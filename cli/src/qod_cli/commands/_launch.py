@@ -2,8 +2,10 @@
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import typer
@@ -15,7 +17,72 @@ from .._manager_version import MANAGER_VERSION
 def _exec(cmd: list[str], env: dict) -> None:
     if sys.platform == "win32":
         raise typer.Exit(subprocess.call(cmd, env=env))
-    os.execvpe(cmd[0], cmd, env)
+    raise typer.Exit(_run_supervised(cmd, env))
+
+
+def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
+    """Run the manager as a supervised child in its own session and turn
+    Ctrl-C into `qod stop`.
+
+    A plain exec would put the JVM (and, transitively, the spawn-script node
+    wrappers and their duckdb children) in the terminal's foreground process
+    group, so Ctrl-C SIGINTs the whole tree at once -- exactly the unclean
+    teardown that orphans duckdb nodes on ports 21900+ (see "Things to avoid"
+    in CLAUDE.md). Instead the child gets its own session, terminal signals
+    land on this CLI alone, and the CLI answers with the stop sweep: SIGTERM
+    manager + nodes, bounded wait, SIGKILL escalation. SIGTERM/SIGHUP on the
+    CLI (kill, closed terminal) take the same path. Returns the manager's
+    exit code, or 130 after an interrupt-triggered teardown."""
+    if teardown is None:
+        from .stop import perform_stop
+
+        teardown = perform_stop
+    # The JVM tree must never hold a terminal fd: something in it flips the
+    # tty into raw mode during boot, and raw mode turns ISIG off - after
+    # which Ctrl-C stops generating SIGINT at all and this supervisor never
+    # hears it. stdin is closed off and stdout/stderr are piped through a
+    # relay thread, so java and its nodes only ever see pipes.
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    def _relay():
+        assert proc.stdout is not None
+        for chunk in iter(lambda: proc.stdout.read(4096), b""):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+
+    relay = threading.Thread(target=_relay, daemon=True)
+    relay.start()
+
+    def _to_interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    old_term = signal.signal(signal.SIGTERM, _to_interrupt)
+    old_hup = signal.signal(signal.SIGHUP, _to_interrupt) if hasattr(signal, "SIGHUP") else None
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        typer.echo("\ninterrupted; stopping the manager and its nodes (qod stop)...", err=True)
+        try:
+            teardown()
+        except KeyboardInterrupt:
+            typer.echo("second interrupt; killing the manager directly.", err=True)
+        finally:
+            # Safety net only: a completed teardown has already reaped the child.
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+        if old_hup is not None:
+            signal.signal(signal.SIGHUP, old_hup)
 
 
 def resolve_java() -> str:

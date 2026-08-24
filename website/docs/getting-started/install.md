@@ -70,11 +70,13 @@ On first run against a freshly-provisioned Postgres, Liquibase applies the contr
 
 The FlightSQL edge listens on `localhost:31338` with TLS on by default. Durable state (the self-signed certs, and the default DuckLake data path unless `QOD_DUCKLAKE_DATA_PATH` is set) lives under the platform user data dir (`~/.local/share/qod` on Linux, `~/Library/Application Support/qod` on macOS).
 
-To stop the manager and its quack nodes (SIGTERM, escalating to SIGKILL after `FORCE_AFTER` seconds):
+To stop the manager and its quack nodes, either press Ctrl-C in the terminal running `qod start` (the CLI supervises the JVM and runs the same graceful teardown) or, from anywhere:
 
 ```bash
 qod stop
 ```
+
+Both paths SIGTERM the manager and every node, wait up to `FORCE_AFTER` seconds (default 10), then escalate to SIGKILL, so no orphaned duckdb node processes are left holding ports.
 
 #### Seeding the demo dataset for a quick smoke test
 
