@@ -126,6 +126,19 @@ export default function Profile() {
     }
   }
 
+  async function onDeletePat(p: PatEntry) {
+    if (!window.confirm(`Delete token "${p.name}" from the list? This cannot be undone.`)) {
+      return;
+    }
+    setPatErr('');
+    try {
+      await api.deletePat(p.id);
+      await loadPats();
+    } catch (e) {
+      setPatErr(errorMessage(e));
+    }
+  }
+
   function patStatus(p: PatEntry): 'active' | 'revoked' | 'expired' {
     if (p.revoked) return 'revoked';
     if (p.expiresAt && new Date(p.expiresAt) < new Date()) return 'expired';
@@ -309,9 +322,13 @@ export default function Profile() {
                       </span>
                     </td>
                     <td>
-                      {status === 'active' && (
+                      {status === 'active' ? (
                         <button className="danger" type="button" onClick={() => onRevokePat(p)}>
                           Revoke
+                        </button>
+                      ) : (
+                        <button className="danger" type="button" onClick={() => onDeletePat(p)}>
+                          Delete
                         </button>
                       )}
                     </td>

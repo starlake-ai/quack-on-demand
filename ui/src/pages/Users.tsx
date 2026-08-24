@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
 import type { TenantResponse } from '../api/types';
 import GroupSection from '../components/GroupSection';
 import RoleSection from '../components/RoleSection';
@@ -19,6 +20,7 @@ type Selector = string | null;
 const ALL = ''; // empty string sentinel for the "(all)" option
 
 export default function Users() {
+  const { tenant: authTenant } = useAuth();
   const [tenants, setTenants] = useState<TenantResponse[]>([]);
   const [selected, setSelected] = useState<Selector>(null);
 
@@ -26,12 +28,15 @@ export default function Users() {
     api.listTenants()
       .then(r => {
         setTenants(r.tenants);
-        // Default to "(all)" so the initial Users tab includes
+        // Default to the tenant used at sign-in when there is one;
+        // otherwise "(all)" so the initial Users tab includes
         // superusers (tenant IS NULL) and every tenant's users. Picking
-        // a specific tenant from the dropdown narrows from there.
-        setSelected(ALL);
+        // a value from the dropdown narrows / widens from there.
+        const fromAuth = authTenant && r.tenants.some(t => t.id === authTenant) ? authTenant : ALL;
+        setSelected(fromAuth);
       })
       .catch(() => setSelected(ALL));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // "(superusers)" is a UI-only sentinel; the backend has no

@@ -47,7 +47,14 @@ def stop():
             err=True,
         )
         raise typer.Exit(1)
+    perform_stop()
 
+
+def perform_stop():
+    """The teardown itself, POSIX only. Shared between the `qod stop` command
+    and the Ctrl-C path of `qod start` / `qod start --demo` (see
+    `_launch._run_supervised`), so interrupting a foreground manager and
+    stopping a detached one behave identically."""
     mgr_port = int(os.environ.get("QOD_ON_DEMAND_PORT", "20900"))
     edge_port = int(os.environ.get("PROXY_PORT", "31338"))
     force_after = int(os.environ.get("FORCE_AFTER", "10"))

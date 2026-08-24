@@ -204,10 +204,12 @@ function StmtStatusBadge({ status }: { status: string }) {
 }
 
 export default function History() {
-  const { superuser, telemetryEnabled } = useAuth();
+  const { superuser, telemetryEnabled, tenant: authTenant } = useAuth();
 
   const [range, setRange]   = useState<Range>('24h');
-  const [tenant, setTenant] = useState('');
+  // Default the tenant filter to the tenant used at sign-in (null for a
+  // system-scope login); the combobox stays free to widen to "all tenants".
+  const [tenant, setTenant] = useState(authTenant ?? '');
   const [pool, setPool]     = useState('');
   const [buckets, setBuckets] = useState<TrendBucketEntry[]>([]);
   const [loading, setLoading] = useState(false);

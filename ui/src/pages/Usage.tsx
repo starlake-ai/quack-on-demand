@@ -105,7 +105,7 @@ function chartRows(groups: UsageGroupEntry[], groupBy: string, metric: Metric): 
 }
 
 export default function Usage() {
-  const { superuser, telemetryEnabled } = useAuth();
+  const { superuser, telemetryEnabled, tenant: authTenant } = useAuth();
 
   const [month, setMonth] = useState(currentMonth());
   const [custom, setCustom] = useState(false);
@@ -114,7 +114,9 @@ export default function Usage() {
   // Tenant admins land on the pool grouping; the tenant grouping is superuser-only.
   const [groupBy, setGroupBy] = useState<GroupBy>(superuser ? 'tenant' : 'pool');
   const [metric, setMetric] = useState<Metric>('statements');
-  const [tenant, setTenant] = useState('');
+  // Default the tenant filter to the tenant used at sign-in (null for a
+  // system-scope login); the combobox stays free to widen to "all tenants".
+  const [tenant, setTenant] = useState(authTenant ?? '');
   const [pool, setPool] = useState('');
 
   const [groups, setGroups] = useState<UsageGroupEntry[]>([]);

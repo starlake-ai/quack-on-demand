@@ -564,6 +564,9 @@ final case class PatListResponse(tokens: List[PatEntry] = Nil)
 
 final case class PatRevokeRequest(id: String)
 
+/** Discard a dead (revoked or expired) token row from the listing; a live id is refused. */
+final case class PatDeleteRequest(id: String)
+
 // ----- Recent statement history -----
 final case class StatementHistoryEntry(
     ts: String, // ISO-8601 UTC
@@ -1250,6 +1253,7 @@ object Dtos:
   given Codec[PatEntry]          = ConfiguredCodec.derived
   given Codec[PatListResponse]   = ConfiguredCodec.derived
   given Codec[PatRevokeRequest]  = ConfiguredCodec.derived
+  given Codec[PatDeleteRequest]  = ConfiguredCodec.derived
 
   given Codec[StatementHistoryEntry]    = deriveCodec
   given Codec[StatementHistoryResponse] = deriveCodec

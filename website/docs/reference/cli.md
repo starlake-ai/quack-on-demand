@@ -48,6 +48,8 @@ NUKE=1 LOAD_TPCH=1 qod start                       # fresh boot + TPC-H only
 NUKE=1 LOAD_TPCH=1 LOAD_TPCDS=10 qod start         # both, independent SFs
 NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start          # single-DuckDB profile: acme, 1 dual node
 qod stop                     # SIGTERM, wait, then SIGKILL (FORCE_AFTER seconds)
+# Ctrl-C in the qod start terminal runs the same teardown as qod stop
+
 ```
 
 ### `run-docker-compose.sh`

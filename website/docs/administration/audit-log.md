@@ -32,6 +32,9 @@ The `action` field is a dotted string. The full set of values emitted by the cur
 | `auth.revoke` | Explicit session revocation |
 | `auth.api-key.failure` | Rejected `X-API-Key` header; rate-limited to one event per source IP per minute |
 | `auth.admin.required` | Valid non-admin session denied on an admin endpoint; rate-limited to one event per user per minute |
+| `auth.pat.create` | Personal access token minted (target is the token id, detail carries its name) |
+| `auth.pat.revoke` | Personal access token revoked (`denied` outcome on an unknown or foreign id) |
+| `auth.pat.delete` | Dead (revoked/expired) personal access token removed from the listing (`denied` outcome on a live, unknown, or foreign id) |
 
 **Control-plane: tenants and databases**
 

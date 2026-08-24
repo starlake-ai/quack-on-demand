@@ -74,8 +74,8 @@ def _ensure_catalog_db(pg: dict) -> None:
 
 def _spawn_loaders(env: dict, scripts: dict, state_dir: Path, pg: dict) -> None:
     """run-jar.sh's LOAD_* block: background the selected benchmark loaders
-    before exec replaces this process (they write DuckLake directly through
-    the provisioned duckdb CLI; the orphans survive the exec)."""
+    before the manager boots (they write DuckLake directly through the
+    provisioned duckdb CLI and run independently of the supervised JVM)."""
     load_tpc = env.get("LOAD_TPC", "")
     selected = [
         (env.get(var) or load_tpc, script, db, schema)
@@ -140,7 +140,8 @@ def start(
     without the checkout). Postgres is assumed reachable (QOD_PG_* env vars);
     supports run-jar's LOAD_TPCH/LOAD_TPCDS/LOAD_SSB/LOAD_TPC, DEMO, NUKE,
     JAVA_OPTS, JAVA_BIN, JAR_CACHE_DIR, DUCKDB_VERSION, and DUCKDB_CACHE_DIR.
-    With --demo, runs the self-contained demo instead (no Postgres needed)."""
+    With --demo, runs the self-contained demo instead (no Postgres needed).
+    Ctrl-C tears the manager and its nodes down gracefully (same as qod stop)."""
     if demo:
         from .demo import run_demo
 

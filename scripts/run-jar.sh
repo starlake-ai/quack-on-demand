@@ -743,7 +743,10 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
         "$REPO_DIR/scripts/load-ssb-dbgen.sh"
     ) &
   fi
-  # No `wait`: exec java next detaches them.
+  # Not waited on: the pid-specific `wait "$MGR_PID"` below never blocks on
+  # these. They share this script's process group, so Ctrl-C now also aborts
+  # an in-flight seed along with the manager (previously they survived as
+  # orphans of the exec'd JVM).
 fi
 
 # ---- Effective settings ----
@@ -819,25 +822,70 @@ preflight_ports() {
 }
 preflight_ports
 
-# ---- Run ----
+# ---- Run (supervised) ----
 # The assembly jar carries `Add-Opens` in its manifest (JEP 261) so Arrow's
 # unsafe allocator works on Java 17+ without extra flags. The system
 # property pins Arrow's allocator - without it Arrow picks netty and
 # crashes with NoSuchFieldError: chunkSize.
 #
+# Ctrl-C acts as stop-jar.sh. The JVM runs as a plain background job in
+# THIS script's process group - deliberately NOT its own (a `set -m` /
+# separate-pgroup design gets the JVM SIGTTOU-suspended the moment it
+# touches the controlling terminal from a background group; the JVM then
+# sits in state T, never binds its ports, and the boot looks hung). So a
+# terminal Ctrl-C reaches every process in the tree at once, and each part
+# handles it correctly on its own:
+#   - the JVM treats SIGINT like SIGTERM (shutdown hooks -> graceful stop);
+#   - spawn-quack-node.sh traps INT and tears down its duckdb child;
+#   - this script's trap supervises the whole teardown with stop-jar.sh:
+#     SIGTERM anything still up, wait up to FORCE_AFTER seconds for the
+#     ports to clear, then the SIGKILL sweep. `kill` on this script and a
+#     closed terminal (TERM/HUP) take the same path.
+# Net effect: no orphaned duckdb nodes on ports 21900+ (see "Things to
+# avoid" in CLAUDE.md), which is what a bare unsupervised Ctrl-C used to
+# leave behind.
+#
 # Terminal hygiene:
 #   - </dev/null  : the JVM does not need stdin. Without this the JVM
 #                   grabs the terminal's read side, so any keystrokes
 #                   are consumed by Java instead of the shell.
-#   - stty sane   : if the JVM exits abnormally (Ctrl-C, OOM) it can
-#                   leave the WSL pty in raw / no-echo mode. We do NOT
-#                   `exec` so the trap still fires after Java returns.
-trap 'stty sane 2>/dev/null || true' EXIT INT TERM
+#   - stty sane   : if the JVM exits abnormally it can leave the WSL pty
+#                   in raw / no-echo mode; the EXIT trap fires on every
+#                   path out of this script, including graceful_stop.
+trap 'stty sane 2>/dev/null || true' EXIT
 # Reset the pty now, after the (possibly tty-grabbing) build/seed tooling and
-# before the long-lived foreground java run, so a corrupted terminal can't
-# persist for the manager's whole lifetime waiting on the EXIT trap.
+# before the long-lived java run, so a corrupted terminal can't persist for
+# the manager's whole lifetime waiting on the EXIT trap.
 stty sane 2>/dev/null || true
+
+graceful_stop() {
+  # Ignore further signals: stop-jar.sh has its own FORCE_AFTER escalation,
+  # so a second Ctrl-C must not abort the teardown halfway.
+  trap '' INT TERM HUP
+  echo ""
+  echo "interrupted; stopping the manager and its nodes (stop-jar.sh)..."
+  "$REPO_DIR/scripts/stop-jar.sh" || true
+  exit 130
+}
+trap graceful_stop INT TERM HUP
+
+# The JVM tree must never hold a terminal fd: something in it flips the
+# pty into raw mode during boot, and raw mode turns ISIG off - after which
+# Ctrl-C stops generating SIGINT at all and the teardown trap above can
+# never fire (the historical "Ctrl-C does nothing" symptom). Routing
+# stdout+stderr through a relay `cat` (which runs as a process-substitution
+# child of THIS shell, immune to the terminal's Ctrl-C as an async job)
+# means java and every node it spawns only ever see pipes, so the terminal
+# keeps its line discipline and the trap stays reachable.
 "${JAVA_BIN:-java}" \
   -Darrow.allocation.manager.type=Unsafe \
   ${JAVA_OPTS:-} \
-  -jar "$JAR" </dev/null
+  -jar "$JAR" </dev/null > >(exec cat) 2>&1 &
+MGR_PID=$!
+
+# Propagate the JVM's own exit code when it exits by itself; the `|| rc=$?`
+# keeps `set -e` from killing the script before the trap can run when wait
+# is interrupted by a trapped signal.
+rc=0
+wait "$MGR_PID" || rc=$?
+exit "$rc"

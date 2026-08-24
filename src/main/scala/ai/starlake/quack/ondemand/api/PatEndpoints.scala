@@ -6,9 +6,9 @@ import sttp.tapir._
 import sttp.tapir.generic.auto._
 import sttp.tapir.json.circe._
 
-/** Personal-access-token self-service surface (`/api/auth/pat/create|list|revoke`), split out of
-  * [[Endpoints]] to stay below the JVM's 64KB `<clinit>` ceiling (see [[RbacEndpoints]] for the
-  * rationale). Registered in [[EndpointModules.all]].
+/** Personal-access-token self-service surface (`/api/auth/pat/create|list|revoke|delete`), split
+  * out of [[Endpoints]] to stay below the JVM's 64KB `<clinit>` ceiling (see [[RbacEndpoints]] for
+  * the rationale). Registered in [[EndpointModules.all]].
   *
   * Every route is strictly self-scoped: the acting identity comes from the session token via
   * [[Endpoints.authToken]], so there is deliberately NO tenant, user, or owner input anywhere on
@@ -66,3 +66,19 @@ object PatEndpoints:
       .in("auth" / "pat" / "revoke")
       .in(authToken)
       .in(jsonBody[PatRevokeRequest])
+
+  /** Discard one of the caller's own DEAD tokens (revoked, or past its expiry) from the listing. A
+    * still-live id is refused `400 pat_live` -- revoke stays the only way to retire a working
+    * credential, so delete can never kill (or resurrect) anything. An id owned by someone else and
+    * an unknown id both answer `404 not_found`, same non-leak contract as revoke.
+    */
+  val delete: PublicEndpoint[
+    (Option[String], PatDeleteRequest),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("auth" / "pat" / "delete")
+      .in(authToken)
+      .in(jsonBody[PatDeleteRequest])

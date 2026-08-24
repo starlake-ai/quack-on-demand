@@ -7,8 +7,10 @@ import type {
 } from '../api/types';
 import CatalogBrowser from '../components/CatalogBrowser';
 import CatalogSnapshotsPanel from '../components/CatalogSnapshotsPanel';
+import { useAuth } from '../auth/AuthContext';
 
 export default function Catalog() {
+  const { tenant: authTenant } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tenants, setTenants]       = useState<TenantResponse[]>([]);
   const [tenant, setTenantState]    = useState<string>('');
@@ -34,7 +36,11 @@ export default function Catalog() {
       .then(r => {
         setTenants(r.tenants);
         const fromQuery = searchParams.get('tenant');
-        const initial = fromQuery ?? r.tenants[0]?.name ?? '';
+        // Deep link wins; otherwise the tenant used at sign-in (when it is
+        // in the visible list), else the first tenant.
+        const fromAuth =
+          authTenant && r.tenants.some(t => t.name === authTenant) ? authTenant : undefined;
+        const initial = fromQuery ?? fromAuth ?? r.tenants[0]?.name ?? '';
         if (initial) setTenantState(initial);
         const queryDb     = searchParams.get('tenantDb');
         if (queryDb) setTenantDbState(queryDb);

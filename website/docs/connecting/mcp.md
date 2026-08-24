@@ -25,7 +25,7 @@ qod auth pat create --name claude-code
 # the token is printed ONCE; store it now
 ```
 
-A PAT acts with exactly its owner's permissions and can be revoked at any time (`qod auth pat revoke --id <id>`, or the profile page). Tenant-scoped principals get their tenant inferred from the PAT owner; superuser and static-key callers pass an explicit `tenant` argument on tools that need one.
+A PAT acts with exactly its owner's permissions and can be revoked at any time (`qod auth pat revoke --id <id>`, or the profile page). A revoked or expired token stays visible in the listing until you discard it with `qod auth pat delete --id <id>` (or the profile page's Delete button); a live token must be revoked before it can be deleted. Tenant-scoped principals get their tenant inferred from the PAT owner; superuser and static-key callers pass an explicit `tenant` argument on tools that need one.
 
 ## Client configuration
 

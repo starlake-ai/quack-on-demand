@@ -13,11 +13,13 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
 }
 
 export default function Audit() {
-  const { superuser, telemetryEnabled } = useAuth();
+  const { superuser, telemetryEnabled, tenant: authTenant } = useAuth();
   const [events, setEvents] = useState<AuditEventEntry[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [family, setFamily] = useState('');
-  const [tenant, setTenant] = useState('');
+  // Default the tenant filter to the tenant used at sign-in (null for a
+  // system-scope login); the combobox stays free to widen to "all tenants".
+  const [tenant, setTenant] = useState(authTenant ?? '');
   const [actor, setActor] = useState('');
   const [action, setAction] = useState('');
   const [from, setFrom] = useState('');

@@ -91,3 +91,39 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
     val (record, _) = pats.mint(uid, "t", None)
     pats.revoke(bobId, record.id) shouldBe false
   }
+
+  "delete" should "remove a revoked token row" in withFreshDb { (users, pats) =>
+    val uid         = seedUser(users)
+    val (record, _) = pats.mint(uid, "dead", None)
+    pats.revoke(uid, record.id) shouldBe true
+    pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Deleted
+    countWhere(users.dbName, s"id = '${record.id}'") shouldBe 0
+  }
+
+  it should "remove an expired token row" in withFreshDb { (users, pats) =>
+    val uid         = seedUser(users)
+    val (record, _) = pats.mint(uid, "old", Some(Instant.now().minusSeconds(60)))
+    pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Deleted
+    countWhere(users.dbName, s"id = '${record.id}'") shouldBe 0
+  }
+
+  it should "refuse a live token" in withFreshDb { (users, pats) =>
+    val uid             = seedUser(users)
+    val (record, token) = pats.mint(uid, "live", None)
+    pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Live
+    countWhere(users.dbName, s"id = '${record.id}'") shouldBe 1
+    pats.verify(token).map(_.id) shouldBe Some(record.id)
+  }
+
+  it should "answer NotFound for another user's token and for an unknown id" in withFreshDb {
+    (users, pats) =>
+      val uid = seedUser(users)
+      users.upsertUser(None, "bob", "pw", "admin")
+      val bobId       = users.userIdOf(None, "bob").get
+      val (record, _) = pats.mint(uid, "t", None)
+      pats.revoke(uid, record.id) shouldBe true
+      // A dead row owned by someone else is indistinguishable from a missing one.
+      pats.delete(bobId, record.id) shouldBe PatStore.DeleteOutcome.NotFound
+      countWhere(users.dbName, s"id = '${record.id}'") shouldBe 1
+      pats.delete(uid, "pat-doesnotexist") shouldBe PatStore.DeleteOutcome.NotFound
+  }

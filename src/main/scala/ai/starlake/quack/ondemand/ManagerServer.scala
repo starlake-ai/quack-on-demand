@@ -142,7 +142,7 @@ final class ManagerServer(
       // not: the handlers scope every call to the session's own user id, so
       // there is nothing here a regular user could reach beyond its own tokens.
       path == "/api/auth/pat/create" || path == "/api/auth/pat/list" ||
-      path == "/api/auth/pat/revoke" ||
+      path == "/api/auth/pat/revoke" || path == "/api/auth/pat/delete" ||
       // Starlake SSO ticket mint: any valid session may hand its own grant to
       // Starlake, admin or not -- the minted grant mirrors the session's own
       // admin-ness, it grants nothing new. Gated on the integration flag: with
@@ -542,7 +542,8 @@ final class ManagerServer(
       List[ServerEndpoint[Any, IO]](
         PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },
         PatEndpoints.list.serverLogic(token => h.list(token)),
-        PatEndpoints.revoke.serverLogic { case (token, req) => h.revoke(token, req) }
+        PatEndpoints.revoke.serverLogic { case (token, req) => h.revoke(token, req) },
+        PatEndpoints.delete.serverLogic { case (token, req) => h.delete(token, req) }
       )
     }
 

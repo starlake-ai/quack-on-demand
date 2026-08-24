@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Ctrl-C on a foreground launcher now acts as `qod stop`.** Both `qod start`
+  (incl. `--demo`) and `scripts/run-jar.sh` supervise the manager JVM instead of
+  exec-ing it: Ctrl-C (and `kill`/a closed terminal) triggers the graceful
+  teardown - SIGTERM manager + nodes, bounded wait (`FORCE_AFTER`, default 10s),
+  SIGKILL sweep - so an interrupted run no longer orphans duckdb node processes
+  on ports 21900+. This also fixes a long-standing "Ctrl-C does nothing" bug:
+  the JVM tree could flip the terminal into raw mode during boot (ISIG off),
+  after which Ctrl-C stopped generating SIGINT entirely; the launchers now route
+  the JVM's stdio through pipes so it never holds a terminal fd. The exit code
+  is the JVM's own on a normal exit, 130 after an interrupt teardown. Windows
+  (`run-jar.ps1` / `qod start` on win32) keeps the previous behavior.
+
+- **Personal access tokens can be deleted.** A revoked or expired PAT stays in
+  the listing until its owner discards it: `POST /api/auth/pat/delete`,
+  `qod pat delete --id <id>`, or the profile page's Delete button (shown on dead
+  rows where live rows show Revoke). Only dead tokens are deletable - a live id
+  is refused `400 pat_live` (revoke remains the sole kill switch), and someone
+  else's or an unknown id answers `404 not_found` with no existence leak, same
+  contract as revoke. Deletion is audited as `auth.pat.delete` and rides the
+  same self-scoped session-only surface (and non-admin profile allowlist) as
+  the other PAT verbs.
+
+- **Admin UI ergonomics.** The login screen refills the Tenant field from the
+  last successful sign-in (stored client-side, saved only on success); the
+  tenant filter comboboxes (Usage, Statements, Control Plane, Nodes, Catalog,
+  Users) preselect the tenant the session signed in with - deep-link `?tenant=`
+  still wins and a system-scope login keeps today's defaults; and the tenant
+  detail page's tab order is now Databases, Pools, Maintenance, Auth provider.
+
 - **Metrics for the metadata-filter and protected-write steps.** The FlightSQL
   pipeline now records `metadata_filter_rewrites_total{outcome}` /
   `metadata_filter_duration_seconds` and `protected_write_checks_total{outcome}` /
