@@ -699,13 +699,19 @@ def test_no_version_defaults_to_latest_release_even_on_a_release_cli(monkeypatch
 
 
 def test_no_version_falls_back_to_stamped_manager_version_when_latest_lookup_fails(
-    monkeypatch, capsys
+    tmp_path, monkeypatch, capsys
 ):
     from qod_cli.commands import _launch
 
     def boom():
         raise httpx.ConnectError("offline")
 
+    # The pinned release wins over a newer cached jar, but only because it is
+    # itself cached: offline, an uncached pin is unrunnable (see
+    # test_offline_jar_fallback.py for the full fallback contract).
+    for v in ("0.3.9", "0.5.0"):
+        (tmp_path / launcher.jar_name(v)).write_bytes(b"jar")
+    monkeypatch.setenv("JAR_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(_launch, "MANAGER_VERSION", "0.3.9")
     monkeypatch.setattr(launcher, "latest_release_version", boom)
     asked = {}
@@ -715,7 +721,9 @@ def test_no_version_falls_back_to_stamped_manager_version_when_latest_lookup_fai
     assert "0.3.9" in capsys.readouterr().err
 
 
-def test_no_version_dev_build_errors_when_latest_lookup_fails(monkeypatch):
+def test_no_version_dev_build_errors_when_latest_lookup_fails_and_cache_is_empty(
+    tmp_path, monkeypatch
+):
     import typer
 
     from qod_cli.commands import _launch
@@ -723,6 +731,9 @@ def test_no_version_dev_build_errors_when_latest_lookup_fails(monkeypatch):
     def boom():
         raise httpx.ConnectError("offline")
 
+    # A dev build pins no release; with nothing cached either there is simply
+    # nothing to run. (With a cached jar it now starts that one instead.)
+    monkeypatch.setenv("JAR_CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(_launch, "MANAGER_VERSION", "0.3.10.dev0")
     monkeypatch.setattr(launcher, "latest_release_version", boom)
     with pytest.raises(typer.Exit):
