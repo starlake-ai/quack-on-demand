@@ -56,6 +56,22 @@ QOD_VERSION=latest-snapshot PG_HOST=... PG_PASSWORD=*** ./scripts/run-docker.sh
 - **Java 21+ is found, not required.** `qod start` uses `JAVA_HOME` or `java` on `PATH` when a 21+ JVM is present; otherwise it downloads a cached Temurin 21 JRE (about 50 MB, one time, no prompt). `JAVA_BIN` forces a specific binary; `JAVA_OPTS` adds JVM flags (e.g. `-Xmx2g`).
 - **DuckDB is self-installed** (CLI + `libduckdb` at the ABI libquackwire links against) into the user cache dir - a system duckdb at the wrong ABI would crash the first node spawn, so it is never used. `DUCKDB_VERSION` / `DUCKDB_CACHE_DIR` override the pin and location; air-gapped operators can pre-populate `$DUCKDB_CACHE_DIR/$VERSION/{bin,lib}` and no network fetch happens.
 
+### Where downloads are cached
+
+Everything `qod start` fetches lands in the per-user cache directory, keyed by version, and is reused on every later run:
+
+| What | Location (macOS) | Location (Linux) | Override |
+|---|---|---|---|
+| Manager jars | `~/Library/Caches/qod/jars` | `~/.cache/qod/jars` | `JAR_CACHE_DIR` |
+| Temurin JRE (only when no system Java 21+) | `~/Library/Caches/qod/jre` | `~/.cache/qod/jre` | - |
+| DuckDB CLI + `libduckdb` | `~/Library/Caches/qod/{bin,lib}` | `~/.cache/qod/{bin,lib}` | `DUCKDB_CACHE_DIR` |
+
+On Windows the root is `%LOCALAPPDATA%\qod\Cache`. Jars are named `quack-on-demand-assembly-<version>.jar`, so several releases coexist; deleting the directory only costs a re-download. Durable state (DuckLake data, TLS certs) is deliberately kept elsewhere, under `~/Library/Application Support/qod` (macOS) or `~/.local/share/qod` (Linux) - wiping the cache is safe, wiping that is not.
+
+Running through `uvx qod ...` adds one more layer: uv caches the `qod` Python package itself under `~/.cache/uv` (`uv cache dir`). That holds only the small CLI, never the manager jar.
+
+**Offline runs.** When GitHub cannot be reached, `qod start` does not fail: it starts the newest manager jar already in the cache (preferring the release this CLI build pins, when that one is cached) and says which version it picked. Only an explicit `--version X.Y.Z` that is neither cached nor downloadable is a hard error, since substituting a different manager behind your back would be worse; the message then lists what is cached so you can pick one. With an empty cache and no network there is nothing to run, so that too is an error.
+
 ### Run from Linux/MacOS
 
 ```bash

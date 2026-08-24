@@ -111,27 +111,47 @@ def resolve_java() -> str:
     return launcher.ensure_jre()
 
 
+def _offline_fallback_version(reason: Exception) -> str:
+    """The manager to run when the release lookup could not reach GitHub.
+
+    Preference order: the release this CLI build pins (version.sbt, see
+    _manager_version.py) when it is already cached, else the newest jar in the
+    cache. Only cached versions are considered - offering an uncached one would
+    just move the same network failure into `ensure_jar`. Exits when the cache
+    is empty, since there is then nothing to run."""
+    cached = launcher.cached_jar_versions()
+    pinned = launcher.resolved_jar_version(MANAGER_VERSION)
+    chosen = pinned if pinned in cached else launcher.newest_cached_jar()
+    if chosen is None:
+        typer.echo(
+            f"could not resolve the latest release: {reason}\n"
+            "No manager jar is cached either, so there is nothing to fall back to.\n"
+            "Reconnect, or pass a local jar with --jar <path>.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(
+        f"could not reach GitHub ({reason}); starting the cached manager {chosen}.\n"
+        f"Cached: {', '.join(cached)} (in {launcher.jar_cache_dir()}).",
+        err=True,
+    )
+    return chosen
+
+
 def resolve_jar(version: str | None) -> Path:
     """The manager jar to run: `version` if given, else the latest GitHub
-    release, falling back to the manager release stamped into this CLI build
-    (from version.sbt, see _manager_version.py) when the lookup fails, so a
-    cached jar still boots offline. Floor-guarded, downloaded and verified."""
-    if version:
-        jar_version = launcher.latest_release_version() if version == "latest" else version
+    release. When the release lookup cannot reach the network, falls back to a
+    jar already in the cache (see `_offline_fallback_version`) so an offline
+    `uvx qod start` boots the manager the user already has instead of failing.
+    An explicit `--version X.Y.Z` is never substituted. Floor-guarded,
+    downloaded and verified."""
+    if version and version != "latest":
+        jar_version = version
     else:
         try:
             jar_version = launcher.latest_release_version()
         except Exception as e:
-            fallback = launcher.resolved_jar_version(MANAGER_VERSION)
-            if fallback is None:
-                typer.echo(f"could not resolve the latest release: {e}", err=True)
-                raise typer.Exit(1)
-            typer.echo(
-                f"could not resolve the latest release ({e}); "
-                f"falling back to this build's manager release {fallback}.",
-                err=True,
-            )
-            jar_version = fallback
+            jar_version = _offline_fallback_version(e)
     if not re.fullmatch(r"\d+(\.\d+)*", jar_version):
         typer.echo(
             f"'{jar_version}' is not a release version. QOD_VERSION=BUILD/LOCAL are "
@@ -154,9 +174,19 @@ def resolve_jar(version: str | None) -> Path:
     except typer.Exit:
         raise
     except Exception as e:
+        # Reached only when this exact version is neither cached nor
+        # downloadable. An explicit pin is a contract, so we never silently
+        # boot a different manager here; naming the cache lets the caller pick
+        # one deliberately.
+        cached = launcher.cached_jar_versions()
+        alternatives = (
+            f"\nAlready cached in {launcher.jar_cache_dir()}: {', '.join(cached)}"
+            if cached
+            else ""
+        )
         typer.echo(
             f"could not download {launcher.jar_url(jar_version)}: {e}\n"
-            "If you have the jar locally, pass it with --jar <path>.",
+            f"If you have the jar locally, pass it with --jar <path>.{alternatives}",
             err=True,
         )
         raise typer.Exit(1)

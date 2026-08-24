@@ -44,11 +44,43 @@ def jar_url(version: str) -> str:
 MIN_DEMO_VERSION = "0.3.8"
 
 
-def version_lt(a: str, b: str) -> bool:
-    def key(v: str) -> tuple[int, ...]:
-        return tuple(int(part) for part in re.findall(r"\d+", v))
+def _version_key(v: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", v))
 
-    return key(a) < key(b)
+
+def version_lt(a: str, b: str) -> bool:
+    return _version_key(a) < _version_key(b)
+
+
+# Matches only a fully-downloaded, version-addressed jar: `.jar.partial` files
+# (an interrupted download) must never be offered as a runnable fallback.
+_CACHED_JAR_RE = re.compile(r"^quack-on-demand-assembly-(\d+(?:\.\d+)*)\.jar$")
+
+
+def jar_cache_dir(cache_dir: Path | None = None) -> Path:
+    """Where manager jars are cached. `JAR_CACHE_DIR` (a run-jar.sh convention)
+    overrides the platform cache dir."""
+    if cache_dir is not None:
+        return cache_dir
+    env_cache = os.environ.get("JAR_CACHE_DIR")
+    return Path(env_cache) if env_cache else default_cache_dir() / "jars"
+
+
+def cached_jar_versions(cache_dir: Path | None = None) -> list[str]:
+    """Manager versions already in the jar cache, oldest first."""
+    d = jar_cache_dir(cache_dir)
+    if not d.is_dir():
+        return []
+    found = [m.group(1) for p in d.iterdir() if (m := _CACHED_JAR_RE.match(p.name))]
+    return sorted(found, key=_version_key)
+
+
+def newest_cached_jar(cache_dir: Path | None = None) -> str | None:
+    """Highest manager version already in the jar cache, or None when there is
+    none. This is the offline fallback: with GitHub unreachable, booting the
+    manager the user already ran beats refusing to start at all."""
+    versions = cached_jar_versions(cache_dir)
+    return versions[-1] if versions else None
 
 
 def resolved_jar_version(cli_version: str) -> str | None:
@@ -174,9 +206,7 @@ def ensure_jar(version: str, cache_dir: Path | None = None) -> Path:
     """The manager jar for `version`, downloading and sha256-verifying it into
     the version-addressed cache on first use. `JAR_CACHE_DIR` (a run-jar.sh
     convention) overrides the cache location."""
-    if cache_dir is None:
-        env_cache = os.environ.get("JAR_CACHE_DIR")
-        cache_dir = Path(env_cache) if env_cache else default_cache_dir() / "jars"
+    cache_dir = jar_cache_dir(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     jar = cache_dir / jar_name(version)
     if jar.is_file():

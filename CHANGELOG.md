@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **`qod start` no longer fails when offline.** The manager jar is resolved from
+  GitHub Releases on every run, so a machine with no network (a plane, a locked-down
+  VPN, `uvx qod start` on a fresh shell) used to hard-fail even with a perfectly
+  good jar in the cache. The release lookup now falls back to a cached jar: the
+  release this CLI build pins when that one is cached, otherwise the newest cached
+  version, naming what it picked and where the cache is. `--version latest` takes
+  the same path instead of surfacing a raw connection traceback. An explicit
+  `--version X.Y.Z` is still never substituted; when it is neither cached nor
+  downloadable the error now lists the versions that are cached. An empty cache
+  with no network remains an error. Cache locations (`~/Library/Caches/qod/jars`
+  on macOS, `~/.cache/qod/jars` on Linux, `%LOCALAPPDATA%\qod\Cache\jars` on
+  Windows, `JAR_CACHE_DIR` to override) are now documented in the install guide.
+
 ## 0.6.9
 
 - **Ctrl-C on a foreground launcher now acts as `qod stop`.** Both `qod start`
