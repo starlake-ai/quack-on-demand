@@ -200,6 +200,8 @@ export const api = {
   createPat: (req: PatCreateRequest) => post<PatCreateResponse>('/auth/pat/create', req),
   listPats:  () => post<PatListResponse>('/auth/pat/list'),
   revokePat: (id: string) => post<void>('/auth/pat/revoke', { id }),
+  // Only dead (revoked/expired) tokens are deletable; a live id answers 400 pat_live.
+  deletePat: (id: string) => post<void>('/auth/pat/delete', { id }),
   // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
   authMode: (tenant?: string) =>
     get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),

@@ -149,6 +149,41 @@ final class PatStore(
       finally ps.close()
     }
 
+  /** Delete `patId`, scoped to `userId` like [[revoke]], and further restricted to rows that are
+    * already unusable (revoked, or past their expiry): revoke stays the only way to kill a live
+    * token, delete is pure listing cleanup and can never resurrect or retire anything. `Live`
+    * reports a row the caller owns that must be revoked first; a dead row owned by someone else and
+    * an unknown id are both `NotFound`, so existence under another account never leaks.
+    */
+  def delete(userId: String, patId: String): PatStore.DeleteOutcome =
+    withConn { c =>
+      val del = c.prepareStatement(
+        "DELETE FROM qodstate_pat WHERE id = ? AND user_id = ? " +
+          "AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= NOW()))"
+      )
+      val deleted =
+        try
+          del.setString(1, patId)
+          del.setString(2, userId)
+          del.executeUpdate() == 1
+        finally del.close()
+      if deleted then PatStore.DeleteOutcome.Deleted
+      else
+        // Nothing matched: either the caller owns a still-live row, or the id is
+        // unknown / someone else's (indistinguishable by design).
+        val probe = c.prepareStatement(
+          "SELECT 1 FROM qodstate_pat WHERE id = ? AND user_id = ?"
+        )
+        try
+          probe.setString(1, patId)
+          probe.setString(2, userId)
+          val rs = probe.executeQuery()
+          try
+            if rs.next() then PatStore.DeleteOutcome.Live else PatStore.DeleteOutcome.NotFound
+          finally rs.close()
+        finally probe.close()
+    }
+
   private def rowOf(rs: ResultSet): PatRecord =
     PatRecord(
       id = rs.getString("id"),
@@ -162,6 +197,10 @@ final class PatStore(
 
 object PatStore:
   val TokenPrefix = "qod_pat_"
+
+  /** Result of [[PatStore.delete]]: only an already-dead row (revoked or expired) is deletable. */
+  enum DeleteOutcome:
+    case Deleted, Live, NotFound
 
   def sha256Hex(s: String): String =
     MessageDigest.getInstance("SHA-256").digest(s.getBytes("UTF-8")).map(b => f"$b%02x").mkString

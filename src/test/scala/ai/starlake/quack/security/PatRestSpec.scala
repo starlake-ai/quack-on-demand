@@ -12,8 +12,8 @@ import org.scalatest.matchers.should.Matchers
 import java.sql.DriverManager
 import scala.util.Try
 
-/** End-to-end contract of the three personal-access-token REST routes
-  * (`/api/auth/pat/{create,list,revoke}`).
+/** End-to-end contract of the four personal-access-token REST routes
+  * (`/api/auth/pat/{create,list,revoke,delete}`).
   *
   * The routes are session-JWT-only and strictly self-scoped: the caller's identity comes from the
   * session token, never from a request field, so there is no tenant (or user) parameter anywhere on
@@ -250,6 +250,90 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
     }
 
   // ------------------------------------------------------------------
+  // 3b. delete: dead rows only, own rows only
+  // ------------------------------------------------------------------
+
+  "POST /api/auth/pat/delete" should "refuse a live token, remove a revoked one, and 404 the rest" in
+    withHarness() { h =>
+      val session = rootSession(h)
+      val created = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        """{"name":"to-delete"}""",
+        apiKey = Some(session)
+      )
+      created.statusCode() shouldBe 200
+      val id = field(created.body(), "id").getOrElse(fail("no id in create response"))
+
+      // Still live: delete is refused, revoke stays the only kill switch.
+      val live = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        s"""{"id":"$id"}""",
+        apiKey = Some(session)
+      )
+      withClue(s"live-delete body: ${live.body()}") {
+        live.statusCode() shouldBe 400
+        errorCode(live.body()) should contain("pat_live")
+      }
+
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/revoke",
+        s"""{"id":"$id"}""",
+        apiKey = Some(session)
+      )
+        .statusCode() shouldBe 200
+
+      // Someone else's dead row is indistinguishable from a missing id.
+      val bobSession = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
+      val crossUser  = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        s"""{"id":"$id"}""",
+        apiKey = Some(bobSession)
+      )
+      withClue(s"cross-user delete body: ${crossUser.body()}") {
+        crossUser.statusCode() shouldBe 404
+        errorCode(crossUser.body()) should contain("not_found")
+      }
+
+      val deleted = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        s"""{"id":"$id"}""",
+        apiKey = Some(session)
+      )
+      withClue(s"delete body: ${deleted.body()}") {
+        deleted.statusCode() shouldBe 200
+      }
+
+      // Gone from the listing entirely (revoke alone would keep it, flagged).
+      val listed = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/list",
+        // `list` declares no body input, so nothing would consume one: an unread
+        // request body desynchronizes the reused HTTP/1.1 connection.
+        "",
+        apiKey = Some(session)
+      )
+      tokenEntries(listed.body())
+        .filter(_.hcursor.get[String]("id").toOption.contains(id)) shouldBe empty
+
+      // A second delete finds nothing.
+      val again = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        s"""{"id":"$id"}""",
+        apiKey = Some(session)
+      )
+      withClue(s"second delete body: ${again.body()}") {
+        again.statusCode() shouldBe 404
+        errorCode(again.body()) should contain("not_found")
+      }
+    }
+
+  // ------------------------------------------------------------------
   // 4. a PAT may not manage PATs
   // ------------------------------------------------------------------
 
@@ -298,6 +382,15 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       )
       deniedRevoke.statusCode() shouldBe 403
       errorCode(deniedRevoke.body()) should contain("session_required")
+
+      val deniedDelete = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        """{"id":"pat-whatever"}""",
+        apiKey = Some(raw)
+      )
+      deniedDelete.statusCode() shouldBe 403
+      errorCode(deniedDelete.body()) should contain("session_required")
   }
 
   // ------------------------------------------------------------------
@@ -306,7 +399,7 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
 
   "an anonymous caller" should "be refused 401 on every PAT route" in
     withHarness(staticApiKey = Some("k1")) { h =>
-      List("create", "list", "revoke").foreach { verb =>
+      List("create", "list", "revoke", "delete").foreach { verb =>
         // Empty body on purpose: the guard rejects before any decode, and a body
         // it never reads would poison the next request on the same connection.
         val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/pat/$verb", "")
@@ -366,6 +459,17 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       )
       withClue(s"revoke body: ${revoked.body()}") {
         revoked.statusCode() shouldBe 200
+      }
+
+      // Delete rides the same profile allowlist as the other PAT verbs.
+      val deleted = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/delete",
+        s"""{"id":"$id"}""",
+        apiKey = Some(session)
+      )
+      withClue(s"delete body: ${deleted.body()}") {
+        deleted.statusCode() shouldBe 200
       }
     }
 

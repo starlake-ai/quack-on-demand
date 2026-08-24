@@ -142,6 +142,13 @@ def revoke(ctx: typer.Context, id: str = typer.Option(..., "--id")):
     call(ctx, "POST", "/api/auth/pat/revoke", body={"id": id})
 
 
+@pat_app.command()
+@covers("POST", "/api/auth/pat/delete", {"id": "--id"})
+def delete(ctx: typer.Context, id: str = typer.Option(..., "--id")):
+    """Delete a revoked or expired PAT from the listing (revoke live ones first)."""
+    call(ctx, "POST", "/api/auth/pat/delete", body={"id": id})
+
+
 @covers("POST", "/api/auth/logout")
 def logout(ctx: typer.Context):
     """Revoke the current session token."""

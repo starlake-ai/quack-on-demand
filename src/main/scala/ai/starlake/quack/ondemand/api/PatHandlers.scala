@@ -5,7 +5,7 @@ import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
-/** Self-service personal-access-token management (`/api/auth/pat/create|list|revoke`).
+/** Self-service personal-access-token management (`/api/auth/pat/create|list|revoke|delete`).
   *
   * Two rules shape every handler here:
   *
@@ -124,6 +124,38 @@ final class PatHandlers(
       else
         audit.rest(token, "auth", AuditActions.AuthPatRevoke, "denied", target = Some(req.id.trim))
         Left(notFound)
+    }
+  }
+
+  def delete(token: Option[String], req: PatDeleteRequest): Out[Unit] = IO.blocking {
+    identityOf(token).flatMap { uid =>
+      pats.delete(uid, req.id.trim) match
+        case PatStore.DeleteOutcome.Deleted =>
+          audit.rest(token, "auth", AuditActions.AuthPatDelete, "ok", target = Some(req.id.trim))
+          Right(())
+        case PatStore.DeleteOutcome.Live =>
+          audit.rest(
+            token,
+            "auth",
+            AuditActions.AuthPatDelete,
+            "denied",
+            target = Some(req.id.trim)
+          )
+          Left(
+            (
+              StatusCode.BadRequest,
+              ErrorResponse("pat_live", "token is still live - revoke it before deleting it")
+            )
+          )
+        case PatStore.DeleteOutcome.NotFound =>
+          audit.rest(
+            token,
+            "auth",
+            AuditActions.AuthPatDelete,
+            "denied",
+            target = Some(req.id.trim)
+          )
+          Left(notFound)
     }
   }
 

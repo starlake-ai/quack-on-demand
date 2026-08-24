@@ -2636,6 +2636,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/auth/pat/delete:
+    post:
+      operationId: postApiAuthPatDelete
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatDeleteRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session, Invalid value for: body'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/auth/pat/list:
     post:
       operationId: postApiAuthPatList
@@ -6271,6 +6307,14 @@ components:
         expiresAt:
           type: string
           format: date-time
+    PatDeleteRequest:
+      title: PatDeleteRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
     PatEntry:
       title: PatEntry
       type: object

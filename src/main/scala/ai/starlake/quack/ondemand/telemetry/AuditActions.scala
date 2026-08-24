@@ -22,6 +22,7 @@ object AuditActions:
   // Audited under the acting session's identity; the raw token is never in the row.
   val AuthPatCreate = "auth.pat.create"
   val AuthPatRevoke = "auth.pat.revoke"
+  val AuthPatDelete = "auth.pat.delete"
   // Starlake SSO handoff: a single-use ticket minted from a live QoD session and
   // redeemed server-to-server for the session grant it carries. The ticket value
   // itself is never audited, only the mint/redeem events.
@@ -118,6 +119,7 @@ object AuditActions:
     AuthPasswordChange,
     AuthPatCreate,
     AuthPatRevoke,
+    AuthPatDelete,
     AuthSsoTicketMint,
     AuthSsoTicketRedeem,
     TenantCreate,
