@@ -9,12 +9,34 @@ import { ApiError, api, errorMessage } from '../api/client';
 // branch this message on the outcome - see api.forgotPassword.
 const FORGOT_PASSWORD_NOTICE = 'If that account exists, a reset link has been emailed.';
 
+// Tenant prefill: remember the tenant of the last successful sign-in so the
+// field comes back filled on the next visit. localStorage can throw (private
+// browsing, storage disabled), so both sides are guarded - losing the prefill
+// must never break the login form.
+const TENANT_STORAGE_KEY = 'qod_login_tenant';
+
+function loadSavedTenant(): string {
+  try {
+    return localStorage.getItem(TENANT_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function saveTenant(tenant: string) {
+  try {
+    localStorage.setItem(TENANT_STORAGE_KEY, tenant);
+  } catch {
+    // Ignored: prefill is best-effort.
+  }
+}
+
 export default function Login() {
   const { login } = useAuth();
   const location = useLocation();
   const [username, setUsername] = useState('admin@localhost.local');
   const [password, setPassword] = useState('');
-  const [tenant,   setTenant]   = useState('');
+  const [tenant,   setTenant]   = useState(loadSavedTenant);
   const [err, setErr]           = useState<string | null>(null);
   // Informational (non-error) notice on the login form, e.g. after a
   // password change whose automatic re-login attempt failed, or after
@@ -46,6 +68,7 @@ export default function Login() {
     setBusy(true);
     try {
       await login(username, password, tenant);
+      saveTenant(tenant);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'password_change_required') {
         setErr(null);
@@ -123,6 +146,7 @@ export default function Login() {
     }
     try {
       await login(username, newPassword, tenant);
+      saveTenant(tenant);
     } catch (e) {
       // The password WAS changed; only the automatic re-login failed (e.g. a
       // transient blip). Staying on the change form here would dead-end the

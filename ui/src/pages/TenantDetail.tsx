@@ -113,8 +113,8 @@ export default function TenantDetail() {
       <Tabs
         tabs={[
           { id: 'databases',     label: 'Databases',     body: <DatabaseSection tenant={data.name} /> },
-          { id: 'maintenance',   label: 'Maintenance',   body: <MaintenanceSection tenant={data.name} /> },
           { id: 'pools',         label: 'Pools',         body: <PoolSection tenant={data.name} /> },
+          { id: 'maintenance',   label: 'Maintenance',   body: <MaintenanceSection tenant={data.name} /> },
           { id: 'auth-provider', label: 'Auth provider', body: <AuthProviderSection tenantName={data.name} /> },
         ]}
       />

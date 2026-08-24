@@ -22,15 +22,16 @@ const POLL_MS = 2000;
   * from the backend's rolling-window per-node histogram; QPS is derived
   * client-side from the delta in totalServed between polls. */
 export default function Nodes() {
-  const { superuser } = useAuth();
+  const { superuser, tenant: authTenant } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr]   = useState<string | null>(null);
   const [tenants, setTenants] = useState<string[]>([]);
   // Seed filters from URL so deep links from TenantDetail / PoolDetail
   // land pre-filtered. The two filters compose: ?tenant=acme&node=ro1
-  // narrows both axes simultaneously.
-  const [filter, setFilter]   = useState<string>(searchParams.get('tenant') ?? '');
+  // narrows both axes simultaneously. With no deep link, default to the
+  // tenant used at sign-in (null for a system-scope login).
+  const [filter, setFilter]   = useState<string>(searchParams.get('tenant') ?? authTenant ?? '');
   const [nodeFilter, setNodeFilter] = useState<string>(searchParams.get('node') ?? '');
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
