@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.9
 
 - **Ctrl-C on a foreground launcher now acts as `qod stop`.** Both `qod start`
   (incl. `--demo`) and `scripts/run-jar.sh` supervise the manager JVM instead of
