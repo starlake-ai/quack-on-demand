@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.1
+
+- **Fixed `qod start` printing nothing (0.7.0 regression).** The supervised
+  launcher introduced in 0.7.0 relays the manager's output through a pipe, and
+  it read that pipe with `read(4096)`, which blocks until 4 KB has accumulated.
+  The manager's startup banner is a few hundred bytes, so it stayed buffered
+  while the manager sat there serving normally: `uvx qod start` looked hung on a
+  blank screen even though `http://localhost:20900` was up. The relay now uses
+  `read1`, which hands over whatever has arrived, so output appears as the
+  manager emits it. `scripts/run-jar.sh` was never affected (it relays through
+  `cat`). Affects 0.7.0 only.
+
 ## 0.7.0
 
 - **`qod start` no longer fails when offline.** The manager jar is resolved from

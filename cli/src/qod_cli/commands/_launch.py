@@ -52,8 +52,13 @@ def _run_supervised(cmd: list[str], env: dict, teardown=None) -> int:
     )
 
     def _relay():
+        # read1, never read: on a pipe, read(n) blocks until n bytes have
+        # accumulated, which would hold the manager's startup banner (a few
+        # hundred bytes) until 4 KB of later logging pushed it out. The manager
+        # then looks hung while it is in fact serving. read1 hands over
+        # whatever has arrived, so output appears as the manager emits it.
         assert proc.stdout is not None
-        for chunk in iter(lambda: proc.stdout.read(4096), b""):
+        for chunk in iter(lambda: proc.stdout.read1(4096), b""):
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
 

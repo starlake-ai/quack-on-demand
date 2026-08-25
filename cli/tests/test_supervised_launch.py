@@ -66,6 +66,56 @@ def test_child_never_holds_a_terminal_fd(tmp_path):
     assert out.read_text() == "False,False,False"
 
 
+def test_child_output_is_relayed_promptly(monkeypatch):
+    # The manager prints a short banner and then serves forever. Relaying with
+    # a blocking read(4096) holds that banner until 4 KB accumulates, so the
+    # user stares at an empty screen and concludes `qod start` is stuck.
+    seen = bytearray()
+    lock = threading.Lock()
+
+    class Sink:
+        def write(self, b):
+            with lock:
+                seen.extend(b)
+
+        def flush(self):
+            pass
+
+    class FakeStdout:
+        buffer = Sink()
+
+    monkeypatch.setattr(sys, "stdout", FakeStdout())
+    marker = f"qod-relay-test-{os.getpid()}"
+    child = [
+        sys.executable,
+        "-u",
+        "-c",
+        "print('BANNER: manager started'); import time; time.sleep(30)",
+        marker,
+    ]
+    def run():
+        try:
+            _launch._run_supervised(child, dict(os.environ), teardown=lambda: None)
+        except ValueError:
+            # signal.signal() is main-thread-only; the supervisor always runs
+            # there in production. It has already spawned the child and started
+            # the relay by this point, which is what this test is about.
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with lock:
+            if b"BANNER" in bytes(seen):
+                break
+        time.sleep(0.05)
+    with lock:
+        relayed = bytes(seen)
+    subprocess.run(["pkill", "-f", marker], capture_output=True)
+    assert b"BANNER" in relayed, "child output was not relayed while it was still running"
+
+
 def test_sigint_runs_teardown_and_reaps_child():
     called = threading.Event()
     marker = f"qod-supervise-test-{os.getpid()}"
