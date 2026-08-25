@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - **`qod start` no longer fails when offline.** The manager jar is resolved from
   GitHub Releases on every run, so a machine with no network (a plane, a locked-down
