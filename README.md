@@ -25,8 +25,8 @@ DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the eng
 
 The manager runs as a **single instance** by default (safely restartable), and supports opt-in **active-active HA** on Kubernetes (`replicaCount > 1`). Worker pools scale horizontally in both modes.
 
-**Documentation:** https://qod.starlake.ai - full guides, configuration reference, and REST API.
-Jump to: [Quickstart](https://qod.starlake.ai/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://qod.starlake.ai/concepts/architecture) · [RBAC model](https://qod.starlake.ai/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
+**Documentation:** https://docs.starlake.ai/qod - full guides, configuration reference, and REST API.
+Jump to: [Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://docs.starlake.ai/qod/concepts/architecture) · [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ---
 
@@ -120,7 +120,7 @@ Connect a BI tool or JDBC client:
 jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
 ```
 
-ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://qod.starlake.ai/getting-started/quickstart)** and **[Connecting clients](https://qod.starlake.ai/connecting/clients)**.
+ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart)** and **[Connecting clients](https://docs.starlake.ai/qod/connecting/clients)**.
 
 Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
 
@@ -134,7 +134,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 - **Arrow Flight SQL edge** with auto-generated self-signed TLS (drop in a CA-signed cert for prod)
 - **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
-- **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://qod.starlake.ai/operating/rbac-model)
+- **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model)
 - **Column-level security & dynamic data masking** - per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too. Both are enabled by default, with `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` as kill switches
 - **Admin REST API** with an `X-API-Key` static key OR a session token from `/api/auth/login`
 - **Account security** - opt-in login lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), self-service password reset over SMTP (email a single-use link), and admin-forced password change at next login. Database users can carry an email; an email-format username is its own email
@@ -149,7 +149,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 - **React admin console** at `http://localhost:20900/ui/` - tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
 - **Observability built in** - Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards - [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json)
-- **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://qod.starlake.ai/operating/resilience)
+- **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience)
 - **Every config key is overridable** via a `QOD_*` env var
 
 ---
@@ -194,7 +194,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
 | Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
 
-Full reference: [Configuration](https://qod.starlake.ai/reference/configuration).
+Full reference: [Configuration](https://docs.starlake.ai/qod/reference/configuration).
 
 Hosted / self-serve deployments should also flip `QOD_NODE_LOCKDOWN=true` (default off, so first-run smoke tests keep working out of the box), which denies `ATTACH`, extension `INSTALL`/`LOAD`, protected `SET`/`PRAGMA`s, and local-file read functions for non-superuser sessions and freezes the DuckDB engine's settings for the process lifetime. Individual pools can override the global default via `POST /api/pool/setLockdown` (tri-state `inherit`/`on`/`off`, superuser only), which restarts the pool's nodes immediately to apply the change; enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress; and tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting. See `skills/quack-on-demand/SKILL.md` for the full hardening runbook.
 
