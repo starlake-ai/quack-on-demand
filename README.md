@@ -13,6 +13,10 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/xHj9D6Rebp)
 
+```bash
+uvx qod start --demo   # the full gateway on your laptop: no install, no Postgres
+```
+
 **The open-source serving layer for DuckLake.** Turn a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Self-hosted. Single uber-jar.
 
 DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the engine. What's missing between them and a room full of analysts is the part that handles *concurrent users, authentication, authorization, and connection routing* - which DuckLake [explicitly leaves out](https://ducklake.select/faq) by design. That is Quack on Demand: think self-hosted MotherDuck, scoped to serving, on your own infrastructure.
