@@ -276,7 +276,12 @@ object ManagerServerHarness:
       patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
       // Mount POST /mcp wired over the harness handlers, mirroring Main's
       // mcp.enabled gate. Off by default so pre-existing specs see no new route.
-      mcpEnabled: Boolean = false
+      mcpEnabled: Boolean = false,
+      // Env overrides the harness reads itself, mirroring the QOD_* -> application.conf
+      // convention without pulling pureconfig into the harness boot path. Currently
+      // backs only QOD_PAT_MAX_DEPTH (PatHandlers.maxDepth); extend here, not with a
+      // global, if a future spec needs another env-tunable knob.
+      env: Map[String, String] = Map.empty
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -333,12 +338,14 @@ object ManagerServerHarness:
     )
 
     // Mounted only when the spec supplies a (Postgres-backed) PAT store.
+    val patMaxDepth = env.get("QOD_PAT_MAX_DEPTH").map(_.toInt).getOrElse(8)
     val patHandlers = patStore.map { pats =>
       new ai.starlake.quack.ondemand.api.PatHandlers(
         pats,
         sessions,
         patUserOf.getOrElse((tenant, username) => store.findUser(tenant, username)),
-        audit = audit
+        audit = audit,
+        maxDepth = patMaxDepth
       )
     }
 

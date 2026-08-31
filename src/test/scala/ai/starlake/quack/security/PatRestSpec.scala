@@ -13,15 +13,23 @@ import java.sql.DriverManager
 import scala.util.Try
 
 /** End-to-end contract of the four personal-access-token REST routes
-  * (`/api/auth/pat/{create,list,revoke,delete}`).
+  * (`/api/auth/pat/{create,list,revoke,delete}`), presented with a SESSION credential. (Presenting
+  * a PAT is [[PatChainRestSpec]]; the guard-level admission of a PAT as the bearer credential is
+  * [[PatApiAdmissionSpec]].)
   *
-  * The routes are session-JWT-only and strictly self-scoped: the caller's identity comes from the
-  * session token, never from a request field, so there is no tenant (or user) parameter anywhere on
-  * the surface. Two properties are load-bearing and pinned here:
-  *   - a PAT can never manage PATs (`403 session_required`), so a leaked token cannot mint itself a
-  *     successor or revoke the tokens that would lock it out;
-  *   - a caller can only ever see and revoke its OWN tokens, and another user's id is answered
-  *     `404 not_found` -- indistinguishable from an id that never existed (no existence leak).
+  * The caller's identity comes from the credential, never from a request field, so there is no
+  * tenant (or user) parameter anywhere on the surface. Two properties are load-bearing and pinned
+  * here:
+  *   - a session caller can only ever see and revoke its OWN tokens, and another user's id is
+  *     answered `404 not_found` -- indistinguishable from an id that never existed (no existence
+  *     leak);
+  *   - a PAT presented on these routes IS now admitted (a reversal of this class's original,
+  *     stricter rule -- see [[PatHandlers]]'s scaladoc for why that is safe), but strictly narrower
+  *     than a session: it may only create, list, revoke and delete within its OWN subtree, which
+  *     [[PatChainRestSpec]] covers in full. This suite's case 4 below pins the piece of that
+  *     narrowing a session-focused suite still needs to know: an already-revoked bearer no longer
+  *     authenticates at all, and a root PAT (unrestricted, no subtree yet) may mint a child but
+  *     cannot touch anything outside itself.
   *
   * The PAT store is real Postgres (`qodstate_pat` carries an FK to `qodstate_user`), shared by
   * every case in the suite; the fixture users are created once through a real [[UserStore]] on that
@@ -334,11 +342,20 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
     }
 
   // ------------------------------------------------------------------
-  // 4. a PAT may not manage PATs
+  // 4. a PAT reaches its own subtree only
+  //
+  // This is a reversal of what this class used to guarantee (every PAT-presented
+  // call refused 403 session_required). PatHandlers' scaladoc explains why the
+  // reversal is safe: the revocation cascade means a leaked token cannot roll
+  // forward past its own revocation, so what has to be pinned here is the
+  // NARROWER surface a PAT gets instead of an outright refusal. Full chain
+  // coverage (widen refusal, expiry clamp, depth cap, cascading revoke, sibling
+  // and parent refusal) lives in PatChainRestSpec; this case only needs to prove
+  // a session-focused reader that the four verbs are reachable, and bounded.
   // ------------------------------------------------------------------
 
-  "a PAT presented as the credential" should "be refused 403 session_required" in withHarness() {
-    h =>
+  "a PAT presented as the credential" should
+    "reach its own subtree on every PAT route, and nothing outside it" in withHarness() { h =>
       val session = rootSession(h)
       val created = post(
         h.httpClient,
@@ -348,22 +365,25 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
       )
       created.statusCode() shouldBe 200
       val raw = field(created.body(), "token").getOrElse(fail("no token in create response"))
+      val id  = field(created.body(), "id").getOrElse(fail("no id in create response"))
 
-      // The guard admits the PAT (patAuth is wired), so what answers here is the
-      // handler's own session-only gate: even a fully-admitted PAT cannot manage
-      // PATs.
-      val denied = post(
+      // create: a PAT may mint a child of ITSELF -- the reversal. Its child carries
+      // `raw`'s id as parentId, so revoking `raw` (untested here, see
+      // PatChainRestSpec) would take the successor with it.
+      val successor = post(
         h.httpClient,
         s"${h.baseUrl}/api/auth/pat/create",
         """{"name":"successor"}""",
         apiKey = Some(raw)
       )
-      withClue(s"create-with-pat body: ${denied.body()}") {
-        denied.statusCode() shouldBe 403
-        errorCode(denied.body()) should contain("session_required")
+      withClue(s"create-with-pat body: ${successor.body()}") {
+        successor.statusCode() shouldBe 200
       }
+      val successorId =
+        field(successor.body(), "id").getOrElse(fail("no id in successor response"))
 
-      val deniedList = post(
+      // list: the subtree it minted, never its own row.
+      val listed = post(
         h.httpClient,
         s"${h.baseUrl}/api/auth/pat/list",
         // `list` declares no body input, so nothing would consume one: an unread
@@ -371,17 +391,22 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
         "",
         apiKey = Some(raw)
       )
-      deniedList.statusCode() shouldBe 403
-      errorCode(deniedList.body()) should contain("session_required")
+      withClue(s"list-with-pat body: ${listed.body()}")(listed.statusCode() shouldBe 200)
+      val ids = tokenEntries(listed.body()).flatMap(_.hcursor.get[String]("id").toOption)
+      ids should contain(successorId)
+      ids should not contain id
 
+      // revoke / delete: an id outside the subtree (here, one that never existed)
+      // gets the SAME non-leak 404 an unknown id gets everywhere else on this
+      // surface, never a distinct code that would out a real id as "not yours".
       val deniedRevoke = post(
         h.httpClient,
         s"${h.baseUrl}/api/auth/pat/revoke",
         """{"id":"pat-whatever"}""",
         apiKey = Some(raw)
       )
-      deniedRevoke.statusCode() shouldBe 403
-      errorCode(deniedRevoke.body()) should contain("session_required")
+      deniedRevoke.statusCode() shouldBe 404
+      errorCode(deniedRevoke.body()) should contain("not_found")
 
       val deniedDelete = post(
         h.httpClient,
@@ -389,9 +414,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
         """{"id":"pat-whatever"}""",
         apiKey = Some(raw)
       )
-      deniedDelete.statusCode() shouldBe 403
-      errorCode(deniedDelete.body()) should contain("session_required")
-  }
+      deniedDelete.statusCode() shouldBe 404
+      errorCode(deniedDelete.body()) should contain("not_found")
+    }
 
   // ------------------------------------------------------------------
   // 5. no credential at all

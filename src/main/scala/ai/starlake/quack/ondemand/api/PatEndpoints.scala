@@ -10,11 +10,13 @@ import sttp.tapir.json.circe._
   * out of [[Endpoints]] to stay below the JVM's 64KB `<clinit>` ceiling (see [[RbacEndpoints]] for
   * the rationale). Registered in [[EndpointModules.all]].
   *
-  * Every route is strictly self-scoped: the acting identity comes from the session token via
+  * Every route is strictly self-scoped: the acting identity comes from the bearer token via
   * [[Endpoints.authToken]], so there is deliberately NO tenant, user, or owner input anywhere on
-  * this surface -- a caller can only ever mint, list and revoke its own tokens, and no request
-  * field can widen that. [[PatHandlers]] additionally refuses a PAT presented as the credential, so
-  * these are session-only routes even though the transport carries any bearer.
+  * this surface -- a caller can only ever mint, list and revoke its own tokens (or, presenting a
+  * PAT, the subtree it minted), and no request field can widen that. Both a session JWT and a PAT
+  * are accepted here: see [[PatHandlers]]'s scaladoc for why admitting a PAT is safe (the
+  * revocation cascade) and what it narrows to (the presenting token's own subtree, never a sibling
+  * or its parent).
   */
 object PatEndpoints:
 

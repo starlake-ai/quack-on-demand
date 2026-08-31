@@ -359,6 +359,24 @@ final case class CatalogConfig(
     restoreTimeoutSec: Int = 300
 )
 
+/** Personal access tokens (`PatHandlers`, `PatStore`).
+  *
+  * `maxDepth` is an OPERATIONAL backstop on the delegation chain (bounded revocation cascade,
+  * bounded row growth in `qodstate_pat`, a delegation graph a human can read during an incident),
+  * NOT a security boundary: `TokenRestriction.narrow` already guarantees a child can never exceed
+  * its parent on any axis, so an unbounded chain could not escalate privilege even without this
+  * cap. Do not reason about `maxDepth` as a defence against privilege escalation.
+  */
+final case class PatConfig(
+    @field @ConfigField(
+      envVar = "QOD_PAT_MAX_DEPTH",
+      description =
+        "Max depth of a PAT delegation chain (root = 0). Operational backstop on the revocation " +
+          "cascade and row growth, not a security boundary -- narrow() already bounds privilege."
+    )
+    maxDepth: Int = 8
+)
+
 /** MCP server for AI agents at POST /mcp. Auth: PAT or the static API key; session JWTs and
   * passwords are never accepted there.
   */
@@ -533,6 +551,7 @@ final case class ManagerConfig(
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
+    pat: PatConfig = PatConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =

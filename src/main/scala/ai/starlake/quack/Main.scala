@@ -95,6 +95,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
   given ProductHint[McpConfig]                 = ProductHint[McpConfig](camelMapping)
+  given ProductHint[PatConfig]                 = ProductHint[PatConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
@@ -122,6 +123,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
   given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]
   given ConfigReader[McpConfig]                = deriveReader[McpConfig]
+  given ConfigReader[PatConfig]                = deriveReader[PatConfig]
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
@@ -614,7 +616,8 @@ object Main extends IOApp with LazyLogging:
       // The whole row, not just its id: a disabled owner must be refused at MINT
       // time too, not only when the resulting token is used.
       userOf = (tenant, username) => store.findUser(tenant, username),
-      audit = auditRecorder
+      audit = auditRecorder,
+      maxDepth = mgrCfg.pat.maxDepth
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)

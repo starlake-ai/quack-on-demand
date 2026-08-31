@@ -21,7 +21,11 @@ import scala.util.Try
   *   - a revoked PAT is anonymous: `401` everywhere, indistinguishable from garbage;
   *   - a tenant-admin PAT carries its owner's tenant scope, so a cross-tenant `?tenant=` path is
   *     `403 tenant_forbidden` (the same perimeter check a session gets);
-  *   - a PAT still cannot manage PATs (`403 session_required`), now proven THROUGH the guard.
+  *   - a PAT reaches its own PAT-management subtree, now proven THROUGH the guard: creating a child
+  *     of itself succeeds (a reversal of what this suite used to pin -- see [[PatHandlers]]'s
+  *     scaladoc for why the revocation cascade makes that safe), while everything outside that
+  *     subtree stays refused. Full chain behavior is [[PatChainRestSpec]]; this case only proves
+  *     the guard's PAT arm is what let the request through in the first place.
   */
 class PatApiAdmissionSpec
     extends AnyFlatSpec
@@ -173,20 +177,27 @@ class PatApiAdmissionSpec
   }
 
   // ------------------------------------------------------------------
-  // (e) a PAT still cannot manage PATs, now proven through the guard
+  // (e) a PAT reaches the PAT-management routes, through the guard's PAT arm
+  //
+  // This pins a reversal: the class used to refuse every PAT-presented call on
+  // these routes outright (403 session_required). It is admitted now because
+  // PatStore.revoke cascades over the whole subtree a PAT-minted child sits in,
+  // so a stolen token cannot roll forward past its own revocation -- see
+  // PatHandlers' scaladoc. What stays refused (never a sibling, never its
+  // parent) is PatChainRestSpec's job to pin; this case only proves the guard
+  // itself is what let the request through, mirroring (a)-(d) above.
   // ------------------------------------------------------------------
 
-  "a PAT presented on the PAT-management routes" should "still be refused 403 session_required" in
-    withHarness { h =>
+  "a PAT presented on the PAT-management routes" should
+    "mint a child of itself, through the guard's PAT arm" in withHarness { h =>
       val (_, raw) = mintFor(None, SecurityFixtures.RootUsername)
-      val denied   = post(
+      val minted   = post(
         h.httpClient,
         s"${h.baseUrl}/api/auth/pat/create",
         """{"name":"successor"}""",
         apiKey = Some(raw)
       )
-      withClue(s"create-with-pat body: ${denied.body()}") {
-        denied.statusCode() shouldBe 403
-        errorCode(denied.body()) should contain("session_required")
+      withClue(s"create-with-pat body: ${minted.body()}") {
+        minted.statusCode() shouldBe 200
       }
     }

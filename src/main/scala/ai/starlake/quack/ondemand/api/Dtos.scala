@@ -531,11 +531,33 @@ final case class SsoRedeemResponse(
 
 /** Mint request. `name` is an operator-facing label (what the token is for), not an identifier: it
   * is never unique and never resolves anything. `expiresAt` absent means "no expiry" -- revocation
-  * is then the only way to retire the token.
+  * is then the only way to retire the token, EXCEPT that a child minted under a PAT parent always
+  * inherits the parent's expiry when it asks for none, and is clamped to it when it asks for later
+  * (see `TokenRestriction.narrow`).
+  *
+  * The scope fields (`roles` .. `maxRows`) are read relative to the caller presenting the request,
+  * never in absolute terms:
+  *   - from a session credential, they are the token's OWN restriction (the caller's grants are the
+  *     ceiling, i.e. `TokenRestriction.Unrestricted`);
+  *   - from a PAT credential, they narrow the presenting token's OWN restriction, and any axis that
+  *     would widen it is refused `400 pat_scope_widens` naming the axis.
+  *
+  * `None` on a set axis means "unrestricted on this axis" (inherit the caller's), `Some(Set())`
+  * means "nothing on this axis" -- see `TokenRestriction`'s scaladoc for why the two must stay
+  * distinct. `verbCeiling` is upcased before it reaches `TokenRestriction.narrow`, so `"ro"` and
+  * `"RO"` are equivalent on the wire.
   */
 final case class PatCreateRequest(
     name: String,
-    expiresAt: Option[java.time.Instant] = None
+    expiresAt: Option[java.time.Instant] = None,
+    roles: Option[Set[String]] = None,
+    databases: Option[Set[String]] = None,
+    pools: Option[Set[String]] = None,
+    tools: Option[Set[String]] = None,
+    verbCeiling: Option[String] = None,
+    dropAdmin: Boolean = false,
+    stmtTimeoutMs: Option[Int] = None,
+    maxRows: Option[Int] = None
 )
 
 /** The ONLY response that ever carries the raw `token`: it is stored hashed, so a caller that loses
@@ -548,8 +570,25 @@ final case class PatCreateResponse(
     expiresAt: Option[java.time.Instant] = None
 )
 
+/** Read-only summary of a token's `TokenRestriction`, surfaced on `PatEntry` so a client can render
+  * what a token may do without decoding the raw axes. Mirrors `TokenRestriction` field for field,
+  * except `expiresAt`, which `PatEntry.expiresAt` already carries.
+  */
+final case class PatScope(
+    roles: Option[Set[String]] = None,
+    databases: Option[Set[String]] = None,
+    pools: Option[Set[String]] = None,
+    tools: Option[Set[String]] = None,
+    verbCeiling: Option[String] = None,
+    dropAdmin: Boolean = false,
+    stmtTimeoutMs: Option[Int] = None,
+    maxRows: Option[Int] = None
+)
+
 /** Listing row: metadata only, deliberately without the raw token or its hash. `revoked` collapses
-  * the store's `revokedAt` timestamp to the one bit a client acts on.
+  * the store's `revokedAt` timestamp to the one bit a client acts on. `parentId` / `depth` place
+  * the row in its delegation chain (`None` / `0` for a root token minted by a session); `scope`
+  * summarizes the token's own restriction for display.
   */
 final case class PatEntry(
     id: String,
@@ -557,7 +596,10 @@ final case class PatEntry(
     createdAt: java.time.Instant,
     expiresAt: Option[java.time.Instant] = None,
     lastUsedAt: Option[java.time.Instant] = None,
-    revoked: Boolean = false
+    revoked: Boolean = false,
+    parentId: Option[String] = None,
+    depth: Int = 0,
+    scope: Option[PatScope] = None
 )
 
 final case class PatListResponse(tokens: List[PatEntry] = Nil)
@@ -1250,6 +1292,7 @@ object Dtos:
   // optional field (`expiresAt`) still decodes against the defaults.
   given Codec[PatCreateRequest]  = ConfiguredCodec.derived
   given Codec[PatCreateResponse] = ConfiguredCodec.derived
+  given Codec[PatScope]          = ConfiguredCodec.derived
   given Codec[PatEntry]          = ConfiguredCodec.derived
   given Codec[PatListResponse]   = ConfiguredCodec.derived
   given Codec[PatRevokeRequest]  = ConfiguredCodec.derived
