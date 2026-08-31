@@ -93,6 +93,15 @@ final class PatStore(
     * `restriction.expiresAt` is the only source written to `expires_at`; there is no separate
     * top-level expiry input, so the clamped value produced by `TokenRestriction.narrow` is exactly
     * what gets persisted.
+    *
+    * When `parentId` is `Some`, the insert is a single conditional statement (`INSERT ... SELECT
+    * ... WHERE EXISTS (...)`) that re-checks, in the same statement as the write, that the parent
+    * is owned by `userId` and still live (neither revoked nor expired). Zero rows inserted means
+    * that check failed, and this throws [[PatStore.ParentNotLiveException]]. This is a race
+    * backstop, not the primary error path: a caller should pre-check with [[PatStore.findById]] and
+    * answer a friendly error before ever calling `mint`, but a concurrent revoke or expiry between
+    * that pre-check and this call could otherwise still let a child be minted under a parent that
+    * is no longer live, and this closes that window atomically.
     */
   def mint(
       userId: String,
@@ -118,12 +127,14 @@ final class PatStore(
       depth = depth,
       restriction = restriction
     )
-    withConn { c =>
+    val inserted = withConn { c =>
       val ps = c.prepareStatement(
         "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at, " +
           "parent_id, depth, roles, databases, pools, tools, verb_ceiling, drop_admin, " +
           "stmt_timeout_ms, max_rows) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
+          "WHERE ? IS NULL OR EXISTS (SELECT 1 FROM qodstate_pat WHERE id = ? AND user_id = ? " +
+          "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()))"
       )
       try
         ps.setString(1, record.id)
@@ -152,10 +163,15 @@ final class PatStore(
         restriction.maxRows match
           case Some(m) => ps.setInt(16, m)
           case None    => ps.setNull(16, java.sql.Types.INTEGER)
+        // The WHERE-clause guard: `? IS NULL` (17) short-circuits the check for a root mint,
+        // and the EXISTS probe (18, 19) re-reads liveness of the claimed parent under this user.
+        ps.setString(17, parentId.orNull)
+        ps.setString(18, parentId.orNull)
+        ps.setString(19, userId)
         ps.executeUpdate()
-        ()
       finally ps.close()
     }
+    if inserted == 0 then throw PatStore.ParentNotLiveException(parentId.getOrElse(""))
     (record, raw)
 
   /** Live-token lookup: `None` on an unrecognized hash, a revoked row, an expired row, or a value
@@ -226,6 +242,7 @@ final class PatStore(
            |  SELECT id FROM qodstate_pat WHERE parent_id = ? AND user_id = ?
            |  UNION ALL
            |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+           |    AND p.user_id = ?
            |)
            |SELECT ${PatStore.SelectCols} FROM qodstate_pat
            |WHERE id IN (SELECT id FROM subtree) ORDER BY created_at DESC""".stripMargin
@@ -233,6 +250,7 @@ final class PatStore(
       try
         ps.setString(1, rootPatId)
         ps.setString(2, userId)
+        ps.setString(3, userId)
         val rs  = ps.executeQuery()
         val buf = scala.collection.mutable.ListBuffer.empty[PatRecord]
         try
@@ -244,9 +262,19 @@ final class PatStore(
 
   /** Revoke `patId` and every descendant, in one statement. The cascade is what makes PAT-minted
     * children safe: a thief who mints a successor from a stolen token loses it the moment the
-    * stolen token is revoked, so rolling forward does not work. Owner-scoped exactly as before, so
-    * a caller can never reach another user's tokens. Returns `false` (no-op) for a token owned by a
-    * different user, an already-revoked token, or an unknown id, exactly as before the cascade.
+    * stolen token is revoked, so rolling forward does not work. Owner-scoped throughout: both the
+    * anchor and the recursive step require `user_id = userId`, so a bad `parent_id` can never walk
+    * the subtree into another user's rows even by accident.
+    *
+    * Returns `false` when there is nothing left to flip: the id is unknown, owned by a different
+    * user, or the token and its entire subtree are already revoked. It is `true` whenever at least
+    * one row in the subtree had `revoked_at IS NULL` and got revoked by this call -- note that the
+    * anchor match (`id = ? AND user_id = ?`) does not itself require the anchor to be live, so if
+    * `patId` were already revoked while a descendant of it was somehow still live, this call would
+    * revoke that descendant and return `true` rather than `false`. That state is unreachable
+    * through this store's own API: [[PatStore.mint]] refuses to place a child under a parent that
+    * is not live, and a revoke always cascades to every descendant in the same statement, so an
+    * already-revoked token can never have a live child to begin with.
     */
   def revoke(userId: String, patId: String): Boolean =
     withConn { c =>
@@ -255,6 +283,7 @@ final class PatStore(
           |  SELECT id FROM qodstate_pat WHERE id = ? AND user_id = ?
           |  UNION ALL
           |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+          |    AND p.user_id = ?
           |)
           |UPDATE qodstate_pat SET revoked_at = NOW()
           |WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL""".stripMargin
@@ -262,12 +291,15 @@ final class PatStore(
       try
         ps.setString(1, patId)
         ps.setString(2, userId)
+        ps.setString(3, userId)
         ps.executeUpdate() >= 1
       finally ps.close()
     }
 
   /** Whether `candidateId` is a strict descendant of `rootPatId`, both owned by `userId`. Never
-    * true for `rootPatId` itself: a token may retire what it created, never itself.
+    * true for `rootPatId` itself: a token may retire what it created, never itself. Owner-scoped at
+    * both the anchor and the recursive step, so a bad `parent_id` can never walk the subtree across
+    * users.
     */
   def isInSubtree(userId: String, rootPatId: String, candidateId: String): Boolean =
     withConn { c =>
@@ -276,13 +308,15 @@ final class PatStore(
           |  SELECT id FROM qodstate_pat WHERE parent_id = ? AND user_id = ?
           |  UNION ALL
           |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+          |    AND p.user_id = ?
           |)
           |SELECT 1 FROM subtree WHERE id = ?""".stripMargin
       )
       try
         ps.setString(1, rootPatId)
         ps.setString(2, userId)
-        ps.setString(3, candidateId)
+        ps.setString(3, userId)
+        ps.setString(4, candidateId)
         val rs = ps.executeQuery()
         try rs.next()
         finally rs.close()
@@ -366,6 +400,17 @@ object PatStore:
   /** Result of [[PatStore.delete]]: only an already-dead row (revoked or expired) is deletable. */
   enum DeleteOutcome:
     case Deleted, Live, NotFound
+
+  /** Thrown by [[PatStore.mint]] when a `parentId` was given but, at the instant of the atomic
+    * insert, no row with that id was owned by the caller and live (neither revoked nor expired).
+    * This is the race backstop, not the primary error path: a caller should pre-check with
+    * [[PatStore.findById]] and answer a friendly 4xx before ever calling `mint` (Task 7's REST
+    * handler does this). This exception exists only to close the window between that pre-check and
+    * the insert, where a concurrent revoke or expiry could otherwise still let a child be minted
+    * under a parent that is no longer live.
+    */
+  final class ParentNotLiveException(val parentId: String)
+      extends RuntimeException(s"parent PAT $parentId is not live")
 
   def sha256Hex(s: String): String =
     MessageDigest.getInstance("SHA-256").digest(s.getBytes("UTF-8")).map(b => f"$b%02x").mkString

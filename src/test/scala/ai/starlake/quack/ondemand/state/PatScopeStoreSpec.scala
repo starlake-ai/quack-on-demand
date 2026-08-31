@@ -5,6 +5,7 @@ import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.time.Instant
 import scala.util.Try
 
 /** Scope persistence and chain semantics on `qodstate_pat` (changelog 0033). */
@@ -62,6 +63,39 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
       pats.verify(raw).map(_.restriction) shouldBe Some(TokenRestriction.Unrestricted)
     }
 
+  // Parent-liveness re-check: mint's atomic INSERT ... WHERE EXISTS(...) guard must refuse a
+  // parentId that is absent, owned by someone else, revoked, or expired, in the same statement as
+  // the write -- not as a separate pre-check the caller could race against.
+
+  it should "refuse a parentId owned by a different user" in
+    withFreshDb { (users, pats) =>
+      val uid = seedUser(users)
+      users.upsertUser(None, "bob", "pw", "admin")
+      val bobId        = users.userIdOf(None, "bob").get
+      val (bobRoot, _) = pats.mint(bobId, "bob-root", TokenRestriction.Unrestricted, None, 0)
+      an[PatStore.ParentNotLiveException] should be thrownBy
+        pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(bobRoot.id), 1)
+    }
+
+  it should "refuse a revoked parent" in
+    withFreshDb { (users, pats) =>
+      val uid       = seedUser(users)
+      val (root, _) = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
+      pats.revoke(uid, root.id) shouldBe true
+      an[PatStore.ParentNotLiveException] should be thrownBy
+        pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
+    }
+
+  it should "refuse an expired parent" in
+    withFreshDb { (users, pats) =>
+      val uid           = seedUser(users)
+      val expiredParent =
+        TokenRestriction.Unrestricted.copy(expiresAt = Some(Instant.now().minusSeconds(60)))
+      val (root, _) = pats.mint(uid, "root", expiredParent, None, 0)
+      an[PatStore.ParentNotLiveException] should be thrownBy
+        pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
+    }
+
   "revoke" should "cascade to the whole subtree" in
     withFreshDb { (users, pats) =>
       val uid               = seedUser(users)
@@ -84,6 +118,18 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
       val (_, bRaw) = pats.mint(uid, "b", TokenRestriction.Unrestricted, None, 0)
       pats.revoke(uid, a.id) shouldBe true
       pats.verify(bRaw).isDefined shouldBe true
+    }
+
+  // Once a token's whole subtree is already revoked -- the only state reachable through this
+  // store's own API, since mint refuses to place a child under a non-live parent -- a second
+  // revoke call has nothing left to flip and must report the no-op false, exactly like a bare
+  // (childless) token revoked twice.
+  it should "no-op on a second call once the token has no live descendants left" in
+    withFreshDb { (users, pats) =>
+      val uid       = seedUser(users)
+      val (root, _) = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
+      pats.revoke(uid, root.id) shouldBe true
+      pats.revoke(uid, root.id) shouldBe false
     }
 
   "isInSubtree" should "accept a descendant and refuse a sibling" in
