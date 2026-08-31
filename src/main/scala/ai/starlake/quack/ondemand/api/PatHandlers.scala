@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.state.{PatRecord, PatStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -99,7 +100,10 @@ final class PatHandlers(
           )
         )
       else
-        val (rec, raw) = pats.mint(uid, name, req.expiresAt)
+        // Root mint from a session: no parent, depth 0, unrestricted except for the caller's
+        // requested expiry. Chained (attenuated) minting is Task 7's REST surface.
+        val restriction = TokenRestriction.Unrestricted.copy(expiresAt = req.expiresAt)
+        val (rec, raw)  = pats.mint(uid, name, restriction, None, 0)
         audit.rest(
           token,
           "auth",

@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/UserLockPatSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.ondemand.auth.PatAuthenticator
+import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import org.scalatest.BeforeAndAfterAll
@@ -71,7 +71,7 @@ class UserLockPatSpec
     val uid = users
       .userIdOf(tenant, username)
       .getOrElse(fail(s"fixture user $username not found"))
-    val (_, raw) = pats.mint(uid, s"spec-$username", None)
+    val (_, raw) = pats.mint(uid, s"spec-$username", TokenRestriction.Unrestricted, None, 0)
     raw
 
   /** Static key is always configured: reaching the handler with a PAT proves the guard's PAT arm

@@ -53,7 +53,14 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
   ): (String, String) =
     users.upsertUser(tenant, username, "pw", role)
     val uid      = users.userIdOf(tenant, username).get
-    val (_, tok) = pats.mint(uid, "claude-code", expiresAt)
+    val (_, tok) =
+      pats.mint(
+        uid,
+        "claude-code",
+        TokenRestriction.Unrestricted.copy(expiresAt = expiresAt),
+        None,
+        0
+      )
     (uid, tok)
 
   "resolve" should "give a tenant-less admin PAT a superuser scope" in withFreshDb {
@@ -117,9 +124,15 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
   it should "refuse a revoked token and an expired token" in withFreshDb { (_, users, pats) =>
     users.upsertUser(None, "root", "pw", "admin")
     val uid          = users.userIdOf(None, "root").get
-    val (rec, live)  = pats.mint(uid, "revoked-soon", None)
-    val (_, expired) = pats.mint(uid, "expired", Some(Instant.now().minusSeconds(60)))
-    val auth         = authOf(users, pats)
+    val (rec, live)  = pats.mint(uid, "revoked-soon", TokenRestriction.Unrestricted, None, 0)
+    val (_, expired) = pats.mint(
+      uid,
+      "expired",
+      TokenRestriction.Unrestricted.copy(expiresAt = Some(Instant.now().minusSeconds(60))),
+      None,
+      0
+    )
+    val auth = authOf(users, pats)
     auth.resolve(live) should not be empty
     pats.revoke(uid, rec.id) shouldBe true
     auth.resolve(live) shouldBe None

@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
+import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -54,7 +55,7 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
   "mint + verify" should "round-trip and never store the raw token" in withFreshDb {
     (users, pats) =>
       val uid             = seedUser(users)
-      val (record, token) = pats.mint(uid, "claude-code", None)
+      val (record, token) = pats.mint(uid, "claude-code", TokenRestriction.Unrestricted, None, 0)
       token should startWith(PatStore.TokenPrefix)
       record.userId shouldBe uid
       pats.verify(token).map(_.id) shouldBe Some(record.id)
@@ -64,20 +65,26 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "stamp last_used_at on verify" in withFreshDb { (users, pats) =>
     val uid        = seedUser(users)
-    val (_, token) = pats.mint(uid, "t", None)
+    val (_, token) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
     pats.verify(token)
     pats.list(uid).head.lastUsedAt should not be empty
   }
 
   "verify" should "reject an expired token" in withFreshDb { (users, pats) =>
     val uid        = seedUser(users)
-    val (_, token) = pats.mint(uid, "old", Some(Instant.now().minusSeconds(60)))
+    val (_, token) = pats.mint(
+      uid,
+      "old",
+      TokenRestriction.Unrestricted.copy(expiresAt = Some(Instant.now().minusSeconds(60))),
+      None,
+      0
+    )
     pats.verify(token) shouldBe None
   }
 
   it should "reject a revoked token and reject garbage" in withFreshDb { (users, pats) =>
     val uid             = seedUser(users)
-    val (record, token) = pats.mint(uid, "t", None)
+    val (record, token) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
     pats.revoke(uid, record.id) shouldBe true
     pats.verify(token) shouldBe None
     pats.verify("qod_pat_notarealtoken") shouldBe None
@@ -88,13 +95,13 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
     val uid = seedUser(users)
     users.upsertUser(None, "bob", "pw", "admin")
     val bobId       = users.userIdOf(None, "bob").get
-    val (record, _) = pats.mint(uid, "t", None)
+    val (record, _) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
     pats.revoke(bobId, record.id) shouldBe false
   }
 
   "delete" should "remove a revoked token row" in withFreshDb { (users, pats) =>
     val uid         = seedUser(users)
-    val (record, _) = pats.mint(uid, "dead", None)
+    val (record, _) = pats.mint(uid, "dead", TokenRestriction.Unrestricted, None, 0)
     pats.revoke(uid, record.id) shouldBe true
     pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Deleted
     countWhere(users.dbName, s"id = '${record.id}'") shouldBe 0
@@ -102,14 +109,20 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
 
   it should "remove an expired token row" in withFreshDb { (users, pats) =>
     val uid         = seedUser(users)
-    val (record, _) = pats.mint(uid, "old", Some(Instant.now().minusSeconds(60)))
+    val (record, _) = pats.mint(
+      uid,
+      "old",
+      TokenRestriction.Unrestricted.copy(expiresAt = Some(Instant.now().minusSeconds(60))),
+      None,
+      0
+    )
     pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Deleted
     countWhere(users.dbName, s"id = '${record.id}'") shouldBe 0
   }
 
   it should "refuse a live token" in withFreshDb { (users, pats) =>
     val uid             = seedUser(users)
-    val (record, token) = pats.mint(uid, "live", None)
+    val (record, token) = pats.mint(uid, "live", TokenRestriction.Unrestricted, None, 0)
     pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Live
     countWhere(users.dbName, s"id = '${record.id}'") shouldBe 1
     pats.verify(token).map(_.id) shouldBe Some(record.id)
@@ -120,7 +133,7 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
       val uid = seedUser(users)
       users.upsertUser(None, "bob", "pw", "admin")
       val bobId       = users.userIdOf(None, "bob").get
-      val (record, _) = pats.mint(uid, "t", None)
+      val (record, _) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
       pats.revoke(uid, record.id) shouldBe true
       // A dead row owned by someone else is indistinguishable from a missing one.
       pats.delete(bobId, record.id) shouldBe PatStore.DeleteOutcome.NotFound

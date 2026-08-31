@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.Names
+import ai.starlake.quack.ondemand.auth.TokenRestriction
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 
@@ -9,9 +10,14 @@ import java.sql.{Connection, ResultSet, Timestamp}
 import java.time.Instant
 import java.util.Base64
 
-/** A row in `qodstate_pat` (Liquibase `0032`). `id` is a surrogate `pat-<32 hex chars>`; the raw
-  * bearer token is never persisted, only its SHA-256 hash (see [[PatStore.sha256Hex]]). `revokedAt`
-  * and an expired `expiresAt` both make the token permanently unusable via [[PatStore.verify]].
+/** A row in `qodstate_pat` (Liquibase `0032`, scope columns added in `0033`). `id` is a surrogate
+  * `pat-<32 hex chars>`; the raw bearer token is never persisted, only its SHA-256 hash (see
+  * [[PatStore.sha256Hex]]). `revokedAt` and an expired `expiresAt` both make the token permanently
+  * unusable via [[PatStore.verify]]. `parentId` / `depth` place this token in the mint chain rooted
+  * at a full-strength credential; `restriction` is the scope narrowed at mint time relative to the
+  * parent (see `TokenRestriction.narrow`). `restriction.expiresAt` is not a second expiry: it is
+  * always read back from the same `expires_at` column as the top-level `expiresAt` field (see
+  * [[PatStore.rowOf]]), so the two can never drift apart.
   */
 final case class PatRecord(
     id: String,
@@ -20,7 +26,10 @@ final case class PatRecord(
     createdAt: Instant,
     expiresAt: Option[Instant],
     lastUsedAt: Option[Instant],
-    revokedAt: Option[Instant]
+    revokedAt: Option[Instant],
+    parentId: Option[String] = None,
+    depth: Int = 0,
+    restriction: TokenRestriction = TokenRestriction.Unrestricted
 )
 
 /** Manages the `qodstate_pat` table -- personal access tokens, long-lived bearer credentials for
@@ -64,20 +73,57 @@ final class PatStore(
 
   private val rnd = new SecureRandom()
 
-  /** Mint a fresh token for `userId`. Returns the stored record and the raw token; the raw value is
-    * shown to the caller exactly once here and is never persisted or retrievable again.
+  /** `NULL` reads back as `None` (unrestricted); an empty array reads back as `Some(Set.empty)`
+    * (nothing allowed). Collapsing the two would silently widen a token that was minted to allow
+    * nothing.
     */
-  def mint(userId: String, name: String, expiresAt: Option[Instant]): (PatRecord, String) =
+  private def readSet(rs: ResultSet, col: String): Option[Set[String]] =
+    Option(rs.getArray(col)).map { a =>
+      a.getArray.asInstanceOf[Array[AnyRef]].map(_.asInstanceOf[String]).toSet
+    }
+
+  private def writeSet(c: Connection, v: Option[Set[String]]): java.sql.Array =
+    v.map(s => c.createArrayOf("text", s.toArray[AnyRef])).orNull
+
+  /** Mint a fresh token for `userId`, scoped by `restriction` and placed at `depth` under
+    * `parentId` (both `None`/`0` for a root token minted directly by a human session). Returns the
+    * stored record and the raw token; the raw value is shown to the caller exactly once here and is
+    * never persisted or retrievable again.
+    *
+    * `restriction.expiresAt` is the only source written to `expires_at`; there is no separate
+    * top-level expiry input, so the clamped value produced by `TokenRestriction.narrow` is exactly
+    * what gets persisted.
+    */
+  def mint(
+      userId: String,
+      name: String,
+      restriction: TokenRestriction,
+      parentId: Option[String],
+      depth: Int
+  ): (PatRecord, String) =
     val raw =
       val bytes = new Array[Byte](32)
       rnd.nextBytes(bytes)
       PatStore.TokenPrefix + Base64.getUrlEncoder.withoutPadding.encodeToString(bytes)
     val now    = clock()
-    val record = PatRecord(Names.newSurrogateId("pat"), userId, name, now, expiresAt, None, None)
+    val record = PatRecord(
+      id = Names.newSurrogateId("pat"),
+      userId = userId,
+      name = name,
+      createdAt = now,
+      expiresAt = restriction.expiresAt,
+      lastUsedAt = None,
+      revokedAt = None,
+      parentId = parentId,
+      depth = depth,
+      restriction = restriction
+    )
     withConn { c =>
       val ps = c.prepareStatement(
-        "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO qodstate_pat (id, user_id, name, token_hash, created_at, expires_at, " +
+          "parent_id, depth, roles, databases, pools, tools, verb_ceiling, drop_admin, " +
+          "stmt_timeout_ms, max_rows) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       try
         ps.setString(1, record.id)
@@ -85,9 +131,27 @@ final class PatStore(
         ps.setString(3, name)
         ps.setString(4, PatStore.sha256Hex(raw))
         ps.setTimestamp(5, Timestamp.from(now))
-        expiresAt match
+        restriction.expiresAt match
           case Some(e) => ps.setTimestamp(6, Timestamp.from(e))
           case None    => ps.setNull(6, java.sql.Types.TIMESTAMP_WITH_TIMEZONE)
+        parentId match
+          case Some(p) => ps.setString(7, p)
+          case None    => ps.setNull(7, java.sql.Types.VARCHAR)
+        ps.setInt(8, depth)
+        ps.setArray(9, writeSet(c, restriction.roles))
+        ps.setArray(10, writeSet(c, restriction.databases))
+        ps.setArray(11, writeSet(c, restriction.pools))
+        ps.setArray(12, writeSet(c, restriction.tools))
+        restriction.verbCeiling match
+          case Some(v) => ps.setString(13, v)
+          case None    => ps.setNull(13, java.sql.Types.VARCHAR)
+        ps.setBoolean(14, restriction.dropAdmin)
+        restriction.stmtTimeoutMs match
+          case Some(t) => ps.setInt(15, t)
+          case None    => ps.setNull(15, java.sql.Types.INTEGER)
+        restriction.maxRows match
+          case Some(m) => ps.setInt(16, m)
+          case None    => ps.setNull(16, java.sql.Types.INTEGER)
         ps.executeUpdate()
         ()
       finally ps.close()
@@ -105,7 +169,7 @@ final class PatStore(
         val ps = c.prepareStatement(
           "UPDATE qodstate_pat SET last_used_at = NOW() WHERE token_hash = ? " +
             "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) " +
-            "RETURNING id, user_id, name, created_at, expires_at, last_used_at, revoked_at"
+            s"RETURNING ${PatStore.SelectCols}"
         )
         try
           ps.setString(1, PatStore.sha256Hex(token))
@@ -119,8 +183,7 @@ final class PatStore(
   def list(userId: String): List[PatRecord] =
     withConn { c =>
       val ps = c.prepareStatement(
-        "SELECT id, user_id, name, created_at, expires_at, last_used_at, revoked_at " +
-          "FROM qodstate_pat WHERE user_id = ? ORDER BY created_at DESC"
+        s"SELECT ${PatStore.SelectCols} FROM qodstate_pat WHERE user_id = ? ORDER BY created_at DESC"
       )
       try
         ps.setString(1, userId)
@@ -133,19 +196,96 @@ final class PatStore(
       finally ps.close()
     }
 
-  /** Revoke `patId`, scoped to `userId`: returns `false` (no-op) for a token owned by a different
-    * user, an already-revoked token, or an unknown id, so a caller can never revoke someone else's
-    * token nor learn whether an id exists under another account.
+  /** Owner-scoped single-row lookup by id, live or dead. Used at mint time so a chained mint reads
+    * the parent's `depth` and `restriction` fresh from the table rather than trusting a principal
+    * resolved earlier in the request. `None` for another user's token and for an unknown id alike,
+    * so existence under another account never leaks.
     */
-  def revoke(userId: String, patId: String): Boolean =
+  def findById(userId: String, patId: String): Option[PatRecord] =
     withConn { c =>
       val ps = c.prepareStatement(
-        "UPDATE qodstate_pat SET revoked_at = NOW() WHERE id = ? AND user_id = ? AND revoked_at IS NULL"
+        s"SELECT ${PatStore.SelectCols} FROM qodstate_pat WHERE id = ? AND user_id = ?"
       )
       try
         ps.setString(1, patId)
         ps.setString(2, userId)
-        ps.executeUpdate() == 1
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(rowOf(rs)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  /** Every descendant of `rootPatId` (not including it), owner-scoped, newest first. Backs the
+    * PAT-scoped `list` surfaced to a restricted caller in Task 7: it may see the tokens it minted,
+    * never its own row nor a sibling subtree.
+    */
+  def listSubtree(userId: String, rootPatId: String): List[PatRecord] =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        s"""WITH RECURSIVE subtree AS (
+           |  SELECT id FROM qodstate_pat WHERE parent_id = ? AND user_id = ?
+           |  UNION ALL
+           |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+           |)
+           |SELECT ${PatStore.SelectCols} FROM qodstate_pat
+           |WHERE id IN (SELECT id FROM subtree) ORDER BY created_at DESC""".stripMargin
+      )
+      try
+        ps.setString(1, rootPatId)
+        ps.setString(2, userId)
+        val rs  = ps.executeQuery()
+        val buf = scala.collection.mutable.ListBuffer.empty[PatRecord]
+        try
+          while rs.next() do buf += rowOf(rs)
+        finally rs.close()
+        buf.toList
+      finally ps.close()
+    }
+
+  /** Revoke `patId` and every descendant, in one statement. The cascade is what makes PAT-minted
+    * children safe: a thief who mints a successor from a stolen token loses it the moment the
+    * stolen token is revoked, so rolling forward does not work. Owner-scoped exactly as before, so
+    * a caller can never reach another user's tokens. Returns `false` (no-op) for a token owned by a
+    * different user, an already-revoked token, or an unknown id, exactly as before the cascade.
+    */
+  def revoke(userId: String, patId: String): Boolean =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """WITH RECURSIVE subtree AS (
+          |  SELECT id FROM qodstate_pat WHERE id = ? AND user_id = ?
+          |  UNION ALL
+          |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+          |)
+          |UPDATE qodstate_pat SET revoked_at = NOW()
+          |WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL""".stripMargin
+      )
+      try
+        ps.setString(1, patId)
+        ps.setString(2, userId)
+        ps.executeUpdate() >= 1
+      finally ps.close()
+    }
+
+  /** Whether `candidateId` is a strict descendant of `rootPatId`, both owned by `userId`. Never
+    * true for `rootPatId` itself: a token may retire what it created, never itself.
+    */
+  def isInSubtree(userId: String, rootPatId: String, candidateId: String): Boolean =
+    withConn { c =>
+      val ps = c.prepareStatement(
+        """WITH RECURSIVE subtree AS (
+          |  SELECT id FROM qodstate_pat WHERE parent_id = ? AND user_id = ?
+          |  UNION ALL
+          |  SELECT p.id FROM qodstate_pat p JOIN subtree s ON p.parent_id = s.id
+          |)
+          |SELECT 1 FROM subtree WHERE id = ?""".stripMargin
+      )
+      try
+        ps.setString(1, rootPatId)
+        ps.setString(2, userId)
+        ps.setString(3, candidateId)
+        val rs = ps.executeQuery()
+        try rs.next()
+        finally rs.close()
       finally ps.close()
     }
 
@@ -185,18 +325,43 @@ final class PatStore(
     }
 
   private def rowOf(rs: ResultSet): PatRecord =
+    // `expires_at` is read once here and fills both PatRecord.expiresAt (the field the existing
+    // verify/list/delete logic checks) and restriction.expiresAt below: one column, two views,
+    // never two sources, so a child token can never read back as outliving its parent.
+    val expiresAt = Option(rs.getTimestamp("expires_at")).map(_.toInstant)
     PatRecord(
       id = rs.getString("id"),
       userId = rs.getString("user_id"),
       name = rs.getString("name"),
       createdAt = rs.getTimestamp("created_at").toInstant,
-      expiresAt = Option(rs.getTimestamp("expires_at")).map(_.toInstant),
+      expiresAt = expiresAt,
       lastUsedAt = Option(rs.getTimestamp("last_used_at")).map(_.toInstant),
-      revokedAt = Option(rs.getTimestamp("revoked_at")).map(_.toInstant)
+      revokedAt = Option(rs.getTimestamp("revoked_at")).map(_.toInstant),
+      parentId = Option(rs.getString("parent_id")),
+      depth = rs.getInt("depth"),
+      restriction = TokenRestriction(
+        roles = readSet(rs, "roles"),
+        databases = readSet(rs, "databases"),
+        pools = readSet(rs, "pools"),
+        tools = readSet(rs, "tools"),
+        verbCeiling = Option(rs.getString("verb_ceiling")),
+        dropAdmin = rs.getBoolean("drop_admin"),
+        stmtTimeoutMs =
+          Option(rs.getObject("stmt_timeout_ms")).map(_.asInstanceOf[Number].intValue),
+        maxRows = Option(rs.getObject("max_rows")).map(_.asInstanceOf[Number].intValue),
+        expiresAt = expiresAt
+      )
     )
 
 object PatStore:
   val TokenPrefix = "qod_pat_"
+
+  /** Column list shared by every read path (`verify`'s `RETURNING`, `list`, `findById`,
+    * `listSubtree`) so a new scope column added later only needs updating in one place.
+    */
+  private val SelectCols =
+    "id, user_id, name, created_at, expires_at, last_used_at, revoked_at, parent_id, depth, " +
+      "roles, databases, pools, tools, verb_ceiling, drop_admin, stmt_timeout_ms, max_rows"
 
   /** Result of [[PatStore.delete]]: only an already-dead row (revoked or expired) is deletable. */
   enum DeleteOutcome:

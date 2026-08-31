@@ -1,0 +1,38 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0033-pat-scope
+      author: qod
+      changes:
+        # Attenuation scope for personal access tokens. Every column is nullable
+        # or defaulted, so rows written before this changeset read as unrestricted
+        # and today's behaviour is unchanged.
+        # NULL on an array column means "unrestricted on this axis"; an empty
+        # array means "nothing on this axis". The two are different.
+        - addColumn:
+            tableName: qodstate_pat
+            columns:
+              - column: { name: parent_id,       type: TEXT }
+              - column: { name: depth,           type: INT, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: roles,           type: "TEXT[]" }
+              - column: { name: databases,       type: "TEXT[]" }
+              - column: { name: pools,           type: "TEXT[]" }
+              - column: { name: tools,           type: "TEXT[]" }
+              - column: { name: verb_ceiling,    type: TEXT }
+              - column: { name: drop_admin,      type: BOOLEAN, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: stmt_timeout_ms, type: INT }
+              - column: { name: max_rows,        type: INT }
+              # Reserved for sub-project B (budgets and rate limits). Unused here.
+              - column: { name: rate_per_min,    type: INT }
+              - column: { name: spend_budget,    type: NUMERIC }
+        - addForeignKeyConstraint:
+            constraintName: fk_qodstate_pat_parent
+            baseTableName: qodstate_pat
+            baseColumnNames: parent_id
+            referencedTableName: qodstate_pat
+            referencedColumnNames: id
+            onDelete: CASCADE
+        - createIndex:
+            indexName: idx_qodstate_pat_parent
+            tableName: qodstate_pat
+            columns:
+              - column: { name: parent_id }

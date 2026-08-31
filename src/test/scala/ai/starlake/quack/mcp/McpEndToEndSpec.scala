@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/mcp/McpEndToEndSpec.scala
 package ai.starlake.quack.mcp
 
-import ai.starlake.quack.ondemand.auth.PatAuthenticator
+import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import ai.starlake.quack.security.{ManagerServerHarness, SecurityFixtures}
@@ -59,7 +59,7 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private def mintPat(tenant: Option[String], username: String): String =
     val uid = users.userIdOf(tenant, username).getOrElse(fail(s"user $username missing"))
-    pats.mint(uid, s"mcp-$username", None)._2
+    pats.mint(uid, s"mcp-$username", TokenRestriction.Unrestricted, None, 0)._2
 
   private def withHarness(
       staticApiKey: Option[String] = Some("static-key-1"),

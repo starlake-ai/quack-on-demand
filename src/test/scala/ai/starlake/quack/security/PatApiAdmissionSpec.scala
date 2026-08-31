@@ -1,7 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/PatApiAdmissionSpec.scala
 package ai.starlake.quack.security
 
-import ai.starlake.quack.ondemand.auth.PatAuthenticator
+import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import org.scalatest.BeforeAndAfterAll
@@ -72,7 +72,7 @@ class PatApiAdmissionSpec
     val uid = users
       .userIdOf(tenant, username)
       .getOrElse(fail(s"fixture user $username not found"))
-    val (rec, raw) = pats.mint(uid, s"spec-$username", None)
+    val (rec, raw) = pats.mint(uid, s"spec-$username", TokenRestriction.Unrestricted, None, 0)
     (rec.id, raw)
 
   /** Static key configured in every case: reaching a handler with a PAT proves the guard's PAT arm
@@ -131,7 +131,7 @@ class PatApiAdmissionSpec
     val uid = users
       .userIdOf(None, SecurityFixtures.RootUsername)
       .getOrElse(fail("fixture user root not found"))
-    val (rec, raw) = pats.mint(uid, "to-revoke", None)
+    val (rec, raw) = pats.mint(uid, "to-revoke", TokenRestriction.Unrestricted, None, 0)
     pats.revoke(uid, rec.id) shouldBe true
 
     List("/api/pool/list", "/api/profile/usage").foreach { path =>
