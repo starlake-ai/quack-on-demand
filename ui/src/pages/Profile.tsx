@@ -44,6 +44,40 @@ function scopeSummary(scope: PatScope | null | undefined): string {
   return parts.length > 0 ? parts.join(' · ') : 'unrestricted';
 }
 
+// One axis, spelled out for the hover detail. The null-versus-empty distinction is
+// load-bearing on the server and invisible in the compact summary: an absent axis
+// means unrestricted, an empty array means nothing at all is permitted. A token
+// scoped to no tools and one scoped to every tool both render as no entry in the
+// summary, so this is where that difference becomes legible.
+const DETAIL_MAX = 12;
+
+function axisDetail(values: string[] | null | undefined, label: string): string {
+  if (values == null) return `${label}: unrestricted`;
+  if (values.length === 0) return `${label}: none`;
+  if (values.length <= DETAIL_MAX) return `${label}: ${values.join(', ')}`;
+  const shown = values.slice(0, DETAIL_MAX).join(', ');
+  return `${label}: ${shown}, +${values.length - DETAIL_MAX} more`;
+}
+
+// Full breakdown for the Scope cell's hover, as plain text for a `title`
+// attribute. Deliberately lists every axis, including the unrestricted ones, so
+// the reader can tell "this axis was never scoped" from "I forgot to look".
+function scopeDetail(scope: PatScope | null | undefined): string {
+  if (scope == null) return 'Unrestricted on every axis.';
+  return [
+    `Verb ceiling: ${scope.verbCeiling ?? 'unrestricted'}`,
+    `Admin: ${scope.dropAdmin ? 'dropped' : 'inherited from owner'}`,
+    axisDetail(scope.databases, 'Databases'),
+    axisDetail(scope.pools, 'Pools'),
+    axisDetail(scope.roles, 'Roles'),
+    axisDetail(scope.tools, 'Tools'),
+    `Row cap: ${scope.maxRows != null ? scope.maxRows : 'unrestricted'}`,
+    `Statement timeout: ${
+      scope.stmtTimeoutMs != null ? `${scope.stmtTimeoutMs} ms` : 'unrestricted'
+    }`,
+  ].join('\n');
+}
+
 function shortTs(iso: string): string {
   try {
     const d = new Date(iso);
@@ -449,7 +483,9 @@ export default function Profile() {
                   <tr key={p.id}>
                     <td>{p.name}</td>
                     <td className="subtle">
-                      <div>{scopeSummary(p.scope)}</div>
+                      <div title={scopeDetail(p.scope)} style={{ cursor: 'help' }}>
+                        {scopeSummary(p.scope)}
+                      </div>
                       {p.parentId && (
                         <div style={{ fontSize: '0.85em' }}>
                           depth {p.depth ?? 0}, delegated from {p.parentId}
