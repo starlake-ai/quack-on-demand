@@ -62,6 +62,18 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       patToken
     )
 
+  private def scopedPat(r: TokenRestriction): McpPrincipal =
+    new McpPrincipal.Pat(
+      PatPrincipal(
+        user = RbacUser(id = "u1", tenant = Some(Tenant), username = "alice", role = "user"),
+        patId = "pat-1",
+        scope = SessionScope(superuser = false, manageableTenants = Set.empty),
+        isAdmin = false,
+        restriction = r
+      ),
+      patToken
+    )
+
   private val stubDetail = CatalogTableDetailResponse(
     CatalogTableEntry("tpch1", "region", 5L, 1, None),
     List(CatalogColumnEntry(0, "r_regionkey", "INTEGER", false, false)),
@@ -222,6 +234,76 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       "tenant"   -> Json.fromString(Tenant)
     )
     out.swap.toOption.get should include("retry")
+  }
+
+  // ------------------------------------------------------------------
+  // scope enforcement (Task 6): a restricted PAT can only narrow, never widen
+  // ------------------------------------------------------------------
+
+  it should "refuse a database outside the allowlist" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "run_sql",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set("other_db")))),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb)
+    )
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("not permitted")
+  }
+
+  it should "refuse a pool outside the allowlist" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "run_sql",
+      scopedPat(TokenRestriction.Unrestricted.copy(pools = Some(Set("other_pool")))),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb),
+      "pool"     -> Json.fromString("sales")
+    )
+    out.isLeft shouldBe true
+  }
+
+  it should "allow a database inside the allowlist" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "run_sql",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set(TenantDb)))),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb)
+    )
+    out.isRight shouldBe true
+  }
+
+  it should "lower the row cap via the token's maxRows, never raise it" in {
+    val tools = fixture(rangeExecutor(10), cfg = McpConfig(maxRows = 8))
+    val out   = call(
+      tools,
+      "run_sql",
+      scopedPat(TokenRestriction.Unrestricted.copy(maxRows = Some(2))),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb),
+      // Above both the token cap and the server cap on purpose.
+      "max_rows" -> Json.fromInt(100)
+    )
+    val json = out.toOption.getOrElse(fail(s"expected Right, got $out"))
+    json.hcursor.downField("rows").as[List[Json]].toOption.get should have size 2
+    json.hcursor.get[Boolean]("truncated").toOption shouldBe Some(true)
+  }
+
+  "list_tables" should "refuse a database outside the allowlist too" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "list_tables",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set("other_db")))),
+      "database" -> Json.fromString(TenantDb)
+    )
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("not permitted")
   }
 
   // ------------------------------------------------------------------

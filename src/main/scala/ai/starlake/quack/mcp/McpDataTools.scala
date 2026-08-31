@@ -77,20 +77,22 @@ final class McpDataTools(
       "a node is still starting; retry in a few seconds"
     case other => other.reason
 
+  /** The caller identity + scope ceiling threaded into the routed executor, built from the resolved
+    * principal's own `TokenRestriction` (`Unrestricted` for the static key, the PAT's narrowed
+    * scope otherwise) so the executor enforces the same ceiling the MCP layer already checked the
+    * arguments against.
+    */
+  private def callerFor(principal: McpPrincipal): ExecCaller =
+    ExecCaller(connectionIdOf(principal), identityOf(principal), principal.restriction)
+
   /** Execute `sql` through the routed executor and decode at most `maxRows` rows. */
   private def execute(
-      principal: McpPrincipal,
+      caller: ExecCaller,
       poolKey: ai.starlake.quack.model.PoolKey,
       sql: String,
       maxRows: Int
   ): IO[Either[String, Json]] =
-    // Unrestricted for now: PatPrincipal already carries a TokenRestriction (Task 4), but
-    // wiring it into the ExecCaller here is Task 6's job, not this one's.
-    executor(
-      ExecCaller.unrestricted(connectionIdOf(principal), identityOf(principal)),
-      poolKey,
-      sql
-    ).flatMap {
+    executor(caller, poolKey, sql).flatMap {
       case Left(f)   => IO.pure(Left(routerFailureText(f)))
       case Right(qr) =>
         IO.blocking {
@@ -108,6 +110,23 @@ final class McpDataTools(
           )
         }
     }
+
+  /** Database axis of the token restriction, checked ahead of `poolKeyFor` so a refusal never
+    * depends on whether the pool exists -- guards `run_sql` and every metadata tool that takes a
+    * `database` argument.
+    */
+  private def allowedDatabase(p: McpPrincipal, db: String): Either[String, String] =
+    if p.restriction.allowsDatabase(db) then Right(db)
+    else Left(s"database '$db' is not permitted for this token")
+
+  /** Pool axis of the token restriction, checked ahead of `poolKeyFor` alongside the database
+    * check.
+    */
+  private def allowedPool(p: McpPrincipal, pool: Option[String]): Either[String, Unit] =
+    pool match
+      case Some(name) if !p.restriction.allowsPool(name) =>
+        Left(s"pool '$name' is not permitted for this token")
+      case _ => Right(())
 
   private def poolKeyFor(
       tenant: String,
@@ -150,12 +169,16 @@ final class McpDataTools(
         tenant   <- tenantOf(principal, args)
         sql      <- str(args, "sql").toRight("the 'sql' argument is required")
         database <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, database)
+        _        <- allowedPool(principal, str(args, "pool"))
         poolKey  <- poolKeyFor(tenant, database, str(args, "pool"))
       yield (poolKey, sql)) match
         case Left(err)             => IO.pure(Left(err))
         case Right((poolKey, sql)) =>
-          val eff = math.min(cfg.maxRows, int(args, "max_rows").getOrElse(cfg.maxRows)).max(1)
-          execute(principal, poolKey, sql, eff)
+          val caller = callerFor(principal)
+          val eff    =
+            caller.effectiveMaxRows(cfg.maxRows, int(args, "max_rows").getOrElse(cfg.maxRows))
+          execute(caller, poolKey, sql, eff)
   )
 
   // ---------- list_databases ----------
@@ -195,6 +218,7 @@ final class McpDataTools(
       (for
         tenant   <- tenantOf(principal, args)
         database <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, database)
       yield (tenant, database)) match
         case Left(err)                 => IO.pure(Left(err))
         case Right((tenant, database)) =>
@@ -237,6 +261,7 @@ final class McpDataTools(
       (for
         tenant   <- tenantOf(principal, args)
         database <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, database)
         schema   <- str(args, "schema").toRight("the 'schema' argument is required")
         table    <- str(args, "table").toRight("the 'table' argument is required")
       yield (tenant, database, schema, table)) match
@@ -260,7 +285,7 @@ final class McpDataTools(
                   // LIMIT one past the sample cap so `truncated` marks that more rows exist.
                   val sampleSql =
                     s"""SELECT * FROM "$schema"."$table" LIMIT ${SampleRows + 1}"""
-                  execute(principal, poolKey, sampleSql, SampleRows).map {
+                  execute(callerFor(principal), poolKey, sampleSql, SampleRows).map {
                     case Left(_)       => Right(Json.obj("table" -> detail.asJson))
                     case Right(sample) =>
                       Right(
@@ -294,6 +319,7 @@ final class McpDataTools(
       (for
         tenant   <- tenantOf(principal, args)
         database <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, database)
         schema   <- str(args, "schema").toRight("the 'schema' argument is required")
         table    <- str(args, "table").toRight("the 'table' argument is required")
       yield (tenant, database, schema, table)) match
@@ -336,6 +362,7 @@ final class McpDataTools(
       (for
         tenant   <- tenantOf(principal, args)
         database <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, database)
       yield (tenant, database)) match
         case Left(err)                 => IO.pure(Left(err))
         case Right((tenant, database)) =>

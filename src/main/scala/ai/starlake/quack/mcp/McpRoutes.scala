@@ -116,8 +116,10 @@ final class McpRoutes(
         IO.pure(jsonResponse(Status.Ok, ok(rpc.id, Json.obj())))
 
       case "tools/list" =>
-        val visible = tools.filter(t => !t.adminOnly || principal.isAdmin)
-        val listed  = visible.map { t =>
+        val visible = tools.filter(t =>
+          (!t.adminOnly || principal.isAdmin) && principal.restriction.allowsTool(t.name)
+        )
+        val listed = visible.map { t =>
           Json.obj(
             "name"        -> Json.fromString(t.name),
             "description" -> Json.fromString(t.description),
@@ -131,10 +133,14 @@ final class McpRoutes(
         val name   = params("name").flatMap(_.asString).getOrElse("")
         val args   = params("arguments").flatMap(_.asObject).getOrElse(JsonObject.empty)
         byName.get(name) match
-          // adminOnly is re-checked HERE, not just at listing time: the server never
-          // trusts that a client only calls the tools it was shown. Unauthorized and
-          // unknown collapse to one answer (no tier-probing oracle).
-          case Some(tool) if !tool.adminOnly || principal.isAdmin =>
+          // adminOnly AND the token allowlist are re-checked HERE, not just at listing
+          // time: the server never trusts that a client only calls the tools it was
+          // shown. Unauthorized and unknown collapse to one answer (no tier-probing
+          // oracle) -- a tool outside the allowlist falls into the same `case _` as a
+          // name that does not exist at all.
+          case Some(tool)
+              if (!tool.adminOnly || principal.isAdmin)
+                && principal.restriction.allowsTool(tool.name) =>
             tool
               .run(principal, args)
               .map {
