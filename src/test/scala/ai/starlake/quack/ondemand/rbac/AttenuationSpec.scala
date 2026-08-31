@@ -13,13 +13,25 @@ class AttenuationSpec extends AnyFlatSpec with Matchers:
   private val roleA = RbacRole(id = "r-a", tenantId = "acme", name = "analyst")
   private val roleB = RbacRole(id = "r-b", tenantId = "acme", name = "reader")
 
+  private val groupG = RbacGroup(id = "g1", tenantId = "acme", name = "team")
+
   private def perm(id: String, roleId: String, table: String, verb: String) =
-    RolePermission(id = id, roleId = roleId, catalogName = "acme_db",
-      schemaName = "public", tableName = table, verb = verb)
+    RolePermission(
+      id = id,
+      roleId = roleId,
+      catalogName = "acme_db",
+      schemaName = "public",
+      tableName = table,
+      verb = verb
+    )
 
   private val rowPolicyOnCustomer = RoleRowPolicy(
-    id = "rp-1", roleId = roleA.id, catalogName = "acme_db",
-    schemaName = "public", tableName = "customer", predicateSql = "region = 'EU'"
+    id = "rp-1",
+    roleId = roleA.id,
+    catalogName = "acme_db",
+    schemaName = "public",
+    tableName = "customer",
+    predicateSql = "region = 'EU'"
   )
 
   private val base = EffectiveSet(
@@ -41,9 +53,27 @@ class AttenuationSpec extends AnyFlatSpec with Matchers:
 
   it should "drop permissions whose role is not in the subset" in {
     val out = Attenuation.attenuatedBy(
-      base, TokenRestriction.Unrestricted.copy(roles = Some(Set("reader"))))
+      base,
+      TokenRestriction.Unrestricted.copy(roles = Some(Set("reader")))
+    )
     out.permissions.map(_.id) shouldBe List("p2")
     out.roles.map(_.name) shouldBe List("reader")
+  }
+
+  // Groups carry no role reference, so there is nothing to filter them by; they must
+  // pass through unchanged even when every role is dropped. A subset that still keeps
+  // a role would not distinguish this from the brief's disguised no-op filter
+  // (`eff.groups.filter(g => keptRoleIds.nonEmpty)`, which also keeps every group
+  // whenever any role survives), so this drops all roles to force keptRoleIds empty,
+  // the one case where that filter actually diverges from passthrough.
+  it should "never subtract groups, even when every role is dropped" in {
+    val withGroup = base.copy(groups = List(groupG))
+    val out = Attenuation.attenuatedBy(
+      withGroup,
+      TokenRestriction.Unrestricted.copy(roles = Some(Set("no-such-role")))
+    )
+    out.roles shouldBe empty
+    out.groups shouldBe withGroup.groups
   }
 
   // THE regression test this design exists for. Role A carries the row policy on
@@ -52,38 +82,50 @@ class AttenuationSpec extends AnyFlatSpec with Matchers:
   // grant in place with no filter, and the child would see MORE rows than its parent.
   it should "never subtract row policies, even when their role is dropped" in {
     val out = Attenuation.attenuatedBy(
-      base, TokenRestriction.Unrestricted.copy(roles = Some(Set("reader"))))
+      base,
+      TokenRestriction.Unrestricted.copy(roles = Some(Set("reader")))
+    )
     out.rowPolicies shouldBe base.rowPolicies
     out.rowPolicies.map(_.tableName) should contain("customer")
   }
 
   it should "never subtract column policies" in {
-    val cls = RoleColumnPolicy(id = "cp-1", roleId = roleA.id, catalogName = "acme_db",
-      schemaName = "public", tableName = "customer", columnName = "ssn",
-      action = "mask", transformSql = None)
+    val cls = RoleColumnPolicy(
+      id = "cp-1",
+      roleId = roleA.id,
+      catalogName = "acme_db",
+      schemaName = "public",
+      tableName = "customer",
+      columnName = "ssn",
+      action = "mask",
+      transformSql = None
+    )
     val withCls = base.copy(columnPolicies = List(cls))
-    Attenuation.attenuatedBy(
-      withCls, TokenRestriction.Unrestricted.copy(roles = Some(Set("reader")))
-    ).columnPolicies shouldBe List(cls)
+    Attenuation
+      .attenuatedBy(
+        withCls,
+        TokenRestriction.Unrestricted.copy(roles = Some(Set("reader")))
+      )
+      .columnPolicies shouldBe List(cls)
   }
 
   it should "clip a permission verb to the ceiling by set intersection" in {
-    val out = Attenuation.attenuatedBy(
-      base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
+    val out =
+      Attenuation.attenuatedBy(base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
     out.permissions.map(p => p.id -> p.verb).toMap shouldBe Map("p1" -> "RO", "p2" -> "RO")
   }
 
   it should "drop a permission whose clipped coverage is empty" in {
     // RW covers {Read, Write}; a DDL ceiling covers {Ddl}; the intersection is empty.
-    val out = Attenuation.attenuatedBy(
-      base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("DDL")))
+    val out =
+      Attenuation.attenuatedBy(base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("DDL")))
     out.permissions.map(_.id) shouldBe List("p1") // ALL clips to DDL; RW disappears
     out.permissions.head.verb shouldBe "DDL"
   }
 
   it should "never produce a permission the input did not cover" in {
-    val out = Attenuation.attenuatedBy(
-      base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("RW")))
+    val out =
+      Attenuation.attenuatedBy(base, TokenRestriction.Unrestricted.copy(verbCeiling = Some("RW")))
     out.permissions.foreach { p =>
       val original = base.permissions.find(_.id == p.id).get
       TokenRestriction.covers(p.verb).subsetOf(TokenRestriction.covers(original.verb)) shouldBe true
