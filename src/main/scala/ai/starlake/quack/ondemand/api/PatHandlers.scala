@@ -141,14 +141,16 @@ final class PatHandlers(
     rec.revokedAt.isEmpty && rec.expiresAt.forall(_.isAfter(java.time.Instant.now()))
 
   /** The restriction requested on the wire, normalized here: this is where untrusted input first
-    * arrives.
-    *   - `verbCeiling` is upcased: `TokenRestriction.narrow`'s ceiling check compares against
-    *     `RolePermission.ValidVerbs` with strict equality downstream, so a lowercase `"ro"` must be
-    *     normalized before it travels any further.
-    *   - `expiresAt` is truncated to microseconds, `qodstate_pat.expires_at`'s column precision: an
-    *     `Instant` carries nanoseconds, and leaving the extra precision in would round-trip through
-    *     Postgres as a DIFFERENT instant (JDBC rounds, not truncates), so a value that compared
-    *     equal to a parent's stored expiry before the mint could compare after it once read back.
+    * arrives. `verbCeiling` is upcased to its canonical form for storage and display -- NOT because
+    * `narrow`'s ceiling check needs it case-insensitive (`TokenRestriction.covers` already upcases
+    * internally, so widen detection works either way) and NOT because of any downstream
+    * `RolePermission.ValidVerbs` comparison (that constant is consulted only in `PoolSupervisor`,
+    * for unrelated grant validation, never here). This is cheap insurance against a future strict
+    * comparison being added, and it keeps every stored/listed value in one consistent case.
+    *
+    * `expiresAt` is passed through unnormalized: `PatStore.mint` truncates to the column's
+    * microsecond precision itself, so every caller of `mint` gets that guarantee, not only this
+    * one.
     */
   private def requestedRestriction(req: PatCreateRequest): TokenRestriction =
     TokenRestriction(
@@ -160,7 +162,7 @@ final class PatHandlers(
       dropAdmin = req.dropAdmin,
       stmtTimeoutMs = req.stmtTimeoutMs,
       maxRows = req.maxRows,
-      expiresAt = req.expiresAt.map(_.truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+      expiresAt = req.expiresAt
     )
 
   /** Narrow `requested` against `(parentRestriction, parentDepth)`, enforce the depth cap, and

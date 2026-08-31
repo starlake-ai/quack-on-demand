@@ -92,7 +92,13 @@ final class PatStore(
     *
     * `restriction.expiresAt` is the only source written to `expires_at`; there is no separate
     * top-level expiry input, so the clamped value produced by `TokenRestriction.narrow` is exactly
-    * what gets persisted.
+    * what gets persisted -- EXCEPT for precision: `expires_at` is `TIMESTAMPTZ` (microsecond
+    * precision) and pgjdbc ROUNDS a finer-grained `Instant` on write rather than truncating it, so
+    * an `Instant` carrying nanoseconds would silently become a DIFFERENT instant once read back
+    * from the row. This method truncates `restriction.expiresAt` to microseconds before it is used
+    * anywhere below -- including the returned `PatRecord` -- so the in-process response and every
+    * later read of the same row are bit-identical for every caller, not only ones that happen to
+    * pre-truncate their own input.
     *
     * When `parentId` is `Some`, the insert is a single conditional statement (`INSERT ... SELECT
     * ... WHERE EXISTS (...)`) that re-checks, in the same statement as the write, that the parent
@@ -110,6 +116,11 @@ final class PatStore(
       parentId: Option[String],
       depth: Int
   ): (PatRecord, String) =
+    // See the scaladoc above: truncate BEFORE this value is used anywhere else, so the
+    // returned record, the row inserted, and a later `verify`/`findById` read all agree.
+    val effective = restriction.copy(
+      expiresAt = restriction.expiresAt.map(_.truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+    )
     val raw =
       val bytes = new Array[Byte](32)
       rnd.nextBytes(bytes)
@@ -120,12 +131,12 @@ final class PatStore(
       userId = userId,
       name = name,
       createdAt = now,
-      expiresAt = restriction.expiresAt,
+      expiresAt = effective.expiresAt,
       lastUsedAt = None,
       revokedAt = None,
       parentId = parentId,
       depth = depth,
-      restriction = restriction
+      restriction = effective
     )
     val inserted = withConn { c =>
       val ps = c.prepareStatement(
@@ -142,25 +153,25 @@ final class PatStore(
         ps.setString(3, name)
         ps.setString(4, PatStore.sha256Hex(raw))
         ps.setTimestamp(5, Timestamp.from(now))
-        restriction.expiresAt match
+        effective.expiresAt match
           case Some(e) => ps.setTimestamp(6, Timestamp.from(e))
           case None    => ps.setNull(6, java.sql.Types.TIMESTAMP_WITH_TIMEZONE)
         parentId match
           case Some(p) => ps.setString(7, p)
           case None    => ps.setNull(7, java.sql.Types.VARCHAR)
         ps.setInt(8, depth)
-        ps.setArray(9, writeSet(c, restriction.roles))
-        ps.setArray(10, writeSet(c, restriction.databases))
-        ps.setArray(11, writeSet(c, restriction.pools))
-        ps.setArray(12, writeSet(c, restriction.tools))
-        restriction.verbCeiling match
+        ps.setArray(9, writeSet(c, effective.roles))
+        ps.setArray(10, writeSet(c, effective.databases))
+        ps.setArray(11, writeSet(c, effective.pools))
+        ps.setArray(12, writeSet(c, effective.tools))
+        effective.verbCeiling match
           case Some(v) => ps.setString(13, v)
           case None    => ps.setNull(13, java.sql.Types.VARCHAR)
-        ps.setBoolean(14, restriction.dropAdmin)
-        restriction.stmtTimeoutMs match
+        ps.setBoolean(14, effective.dropAdmin)
+        effective.stmtTimeoutMs match
           case Some(t) => ps.setInt(15, t)
           case None    => ps.setNull(15, java.sql.Types.INTEGER)
-        restriction.maxRows match
+        effective.maxRows match
           case Some(m) => ps.setInt(16, m)
           case None    => ps.setNull(16, java.sql.Types.INTEGER)
         // The WHERE-clause guard: `? IS NULL` (17) short-circuits the check for a root mint,

@@ -220,6 +220,14 @@ class PatChainRestSpec
     pats.verify(field(root.body(), "token").get).isDefined shouldBe true
   }
 
+  it should "refuse a PAT revoking itself" in withHarness() { h =>
+    val session   = rootSession(h)
+    val root      = mint(h, session, createBody("self"))
+    val rootToken = field(root.body(), "token").get
+    revoke(h, rootToken, field(root.body(), "id").get).statusCode() shouldBe 404
+    pats.verify(rootToken).isDefined shouldBe true
+  }
+
   "POST /api/auth/pat/list" should "show the subtree to a PAT and everything to a session" in
     withHarness() { h =>
       val session   = rootSession(h)
