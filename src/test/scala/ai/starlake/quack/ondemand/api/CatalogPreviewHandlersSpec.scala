@@ -172,9 +172,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       )
 
     val executor: CatalogPreviewHandlers.PreviewExecutor =
-      (connectionId, user, poolKey, sql) =>
+      (caller, poolKey, sql) =>
         seenSql = Some(sql)
-        seenUser = Some(user)
+        seenUser = Some(caller.identity)
         seenPoolKey = Some(poolKey)
         executorResult
 
@@ -183,9 +183,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     var seenSqls: List[String]                                        = Nil
     var executorResults: List[IO[Either[RouterFailure, QueryResult]]] = Nil
     val queuedExecutor: CatalogPreviewHandlers.PreviewExecutor        =
-      (connectionId, user, poolKey, sql) =>
+      (caller, poolKey, sql) =>
         seenSqls = seenSqls :+ sql
-        seenUser = Some(user)
+        seenUser = Some(caller.identity)
         seenPoolKey = Some(poolKey)
         executorResults match
           case head :: tail =>

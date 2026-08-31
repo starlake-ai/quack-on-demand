@@ -16,14 +16,17 @@ import scala.concurrent.duration.DurationInt
 
 object CatalogPreviewHandlers:
 
-  /** `(connectionId, user, poolKey, sql) -> IO[Either[RouterFailure, QueryResult]]`, the same shape
-    * as [[ai.starlake.quack.edge.FlightSqlRouter.execute]]'s first four positional params. Task 5
-    * adapts the real router (plus effective-set resolution) to this shape; here it lets the handler
-    * stay unit-testable and keeps `RouterFailure` as the single failure vocabulary the handler maps
-    * to REST status codes (`AccessDenied` -> 403 `acl_denied`, everything else -> 502
-    * `preview_failed`).
+  /** `(caller, poolKey, sql) -> IO[Either[RouterFailure, QueryResult]]`. `caller` folds in what
+    * used to be the `(connectionId, user)` pair from
+    * [[ai.starlake.quack.edge.FlightSqlRouter.execute]]'s first two positional params, plus the
+    * [[ai.starlake.quack.ondemand.auth.TokenRestriction]] the caller's credential carries -- an
+    * [[ExecCaller]] rather than loose strings so that a call site cannot omit the restriction and
+    * still compile. Task 5 adapts the real router (plus effective-set resolution and attenuation)
+    * to this shape; here it lets the handler stay unit-testable and keeps `RouterFailure` as the
+    * single failure vocabulary the handler maps to REST status codes (`AccessDenied` -> 403
+    * `acl_denied`, everything else -> 502 `preview_failed`).
     */
-  type PreviewExecutor = (String, String, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
+  type PreviewExecutor = (ExecCaller, PoolKey, String) => IO[Either[RouterFailure, QueryResult]]
 
   /** Identity contract for the executor call: a valid session token resolves to its
     * `(profile.username)`; no token, an unresolved token (static API key), or open/dev mode all
@@ -336,7 +339,7 @@ final class CatalogPreviewHandlers(
                 val sql  = buildSql(schema, table, snapshotId, effectiveLimit + 1)
                 val user = identityOf(apiKey)
 
-                executor(s"preview-$tid-$db", user, poolKey, sql)
+                executor(ExecCaller.unrestricted(s"preview-$tid-$db", user), poolKey, sql)
                   .timeout(cfg.previewTimeoutSec.seconds)
                   .attempt
                   .map {
@@ -579,7 +582,7 @@ final class CatalogPreviewHandlers(
     val user = identityOf(apiKey)
 
     def run(sql: String): IO[Either[Throwable, Either[RouterFailure, QueryResult]]] =
-      executor(s"diff-$tid-$db", user, poolKey, sql)
+      executor(ExecCaller.unrestricted(s"diff-$tid-$db", user), poolKey, sql)
         .timeout(cfg.previewTimeoutSec.seconds)
         .attempt
 

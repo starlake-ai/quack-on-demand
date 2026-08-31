@@ -152,12 +152,13 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     var writeResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
     val readExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, user, poolKey, sql) => {
-        readSql = Some(sql); readPool = Some(poolKey); readUser = Some(user); readResult
+      (caller, poolKey, sql) => {
+        readSql = Some(sql); readPool = Some(poolKey); readUser = Some(caller.identity); readResult
       }
     val writeExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, user, poolKey, sql) => {
-        writeSql = Some(sql); writePool = Some(poolKey); writeUser = Some(user); writeResult
+      (caller, poolKey, sql) => {
+        writeSql = Some(sql); writePool = Some(poolKey); writeUser = Some(caller.identity)
+        writeResult
       }
 
     def handlers(

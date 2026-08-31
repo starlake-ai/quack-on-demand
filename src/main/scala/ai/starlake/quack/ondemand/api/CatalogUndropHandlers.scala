@@ -19,8 +19,7 @@ import scala.concurrent.duration.DurationInt
   * as [[CatalogPreviewHandlers]] but wired with `recordExecution = true` in Main, so the recovery
   * snapshot carries the principal's author stamp. The engine primitive (time-travel-reading a
   * DROPPED table by name) was verified live 2026-07-14 on DuckDB 1.5.4 / DuckLake 0.3 and
-  * re-verified on 1.5.5 (2026-07-25, DuckLakeCatalogReaderDroppedSpec); see the
-  * undrop design doc.
+  * re-verified on 1.5.5 (2026-07-25, DuckLakeCatalogReaderDroppedSpec); see the undrop design doc.
   *
   * `recoverable` audits under the `cfg.auditCatalogReads` knob like the other catalog reads;
   * `undrop` is a mutation and audits unconditionally (never row contents; detail carries schema,
@@ -212,7 +211,11 @@ final class CatalogUndropHandlers(
                         )
                       )
                       Right(UndropResponse(req.schema, req.table, target, fromSnapshot))
-                    executor(s"undrop-$tid-$db", identityOf(apiKey), poolKey, sql)
+                    executor(
+                      ExecCaller.unrestricted(s"undrop-$tid-$db", identityOf(apiKey)),
+                      poolKey,
+                      sql
+                    )
                       .timeout(cfg.undropTimeoutSec.seconds)
                       .attempt
                       .map {

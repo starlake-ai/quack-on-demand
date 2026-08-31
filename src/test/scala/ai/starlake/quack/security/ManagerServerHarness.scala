@@ -248,7 +248,7 @@ object ManagerServerHarness:
       // authz specs that never intend to exercise a real query still get a deterministic,
       // non-403 outcome once past the gate; the acl_denied spec case overrides this to return
       // Left(RouterFailure.AccessDenied(...)) instead.
-      previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _, _) =>
+      previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _) =>
         IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness"))),
       // SPI module plumbing (Task 7): defaulted so every pre-existing caller compiles
       // unchanged. Task 10 passes real values sourced from loaded modules.

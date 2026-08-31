@@ -912,29 +912,40 @@ object Main extends IOApp with LazyLogging:
       // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
       // handshake's EffectiveSet resolution: the SuperuserIdentity sentinel gets a
       // synthetic superuser EffectiveSet (NOT None, which PostgresAclValidator
-      // denies fail-safe); real sessions resolve through sup.authorizeHandshake
-      // (same gate + 60s cache as the handshake), a Left short-circuiting to
-      // AccessDenied before fsRouter.execute.
+      // denies fail-safe) and is never attenuated -- the sentinel is definitionally
+      // TokenRestriction.Unrestricted; real sessions resolve through
+      // sup.authorizeHandshake (same gate + 60s cache as the handshake), a Left
+      // short-circuiting to AccessDenied before fsRouter.execute.
       // recordExecution = false for read-only probes (preview, data diff, restore
       // dry-run); true for undrop's CTAS and restore's CREATE OR REPLACE so the
       // snapshot carries the author stamp.
+      // Attenuation runs AFTER the EffectiveSet is resolved -- for real sessions,
+      // after PoolSupervisor's 60s-TTL cache read -- and BEFORE the router runs.
+      // PoolSupervisor caches that closure per user keyed on
+      // (userId, jwtRoles.hashCode, jwtGroups.hashCode), not per token, so two
+      // differently-scoped tokens belonging to the same user share one cached
+      // closure; each call narrows its own copy on the way out, and the narrowed
+      // copy is never the thing fed back into that cache.
       // Caveat: the handler-level timeout cannot cancel the underlying IO.blocking
       // node call, so a timed-out preview may leave that call to finish unobserved
       // (bounded by previewTimeoutSec, pre-existing on the shared executor path;
-      // durable fix is bracketing the connection inside QuackHttpClient).
+      // durable fix is bracketing the connection inside QuackHttpClient). The
+      // per-caller `stmtTimeoutMs` below is the same kind of bound: it is a
+      // BOUNDED WAIT, not a cancellation of the statement in flight.
       def routedExecutor(
           recordExecution: Boolean
       ): ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
-        (connectionId, user, poolKey, sql) =>
+        (caller, poolKey, sql) =>
+          val isSuperuser =
+            caller.identity == ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.SuperuserIdentity
           val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
             ai.starlake.quack.ondemand.rbac.EffectiveSet
           ]]] =
-            if user == ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.SuperuserIdentity
-            then
+            if isSuperuser then
               val superuser = ai.starlake.quack.ondemand.state.RbacUser(
                 id = "",
                 tenant = None,
-                username = user,
+                username = caller.identity,
                 role = "admin"
               )
               IO.pure(
@@ -946,7 +957,7 @@ object Main extends IOApp with LazyLogging:
                 )
               )
             else
-              IO.delay(sup.authorizeHandshake(poolKey.tenant, poolKey.pool, user)).map {
+              IO.delay(sup.authorizeHandshake(poolKey.tenant, poolKey.pool, caller.identity)).map {
                 case Left(reason) =>
                   Left(ai.starlake.quack.edge.RouterFailure.AccessDenied(reason))
                 case Right(authorized) => Right(Some(authorized.effectiveSet))
@@ -954,14 +965,49 @@ object Main extends IOApp with LazyLogging:
           effectiveSetIO.flatMap {
             case Left(denied) => IO.pure(Left(denied))
             case Right(eff)   =>
-              fsRouter.execute(
-                connectionId,
-                user,
+              // Skip attenuation for the superuser sentinel rather than relying on
+              // attenuatedBy's Unrestricted no-op path: this keeps "the synthetic
+              // superuser set is never narrowed" an explicit invariant here, not
+              // an incidental consequence of every superuser caller currently
+              // being built with ExecCaller.unrestricted.
+              val narrowed =
+                if isSuperuser then eff
+                else
+                  eff.map(e =>
+                    ai.starlake.quack.ondemand.rbac.Attenuation.attenuatedBy(e, caller.restriction)
+                  )
+              val run = fsRouter.execute(
+                caller.connectionId,
+                caller.identity,
                 poolKey,
                 sql,
-                effectiveSet = eff,
+                effectiveSet = narrowed,
                 recordExecution = recordExecution
               )
+              // BOUNDED WAIT, not a cancellation: past this many milliseconds the
+              // caller of this executor gets a failure back, but the underlying
+              // IO.blocking node call keeps running unobserved and may still
+              // complete -- the same caveat as previewTimeoutSec above, and the
+              // same best-effort gap FlightSqlRouter already has between register
+              // and attachCancel. Durable cancellation (bracketing the connection
+              // inside QuackHttpClient) is deliberately deferred to a later
+              // sub-project; do not describe this branch as killing or aborting
+              // the statement.
+              caller.restriction.stmtTimeoutMs match
+                case Some(ms) if ms > 0 =>
+                  run.timeoutTo(
+                    scala.concurrent.duration.FiniteDuration(
+                      ms.toLong,
+                      java.util.concurrent.TimeUnit.MILLISECONDS
+                    ),
+                    IO.pure(
+                      Left(
+                        ai.starlake.quack.edge.RouterFailure
+                          .Unavailable(s"statement exceeded this token's ${ms}ms limit")
+                      )
+                    )
+                  )
+                case _ => run
           }
 
       val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =

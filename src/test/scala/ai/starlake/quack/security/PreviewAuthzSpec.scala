@@ -23,7 +23,6 @@ import java.net.http.HttpResponse
   * leak), the acl_denied case (a tenant principal with no data-plane grant reaches the executor,
   * which denies), and the schema-diff stub's gating (401/403 land the same way even though the
   * handler itself always answers 501 once past the gate).
-  *
   */
 class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
@@ -82,7 +81,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   private def bootWithFixtures(
       staticApiKey: Option[String] = None,
-      previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _, _) =>
+      previewExecutor: CatalogPreviewHandlers.PreviewExecutor = (_, _, _) =>
         IO.pure(Left(RouterFailure.Unavailable("no preview executor wired in this harness")))
   ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
@@ -190,7 +189,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     // RouterFailure.AccessDenied -> 403 acl_denied mapping, which is executor-outcome-driven and
     // therefore independent of alice's actual permission graph.
     val deniedExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, _, _) => IO.pure(Left(RouterFailure.AccessDenied("access denied: no grant")))
+      (_, _, _) => IO.pure(Left(RouterFailure.AccessDenied("access denied: no grant")))
     val (h, _) = bootWithFixtures(previewExecutor = deniedExecutor)
     try
       val token = h.mintToken(
@@ -212,7 +211,7 @@ class PreviewAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   it should "let a real query succeed for a principal the executor stub allows (past every gate)" in {
     val allowingExecutor: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, _, _) => IO.pure(Right(QueryResult(emptyArrowReader(), () => (), "node-1", 1L)))
+      (_, _, _) => IO.pure(Right(QueryResult(emptyArrowReader(), () => (), "node-1", 1L)))
     val (h, _) = bootWithFixtures(previewExecutor = allowingExecutor)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)

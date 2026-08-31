@@ -285,7 +285,11 @@ final class CatalogRestoreHandlers(
           // tenant-db above, and (c) that same gate already exposes equivalent aggregate
           // metadata via the catalog history/snapshot reads -- this isn't a missing table grant,
           // it's a parser gap on one specific table function.
-          readExecutor(s"restore-dryrun-$tid-$db", SuperuserIdentity, poolKey, sql)
+          readExecutor(
+            ExecCaller.unrestricted(s"restore-dryrun-$tid-$db", SuperuserIdentity),
+            poolKey,
+            sql
+          )
             .timeout(cfg.previewTimeoutSec.seconds)
             .attempt
             .map {
@@ -355,7 +359,11 @@ final class CatalogRestoreHandlers(
         // mentions a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
         // the same); a false positive requires "conflict" in an unrelated engine error.
         def isConflict(reason: String): Boolean = reason.toLowerCase.contains("conflict")
-        writeExecutor(s"restore-$tid-$db", identityOf(apiKey), poolKey, sql)
+        writeExecutor(
+          ExecCaller.unrestricted(s"restore-$tid-$db", identityOf(apiKey)),
+          poolKey,
+          sql
+        )
           .timeout(cfg.restoreTimeoutSec.seconds)
           .attempt
           .map {

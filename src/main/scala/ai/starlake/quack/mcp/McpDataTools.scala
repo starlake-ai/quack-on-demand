@@ -9,6 +9,7 @@ import ai.starlake.quack.ondemand.api.{
   CatalogHistoryHandlers,
   CatalogPreviewHandlers,
   ErrorResponse,
+  ExecCaller,
   PoolPicks,
   ProfileHandlers,
   TagHandlers,
@@ -83,7 +84,13 @@ final class McpDataTools(
       sql: String,
       maxRows: Int
   ): IO[Either[String, Json]] =
-    executor(connectionIdOf(principal), identityOf(principal), poolKey, sql).flatMap {
+    // Unrestricted for now: PatPrincipal already carries a TokenRestriction (Task 4), but
+    // wiring it into the ExecCaller here is Task 6's job, not this one's.
+    executor(
+      ExecCaller.unrestricted(connectionIdOf(principal), identityOf(principal)),
+      poolKey,
+      sql
+    ).flatMap {
       case Left(f)   => IO.pure(Left(routerFailureText(f)))
       case Right(qr) =>
         IO.blocking {

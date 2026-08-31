@@ -105,7 +105,7 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
     var executorResult: IO[Either[RouterFailure, QueryResult]] =
       IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
     val executor: CatalogPreviewHandlers.PreviewExecutor =
-      (connectionId, user, poolKey, sql) =>
+      (caller, poolKey, sql) =>
         seenSql = Some(sql)
         seenPoolKey = Some(poolKey)
         executorResult

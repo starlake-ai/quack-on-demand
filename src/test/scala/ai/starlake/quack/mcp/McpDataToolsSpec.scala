@@ -76,7 +76,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   /** Executor answering every statement with a fresh N-row TestArrow reader. */
   private def rangeExecutor(rows: Int): CatalogPreviewHandlers.PreviewExecutor =
-    (_, _, _, _) =>
+    (_, _, _) =>
       IO.pure(
         Right(
           ai.starlake.quack.edge.QueryResult(
@@ -179,7 +179,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   it should "surface an ACL denial with the validator's reason text" in {
     val denied: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, _, _) => IO.pure(Left(RouterFailure.AccessDenied("missing RW grant on tpch1.region")))
+      (_, _, _) => IO.pure(Left(RouterFailure.AccessDenied("missing RW grant on tpch1.region")))
     val tools = fixture(denied)
     val out   = call(
       tools,
@@ -195,7 +195,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   it should "translate a resuming-pool Unavailable into an agent-actionable retry message" in {
     val resuming: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, _, _) => IO.pure(Left(RouterFailure.Unavailable("pool is resuming; no node yet")))
+      (_, _, _) => IO.pure(Left(RouterFailure.Unavailable("pool is resuming; no node yet")))
     val tools = fixture(resuming)
     val out   = call(
       tools,
@@ -210,7 +210,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   it should "translate a node-startup connect failure into a retry message" in {
     val starting: CatalogPreviewHandlers.PreviewExecutor =
-      (_, _, _, _) =>
+      (_, _, _) =>
         IO.pure(Left(RouterFailure.Internal("permanent failure: java.net.ConnectException")))
     val tools = fixture(starting)
     val out   = call(
