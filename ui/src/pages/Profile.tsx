@@ -34,8 +34,8 @@ function scopeSummary(scope: PatScope | null | undefined): string {
   if (role) parts.push(role);
   const tool = fmtAxis(scope?.tools, 'tool');
   if (tool) parts.push(tool);
-  if (scope?.stmtTimeoutMs) parts.push(`${scope.stmtTimeoutMs} ms timeout`);
-  if (scope?.maxRows) parts.push(`${scope.maxRows} row cap`);
+  if (scope?.stmtTimeoutMs != null) parts.push(`${scope.stmtTimeoutMs} ms timeout`);
+  if (scope?.maxRows != null) parts.push(`${scope.maxRows} row cap`);
   return parts.length > 0 ? parts.join(' · ') : 'unrestricted';
 }
 
