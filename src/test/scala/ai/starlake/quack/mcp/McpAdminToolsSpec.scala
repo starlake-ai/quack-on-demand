@@ -13,7 +13,7 @@ import ai.starlake.quack.ondemand.api.{
   SetPoolAutoscaleRequest,
   TagHandlers
 }
-import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope}
+import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.NoopTelemetryStore
@@ -40,7 +40,8 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
         user = RbacUser(id = "u1", tenant = Some(tenant), username = "alice", role = "admin"),
         patId = "pat-1",
         scope = SessionScope(superuser = false, manageableTenants = Set(tenant)),
-        isAdmin = true
+        isAdmin = true,
+        restriction = TokenRestriction.Unrestricted
       ),
       patToken
     )

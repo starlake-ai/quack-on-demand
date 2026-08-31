@@ -2,7 +2,7 @@
 package ai.starlake.quack.mcp
 
 import ai.starlake.quack.McpConfig
-import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope}
+import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.state.RbacUser
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -28,7 +28,8 @@ class McpProtocolSpec extends AnyFlatSpec with Matchers:
         superuser = false,
         manageableTenants = if admin then Set("acme") else Set.empty
       ),
-      isAdmin = admin
+      isAdmin = admin,
+      restriction = TokenRestriction.Unrestricted
     )
 
   private val resolvePat: String => Option[PatPrincipal] =

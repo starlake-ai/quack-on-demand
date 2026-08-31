@@ -8,9 +8,17 @@ import java.time.Instant
 
 /** A personal access token resolved to the principal it authenticates: the owning `qodstate_user`
   * row, the id of the `qodstate_pat` row that was presented (for audit), the authorization envelope
-  * the caller gets, and whether that envelope carries management privileges.
+  * the caller gets, whether that envelope carries management privileges, and the token's own
+  * [[TokenRestriction]] (deliberately no default: a construction site that forgets it must fail to
+  * compile rather than silently mint an unrestricted principal).
   */
-final case class PatPrincipal(user: RbacUser, patId: String, scope: SessionScope, isAdmin: Boolean)
+final case class PatPrincipal(
+    user: RbacUser,
+    patId: String,
+    scope: SessionScope,
+    isAdmin: Boolean,
+    restriction: TokenRestriction
+)
 
 /** Turns a raw PAT bearer token into a principal, mirroring what `AuthHandlers.mintSessionFor`
   * derives from a password login so a PAT is accepted wherever a session JWT is.
@@ -28,6 +36,14 @@ final case class PatPrincipal(user: RbacUser, patId: String, scope: SessionScope
   *     own bypass off `tenant.isEmpty` alone; that is the FlightSQL side's rule, not this one.)
   *   - `manageableTenants` = the tenants where this principal carries role `admin`, from the owning
   *     row or any sibling grant.
+  *
+  * On top of that owner-derived scope, the token's own `restriction.dropAdmin` (Task 1's
+  * [[TokenRestriction]], carried on the `qodstate_pat` row) can demote further, never widen: a
+  * `dropAdmin` token collapses to `SessionScope(superuser = false, manageableTenants = Set.empty)`
+  * regardless of what the owning row would otherwise grant. That is exactly the demotion the
+  * profile-only login path already produces (`ManagerServer.apiKeyGuard`'s `isProfileApi`
+  * allowlist), so a `dropAdmin` agent token rides the SAME existing gate rather than a new
+  * "restricted admin" concept -- an admin's agent credential becomes a data-only one.
   *
   * Every entry point resolves from scratch (one store hit each, restamping `last_used_at`); a
   * caller needing more than one facet should call [[resolve]] once and read the principal.
@@ -58,10 +74,16 @@ final class PatAuthenticator(
     else
       pats
         .verify(token)
-        .flatMap(rec => userById(rec.userId).filter(_.enabled).map(user => (rec.id, user)))
-        .map { (patId, user) =>
-          val scope = scopeFor(user)
-          PatPrincipal(user, patId, scope, adminOf(scope))
+        .flatMap(rec => userById(rec.userId).filter(_.enabled).map(user => (rec, user)))
+        .map { (rec, user) =>
+          val base = scopeFor(user)
+          // dropAdmin lands on the SAME demotion login already performs, so a
+          // restricted admin token walks the existing profile-only path.
+          val scope =
+            if rec.restriction.dropAdmin then
+              SessionScope(superuser = false, manageableTenants = Set.empty)
+            else base
+          PatPrincipal(user, rec.id, scope, adminOf(scope), rec.restriction)
         }
 
   /** Authorization envelope for `token`, for the `TenantScopeCheck` gates that only need the scope.

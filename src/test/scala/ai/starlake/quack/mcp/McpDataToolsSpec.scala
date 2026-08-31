@@ -19,7 +19,7 @@ import ai.starlake.quack.ondemand.api.{
   TagHandlers,
   TenantDbHandlers
 }
-import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope}
+import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.NoopTelemetryStore
@@ -56,7 +56,8 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
         ),
         patId = "pat-1",
         scope = scope,
-        isAdmin = admin
+        isAdmin = admin,
+        restriction = TokenRestriction.Unrestricted
       ),
       patToken
     )
