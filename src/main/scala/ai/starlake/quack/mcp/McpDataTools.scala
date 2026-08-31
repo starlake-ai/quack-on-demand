@@ -199,7 +199,17 @@ final class McpDataTools(
         case Right(tenant) =>
           tenantDbs
             .listTenantDbs(tenant, principal.rawToken)(scopeOf)
-            .map(res => bridge(res).map(_.asJson))
+            .map(res =>
+              bridge(res).map { list =>
+                // Same reconnaissance surface the tool allowlist closes: a token scoped to
+                // a subset of databases must not be able to enumerate the rest by name.
+                list
+                  .copy(tenantDbs =
+                    list.tenantDbs.filter(db => principal.restriction.allowsDatabase(db.name))
+                  )
+                  .asJson
+              }
+            )
   )
 
   // ---------- list_tables ----------
@@ -285,7 +295,12 @@ final class McpDataTools(
                   // LIMIT one past the sample cap so `truncated` marks that more rows exist.
                   val sampleSql =
                     s"""SELECT * FROM "$schema"."$table" LIMIT ${SampleRows + 1}"""
-                  execute(callerFor(principal), poolKey, sampleSql, SampleRows).map {
+                  val caller = callerFor(principal)
+                  // The token's maxRows must lower this preview too, not just run_sql: the
+                  // invariant is "a token can lower the cap and never raise it", stated without
+                  // qualifying it to one tool.
+                  val eff = caller.effectiveMaxRows(SampleRows, SampleRows)
+                  execute(caller, poolKey, sampleSql, eff).map {
                     case Left(_)       => Right(Json.obj("table" -> detail.asJson))
                     case Right(sample) =>
                       Right(

@@ -306,6 +306,70 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get should include("not permitted")
   }
 
+  "describe_table" should "lower its sample preview via the token's maxRows too" in {
+    // SampleRows is 5; a token capped at 2 must not see more than that in the preview,
+    // even though describe_table never mentions max_rows as an argument.
+    val tools = fixture(rangeExecutor(10))
+    val out   = call(
+      tools,
+      "describe_table",
+      scopedPat(TokenRestriction.Unrestricted.copy(maxRows = Some(2))),
+      "database" -> Json.fromString(TenantDb),
+      "schema"   -> Json.fromString("tpch1"),
+      "table"    -> Json.fromString("region"),
+      "tenant"   -> Json.fromString(Tenant)
+    )
+    val json = out.toOption.getOrElse(fail(s"expected Right, got $out"))
+    json.hcursor.downField("sample").downField("rows").as[List[Json]].toOption.get should
+      have size 2
+  }
+
+  // ------------------------------------------------------------------
+  // list_databases (Task 6 fix-up): the allowlist must hide names, not just refuse queries
+  // ------------------------------------------------------------------
+
+  private def listedDbNames(out: Either[String, Json]): List[String] =
+    out.toOption
+      .flatMap(_.hcursor.downField("tenantDbs").as[List[Json]].toOption)
+      .getOrElse(Nil)
+      .flatMap(_.hcursor.get[String]("name").toOption)
+
+  "list_databases" should "list everything when the axis is unrestricted" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(tools, "list_databases", scopedPat(TokenRestriction.Unrestricted))
+    listedDbNames(out) should contain(TenantDb)
+  }
+
+  it should "list nothing when the allowlist is empty" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "list_databases",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set.empty)))
+    )
+    listedDbNames(out) shouldBe Nil
+  }
+
+  it should "hide a database outside the allowlist" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "list_databases",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set("other_db"))))
+    )
+    listedDbNames(out) shouldBe Nil
+  }
+
+  it should "still list a database inside the allowlist" in {
+    val tools = fixture(rangeExecutor(1))
+    val out   = call(
+      tools,
+      "list_databases",
+      scopedPat(TokenRestriction.Unrestricted.copy(databases = Some(Set(TenantDb))))
+    )
+    listedDbNames(out) shouldBe List(TenantDb)
+  }
+
   // ------------------------------------------------------------------
   // tenant inference
   // ------------------------------------------------------------------
