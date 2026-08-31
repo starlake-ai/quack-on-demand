@@ -15,8 +15,13 @@ function parseCsv(raw: string): string[] | undefined {
 }
 
 // Compact scope summary for a listing row, e.g. "RO · acme_db · 3 tools".
-function fmtAxis(values: string[] | undefined, noun: string): string | null {
-  if (values === undefined) return null;
+// An axis the server left unrestricted arrives as JSON `null`, not as a missing
+// key: the DTO codec runs under `Configuration.default.withDefaults`, which
+// encodes `None` as `null` rather than dropping it. So this must be a loose
+// `== null` (matching null AND undefined); a strict `=== undefined` misses the
+// real wire shape and throws on `values.length`.
+function fmtAxis(values: string[] | null | undefined, noun: string): string | null {
+  if (values == null) return null;
   if (values.length === 0) return `no ${noun}s`;
   if (values.length === 1) return values[0];
   return `${values.length} ${noun}s`;

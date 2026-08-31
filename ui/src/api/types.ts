@@ -461,15 +461,19 @@ export interface PatCreateResponse {
 }
 
 // Read-only summary of a token's own restriction, mirrored from `TokenRestriction`.
+// Every optional field arrives as JSON `null` when unrestricted, not as a
+// missing key: the server's DTO codec encodes `None` as `null` rather than
+// dropping it. The `| null` is therefore the real wire shape, and callers must
+// use loose `== null` checks rather than `=== undefined`.
 export interface PatScope {
-  roles?: string[];
-  databases?: string[];
-  pools?: string[];
-  tools?: string[];
-  verbCeiling?: string;
-  dropAdmin?: boolean;
-  stmtTimeoutMs?: number;
-  maxRows?: number;
+  roles?: string[] | null;
+  databases?: string[] | null;
+  pools?: string[] | null;
+  tools?: string[] | null;
+  verbCeiling?: string | null;
+  dropAdmin?: boolean | null;
+  stmtTimeoutMs?: number | null;
+  maxRows?: number | null;
 }
 
 export interface PatEntry {
