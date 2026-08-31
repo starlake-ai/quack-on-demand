@@ -6284,12 +6284,43 @@ components:
       type: object
       required:
       - name
+      - dropAdmin
       properties:
         name:
           type: string
         expiresAt:
           type: string
           format: date-time
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        databases:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        pools:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        tools:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        verbCeiling:
+          type: string
+        dropAdmin:
+          type: boolean
+        stmtTimeoutMs:
+          type: integer
+          format: int32
+        maxRows:
+          type: integer
+          format: int32
     PatCreateResponse:
       title: PatCreateResponse
       type: object
@@ -6323,6 +6354,7 @@ components:
       - name
       - createdAt
       - revoked
+      - depth
       properties:
         id:
           type: string
@@ -6339,6 +6371,13 @@ components:
           format: date-time
         revoked:
           type: boolean
+        parentId:
+          type: string
+        depth:
+          type: integer
+          format: int32
+        scope:
+          $ref: '#/components/schemas/PatScope'
     PatListResponse:
       title: PatListResponse
       type: object
@@ -6355,6 +6394,42 @@ components:
       properties:
         id:
           type: string
+    PatScope:
+      title: PatScope
+      type: object
+      required:
+      - dropAdmin
+      properties:
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        databases:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        pools:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        tools:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        verbCeiling:
+          type: string
+        dropAdmin:
+          type: boolean
+        stmtTimeoutMs:
+          type: integer
+          format: int32
+        maxRows:
+          type: integer
+          format: int32
     PoolCohortDto:
       title: PoolCohortDto
       type: object
