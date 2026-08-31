@@ -205,7 +205,7 @@ def test_pat_create_sends_name_and_prints_token(runner, respx_mock):
     import json
 
     sent = json.loads(route.calls.last.request.content)
-    assert sent == {"name": "claude", "expiresAt": None}
+    assert sent == {"name": "claude", "expiresAt": None, "dropAdmin": False}
     assert "qod_pat_abc123" in result.output
 
 
@@ -230,7 +230,113 @@ def test_pat_create_sends_expiry(runner, respx_mock):
     import json
 
     sent = json.loads(route.calls.last.request.content)
-    assert sent == {"name": "ci", "expiresAt": "2027-01-01T00:00:00Z"}
+    assert sent == {"name": "ci", "expiresAt": "2027-01-01T00:00:00Z", "dropAdmin": False}
+
+
+def _mock_pat_create(respx_mock):
+    return respx_mock.post(f"{BASE}/api/auth/pat/create").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "pat-3", "name": "agent", "token": "qod_pat_scoped", "expiresAt": None},
+        )
+    )
+
+
+def test_pat_create_omits_unset_scope_fields(runner, respx_mock):
+    """Absent scope flags must be omitted from the payload, not sent as empty lists or None,
+    since the server reads an absent key as unrestricted and an empty list as nothing."""
+    route = _mock_pat_create(respx_mock)
+    result = runner.invoke(app, ["auth", "pat", "create", "--name", "agent"])
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    for key in ("roles", "databases", "pools", "tools", "verbCeiling", "stmtTimeoutMs", "maxRows"):
+        assert key not in sent, f"{key} should be omitted when its flag is not passed"
+    assert sent["dropAdmin"] is False
+
+
+def test_pat_create_scope_flags_serialize_to_lists(runner, respx_mock):
+    route = _mock_pat_create(respx_mock)
+    result = runner.invoke(
+        app,
+        [
+            "auth",
+            "pat",
+            "create",
+            "--name",
+            "agent",
+            "--database",
+            "sales",
+            "--database",
+            "hr",
+            "--role",
+            "analyst",
+            "--pool",
+            "bi",
+            "--tool",
+            "read_query",
+        ],
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["databases"] == ["sales", "hr"]
+    assert sent["roles"] == ["analyst"]
+    assert sent["pools"] == ["bi"]
+    assert sent["tools"] == ["read_query"]
+
+
+def test_pat_create_sends_scalar_scope_fields(runner, respx_mock):
+    route = _mock_pat_create(respx_mock)
+    result = runner.invoke(
+        app,
+        [
+            "auth",
+            "pat",
+            "create",
+            "--name",
+            "agent",
+            "--drop-admin",
+            "--stmt-timeout-ms",
+            "5000",
+            "--max-rows",
+            "1000",
+        ],
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["dropAdmin"] is True
+    assert sent["stmtTimeoutMs"] == 5000
+    assert sent["maxRows"] == 1000
+
+
+def test_pat_create_rejects_invalid_verb_ceiling(runner, respx_mock):
+    route = _mock_pat_create(respx_mock)
+    result = runner.invoke(
+        app, ["auth", "pat", "create", "--name", "agent", "--verb-ceiling", "bogus"]
+    )
+    assert result.exit_code != 0
+    assert not route.called
+
+
+def test_pat_create_verb_ceiling_is_uppercased(runner, respx_mock):
+    route = _mock_pat_create(respx_mock)
+    result = runner.invoke(
+        app, ["auth", "pat", "create", "--name", "agent", "--verb-ceiling", "ro"]
+    )
+    assert result.exit_code == 0
+    assert route.called
+    import json
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["verbCeiling"] == "RO"
 
 
 def test_pat_list_hits_the_list_route(runner, respx_mock):
