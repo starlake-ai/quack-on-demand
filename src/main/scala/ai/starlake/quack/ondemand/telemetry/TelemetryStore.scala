@@ -15,7 +15,12 @@ final case class AuditEvent(
     target: Option[String],
     outcome: String, // "ok" | "denied" | "error"
     origin: String,  // "rest" | "flightsql"
-    detail: Map[String, String]
+    detail: Map[String, String],
+    /** The `qodstate_pat` id of the token that acted, when the caller authenticated with a personal
+      * access token. `None` for session-authenticated and static-key callers, which is the
+      * overwhelming majority of rows and the default for every existing call site.
+      */
+    patId: Option[String] = None
 ):
   require(
     !detail.keys.exists(AuditEvent.forbiddenKey),
@@ -62,8 +67,12 @@ final case class StatementEvent(
     sql: String, // caller caps at 500 chars before offer
     durationMs: Long,
     prepareMs: Option[Long],
-    status: String,       // same enum as the ring: "ok" | "denied" | "error" | ...
-    error: Option[String] // caller caps at 500 chars before offer
+    status: String,        // same enum as the ring: "ok" | "denied" | "error" | ...
+    error: Option[String], // caller caps at 500 chars before offer
+    /** The `qodstate_pat` id of the token that ran the statement, when the caller authenticated
+      * with a personal access token. `None` for session-authenticated and static-key callers.
+      */
+    patId: Option[String] = None
 )
 
 /** Keyset-pageable filter for [[TelemetryStore.searchStatements]].

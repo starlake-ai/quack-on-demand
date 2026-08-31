@@ -38,10 +38,11 @@ final class AuditRecorder(
       outcome: String,
       tenant: Option[String] = None,
       target: Option[String] = None,
-      detail: Map[String, String] = Map.empty
+      detail: Map[String, String] = Map.empty,
+      patId: Option[String] = None
   ): Unit =
     val (actor, realm) = actorOf(token)
-    restAs(actor, realm, family, action, outcome, tenant, target, detail)
+    restAs(actor, realm, family, action, outcome, tenant, target, detail, patId)
 
   def restAs(
       actor: String,
@@ -51,7 +52,12 @@ final class AuditRecorder(
       outcome: String,
       tenant: Option[String] = None,
       target: Option[String] = None,
-      detail: Map[String, String] = Map.empty
+      detail: Map[String, String] = Map.empty,
+      /** The `qodstate_pat` id of the token that acted, when the resolved principal authenticated
+        * with a personal access token. `None` for session and static-key callers, the default for
+        * every pre-existing call site.
+        */
+      patId: Option[String] = None
   ): Unit =
     if store.enabled then
       try
@@ -67,7 +73,8 @@ final class AuditRecorder(
               target,
               outcome,
               "rest",
-              detail
+              detail,
+              patId
             )
           )
         )

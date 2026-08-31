@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0034-pat-attribution
+      author: qod
+      changes:
+        # Which credential acted, not only which human owns it. Nullable and additive:
+        # session and static-key rows keep writing NULL and every existing query is
+        # unaffected.
+        - addColumn:
+            tableName: qodstate_audit
+            columns:
+              - column: { name: pat_id, type: TEXT }
+        - addColumn:
+            tableName: qodstate_stmt_history
+            columns:
+              - column: { name: pat_id, type: TEXT }
+        - createIndex:
+            indexName: idx_qodstate_stmt_history_pat
+            tableName: qodstate_stmt_history
+            columns:
+              - column: { name: pat_id }

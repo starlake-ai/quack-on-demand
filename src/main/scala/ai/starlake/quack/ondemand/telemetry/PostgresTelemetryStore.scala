@@ -48,8 +48,8 @@ final class PostgresTelemetryStore(
       withConn { c =>
         val ps = c.prepareStatement(
           "INSERT INTO qodstate_audit" +
-            " (ts, family, actor, actor_realm, tenant, action, target, outcome, origin, detail)" +
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)"
+            " (ts, family, actor, actor_realm, tenant, action, target, outcome, origin, detail, pat_id)" +
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)"
         )
         try
           events.foreach { e =>
@@ -63,6 +63,7 @@ final class PostgresTelemetryStore(
             ps.setString(8, e.outcome)
             ps.setString(9, e.origin)
             ps.setString(10, e.detail.asJson.noSpaces)
+            ps.setString(11, e.patId.orNull)
             ps.addBatch()
           }
           ps.executeBatch()
@@ -153,7 +154,8 @@ final class PostgresTelemetryStore(
         else builtParts.map(_._1).mkString(" WHERE ", " AND ", "")
       val limitVal = math.max(1, math.min(q.limit, 500))
       val sql      =
-        "SELECT id, ts, family, actor, actor_realm, tenant, action, target, outcome, origin, detail::text" +
+        "SELECT id, ts, family, actor, actor_realm, tenant, action, target, outcome, origin," +
+          " detail::text, pat_id" +
           s" FROM qodstate_audit$whereSql ORDER BY id DESC LIMIT $limitVal"
       val ps = c.prepareStatement(sql)
       try
@@ -173,7 +175,8 @@ final class PostgresTelemetryStore(
               Option(rs.getString("target")),
               rs.getString("outcome"),
               rs.getString("origin"),
-              decode[Map[String, String]](rs.getString("detail")).getOrElse(Map.empty)
+              decode[Map[String, String]](rs.getString("detail")).getOrElse(Map.empty),
+              Option(rs.getString("pat_id"))
             )
           )
         out.toList
@@ -196,8 +199,8 @@ final class PostgresTelemetryStore(
       withConn { c =>
         val ps = c.prepareStatement(
           "INSERT INTO qodstate_stmt_history" +
-            " (ts, username, tenant, pool, node_id, sql, status, duration_ms, prepare_ms, error)" +
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " (ts, username, tenant, pool, node_id, sql, status, duration_ms, prepare_ms, error, pat_id)" +
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         try
           events.foreach { e =>
@@ -215,6 +218,7 @@ final class PostgresTelemetryStore(
               java.sql.Types.BIGINT
             )
             ps.setString(10, e.error.orNull)
+            ps.setString(11, e.patId.orNull)
             ps.addBatch()
           }
           ps.executeBatch()
@@ -260,7 +264,7 @@ final class PostgresTelemetryStore(
       val limitVal = math.max(1, math.min(q.limit, 500))
       val sql      =
         "SELECT id, ts, username, tenant, pool, node_id, sql," +
-          " status, duration_ms, prepare_ms, error" +
+          " status, duration_ms, prepare_ms, error, pat_id" +
           s" FROM qodstate_stmt_history$whereSql ORDER BY id DESC LIMIT $limitVal"
       val ps = c.prepareStatement(sql)
       try
@@ -284,7 +288,8 @@ final class PostgresTelemetryStore(
               rs.getLong("duration_ms"),
               prepMs,
               rs.getString("status"),
-              Option(rs.getString("error"))
+              Option(rs.getString("error")),
+              Option(rs.getString("pat_id"))
             )
           )
         out.toList

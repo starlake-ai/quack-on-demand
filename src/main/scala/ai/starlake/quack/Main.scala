@@ -985,7 +985,8 @@ object Main extends IOApp with LazyLogging:
                 poolKey,
                 sql,
                 effectiveSet = narrowed,
-                recordExecution = recordExecution
+                recordExecution = recordExecution,
+                patId = caller.patId
               )
               // BOUNDED WAIT, not a cancellation: past this many milliseconds the
               // caller of this executor gets a failure back, but the underlying

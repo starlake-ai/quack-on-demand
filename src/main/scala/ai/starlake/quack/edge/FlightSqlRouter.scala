@@ -108,7 +108,13 @@ final class FlightSqlRouter(
       kind: StatementKind,
       deniedRefs: Set[TableAccess] = Set.empty,
       realm: String = "tenant",
-      prepareDurationMs: Option[Long] = None
+      prepareDurationMs: Option[Long] = None,
+      /** The acting personal-access-token id, when the resolved principal authenticated with one.
+        * `None` for session-authenticated and static-key callers (and for the raw FlightSQL wire,
+        * which has no PAT concept). Threaded into both the statement-history row and the paired
+        * audit row (denial or write) so the two always agree on who acted.
+        */
+      patId: Option[String] = None
   ): Unit =
     history.record(
       StatementRecord(
@@ -136,7 +142,8 @@ final class FlightSqlRouter(
         durationMs,
         prepareDurationMs,
         status,
-        error.map(_.take(500))
+        error.map(_.take(500)),
+        patId
       )
     )
     if status == "denied" then
@@ -157,7 +164,8 @@ final class FlightSqlRouter(
                 "denied" -> deniedRefs.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")
               )
               .toMap ++
-            error.map("reason" -> _.take(500)).toMap
+            error.map("reason" -> _.take(500)).toMap,
+          patId
         )
       )
     else if status == "ok" && (kind == StatementKind.Dml || kind == StatementKind.Ddl) then
@@ -172,7 +180,8 @@ final class FlightSqlRouter(
           None,
           "ok",
           "flightsql",
-          Map("sql" -> sql.take(500), "durationMs" -> durationMs.toString)
+          Map("sql" -> sql.take(500), "durationMs" -> durationMs.toString),
+          patId
         )
       )
 
@@ -226,7 +235,13 @@ final class FlightSqlRouter(
       effectiveSet: Option[EffectiveSet] = None,
       preferredNode: Option[String] = None,
       recordExecution: Boolean = true,
-      prepareDurationMs: Option[Long] = None
+      prepareDurationMs: Option[Long] = None,
+      /** The acting PAT id, when the resolved principal authenticated with one. `None` for the raw
+        * FlightSQL wire (session-authenticated, no PAT concept) and for every caller that has not
+        * been narrowed to one. Threaded straight into the statement-history and paired audit rows;
+        * see [[record]].
+        */
+      patId: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse {
       val opened = sessions.open(connectionId, user, poolKey)
@@ -285,7 +300,8 @@ final class FlightSqlRouter(
           kind,
           deniedRefs,
           realm,
-          prepMs
+          prepMs,
+          patId
         )
 
     // Node lockdown, resolved per pool (tri-state: pool override else global default).

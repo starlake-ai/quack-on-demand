@@ -80,10 +80,14 @@ final class McpDataTools(
   /** The caller identity + scope ceiling threaded into the routed executor, built from the resolved
     * principal's own `TokenRestriction` (`Unrestricted` for the static key, the PAT's narrowed
     * scope otherwise) so the executor enforces the same ceiling the MCP layer already checked the
-    * arguments against.
+    * arguments against. `patId` carries the acting token's id for statement-history and audit
+    * attribution -- `None` for the static key, which is not a token at all.
     */
   private def callerFor(principal: McpPrincipal): ExecCaller =
-    ExecCaller(connectionIdOf(principal), identityOf(principal), principal.restriction)
+    val patId = principal match
+      case McpPrincipal.StaticKey => None
+      case McpPrincipal.Pat(p)    => Some(p.patId)
+    ExecCaller(connectionIdOf(principal), identityOf(principal), principal.restriction, patId)
 
   /** Execute `sql` through the routed executor and decode at most `maxRows` rows. */
   private def execute(

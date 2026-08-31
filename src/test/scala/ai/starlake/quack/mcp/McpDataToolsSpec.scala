@@ -237,6 +237,52 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
+  // caller attribution (Task 8): callerFor threads the acting token id
+  // ------------------------------------------------------------------
+
+  /** Executor that records the `ExecCaller` it was invoked with, then answers with an empty result
+    * set -- used to inspect what `callerFor` built without touching the router.
+    */
+  private def capturingExecutor(
+      captured: scala.collection.mutable.ListBuffer[ai.starlake.quack.ondemand.api.ExecCaller]
+  ): CatalogPreviewHandlers.PreviewExecutor =
+    (caller, _, _) =>
+      captured += caller
+      IO.pure(
+        Right(ai.starlake.quack.edge.QueryResult(TestArrow.oneRowReader(), () => (), "n1", 1L))
+      )
+
+  it should "populate ExecCaller.patId from a PAT principal" in {
+    val captured =
+      scala.collection.mutable.ListBuffer.empty[ai.starlake.quack.ondemand.api.ExecCaller]
+    val tools = fixture(capturingExecutor(captured))
+    call(
+      tools,
+      "run_sql",
+      patFor(Some(Tenant), admin = false),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb),
+      "tenant"   -> Json.fromString(Tenant)
+    )
+    captured.map(_.patId).toList shouldBe List(Some("pat-1"))
+  }
+
+  it should "leave ExecCaller.patId at None for the static key" in {
+    val captured =
+      scala.collection.mutable.ListBuffer.empty[ai.starlake.quack.ondemand.api.ExecCaller]
+    val tools = fixture(capturingExecutor(captured))
+    call(
+      tools,
+      "run_sql",
+      McpPrincipal.StaticKey,
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb),
+      "tenant"   -> Json.fromString(Tenant)
+    )
+    captured.map(_.patId).toList shouldBe List(None)
+  }
+
+  // ------------------------------------------------------------------
   // scope enforcement (Task 6): a restricted PAT can only narrow, never widen
   // ------------------------------------------------------------------
 
