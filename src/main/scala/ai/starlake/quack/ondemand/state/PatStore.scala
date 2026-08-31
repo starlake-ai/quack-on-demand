@@ -101,13 +101,27 @@ final class PatStore(
     * pre-truncate their own input.
     *
     * When `parentId` is `Some`, the insert is a single conditional statement (`INSERT ... SELECT
-    * ... WHERE EXISTS (...)`) that re-checks, in the same statement as the write, that the parent
-    * is owned by `userId` and still live (neither revoked nor expired). Zero rows inserted means
-    * that check failed, and this throws [[PatStore.ParentNotLiveException]]. This is a race
-    * backstop, not the primary error path: a caller should pre-check with [[PatStore.findById]] and
-    * answer a friendly error before ever calling `mint`, but a concurrent revoke or expiry between
-    * that pre-check and this call could otherwise still let a child be minted under a parent that
-    * is no longer live, and this closes that window atomically.
+    * ... WHERE EXISTS (SELECT ... FOR UPDATE)`) that re-checks, in the same statement as the write,
+    * that the parent is owned by `userId` and still live (neither revoked nor expired). Zero rows
+    * inserted means that check failed, and this throws [[PatStore.ParentNotLiveException]]. This is
+    * a race backstop, not the primary error path: a caller should pre-check with
+    * [[PatStore.findById]] and answer a friendly error before ever calling `mint`, but a concurrent
+    * revoke or expiry between that pre-check and this call could otherwise still let a child be
+    * minted under a parent that is no longer live.
+    *
+    * `FOR UPDATE` on the EXISTS subquery is load-bearing, not decorative. Under READ COMMITTED a
+    * plain `EXISTS` is a non-locking read: it can see the pre-revoke row version while a concurrent
+    * `revoke` is still uncommitted in another transaction, so this insert would go through, the row
+    * would be born live, and the revoke's own recursive-CTE cascade (which had already computed its
+    * subtree before this insert existed) would never touch it -- a child minted under a parent that
+    * is revoked a moment later, permanently outside the cascade. The row's foreign key does not
+    * save us here: the `ON DELETE CASCADE` trigger only ever takes `FOR KEY SHARE`, which does not
+    * conflict with the `FOR NO KEY UPDATE` a plain `UPDATE` (revoke's statement) takes on the
+    * parent row. `FOR UPDATE` forces this subquery to take a real row lock and block behind the
+    * concurrent revoke's uncommitted `UPDATE` until it commits (or rolls back), so the EXISTS check
+    * always evaluates against the parent's post-revoke state. This is the ONLY thing that closes
+    * the concurrent-revoke window; without it, the window described above is open regardless of the
+    * conditional-insert shape.
     */
   def mint(
       userId: String,
@@ -145,7 +159,7 @@ final class PatStore(
           "stmt_timeout_ms, max_rows) " +
           "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
           "WHERE ? IS NULL OR EXISTS (SELECT 1 FROM qodstate_pat WHERE id = ? AND user_id = ? " +
-          "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()))"
+          "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) FOR UPDATE)"
       )
       try
         ps.setString(1, record.id)

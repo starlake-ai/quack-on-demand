@@ -36,17 +36,22 @@ object Attenuation:
             TokenRestriction.verbOf(residue).map(v => p.copy(verb = v))
       }
 
-      val keptPoolPerms = r.pools match
-        case None => eff.poolPerms
-        // Pool grants are attached to a user or a group, never to a role, so the
-        // pool allowlist is an independent axis and role subsetting cannot touch it.
-        case Some(_) => eff.poolPerms
-
+      // `poolPerms` is passed through UNCHANGED, deliberately, regardless of `r.pools`.
+      // `poolPerms` carries `poolId` (from the RBAC grant table), not a pool name, and
+      // `TokenRestriction.pools` is a set of names -- this function has no store to resolve one
+      // into the other, and it must stay pure. More importantly, `poolPerms` is not where pool
+      // scoping is enforced downstream: `authorizeHandshake` already used the OWNER's
+      // (unattenuated) `poolPerms` to gate the handshake before this function ever runs, and
+      // nothing after attenuation reads `poolPerms` again for a per-statement decision. The
+      // `pools` axis is enforced separately, on the RESOLVED `PoolKey`, in
+      // `Main.routedExecutor` (`caller.restriction.allowsPool(poolKey.pool)`) -- one choke
+      // point every current and future caller of the executor routes through, rather than a
+      // filter here that a store-less function could not make correct or meaningful anyway.
       eff.copy(
         roles = keptRoles,
         groups = keptGroups,
         permissions = clipped,
-        poolPerms = keptPoolPerms,
+        poolPerms = eff.poolPerms,
         columnPolicies = eff.columnPolicies,
         rowPolicies = eff.rowPolicies
       )

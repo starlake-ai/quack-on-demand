@@ -19,12 +19,17 @@ final class AuditRecorder(
       * owner instead of falling through to the "unresolved token" `static-key` branch below.
       */
     sessionLookup: String => Option[SessionTokenStore.Session],
+    onDrop: Int => Unit = _ => (),
     /** Resolves a bearer to the `qodstate_pat` id it presented, when it is a PAT. `None` for a
       * session token, the static key, or no token at all -- the default no-op keeps every
       * pre-existing construction site (tests, `AuditRecorder.noop`) behaving exactly as before.
+      * Appended AFTER `onDrop` deliberately, not inserted before it: every in-tree call site that
+      * sets `onDrop` already does so by name, so this ordering is source-compatible with them, but
+      * an out-of-tree SPI module built against the old (store, sessionLookup, patIdOf, onDrop)
+      * positional order would silently swap the two on a naive rebuild if patIdOf had been inserted
+      * before onDrop instead -- appending avoids that trap entirely.
       */
-    patIdOf: String => Option[String] = _ => None,
-    onDrop: Int => Unit = _ => ()
+    patIdOf: String => Option[String] = _ => None
 ) extends LazyLogging:
 
   @volatile private var dropHook: Int => Unit = onDrop

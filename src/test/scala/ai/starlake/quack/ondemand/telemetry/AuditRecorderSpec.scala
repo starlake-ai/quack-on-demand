@@ -64,7 +64,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
         t => if t == patToken then Some(session("alice", superuser = false)) else None
       val patIdOf: String => Option[String] =
         t => if t == patToken then Some("pat-1") else None
-      val r = new AuditRecorder(store, sessionLookup, patIdOf)
+      val r = new AuditRecorder(store, sessionLookup, patIdOf = patIdOf)
       r.rest(Some(patToken), "control-plane", "pool.scale", "ok", tenant = Some("t-a"))
       val e = store.events.head
       (e.actor, e.actorRealm, e.patId) shouldBe ("alice", "tenant", Some("pat-1"))
@@ -76,7 +76,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     val r        = new AuditRecorder(
       store,
       t => if t == patToken then Some(session("alice", superuser = false)) else None,
-      t => if t == patToken then Some("pat-1") else None
+      patIdOf = t => if t == patToken then Some("pat-1") else None
     )
     r.rest(Some("static-abc"), "control-plane", "pool.scale", "ok")
     val e = store.events.head
@@ -89,7 +89,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     val r        = new AuditRecorder(
       store,
       t => if t == patToken then Some(session("alice", superuser = false)) else None,
-      t => if t == patToken then Some("pat-1") else None
+      patIdOf = t => if t == patToken then Some("pat-1") else None
     )
     r.rest(Some(patToken), "control-plane", "pool.scale", "ok", patId = Some("override"))
     store.events.head.patId shouldBe Some("override")

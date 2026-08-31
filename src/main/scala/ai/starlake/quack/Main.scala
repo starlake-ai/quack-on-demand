@@ -953,7 +953,22 @@ object Main extends IOApp with LazyLogging:
           val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
             ai.starlake.quack.ondemand.rbac.EffectiveSet
           ]]] =
-            if isSuperuser then
+            // `pools` axis, enforced here on the RESOLVED pool key rather than only at the MCP
+            // call sites that happen to take a `pool` argument: this is the single choke point
+            // every current and future PreviewExecutor caller routes through (run_sql,
+            // describe_table's sample fetch, preview, data diff, restore dry-run, undrop), so a
+            // token scoped to `pools` cannot reach an out-of-scope pool merely by omitting the
+            // argument and letting the caller pick one for it. `allowsPool` is `pools.forall(_
+            // .contains(pool))`, so `TokenRestriction.Unrestricted` (every superuser call site,
+            // and any token that never set the axis) always passes here.
+            if !caller.restriction.allowsPool(poolKey.pool) then
+              IO.pure(
+                Left(
+                  ai.starlake.quack.edge.RouterFailure
+                    .AccessDenied(s"pool '${poolKey.pool}' is not permitted for this token")
+                )
+              )
+            else if isSuperuser then
               val superuser = ai.starlake.quack.ondemand.state.RbacUser(
                 id = "",
                 tenant = None,

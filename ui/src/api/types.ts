@@ -428,9 +428,13 @@ export interface ResetPasswordRequest {
 }
 
 // ----- Auth: personal access tokens -----
-// Session-only management surface: a PAT can never mint, list, or revoke PATs
-// (the server answers 403 session_required). The raw token appears exactly once,
-// in PatCreateResponse; listings are metadata only.
+// A session can mint, list, revoke and delete any of the caller's own tokens. A PAT
+// may also mint a scoped child of itself, and may list, revoke and delete within its
+// own subtree only - never a sibling, its own parent, or any other token of its
+// owner. Revoking a token cascades to its whole subtree in one statement, so a
+// stolen token cannot be rolled forward past its own revocation by minting a
+// successor first. The raw token appears exactly once, in PatCreateResponse;
+// listings are metadata only.
 //
 // Scope axes narrow a minted token below its owner's own grants. `undefined` on
 // an axis means unrestricted (inherit the caller's reach); an empty array means

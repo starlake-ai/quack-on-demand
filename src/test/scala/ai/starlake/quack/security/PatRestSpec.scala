@@ -201,6 +201,31 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
         pastExpiry.statusCode() shouldBe 400
         errorCode(pastExpiry.body()) should contain("invalid_expiry")
       }
+      // stmtTimeoutMs = 0 is not "no timeout requested" (that is the field being absent): it
+      // would pass `narrow`'s `cv <= pv` tightening check while `Main.routedExecutor` treats
+      // zero exactly like absent (`case Some(ms) if ms > 0 => ... case _ => run`), so a child
+      // of a bounded parent requesting 0 would read as tighter while actually being
+      // unbounded. Refused at this REST boundary before it ever reaches `narrow`.
+      val zeroTimeout = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        """{"name":"zero-timeout","stmtTimeoutMs":0}""",
+        apiKey = Some(session)
+      )
+      withClue(s"zero-timeout body: ${zeroTimeout.body()}") {
+        zeroTimeout.statusCode() shouldBe 400
+        errorCode(zeroTimeout.body()) should contain("invalid_stmt_timeout_ms")
+      }
+      val negativeTimeout = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/pat/create",
+        """{"name":"negative-timeout","stmtTimeoutMs":-1}""",
+        apiKey = Some(session)
+      )
+      withClue(s"negative-timeout body: ${negativeTimeout.body()}") {
+        negativeTimeout.statusCode() shouldBe 400
+        errorCode(negativeTimeout.body()) should contain("invalid_stmt_timeout_ms")
+      }
     }
 
   // ------------------------------------------------------------------

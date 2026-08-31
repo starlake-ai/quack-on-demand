@@ -121,8 +121,12 @@ qod profile statements --limit 20
 PATs are long-lived bearer credentials for agents and scripts. A PAT acts with exactly
 its owner's permissions (admin PATs reach the admin surface, `role=user` PATs are
 demoted to the profile allowlist) and is accepted wherever a session token is, on both
-`/api/*` and the MCP endpoint. Management is session-only: a PAT can never mint, list,
-or revoke PATs (`403 session_required`).
+`/api/*` and the MCP endpoint. Management is no longer session-only: a session can
+mint, list, revoke and delete any of the caller's own tokens, and a PAT may now mint a
+scoped child of itself and may list, revoke and delete within its own subtree only -
+never a sibling, its own parent, or any other token of its owner. Revoking a token
+cascades to its whole subtree in the same statement, so a stolen token cannot be rolled
+forward past its own revocation by minting a successor first.
 
 A PAT can also be **scoped** narrower than its owner's own grants, so an AI agent holds
 a credential it cannot exceed. Scope axes are `roles` / `databases` / `pools` / `tools`
@@ -134,6 +138,17 @@ A PAT credential can mint a further-scoped child PAT of its own (`parentId` / `d
 the listing row show the chain), but any axis narrowed at mint time can only be narrowed
 further down the chain, never widened back out - the server refuses a widening attempt
 with `400 pat_scope_widens`.
+
+**`roles` and `verbCeiling` are inert for a token whose owner is a tenant-less
+superuser.** The ACL validator returns `Allowed` for a superuser before it ever looks at
+a permission list, so attenuating an empty permission set changes nothing, and the
+example below (`verbCeiling: "RO"`, `dropAdmin: true`) minted by the default
+`admin@localhost.local` superuser still produces a token that can `DROP TABLE`. For a
+tenant-scoped admin the ceiling does bite, which is exactly what makes this easy to miss
+in testing: it only fails silently for a superuser owner. Scope a superuser-owned agent
+token with `databases`, `tools` and `dropAdmin` instead, or - better - mint the token
+from a tenant-scoped service user in the first place, where `roles` and `verbCeiling`
+are load-bearing.
 
 ```bash
 # Mint an unscoped token (session required; the token is printed ONCE - store it now)

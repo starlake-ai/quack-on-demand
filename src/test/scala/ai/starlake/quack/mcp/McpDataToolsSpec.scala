@@ -310,6 +310,49 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       "pool"     -> Json.fromString("sales")
     )
     out.isLeft shouldBe true
+    out.swap.toOption.get should include("not permitted")
+  }
+
+  /** Executor standing in for `Main.routedExecutor`'s pool-scope gate: refuses on the RESOLVED
+    * `PoolKey`, exactly like the production fix, so a test can prove the omitted-`pool`-argument
+    * path (where `McpDataTools.allowedPool`'s early check never fires, because there is no argument
+    * to check) is still caught once the pool is resolved and handed to the executor.
+    */
+  private def poolScopeAwareExecutor(rows: Int): CatalogPreviewHandlers.PreviewExecutor =
+    (caller, poolKey, _) =>
+      if !caller.restriction.allowsPool(poolKey.pool) then
+        IO.pure(
+          Left(
+            RouterFailure.AccessDenied(s"pool '${poolKey.pool}' is not permitted for this token")
+          )
+        )
+      else
+        IO.pure(
+          Right(
+            ai.starlake.quack.edge.QueryResult(
+              TestArrow.readerFor(s"SELECT * FROM range($rows) t(x)"),
+              () => (),
+              "n1",
+              5L
+            )
+          )
+        )
+
+  it should "refuse a token scoped away from the resolved pool even when 'pool' is omitted" in {
+    // `sales` is the only pool wired up by `fixture`, so `poolKeyFor`'s `None` branch
+    // (PoolPicks.readPoolKey) resolves to it with no `pool` argument in play at all -- the
+    // exact shape of the bug this fix closes.
+    val tools = fixture(poolScopeAwareExecutor(1))
+    val out   = call(
+      tools,
+      "run_sql",
+      scopedPat(TokenRestriction.Unrestricted.copy(pools = Some(Set("other_pool")))),
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb)
+      // no "pool" argument
+    )
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("not permitted")
   }
 
   it should "allow a database inside the allowlist" in {

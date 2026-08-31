@@ -220,6 +220,20 @@ final class PatHandlers(
             ErrorResponse("invalid_expiry", "expiresAt must be in the future")
           )
         )
+      // A non-positive stmtTimeoutMs is not "no timeout requested" (that is the field being
+      // absent), it is a value that would compare `<= parent` under `narrow`'s tightening rule
+      // and so pass as a legal "tightening", while `Main.routedExecutor`'s
+      // `case Some(ms) if ms > 0 => ... case _ => run` treats zero (and negative) exactly like
+      // absent: no timeout applied at all. A child of a 5000ms parent requesting `0` would
+      // therefore read as tighter while actually being UNBOUNDED. Refused here, at the REST
+      // boundary, before it ever reaches `narrow`.
+      else if req.stmtTimeoutMs.exists(_ <= 0) then
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid_stmt_timeout_ms", "stmtTimeoutMs must be positive")
+          )
+        )
       else
         val requested = requestedRestriction(req)
         caller match

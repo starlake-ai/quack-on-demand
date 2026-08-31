@@ -140,3 +140,65 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
       countWhere(users.dbName, s"id = '${record.id}'") shouldBe 1
       pats.delete(uid, "pat-doesnotexist") shouldBe PatStore.DeleteOutcome.NotFound
   }
+
+  // Genuine two-connection race: a raw JDBC connection holds an uncommitted revoke of the
+  // parent (a plain UPDATE, which takes the same FOR NO KEY UPDATE row lock the production
+  // revoke's recursive-CTE UPDATE takes) while a second, separate connection -- PatStore's own
+  // pool, driven from a background thread -- attempts to mint a child under that parent. This is
+  // exactly the shape the reviewer reproduced against the PG16 container: without `FOR UPDATE` on
+  // the mint's EXISTS subquery, the insert is a non-locking read under READ COMMITTED and returns
+  // immediately, seeing the pre-revoke row version and inserting a live child. With `FOR UPDATE`,
+  // the subquery must acquire the same row lock the uncommitted revoke already holds, so it
+  // blocks until the revoke resolves and then re-evaluates against the post-revoke state.
+  "mint" should "refuse a child minted while a concurrent revoke of the parent is still uncommitted" in
+    withFreshDb { (users, pats) =>
+      import scala.concurrent.{Await, Future}
+      import scala.concurrent.ExecutionContext.Implicits.global
+      import scala.concurrent.duration._
+
+      val uid         = seedUser(users)
+      val (parent, _) = pats.mint(uid, "parent", TokenRestriction.Unrestricted, None, 0)
+
+      // Connection A: the "revoke", held open uncommitted. A plain UPDATE takes a
+      // FOR NO KEY UPDATE lock on the touched row -- the same lock shape PatStore.revoke's
+      // recursive-CTE UPDATE takes in production; issuing it by hand here just lets the test
+      // hold the transaction open instead of committing immediately.
+      val revokeConn = DriverManager.getConnection(
+        TestPostgres.dbUrl(users.dbName),
+        TestPostgres.pgUser,
+        TestPostgres.pgPass
+      )
+      revokeConn.setAutoCommit(false)
+      try
+        val upd = revokeConn.prepareStatement(
+          "UPDATE qodstate_pat SET revoked_at = NOW() WHERE id = ? AND user_id = ?"
+        )
+        try
+          upd.setString(1, parent.id)
+          upd.setString(2, uid)
+          upd.executeUpdate() shouldBe 1
+        finally upd.close()
+
+        // Connection B: PatStore's own pool, driven from a background thread so this thread
+        // can observe the mint blocking before the revoke commits.
+        val mintResult: Future[Try[(PatRecord, String)]] = Future(
+          Try(pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(parent.id), 1))
+        )
+
+        // Give the background mint time to reach the FOR UPDATE subquery and block on
+        // connection A's still-uncommitted lock. If FOR UPDATE were absent (or a no-op), the
+        // mint would race ahead and complete well inside this window instead of blocking.
+        Thread.sleep(500)
+        mintResult.isCompleted shouldBe false
+
+        // Release the lock: commit the revoke, so the blocked EXISTS subquery re-evaluates
+        // against the post-revoke row and finds it dead.
+        revokeConn.commit()
+
+        val outcome = Await.result(mintResult, 5.seconds)
+        outcome.isFailure shouldBe true
+        outcome.failed.get shouldBe a[PatStore.ParentNotLiveException]
+      finally
+        Try(revokeConn.rollback())
+        revokeConn.close()
+    }
