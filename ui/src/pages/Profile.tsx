@@ -1,7 +1,43 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { api, ApiError, errorMessage } from '../api/client';
-import type { UsageDayEntry, StatementHistoryEntry, PatEntry } from '../api/types';
+import type { UsageDayEntry, StatementHistoryEntry, PatEntry, PatScope } from '../api/types';
+
+const VERB_CEILINGS = ['RO', 'RW', 'DDL', 'ALL'] as const;
+
+// Comma-separated free text -> trimmed, non-empty array, or undefined when the
+// field was left blank. `undefined` (an omitted key) means unrestricted on the
+// server; sending `[]` for a blank field would instead mint a token that can
+// reach nothing on that axis, so blank must stay omitted.
+function parseCsv(raw: string): string[] | undefined {
+  const items = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return items.length > 0 ? items : undefined;
+}
+
+// Compact scope summary for a listing row, e.g. "RO · acme_db · 3 tools".
+function fmtAxis(values: string[] | undefined, noun: string): string | null {
+  if (values === undefined) return null;
+  if (values.length === 0) return `no ${noun}s`;
+  if (values.length === 1) return values[0];
+  return `${values.length} ${noun}s`;
+}
+
+function scopeSummary(scope: PatScope | null | undefined): string {
+  const parts: string[] = [];
+  if (scope?.verbCeiling) parts.push(scope.verbCeiling);
+  if (scope?.dropAdmin) parts.push('no admin');
+  const database = fmtAxis(scope?.databases, 'database');
+  if (database) parts.push(database);
+  const pool = fmtAxis(scope?.pools, 'pool');
+  if (pool) parts.push(pool);
+  const role = fmtAxis(scope?.roles, 'role');
+  if (role) parts.push(role);
+  const tool = fmtAxis(scope?.tools, 'tool');
+  if (tool) parts.push(tool);
+  if (scope?.stmtTimeoutMs) parts.push(`${scope.stmtTimeoutMs} ms timeout`);
+  if (scope?.maxRows) parts.push(`${scope.maxRows} row cap`);
+  return parts.length > 0 ? parts.join(' · ') : 'unrestricted';
+}
 
 function shortTs(iso: string): string {
   try {
@@ -72,6 +108,14 @@ export default function Profile() {
   const [pats, setPats] = useState<PatEntry[]>([]);
   const [patName, setPatName] = useState('');
   const [patExpiry, setPatExpiry] = useState('');
+  const [patRoles, setPatRoles] = useState('');
+  const [patDatabases, setPatDatabases] = useState('');
+  const [patPools, setPatPools] = useState('');
+  const [patTools, setPatTools] = useState('');
+  const [patVerbCeiling, setPatVerbCeiling] = useState('');
+  const [patDropAdmin, setPatDropAdmin] = useState(false);
+  const [patStmtTimeoutMs, setPatStmtTimeoutMs] = useState('');
+  const [patMaxRows, setPatMaxRows] = useState('');
   const [patErr, setPatErr] = useState('');
   const [patBusy, setPatBusy] = useState(false);
   const [mintedName, setMintedName] = useState('');
@@ -100,11 +144,27 @@ export default function Profile() {
         name: patName.trim(),
         // datetime-local yields a zone-less local timestamp; send it as ISO UTC.
         expiresAt: patExpiry ? new Date(patExpiry).toISOString() : null,
+        roles: parseCsv(patRoles),
+        databases: parseCsv(patDatabases),
+        pools: parseCsv(patPools),
+        tools: parseCsv(patTools),
+        verbCeiling: patVerbCeiling ? (patVerbCeiling as (typeof VERB_CEILINGS)[number]) : undefined,
+        dropAdmin: patDropAdmin,
+        stmtTimeoutMs: patStmtTimeoutMs ? Number(patStmtTimeoutMs) : undefined,
+        maxRows: patMaxRows ? Number(patMaxRows) : undefined,
       });
       setMintedName(resp.name);
       setMintedToken(resp.token);
       setPatName('');
       setPatExpiry('');
+      setPatRoles('');
+      setPatDatabases('');
+      setPatPools('');
+      setPatTools('');
+      setPatVerbCeiling('');
+      setPatDropAdmin(false);
+      setPatStmtTimeoutMs('');
+      setPatMaxRows('');
       await loadPats();
     } catch (e) {
       setPatErr(errorMessage(e));
@@ -291,6 +351,75 @@ export default function Profile() {
               onChange={e => setPatExpiry(e.target.value)}
             />
           </label>
+          <label>
+            Roles (optional)
+            <input
+              value={patRoles}
+              onChange={e => setPatRoles(e.target.value)}
+              placeholder="comma-separated, blank = unrestricted"
+            />
+          </label>
+          <label>
+            Databases (optional)
+            <input
+              value={patDatabases}
+              onChange={e => setPatDatabases(e.target.value)}
+              placeholder="comma-separated, blank = unrestricted"
+            />
+          </label>
+          <label>
+            Pools (optional)
+            <input
+              value={patPools}
+              onChange={e => setPatPools(e.target.value)}
+              placeholder="comma-separated, blank = unrestricted"
+            />
+          </label>
+          <label>
+            Tools (optional)
+            <input
+              value={patTools}
+              onChange={e => setPatTools(e.target.value)}
+              placeholder="comma-separated, blank = unrestricted"
+            />
+          </label>
+          <label>
+            Verb ceiling (optional)
+            <select value={patVerbCeiling} onChange={e => setPatVerbCeiling(e.target.value)}>
+              <option value="">(unrestricted)</option>
+              {VERB_CEILINGS.map(v => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+          </label>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={patDropAdmin}
+              onChange={e => setPatDropAdmin(e.target.checked)}
+            />
+            {' '}Drop admin standing on this token
+          </label>
+          <label>
+            Row cap (optional)
+            <input
+              type="number"
+              min={1}
+              value={patMaxRows}
+              onChange={e => setPatMaxRows(e.target.value)}
+              placeholder="unrestricted"
+            />
+          </label>
+          <label>
+            Statement timeout, ms (optional)
+            <input
+              type="number"
+              min={1}
+              value={patStmtTimeoutMs}
+              onChange={e => setPatStmtTimeoutMs(e.target.value)}
+              placeholder="unrestricted"
+            />
+          </label>
           <button type="submit" disabled={patBusy || !patName.trim()}>
             {patBusy ? 'Creating…' : 'Create token'}
           </button>
@@ -300,6 +429,7 @@ export default function Profile() {
             <thead>
               <tr>
                 <th>Name</th>
+                <th>Scope</th>
                 <th>Created</th>
                 <th>Expires</th>
                 <th>Last used</th>
@@ -313,6 +443,14 @@ export default function Profile() {
                 return (
                   <tr key={p.id}>
                     <td>{p.name}</td>
+                    <td className="subtle">
+                      <div>{scopeSummary(p.scope)}</div>
+                      {p.parentId && (
+                        <div style={{ fontSize: '0.85em' }}>
+                          depth {p.depth ?? 0}, delegated from {p.parentId}
+                        </div>
+                      )}
+                    </td>
                     <td className="subtle">{shortTs(p.createdAt)}</td>
                     <td className="subtle">{p.expiresAt ? shortTs(p.expiresAt) : '-'}</td>
                     <td className="subtle">{p.lastUsedAt ? shortTs(p.lastUsedAt) : 'never'}</td>

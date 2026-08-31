@@ -431,9 +431,22 @@ export interface ResetPasswordRequest {
 // Session-only management surface: a PAT can never mint, list, or revoke PATs
 // (the server answers 403 session_required). The raw token appears exactly once,
 // in PatCreateResponse; listings are metadata only.
+//
+// Scope axes narrow a minted token below its owner's own grants. `undefined` on
+// an axis means unrestricted (inherit the caller's reach); an empty array means
+// nothing on that axis. A blank field in the create form must be omitted from
+// the request, never sent as `[]`.
 export interface PatCreateRequest {
   name: string;
   expiresAt?: string | null; // ISO-8601, must be in the future
+  roles?: string[];
+  databases?: string[];
+  pools?: string[];
+  tools?: string[];
+  verbCeiling?: 'RO' | 'RW' | 'DDL' | 'ALL';
+  dropAdmin?: boolean;
+  stmtTimeoutMs?: number;
+  maxRows?: number;
 }
 
 export interface PatCreateResponse {
@@ -443,6 +456,18 @@ export interface PatCreateResponse {
   expiresAt?: string | null;
 }
 
+// Read-only summary of a token's own restriction, mirrored from `TokenRestriction`.
+export interface PatScope {
+  roles?: string[];
+  databases?: string[];
+  pools?: string[];
+  tools?: string[];
+  verbCeiling?: string;
+  dropAdmin?: boolean;
+  stmtTimeoutMs?: number;
+  maxRows?: number;
+}
+
 export interface PatEntry {
   id: string;
   name: string;
@@ -450,6 +475,9 @@ export interface PatEntry {
   expiresAt?: string | null;
   lastUsedAt?: string | null;
   revoked: boolean;
+  parentId?: string | null;
+  depth?: number;
+  scope?: PatScope | null;
 }
 
 export interface PatListResponse { tokens: PatEntry[]; }

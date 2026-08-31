@@ -124,13 +124,36 @@ demoted to the profile allowlist) and is accepted wherever a session token is, o
 `/api/*` and the MCP endpoint. Management is session-only: a PAT can never mint, list,
 or revoke PATs (`403 session_required`).
 
+A PAT can also be **scoped** narrower than its owner's own grants, so an AI agent holds
+a credential it cannot exceed. Scope axes are `roles` / `databases` / `pools` / `tools`
+(each a JSON array of strings), `verbCeiling` (`RO` / `RW` / `DDL` / `ALL`), `dropAdmin`
+(boolean, strips superuser/admin standing), and `stmtTimeoutMs` / `maxRows` (integer
+caps). Every axis is optional: an axis left out of the request is unrestricted (inherits
+the owner's reach); an axis sent as `[]` restricts the token to nothing on that axis.
+A PAT credential can mint a further-scoped child PAT of its own (`parentId` / `depth` on
+the listing row show the chain), but any axis narrowed at mint time can only be narrowed
+further down the chain, never widened back out - the server refuses a widening attempt
+with `400 pat_scope_widens`.
+
 ```bash
-# Mint (session required; the token is printed ONCE - store it now)
+# Mint an unscoped token (session required; the token is printed ONCE - store it now)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/create \
   -H 'Content-Type: application/json' -d '{"name":"claude-code"}'
 # {"id":"pat-...","name":"claude-code","token":"qod_pat_..."}
 
-# List (metadata only; the raw token is unrecoverable after mint)
+# Mint a scoped token for an agent: read-only, one database, two tools, no admin standing
+curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/create \
+  -H 'Content-Type: application/json' -d '{
+    "name": "claude-agent",
+    "databases": ["acme_db"],
+    "tools": ["run_sql", "list_tables"],
+    "verbCeiling": "RO",
+    "dropAdmin": true,
+    "maxRows": 500
+  }'
+
+# List (metadata only; the raw token is unrecoverable after mint; the scope summary
+# and parentId/depth on each row show what an agent's own PAT has minted)
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/list
 # Revoke
 curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/revoke \
@@ -138,9 +161,17 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/revo
 
 # CLI equivalents
 qod auth pat create --name claude-code [--expires-at 2027-01-01T00:00:00Z]
+qod auth pat create --name claude-agent \
+  --database acme_db --tool run_sql --tool list_tables \
+  --verb-ceiling RO --drop-admin --max-rows 500
 qod auth pat list
 qod auth pat revoke --id pat-...
 ```
+
+`qod auth pat create --help` lists the full scope flag set (`--role`, `--database`,
+`--pool`, `--tool` are repeatable; `--verb-ceiling`; `--drop-admin`; `--stmt-timeout-ms`;
+`--max-rows`). A flag left off the command line is unrestricted on that axis, not empty -
+same rule as the REST body above.
 
 The MCP server lives at `POST /mcp` on the manager port (`QOD_MCP_ENABLED`, default
 true). Auth is `Authorization: Bearer <PAT or QOD_API_KEY>`; session JWTs are refused
