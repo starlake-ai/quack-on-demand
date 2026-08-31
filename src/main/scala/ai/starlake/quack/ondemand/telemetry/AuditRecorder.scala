@@ -13,7 +13,17 @@ import scala.util.control.NonFatal
   */
 final class AuditRecorder(
     store: TelemetryStore,
+    /** Resolves a bearer to the session it authenticates. The composed lookup wired at boot
+      * (`Main.scala`) tries a session JWT first, then falls back to a PAT bearer resolved through
+      * `PatAuthenticator.sessionOf`, so a PAT-authenticated REST/MCP call attributes to its real
+      * owner instead of falling through to the "unresolved token" `static-key` branch below.
+      */
     sessionLookup: String => Option[SessionTokenStore.Session],
+    /** Resolves a bearer to the `qodstate_pat` id it presented, when it is a PAT. `None` for a
+      * session token, the static key, or no token at all -- the default no-op keeps every
+      * pre-existing construction site (tests, `AuditRecorder.noop`) behaving exactly as before.
+      */
+    patIdOf: String => Option[String] = _ => None,
     onDrop: Int => Unit = _ => ()
 ) extends LazyLogging:
 
@@ -39,10 +49,17 @@ final class AuditRecorder(
       tenant: Option[String] = None,
       target: Option[String] = None,
       detail: Map[String, String] = Map.empty,
+      /** Explicit override for the acting token id, for a future caller that already knows its own
+        * principal's token id some other way. Falls back to `token.flatMap(patIdOf)` when omitted,
+        * which is what fills `pat_id` for the many `audit.rest(apiKey, ...)` call sites that never
+        * pass this argument at all -- a PAT bearer curried in as `apiKey` (MCP admin tools calling
+        * through the REST handlers) resolves here with zero call-site changes.
+        */
       patId: Option[String] = None
   ): Unit =
     val (actor, realm) = actorOf(token)
-    restAs(actor, realm, family, action, outcome, tenant, target, detail, patId)
+    val effectivePatId = patId.orElse(token.flatMap(patIdOf))
+    restAs(actor, realm, family, action, outcome, tenant, target, detail, effectivePatId)
 
   def restAs(
       actor: String,
@@ -53,9 +70,10 @@ final class AuditRecorder(
       tenant: Option[String] = None,
       target: Option[String] = None,
       detail: Map[String, String] = Map.empty,
-      /** The `qodstate_pat` id of the token that acted, when the resolved principal authenticated
-        * with a personal access token. `None` for session and static-key callers, the default for
-        * every pre-existing call site.
+      /** The `qodstate_pat` id of the token that acted. `rest` resolves this automatically from the
+        * bearer via `patIdOf` before delegating here; a caller that already has an actor/realm
+        * resolved some other way (bypassing `rest`) passes it explicitly, and `None` is the correct
+        * value for session and static-key callers.
         */
       patId: Option[String] = None
   ): Unit =

@@ -167,6 +167,24 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     result shouldBe a[Right[?, ?]]
   }
 
+  it should "thread patId from execute() through to the persisted statement row" in {
+    val (router, journal, store) = setupWithJournal()
+    router.execute("hist-6", "alice", poolKey, "SELECT 1", patId = Some("pat-9")).unsafeRunSync()
+    journal.drainNow()
+    val rows = store.searchStatements(StatementQuery())
+    rows should have size 1
+    rows.head.event.patId shouldBe Some("pat-9")
+  }
+
+  it should "leave patId at None when execute() is called without one (session/static-key)" in {
+    val (router, journal, store) = setupWithJournal()
+    router.execute("hist-7", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    journal.drainNow()
+    val rows = store.searchStatements(StatementQuery())
+    rows should have size 1
+    rows.head.event.patId shouldBe None
+  }
+
   it should "cap sql at 500 chars before persisting" in {
     val padding                  = "x" * 600
     val longSql                  = s"SELECT $padding FROM t"

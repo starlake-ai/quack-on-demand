@@ -56,6 +56,45 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
       List(("static-key", "system"), ("anonymous", "system"))
   }
 
+  it should "resolve a PAT bearer to its owner's actor via the composed session lookup, " +
+    "and fill pat_id from patIdOf with no call-site change" in {
+      val store                                                      = new RecordingStore
+      val patToken                                                   = "qod_pat_alice"
+      val sessionLookup: String => Option[SessionTokenStore.Session] =
+        t => if t == patToken then Some(session("alice", superuser = false)) else None
+      val patIdOf: String => Option[String] =
+        t => if t == patToken then Some("pat-1") else None
+      val r = new AuditRecorder(store, sessionLookup, patIdOf)
+      r.rest(Some(patToken), "control-plane", "pool.scale", "ok", tenant = Some("t-a"))
+      val e = store.events.head
+      (e.actor, e.actorRealm, e.patId) shouldBe ("alice", "tenant", Some("pat-1"))
+    }
+
+  it should "leave pat_id at None for a static-key bearer even when patIdOf is wired" in {
+    val store    = new RecordingStore
+    val patToken = "qod_pat_alice"
+    val r        = new AuditRecorder(
+      store,
+      t => if t == patToken then Some(session("alice", superuser = false)) else None,
+      t => if t == patToken then Some("pat-1") else None
+    )
+    r.rest(Some("static-abc"), "control-plane", "pool.scale", "ok")
+    val e = store.events.head
+    (e.actor, e.actorRealm, e.patId) shouldBe ("static-key", "system", None)
+  }
+
+  it should "let an explicit patId argument win over patIdOf's resolution" in {
+    val store    = new RecordingStore
+    val patToken = "qod_pat_alice"
+    val r        = new AuditRecorder(
+      store,
+      t => if t == patToken then Some(session("alice", superuser = false)) else None,
+      t => if t == patToken then Some("pat-1") else None
+    )
+    r.rest(Some(patToken), "control-plane", "pool.scale", "ok", patId = Some("override"))
+    store.events.head.patId shouldBe Some("override")
+  }
+
   it should "swallow store failures (never throws into the handler) and count the drop" in {
     val store   = new RecordingStore
     var dropped = 0

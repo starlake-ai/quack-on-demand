@@ -1,6 +1,7 @@
 // src/test/scala/ai/starlake/quack/mcp/McpAdminToolsSpec.scala
 package ai.starlake.quack.mcp
 
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore}
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -10,14 +11,17 @@ import ai.starlake.quack.ondemand.api.{
   MaintenanceHandlers,
   NodeHandlers,
   PoolHandlers,
+  SessionTokenStore,
   SetPoolAutoscaleRequest,
   TagHandlers
 }
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
-import ai.starlake.quack.ondemand.telemetry.NoopTelemetryStore
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.ondemand.telemetry.{AuditRecorder, NoopTelemetryStore}
 import cats.effect.unsafe.implicits.global
+import java.time.Instant
 import io.circe.{Json, JsonObject}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -46,7 +50,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       patToken
     )
 
-  private final class Fixture:
+  private final class Fixture(auditRecorder: AuditRecorder = AuditRecorder.noop):
     val store    = new InMemoryControlPlaneStore()
     val backend  = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
     val tracker  = new ai.starlake.quack.edge.adapter.NodeLoadTracker
@@ -82,7 +86,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
           Some(SessionScope(superuser = false, manageableTenants = Set(Tenant0)))
         else None
 
-    val pools      = new PoolHandlers(sup, tracker)
+    val pools      = new PoolHandlers(sup, tracker, audit = auditRecorder)
     val nodes      = new NodeHandlers(sup, tracker, store, StateChangePublisher.noop)
     val statements =
       new ActiveStatementHandlers(registry, new StatementHistoryStore(), store, haEnabled = false)
@@ -134,6 +138,75 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       "dual"     -> Json.fromInt(5)
     )
     out.swap.toOption.get should include("outside_band")
+  }
+
+  // ------------------------------------------------------------------
+  // caller attribution (Task 8, review round 2): the admin REST handlers an
+  // MCP admin tool delegates to must attribute the ACTUAL audit row to the
+  // resolved principal, not just carry a pat_id -- a PAT bearer curried in as
+  // `apiKey` has to resolve through AuditRecorder's composed session lookup to
+  // its owner's real username, exactly as Main.scala wires it at boot
+  // (session lookup first, PatAuthenticator.sessionOf as fallback), with
+  // patIdOf filling pat_id with zero changes to PoolHandlers.scalePool itself.
+  // ------------------------------------------------------------------
+
+  private def sessionFor(username: String, tenant: String) =
+    SessionTokenStore.Session(
+      AuthenticatedProfile(username, "admin", Set.empty, Map.empty, "db", Some(tenant)),
+      SessionScope(superuser = false, manageableTenants = Set(tenant)),
+      Instant.now()
+    )
+
+  /** Mirrors Main.scala's `auditRecorder` wiring: session lookup first, then a PAT-token lookup
+    * (stand-in for `PatAuthenticator.sessionOf`/`resolve`), against a capturing store.
+    */
+  private def attributingAuditRecorder(): (AuditRecorder, RecordingTelemetryStore) =
+    val telemetry = new RecordingTelemetryStore()
+    val recorder  = new AuditRecorder(
+      telemetry,
+      sessionLookup = t => if t == patToken then Some(sessionFor("alice", Tenant0)) else None,
+      patIdOf = t => if t == patToken then Some("pat-1") else None
+    )
+    (recorder, telemetry)
+
+  "scale_pool via a PAT" should "attribute the audit row to the token's owner and its pat_id" in {
+    val (recorder, telemetry) = attributingAuditRecorder()
+    val f                     = new Fixture(recorder)
+    f.call(
+      "scale_pool",
+      adminPat(),
+      "tenant"   -> Json.fromString(Tenant0),
+      "database" -> Json.fromString(TenantDb),
+      "pool"     -> Json.fromString(Pool),
+      "dual"     -> Json.fromInt(2)
+    ).isRight shouldBe true
+    val e =
+      telemetry.events.find(_.action == "pool.scale").getOrElse(fail("no pool.scale audit row"))
+    (e.actor, e.patId) shouldBe ("alice", Some("pat-1"))
+  }
+
+  it should "leave the static key's audit row with a NULL pat_id (not the PAT owner's)" in {
+    val (recorder, telemetry) = attributingAuditRecorder()
+    val f                     = new Fixture(recorder)
+    f.call(
+      "scale_pool",
+      McpPrincipal.StaticKey,
+      "tenant"   -> Json.fromString(Tenant0),
+      "database" -> Json.fromString(TenantDb),
+      "pool"     -> Json.fromString(Pool),
+      "dual"     -> Json.fromInt(2)
+    ).isRight shouldBe true
+    val e =
+      telemetry.events.find(_.action == "pool.scale").getOrElse(fail("no pool.scale audit row"))
+    // McpPrincipal.StaticKey carries rawToken = None by design (its docstring: "the handlers'
+    // own static-key arm is not re-entered from here"), so no bearer reaches AuditRecorder at
+    // all here and actorOf(None) resolves the pre-existing "anonymous" branch rather than
+    // "static-key" (that label is for a REAL non-empty, non-PAT, non-session bearer -- see
+    // AuditRecorderSpec's "leave pat_id at None for a static-key bearer" case for that path).
+    // The one fact this test exists to pin is the one the review flagged: patId must stay None,
+    // never leak the PAT owner's id onto an unrelated caller.
+    e.patId shouldBe None
+    e.actor should not be "alice"
   }
 
   "suspend_pool / resume_pool" should "round-trip the suspended flag" in {

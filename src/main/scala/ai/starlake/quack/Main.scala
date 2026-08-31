@@ -415,7 +415,16 @@ object Main extends IOApp with LazyLogging:
             )
     )
 
-    val auditRecorder = new AuditRecorder(telemetryStore, sessionTokens.get)
+    // A PAT bearer must attribute to its real owner, not fall through to the
+    // "unresolved token" static-key branch: session lookup first, PAT second.
+    // patIdOf feeds pat_id on every audit.rest(apiKey, ...) call site (dozens,
+    // across the REST handlers the MCP admin tools curry the raw PAT bearer
+    // into) with zero call-site changes.
+    val auditRecorder = new AuditRecorder(
+      telemetryStore,
+      sessionLookup = t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t)),
+      patIdOf = t => patAuthenticator.resolve(t).map(_.patId)
+    )
 
     // Starlake SSO handoff ticket store. Process-local and cheap; constructed unconditionally
     // (like sessionTokens' denylist) even though the endpoints it backs are only mounted when

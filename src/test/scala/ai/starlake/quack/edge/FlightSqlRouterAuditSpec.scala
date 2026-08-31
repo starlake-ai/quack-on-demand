@@ -123,6 +123,32 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       e.detail.contains("durationMs") shouldBe true
     }
 
+  it should "thread patId into the data-write audit event" in {
+    val (router, journal, store) = setupWithJournal()
+    router
+      .execute(
+        "aud-1b",
+        "alice",
+        poolKey,
+        "INSERT INTO acme.public.t VALUES (1)",
+        patId = Some("pat-7")
+      )
+      .unsafeRunSync()
+    journal.drainNow()
+    store.events should have size 1
+    store.events.head.patId shouldBe Some("pat-7")
+  }
+
+  it should "leave patId at None on a data-write event when execute() carries none" in {
+    val (router, journal, store) = setupWithJournal()
+    router
+      .execute("aud-1c", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")
+      .unsafeRunSync()
+    journal.drainNow()
+    store.events should have size 1
+    store.events.head.patId shouldBe None
+  }
+
   it should "emit data-write/sql.ddl/ok for a CREATE TABLE" in {
     val (router, journal, store) = setupWithJournal()
     router
@@ -162,6 +188,25 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     e.tenant shouldBe Some("acme")
     e.origin shouldBe "flightsql"
     e.detail("denied") shouldBe "cat.sch.tbl:Write"
+  }
+
+  it should "thread patId into the data-denial audit event too" in {
+    val denying = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult =
+        Denied("insufficient grants", Set.empty)
+    val (router, journal, store) = setupWithJournal(validator = denying)
+    router
+      .execute(
+        "aud-4b",
+        "alice",
+        poolKey,
+        "INSERT INTO cat.sch.tbl VALUES (1)",
+        patId = Some("pat-8")
+      )
+      .unsafeRunSync()
+    journal.drainNow()
+    store.events should have size 1
+    store.events.head.patId shouldBe Some("pat-8")
   }
 
   it should "not throw and not record when using the default noop journal (EventJournal.noop)" in {
