@@ -1080,7 +1080,10 @@ opt-in except pod security:
     protected-settings list (`disabled_filesystems`, `allow_*_extensions`,
     `autoinstall_known_extensions`, `autoload_known_extensions`,
     `enable_external_access`, `lock_configuration`, `temp_directory`,
-    `extension_directory`, `secret_directory`), and local-machine read
+    `extension_directory`, `secret_directory`, plus the resource settings
+    `memory_limit`, `max_memory`, `threads`, `worker_threads`,
+    `max_temp_directory_size` - a tenant raising them past the spawn-time
+    defaults could OOM the node or pressure the host), and local-machine read
     functions (`read_text`, `read_blob`, `glob`, `read_csv[_auto]`,
     `read_parquet`, `read_json[_auto]`, `read_ndjson[_auto]`, `parquet_scan`,
     `getenv`) unless every path argument is an object-store URL literal

@@ -27,10 +27,21 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("RESET enable_external_access") shouldBe true
     denied("PRAGMA temp_directory = '/tmp/x'") shouldBe true
     denied("SET allowed_directories = ['/']") shouldBe true
-    denied("SET memory_limit = '1GB'") shouldBe false
-    denied("SET threads = 4") shouldBe false
     denied("SET schema = 'tpch1'") shouldBe false
     denied("PRAGMA table_info('t')") shouldBe false
+  }
+
+  it should "deny resource settings (memory / threads / temp size)" in {
+    denied("SET memory_limit = '100GB'") shouldBe true
+    denied("SET max_memory = '100GB'") shouldBe true
+    denied("RESET memory_limit") shouldBe true
+    denied("PRAGMA memory_limit = '100GB'") shouldBe true
+    denied("SET threads = 64") shouldBe true
+    denied("SET worker_threads = 64") shouldBe true
+    denied("SET max_temp_directory_size = '1TB'") shouldBe true
+    // resource-setting names in ordinary SQL stay admitted
+    denied("SELECT memory_limit FROM settings_view") shouldBe false
+    denied("SELECT * FROM t WHERE name = 'threads'") shouldBe false
   }
 
   "functions" should "deny local-path reads anywhere in the statement" in {
@@ -83,7 +94,7 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
 
   "settings statements" should "still screen denied functions in their values" in {
     denied("SET my_var = getenv('HOME')") shouldBe true
-    denied("SET memory_limit = '1GB'") shouldBe false
+    denied("SET enable_progress_bar = true") shouldBe false
     denied("PRAGMA table_info('t')") shouldBe false
   }
 

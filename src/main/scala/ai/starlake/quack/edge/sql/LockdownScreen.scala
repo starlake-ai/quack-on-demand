@@ -38,7 +38,17 @@ object LockdownScreen:
     "extension_directory",
     "secret_directory",
     "allowed_directories",
-    "allowed_paths"
+    "allowed_paths",
+    // Resource settings: not a data-exfiltration surface, but an unguarded resource-abuse vector.
+    // A tenant raising memory_limit past the node's spawn-time default can OOM the node (K8s) or
+    // pressure the whole host's RAM (local backend). Spawn-time defaults (dbInitSql, cgroup-derived
+    // RESOURCE_SQL) run node-side before quack_serve, so protecting these at the edge never blocks
+    // legitimate operator-set values.
+    "memory_limit",
+    "max_memory",
+    "threads",
+    "worker_threads",
+    "max_temp_directory_size"
   )
 
   private val DeniedFunctions = Set(
