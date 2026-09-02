@@ -101,6 +101,38 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     sql should include("c_region = 'eu'")
   }
 
+  it should "wrap a double-quoted table reference (BI folded SQL shape)" in {
+    // Power BI's folded SQL quotes every identifier; jsqlparser keeps the quotes
+    // on getName/getSchemaName/getDatabaseName, and an unstripped match let the
+    // reference silently escape its row policies (fail-open).
+    val sql = rewritten(
+      go(
+        "select distinct \"c_mktsegment\" from \"tpch1\".\"customer\"",
+        eff(tenantUser, List(policy("c_mktsegment = 'BUILDING'")))
+      )
+    )
+    sql should include("c_mktsegment = 'building'")
+    // the caller's quoting survives in the rewritten reference
+    sql should include("\"tpch1\".\"customer\"")
+  }
+
+  it should "wrap a fully catalog-qualified quoted reference" in {
+    val sql = rewritten(
+      go(
+        "select \"c_id\" from \"acme_tpch\".\"tpch1\".\"customer\"",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "still not match a policy for a different quoted table" in {
+    go(
+      "select \"o_id\" from \"tpch1\".\"orders\"",
+      eff(tenantUser, List(policy("c_region = 'eu'", table = "customer")))
+    ) shouldBe Passthrough
+  }
+
   it should "preserve the caller's table alias" in {
     val sql = rewritten(go("SELECT c.c_id FROM customer c", eff(tenantUser, List(policy("c_region = 'eu'")))))
     // outer reference c.c_id must still resolve -> wrapper carries alias `c`

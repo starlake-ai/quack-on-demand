@@ -57,6 +57,13 @@ object RowPolicyRewriter:
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
 
+  /** jsqlparser keeps the double quotes on quoted identifiers (`"customer"`), so policy matching
+    * must strip them or a quoted reference silently escapes its row policies (fail-open). Mirrors
+    * ColumnPolicyRewriter's unquote; only the MATCH uses the stripped form - the rewritten SQL
+    * keeps the caller's original (possibly quoted) identifiers.
+    */
+  private def unquote(s: String): String = s.stripPrefix("\"").stripSuffix("\"")
+
   /** Build the identity-token substitution map for one principal. List tokens that resolve to an
     * empty set collapse to `NULL` so `col IN (${groups})` becomes `col IN (NULL)` - a predicate
     * that matches nothing (safe-restrictive) rather than invalid `IN ()`.
@@ -160,10 +167,11 @@ class RowPolicyRewriter(enabled: Boolean = true):
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean
   ): net.sf.jsqlparser.statement.select.FromItem =
-    val name    = t.getName
-    val schema  = Option(t.getSchemaName).getOrElse(ctx.defaultSchema.getOrElse(""))
+    val name    = unquote(t.getName)
+    val schema  = Option(t.getSchemaName).map(unquote).getOrElse(ctx.defaultSchema.getOrElse(""))
     val catalog = Option(t.getDatabase)
       .flatMap(d => Option(d.getDatabaseName))
+      .map(unquote)
       .getOrElse(ctx.defaultDatabase.getOrElse(""))
 
     val matched = eff.rowPolicies.filter(p => policyMatches(p, catalog, schema, name))
@@ -174,7 +182,8 @@ class RowPolicyRewriter(enabled: Boolean = true):
       val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
 
       val alias: Alias = t.getAlias
-      val baseTable    = new Table(name)
+      // Rebuild from the RAW parts: a quoted identifier stays quoted in the output.
+      val baseTable = new Table(t.getName)
       Option(t.getSchemaName).foreach(_ => baseTable.setSchemaName(t.getSchemaName))
       Option(t.getDatabase).foreach(baseTable.setDatabase)
 
@@ -187,7 +196,7 @@ class RowPolicyRewriter(enabled: Boolean = true):
       wrapped.setSelect(inner)
       // Preserve the caller's alias so outer `alias.col` references still resolve; when the table
       // had no alias, fall back to the table name so a bare `SELECT t.col` keeps working.
-      wrapped.setAlias(if alias != null then alias else new Alias(name))
+      wrapped.setAlias(if alias != null then alias else new Alias(t.getName))
       changed.set(true)
       wrapped
 
