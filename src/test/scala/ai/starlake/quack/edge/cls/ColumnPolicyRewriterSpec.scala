@@ -774,8 +774,9 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
-  // SECURITY-FOLLOWUPS items 1 + 2, pinned through the full layer (catalog +
-  // schema-map collection + inner rewriter)
+  // Closed CLS masking gaps (outer-scope aliases in correlated subqueries;
+  // unresolved tables nested in subqueries failing open), pinned through the
+  // full layer (catalog + schema-map collection + inner rewriter)
   // ------------------------------------------------------------------
 
   it should "mask an outer-aliased covered column inside a correlated EXISTS subquery" in {

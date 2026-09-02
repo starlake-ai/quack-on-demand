@@ -262,7 +262,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Passthrough, got $other")
   }
   // ------------------------------------------------------------------
-  // SECURITY-FOLLOWUPS item 1: outer-scope aliases inside correlated subqueries
+  // Closed masking gap: outer-scope aliases inside correlated subqueries
   // ------------------------------------------------------------------
 
   private val maskPhone = maskEmail.copy(id = "cp-2", columnName = "c_phone")
@@ -305,7 +305,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
-  // SECURITY-FOLLOWUPS item 2: unresolved tables nested in subqueries fail closed
+  // Closed fail-open gap: unresolved tables nested in subqueries fail closed
   // ------------------------------------------------------------------
 
   it should "deny an unresolvable table nested inside a subquery in STRICT mode" in {
