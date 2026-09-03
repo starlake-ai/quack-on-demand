@@ -75,3 +75,5 @@ databaseChangeLog:
       file: db/changelog/0034-pat-attribution.yaml
   - include:
       file: db/changelog/0035-pool-activity.yaml
+  - include:
+      file: db/changelog/0036-scim-external-id.yaml

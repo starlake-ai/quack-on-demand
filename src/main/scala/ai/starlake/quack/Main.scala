@@ -1187,6 +1187,11 @@ object Main extends IOApp with LazyLogging:
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         patAuth = Some(patAuthenticator),
+        scim = Some(
+          new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)
+        ),
+        canonicalTenantIdOf =
+          t => ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
         mcpRoutes = mcpRoutes
       )
       // One managed-object-store client for both the boot probe below and the purge

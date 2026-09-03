@@ -169,10 +169,11 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       mustChangePassword: Boolean = false,
       email: Option[String] = None
   ): String =
-    val now             = Instant.now()
-    val (id, createdAt) = findUser(tenant, username) match
-      case Some(u) => (u.id, u.createdAt.getOrElse(now))
-      case None    => (s"u-${java.util.UUID.randomUUID().toString.take(8)}", now)
+    val now                         = Instant.now()
+    val existing                    = findUser(tenant, username)
+    val (id, createdAt, externalId) = existing match
+      case Some(u) => (u.id, u.createdAt.getOrElse(now), u.externalId)
+      case None    => (s"u-${java.util.UUID.randomUUID().toString.take(8)}", now, None)
     users.put(
       id,
       RbacUser(
@@ -184,7 +185,10 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
         mustChangePassword = mustChangePassword,
         email = email,
         createdAt = Some(createdAt),
-        updatedAt = Some(now)
+        updatedAt = Some(now),
+        // Mirror Postgres: the credential upsert's column list omits external_id,
+        // so an existing SCIM externalId survives a password/enabled rewrite.
+        externalId = externalId
       )
     )
     passwordHashes.put(id, passwordHash)
@@ -203,6 +207,10 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
       .toList
       .sortBy(u => if u.tenant.isDefined then 0 else 1) // tenant-scoped wins
       .headOption
+  def setUserExternalId(id: String, externalId: Option[String]): Unit =
+    users.updateWith(id)(_.map(_.copy(externalId = externalId)))
+    ()
+
   def deleteUser(id: String): Unit =
     users.remove(id)
     passwordHashes.remove(id)
@@ -249,12 +257,21 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   // ---------------- RBAC: groups ----------------
   private val groups                                = TrieMap.empty[String, RbacGroup]
-  def upsertGroup(g: RbacGroup): Unit               = groups.put(g.id, g)
+  // Mirror Postgres: upsertGroup's column list omits external_id, so a SCIM-set
+  // externalId survives a name/description upsert.
+  def upsertGroup(g: RbacGroup): Unit =
+    val preserved = groups.get(g.id).flatMap(_.externalId)
+    groups.put(g.id, g.copy(externalId = g.externalId.orElse(preserved)))
+    ()
   def listGroups(tenantId: String): List[RbacGroup] =
     groups.values.filter(_.tenantId == tenantId).toList.sortBy(_.name)
   def getGroup(id: String): Option[RbacGroup]                      = groups.get(id)
   def findGroup(tenantId: String, name: String): Option[RbacGroup] =
     groups.values.find(g => g.tenantId == tenantId && g.name == name)
+  def setGroupExternalId(id: String, externalId: Option[String]): Unit =
+    groups.updateWith(id)(_.map(_.copy(externalId = externalId)))
+    ()
+
   def deleteGroup(id: String): Unit =
     groups.remove(id)
     userGroups.filterInPlace((_, g) => g != id)

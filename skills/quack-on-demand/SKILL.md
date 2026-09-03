@@ -249,6 +249,35 @@ curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
 
 An admin password reset also unconditionally clears the lock (`failed_attempts` and `locked_at`), same as the self-service reset.
 
+### SCIM 2.0 provisioning (IdP-driven user + group lifecycle)
+
+For workforce identity, point an enterprise IdP's SCIM connector (Okta, Entra, Google Workspace) at the per-tenant base URL so users and groups are provisioned, updated and deprovisioned automatically instead of by hand. This complements per-tenant OIDC SSO: SSO authenticates the login, SCIM manages the accounts.
+
+- **Base URL**: `https://qod.example.com/api/scim/v2/<tenant>` (the tenant id or its display name both work).
+- **Auth**: `Authorization: Bearer <token>`, where the token is the static `QOD_API_KEY` or a tenant-admin personal access token. A tenant-scoped token can only touch its own tenant.
+- **Resources**: Users and Groups, plus the discovery endpoints (`ServiceProviderConfig`, `ResourceTypes`, `Schemas`) the connector reads on setup.
+
+```bash
+SCIM=https://qod.example.com/api/scim/v2/acme
+
+# Provision a user (no password needed - the user signs in through the tenant's OIDC SSO;
+# QoD assigns an unguessable random password). active:false creates the row disabled.
+curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Users"   -d '{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+       "userName":"carol@acme.com","externalId":"okta-123",
+       "emails":[{"value":"carol@acme.com","primary":true}],"active":true}'
+
+# Find by the IdP's identifier or by userName (filter: attr eq "value")
+curl -sS -H "Authorization: Bearer $QOD_API_KEY"   "$SCIM/Users?filter=externalId%20eq%20%22okta-123%22"
+
+# Deactivate (cuts BOTH the REST login and the FlightSQL handshake, not just the console)
+curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X PATCH "$SCIM/Users/<id>"   -d '{"Operations":[{"op":"replace","path":"active","value":false}]}'
+
+# Group with members; PATCH add/remove members drives RBAC group membership
+curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Groups"   -d '{"displayName":"analysts","members":[{"value":"<user-id>"}]}'
+```
+
+Semantics worth knowing: `userName` and a group's `displayName` are immutable (a rename is refused with scimType `mutability`); `active` maps to the account `enabled` flag; the superuser realm is invisible to SCIM; creates are insert-only, so a connector retry can never rotate an existing user's password. SCIM is machine-to-machine, so it has no `qod` CLI command - manage users and groups by hand with `qod user`/`qod group`/`qod membership` when you are not driving them from an IdP.
+
 ## Tenant + pool management
 
 ```bash

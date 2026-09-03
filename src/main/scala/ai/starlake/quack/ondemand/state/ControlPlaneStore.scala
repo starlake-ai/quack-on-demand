@@ -205,6 +205,9 @@ trait ControlPlaneStore:
   def findUserForLogin(tenantId: String, username: String): Option[RbacUser]
   def deleteUser(id: String): Unit
 
+  /** Set or clear the SCIM externalId on a user row. Only the /api/scim surface writes this. */
+  def setUserExternalId(id: String, externalId: Option[String]): Unit
+
   // ---------------- RBAC: roles ------------------------------------------
 
   def upsertRole(r: RbacRole): Unit
@@ -240,6 +243,9 @@ trait ControlPlaneStore:
   def getGroup(id: String): Option[RbacGroup]
   def findGroup(tenantId: String, name: String): Option[RbacGroup]
   def deleteGroup(id: String): Unit
+
+  /** Set or clear the SCIM externalId on a group row. Only the /api/scim surface writes this. */
+  def setGroupExternalId(id: String, externalId: Option[String]): Unit
 
   // ---------------- RBAC: memberships ------------------------------------
 

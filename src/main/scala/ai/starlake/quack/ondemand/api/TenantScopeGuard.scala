@@ -20,6 +20,7 @@ object TenantScopeGuard:
   private val PoolStatus       = "^/api/pool/([^/]+)/[^/]+/[^/]+/status".r
   private val CatalogTenant    = "^/api/catalog/tenant/([^/]+)/".r
   private val FederatedTenants = "^/api/tenants/([^/]+)/tenant-dbs/".r
+  private val Scim             = "^/api/scim/v2/([^/]+)(?:/|$)".r
 
   // Paths where ?tenant= is a filter hint handled by the endpoint's own scoping
   // logic, not an authz scope that the perimeter guard should enforce. Adding a
@@ -43,6 +44,7 @@ object TenantScopeGuard:
       .map(_.group(1))
       .orElse(CatalogTenant.findFirstMatchIn(path).map(_.group(1)))
       .orElse(FederatedTenants.findFirstMatchIn(path).map(_.group(1)))
+      .orElse(Scim.findFirstMatchIn(path).map(_.group(1)))
       .orElse(
         if QueryTenantExempt.contains(path) then None
         else queryTenant.map(_.trim).filter(_.nonEmpty)

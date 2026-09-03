@@ -2166,7 +2166,14 @@ final class PoolSupervisor(
       role: String = "user",
       userStore: ai.starlake.quack.ondemand.state.UserStore,
       mustChangePassword: Boolean = false,
-      email: Option[String] = None
+      email: Option[String] = None,
+      // enabled = false persists the row disabled from the first write (SCIM
+      // creates with active: false), atomically -- no enabled window.
+      enabled: Boolean = true,
+      // failIfExists = true makes this a true CREATE: an existing (tenant,
+      // username) row is refused untouched (no password rotation, no role
+      // change) instead of upserted. SCIM provisioning retries depend on it.
+      failIfExists: Boolean = false
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("createUser") {
       if username.isEmpty || password.isEmpty then
@@ -2197,18 +2204,24 @@ final class PoolSupervisor(
                   password,
                   role,
                   mustChangePassword = Some(mustChangePassword),
-                  email = Some(effEmail)
+                  email = Some(effEmail),
+                  enabled = Option.when(!enabled)(false),
+                  insertOnly = failIfExists
                 )
-                val u = RbacUser(
-                  out.id,
-                  resolvedTenantId,
-                  username,
-                  role,
-                  mustChangePassword = mustChangePassword,
-                  email = effEmail
-                )
-                store.upsertUserIdentity(u)
-                Right(u)
+                if failIfExists && !out.inserted then
+                  Left(SupervisorError.InvalidArgument(s"user already exists: $username"))
+                else
+                  val u = RbacUser(
+                    out.id,
+                    resolvedTenantId,
+                    username,
+                    role,
+                    enabled = enabled,
+                    mustChangePassword = mustChangePassword,
+                    email = effEmail
+                  )
+                  store.upsertUserIdentity(u)
+                  Right(u)
     }
   }
 
@@ -2614,6 +2627,24 @@ final class PoolSupervisor(
   }
 
   def listGroups(tenantId: String): List[RbacGroup] = store.listGroups(tenantId)
+
+  /** User ids belonging to a group, for the SCIM Group.members projection. */
+  def usersInGroup(groupId: String): List[String] = store.listUsersInGroup(groupId)
+
+  /** Batch membership read for the SCIM Groups list: one query for all users' group edges
+    * instead of one usersInGroup call per group.
+    */
+  def groupsByUsers(userIds: List[String]): Map[String, Set[String]] =
+    store.listGroupsByUsers(userIds)
+
+  /** SCIM externalId writes: identity metadata only, no effect on the RBAC closure, so no
+    * effective-cache invalidation.
+    */
+  def setUserExternalId(id: String, externalId: Option[String]): Unit =
+    store.setUserExternalId(id, externalId)
+
+  def setGroupExternalId(id: String, externalId: Option[String]): Unit =
+    store.setGroupExternalId(id, externalId)
 
   def listRolesForGroup(groupId: String): List[RbacRole] =
     rbacResolver.rolesForGroup(groupId).toList.flatMap(rbacResolver.role).sortBy(_.name)

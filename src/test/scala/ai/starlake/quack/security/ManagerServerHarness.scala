@@ -153,6 +153,7 @@ object ManagerServerHarness:
           |  username             TEXT NOT NULL,
           |  password_hash        TEXT NOT NULL,
           |  role                 TEXT NOT NULL DEFAULT 'user',
+          |  enabled              BOOLEAN NOT NULL DEFAULT true,
           |  email                TEXT,
           |  must_change_password BOOLEAN,
           |  failed_attempts      INT NOT NULL DEFAULT 0,
@@ -579,6 +580,8 @@ object ManagerServerHarness:
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
       patAuth = patAuth,
+      scim = Some(new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, audit)),
+      canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes
     )
 

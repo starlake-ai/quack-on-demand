@@ -1,0 +1,20 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0036-scim-external-id
+      author: quack-on-demand
+      changes:
+        # SCIM 2.0 provisioning: the IdP's identifier for a user / group, set and
+        # matched by the /api/scim/v2 surface. Nullable: rows provisioned through
+        # the REST API, CLI, manifest import or boot seeding never carry one.
+        - addColumn:
+            tableName: qodstate_user
+            columns:
+              - column:
+                  name: external_id
+                  type: TEXT
+        - addColumn:
+            tableName: qodstate_group
+            columns:
+              - column:
+                  name: external_id
+                  type: TEXT

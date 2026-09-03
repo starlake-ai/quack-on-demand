@@ -44,10 +44,16 @@ object UserUpsert:
       role: String,
       enabled: Option[Boolean],
       mustChangePassword: Option[Boolean] = None,
-      email: Option[Option[String]] = None
+      email: Option[Option[String]] = None,
+      // insertOnly = true refuses to touch an existing (tenant, username) row: the caller gets
+      // Result(existingId, inserted = false) and NOTHING is written -- no password rotation, no
+      // role change, no lockout clear. A true concurrent double-insert (both lookups miss) is
+      // resolved by the partial unique indexes: the second INSERT throws instead of overwriting.
+      insertOnly: Boolean = false
   ): Result =
     val existing = lookupId(c, tenant, username)
-    val id       = existing.getOrElse(Names.newSurrogateId("u"))
+    if insertOnly && existing.isDefined then return Result(id = existing.get, inserted = false)
+    val id = existing.getOrElse(Names.newSurrogateId("u"))
     // Optional boolean flag columns: present -> written on both insert and
     // update; absent -> column default on insert, stored value preserved on
     // update.

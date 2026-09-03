@@ -77,6 +77,14 @@ final class ManagerServer(
     // header) is accepted wherever its owner's session JWT would be. None (tests /
     // callers without Postgres) keeps the guard session-and-static-key only.
     patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
+    // SCIM 2.0 provisioning surface (/api/scim/v2/{tenant}). None leaves the routes
+    // unmounted; Main always wires it. SCIM clients authenticate with Authorization:
+    // Bearer, which the guard accepts for /api/scim/ paths only.
+    scim: Option[ScimHandlers] = None,
+    // Canonicalizes a URL-path tenant (id OR display name) to its id before the
+    // perimeter scope check: SCIM base URLs are routinely configured with the
+    // display name, and manageableTenants holds ids. None = unknown, compare raw.
+    canonicalTenantIdOf: String => Option[String] = _ => None,
     // The MCP endpoint (POST /mcp), pre-built by Main when quack-on-demand.mcp.enabled.
     // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
     // static key, never sessions), and the guard's path filter ignores non-/api paths
@@ -203,7 +211,19 @@ final class ManagerServer(
         // it doesn't leak cross-origin); the header is the CLI / static-key
         // path. A request can present either; the static key only ever
         // matches via the header.
-        val headerToken = req.headers.get(CIString("X-API-Key")).map(_.head.value)
+        // SCIM clients (Okta, Entra) can only send Authorization: Bearer, so for the
+        // SCIM prefix the bearer value is admitted exactly like an X-API-Key header
+        // (static key or PAT). Scoped to /api/scim/ on purpose: nothing else should
+        // gain a third credential transport.
+        val bearerToken =
+          if path.startsWith("/api/scim/") then
+            req.headers
+              .get(CIString("Authorization"))
+              .map(_.head.value)
+              .flatMap(ScimEndpoints.stripBearer)
+          else None
+        val headerToken =
+          req.headers.get(CIString("X-API-Key")).map(_.head.value).orElse(bearerToken)
         val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
         val provided    = headerToken.orElse(cookieToken)
         // Constant-time compare so a caller can't recover the static key byte by
@@ -278,7 +298,9 @@ final class ManagerServer(
           // session (not the static key). Body-tenant endpoints
           // do their own check via TenantScopeCheck.reject.
           val queryTenant = req.uri.query.params.get("tenant")
-          val pathTenant  = TenantScopeGuard.extractTenant(path, queryTenant)
+          val pathTenant  = TenantScopeGuard
+            .extractTenant(path, queryTenant)
+            .map(t => canonicalTenantIdOf(t).getOrElse(t))
           (tokenScope, pathTenant) match
             case (Some(scope), Some(t))
                 if !scope.superuser && !scope.manageableTenants.contains(t) =>
@@ -556,6 +578,56 @@ final class ManagerServer(
       )
     }
 
+    val scimEndpoints: List[ServerEndpoint[Any, IO]] = scim.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        ScimEndpoints.listUsers.serverLogic { case (tenant, filter, start, count, token) =>
+          h.listUsers(tenant, filter, start, count, token)(scopeOfToken)
+        },
+        ScimEndpoints.getUser.serverLogic { case (tenant, id, token) =>
+          h.getUser(tenant, id, token)(scopeOfToken)
+        },
+        ScimEndpoints.createUser.serverLogic { case (tenant, body, token) =>
+          h.createUser(tenant, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.replaceUser.serverLogic { case (tenant, id, body, token) =>
+          h.replaceUser(tenant, id, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.patchUser.serverLogic { case (tenant, id, body, token) =>
+          h.patchUser(tenant, id, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.deleteUser.serverLogic { case (tenant, id, token) =>
+          h.deleteUser(tenant, id, token)(scopeOfToken)
+        },
+        ScimEndpoints.listGroups.serverLogic { case (tenant, filter, start, count, token) =>
+          h.listGroups(tenant, filter, start, count, token)(scopeOfToken)
+        },
+        ScimEndpoints.getGroup.serverLogic { case (tenant, id, token) =>
+          h.getGroup(tenant, id, token)(scopeOfToken)
+        },
+        ScimEndpoints.createGroup.serverLogic { case (tenant, body, token) =>
+          h.createGroup(tenant, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.replaceGroup.serverLogic { case (tenant, id, body, token) =>
+          h.replaceGroup(tenant, id, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.patchGroup.serverLogic { case (tenant, id, body, token) =>
+          h.patchGroup(tenant, id, body, token)(scopeOfToken)
+        },
+        ScimEndpoints.deleteGroup.serverLogic { case (tenant, id, token) =>
+          h.deleteGroup(tenant, id, token)(scopeOfToken)
+        },
+        ScimEndpoints.serviceProviderConfig.serverLogic { case (tenant, token) =>
+          h.serviceProviderConfig(tenant, token)(scopeOfToken)
+        },
+        ScimEndpoints.resourceTypes.serverLogic { case (tenant, token) =>
+          h.resourceTypes(tenant, token)(scopeOfToken)
+        },
+        ScimEndpoints.schemas.serverLogic { case (tenant, token) =>
+          h.schemas(tenant, token)(scopeOfToken)
+        }
+      )
+    }
+
     val rbacEndpoints: List[ServerEndpoint[Any, IO]] = List[ServerEndpoint[Any, IO]](
       RbacEndpoints.createUser.serverLogic { case (req, token) =>
         users.createUser(req, token)(scopeOfToken)
@@ -797,7 +869,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

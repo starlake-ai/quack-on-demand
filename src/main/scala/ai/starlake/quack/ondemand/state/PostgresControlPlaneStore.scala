@@ -639,7 +639,7 @@ final class PostgresControlPlaneStore(
 
   def getUserById(id: String): Option[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at FROM qodstate_user WHERE id = ?"
+      "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id FROM qodstate_user WHERE id = ?"
     )
     try
       ps.setString(1, id)
@@ -653,7 +653,7 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
             |FROM qodstate_user WHERE tenant = ? AND username = ?""".stripMargin
         )
         p.setString(1, t)
@@ -661,7 +661,7 @@ final class PostgresControlPlaneStore(
         p
       case None =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
             |FROM qodstate_user WHERE tenant IS NULL AND username = ?""".stripMargin
         )
         p.setString(1, username)
@@ -677,14 +677,14 @@ final class PostgresControlPlaneStore(
     val ps = tenant match
       case Some(t) =>
         val p = c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
             |FROM qodstate_user WHERE tenant = ? ORDER BY username""".stripMargin
         )
         p.setString(1, t)
         p
       case None =>
         c.prepareStatement(
-          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+          """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
             |FROM qodstate_user ORDER BY COALESCE(tenant, ''), username""".stripMargin
         )
     try
@@ -696,7 +696,7 @@ final class PostgresControlPlaneStore(
 
   def listSuperusers(): List[RbacUser] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
         |FROM qodstate_user WHERE tenant IS NULL ORDER BY username""".stripMargin
     )
     try
@@ -711,7 +711,7 @@ final class PostgresControlPlaneStore(
     // the wildcard NULL superuser row when both exist with the same
     // username. Mirrors application.conf's auth.database.query.
     val ps = c.prepareStatement(
-      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at
+      """SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id
         |FROM qodstate_user
         |WHERE (tenant IS NULL OR tenant = ?) AND username = ?
         |ORDER BY (tenant IS NOT NULL) DESC
@@ -739,8 +739,29 @@ final class PostgresControlPlaneStore(
       mustChangePassword = rs.getBoolean("must_change_password"),
       email = Option(rs.getString("email")),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
-      updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant)
+      updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant),
+      externalId = Option(rs.getString("external_id"))
     )
+
+  def setUserExternalId(id: String, externalId: Option[String]): Unit = withConn { c =>
+    val ps = c.prepareStatement("UPDATE qodstate_user SET external_id = ? WHERE id = ?")
+    try
+      ps.setString(1, externalId.orNull)
+      ps.setString(2, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def setGroupExternalId(id: String, externalId: Option[String]): Unit = withConn { c =>
+    val ps = c.prepareStatement("UPDATE qodstate_group SET external_id = ? WHERE id = ?")
+    try
+      ps.setString(1, externalId.orNull)
+      ps.setString(2, id)
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
 
   // ---------------- RBAC: roles ----------------
 
@@ -925,7 +946,7 @@ final class PostgresControlPlaneStore(
 
   def listGroups(tenantId: String): List[RbacGroup] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_id, name, description FROM qodstate_group
+      """SELECT id, tenant_id, name, description, external_id FROM qodstate_group
         |WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -938,7 +959,7 @@ final class PostgresControlPlaneStore(
 
   def getGroup(id: String): Option[RbacGroup] = withConn { c =>
     val ps = c.prepareStatement(
-      "SELECT id, tenant_id, name, description FROM qodstate_group WHERE id = ?"
+      "SELECT id, tenant_id, name, description, external_id FROM qodstate_group WHERE id = ?"
     )
     try
       ps.setString(1, id)
@@ -950,7 +971,7 @@ final class PostgresControlPlaneStore(
 
   def findGroup(tenantId: String, name: String): Option[RbacGroup] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_id, name, description FROM qodstate_group
+      """SELECT id, tenant_id, name, description, external_id FROM qodstate_group
         |WHERE tenant_id = ? AND name = ?""".stripMargin
     )
     try
@@ -970,7 +991,8 @@ final class PostgresControlPlaneStore(
       id = rs.getString("id"),
       tenantId = rs.getString("tenant_id"),
       name = rs.getString("name"),
-      description = Option(rs.getString("description"))
+      description = Option(rs.getString("description")),
+      externalId = Option(rs.getString("external_id"))
     )
 
   // ---------------- RBAC: memberships ----------------
@@ -1474,7 +1496,7 @@ final class PostgresControlPlaneStore(
       ),
       users = selectAll(
         c,
-        "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
+        "SELECT id, tenant, username, role, enabled, must_change_password, email, created_at, updated_at, external_id FROM qodstate_user ORDER BY COALESCE(tenant, ''), username",
         readRbacUser
       ),
       roles = selectAll(
@@ -1489,7 +1511,7 @@ final class PostgresControlPlaneStore(
       ),
       groups = selectAll(
         c,
-        "SELECT id, tenant_id, name, description FROM qodstate_group ORDER BY tenant_id, name",
+        "SELECT id, tenant_id, name, description, external_id FROM qodstate_group ORDER BY tenant_id, name",
         readGroup
       ),
       userGroups = selectAll(

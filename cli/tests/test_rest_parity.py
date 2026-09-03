@@ -26,6 +26,17 @@ EXCLUSIONS = {
     # Postgres" section. The CLI has no create-form to prefill, and the same
     # values are operator config (QOD_PG_*), so no CLI command is warranted.
     "/api/database/metastore-defaults",
+    # SCIM 2.0 provisioning surface: driven machine-to-machine by an identity
+    # provider's connector (Okta, Entra, Google), speaking the RFC 7644 wire
+    # format with Authorization: Bearer. Humans manage users/groups through the
+    # existing user/group/membership CLI commands, so no CLI surface is warranted.
+    "/api/scim/v2/{tenant}/Users",
+    "/api/scim/v2/{tenant}/Users/{id}",
+    "/api/scim/v2/{tenant}/Groups",
+    "/api/scim/v2/{tenant}/Groups/{id}",
+    "/api/scim/v2/{tenant}/ServiceProviderConfig",
+    "/api/scim/v2/{tenant}/ResourceTypes",
+    "/api/scim/v2/{tenant}/Schemas",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

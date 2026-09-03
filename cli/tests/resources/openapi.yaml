@@ -3,6 +3,478 @@ info:
   title: Quack on Demand REST API
   version: 0.5.3-SNAPSHOT
 paths:
+  /api/scim/v2/{tenant}/Groups/{id}:
+    get:
+      operationId: getApiScimV2TenantGroupsId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    put:
+      operationId: putApiScimV2TenantGroupsId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    delete:
+      operationId: deleteApiScimV2TenantGroupsId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '204':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    patch:
+      operationId: patchApiScimV2TenantGroupsId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+  /api/scim/v2/{tenant}/Users/{id}:
+    get:
+      operationId: getApiScimV2TenantUsersId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    put:
+      operationId: putApiScimV2TenantUsersId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    delete:
+      operationId: deleteApiScimV2TenantUsersId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '204':
+          description: ''
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    patch:
+      operationId: patchApiScimV2TenantUsersId
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
   /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources/{alias}:
     get:
       operationId: getApiTenantsTenantTenant-dbsTenantdbFederated-sourcesAlias
@@ -2106,6 +2578,432 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/scim/v2/{tenant}/Groups:
+    get:
+      operationId: getApiScimV2TenantGroups
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: filter
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: startIndex
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: count
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: query parameter filter, Invalid value for:
+            query parameter startIndex, Invalid value for: query parameter count,
+            Invalid value for: header X-API-Key, Invalid value for: header Authorization,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    post:
+      operationId: postApiScimV2TenantGroups
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '201':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+  /api/scim/v2/{tenant}/ResourceTypes:
+    get:
+      operationId: getApiScimV2TenantResourcetypes
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+  /api/scim/v2/{tenant}/Schemas:
+    get:
+      operationId: getApiScimV2TenantSchemas
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+  /api/scim/v2/{tenant}/ServiceProviderConfig:
+    get:
+      operationId: getApiScimV2TenantServiceproviderconfig
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+  /api/scim/v2/{tenant}/Users:
+    get:
+      operationId: getApiScimV2TenantUsers
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: filter
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: startIndex
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: count
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: query parameter filter, Invalid value for:
+            query parameter startIndex, Invalid value for: query parameter count,
+            Invalid value for: header X-API-Key, Invalid value for: header Authorization,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+    post:
+      operationId: postApiScimV2TenantUsers
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: Authorization
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '201':
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: header
+            Authorization, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          headers:
+            Content-Type:
+              required: true
+              schema:
+                type: string
+          content:
+            application/scim+json:
+              schema:
+                type: string
   /api/tenant/list:
     get:
       operationId: getApiTenantList

@@ -114,7 +114,9 @@ final class UserStore(
       plaintext: String,
       role: String,
       mustChangePassword: Option[Boolean] = None,
-      email: Option[Option[String]] = None
+      email: Option[Option[String]] = None,
+      enabled: Option[Boolean] = None,
+      insertOnly: Boolean = false
   ): UserStore.Upsert =
     require(
       tenant.forall(_.nonEmpty),
@@ -132,9 +134,10 @@ final class UserStore(
         username,
         hash,
         role,
-        enabled = None,
+        enabled = enabled,
         mustChangePassword = mustChangePassword,
-        email = email
+        email = email,
+        insertOnly = insertOnly
       )
       UserStore.Upsert(id = r.id, inserted = r.inserted)
     }

@@ -7,5 +7,8 @@ final case class RbacGroup(
     id: String,
     tenantId: String,
     name: String,
-    description: Option[String] = None
+    description: Option[String] = None,
+    // SCIM 2.0 externalId: the provisioning IdP's identifier, set only through the
+    // /api/scim surface. None = not IdP-managed.
+    externalId: Option[String] = None
 )

@@ -21,6 +21,7 @@ object EndpointModules:
     TagEndpoints,
     MaintenanceEndpoints,
     RbacEndpoints,
+    ScimEndpoints,
     TimeTravelEndpoints,
     UndropEndpoints,
     RestoreEndpoints

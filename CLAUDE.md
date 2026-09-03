@@ -143,6 +143,21 @@ The `EffectiveSet` is cached in `PoolSupervisor` with a 60s TTL keyed by `(userI
 
 Every handler in `api/{User,Role,Group,Membership,PoolPermission}Handlers.scala` calls `TenantScopeCheck.{reject,rejectForResource,rejectForUser}` before mutating. Id-only endpoints (e.g. `POST /api/role/delete {id}`) resolve the owning tenant via 5 supervisor lookup helpers (`tenantForUser`, `tenantForRole`, `tenantForGroup`, `tenantForRolePermission`, `tenantForPoolPermission`) before applying the gate. Tenant-A admin sessions get `403 tenant_forbidden` on any tenant-B resource; superuser and static-key callers bypass. Missing ids 404 (no cross-tenant existence leak via differential error codes). See `RbacTenantScopeSpec` for the 14 cases that pin the contract.
 
+### SCIM 2.0 provisioning (`/api/scim/v2/{tenant}`)
+
+`ScimEndpoints` / `ScimHandlers` (in `ondemand/api/`) serve RFC 7643/7644 Users and Groups
+over the RBAC store for IdP connectors (Okta, Entra): CRUD, `eq` filters
+(userName/externalId/displayName), pagination, PATCH (active toggle incl. Entra's string
+booleans, member add/remove/replace), plus ServiceProviderConfig/ResourceTypes/Schemas.
+Bodies are raw strings (SCIM clients send `application/scim+json`, and errors must be the
+SCIM envelope, not `ErrorResponse`). Auth: `Authorization: Bearer` (static key or PAT) is
+accepted by `apiKeyGuard` for the `/api/scim/` prefix ONLY, alongside the usual
+header/cookie. Mapping: userName=username (immutable), active=enabled, primary
+email=email (EmailPolicy applies), externalId=new `external_id` columns (Liquibase
+`0036`, written only by SCIM). The superuser realm is invisible to SCIM; passwordless
+creates get a random password (users sign in via tenant OIDC). SCIM routes are excluded
+from CLI parity (`cli/tests/test_rest_parity.py`) as machine-to-machine. See `ScimSpec`.
+
 ### Session model - JWT in HttpOnly cookie
 
 `SessionTokenStore` is a stateless JWT signer/verifier (HS256, secret from `manager.auth.management.sessionJwtSecret`). `mintWithScope` returns the compact JWT; `get` parses + verifies + reconstructs the `Session` from claims. Revocation: bounded in-process jti denylist (lost on restart; the documented trade-off for going stateless).

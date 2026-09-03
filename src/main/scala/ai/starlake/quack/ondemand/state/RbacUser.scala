@@ -19,5 +19,8 @@ final case class RbacUser(
     mustChangePassword: Boolean = false,
     email: Option[String] = None,
     createdAt: Option[Instant] = None,
-    updatedAt: Option[Instant] = None
+    updatedAt: Option[Instant] = None,
+    // SCIM 2.0 externalId: the provisioning IdP's identifier, set only through the
+    // /api/scim surface (never by REST/CLI/manifest). None = not IdP-managed.
+    externalId: Option[String] = None
 )
