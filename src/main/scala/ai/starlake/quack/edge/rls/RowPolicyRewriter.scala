@@ -6,12 +6,15 @@ import ai.starlake.quack.ondemand.state.RoleRowPolicy
 import net.sf.jsqlparser.expression.{Alias, Expression}
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.Table
+import net.sf.jsqlparser.statement.piped.FromQuery
 import net.sf.jsqlparser.statement.select.{
   AllColumns,
+  FromItem,
+  Join,
+  ParenthesedFromItem,
   ParenthesedSelect,
   PlainSelect,
-  Select,
-  SetOperationList
+  Select
 }
 
 import scala.jdk.CollectionConverters._
@@ -92,6 +95,34 @@ object RowPolicyRewriter:
         java.util.regex.Matcher.quoteReplacement(values.getOrElse(name, "NULL"))
     )
 
+  // ---- reflective descent plumbing (mirrors TableExtractorVisitor.childAccessors, which is
+  // private to the ACL parser package) ----
+
+  private val accessorCache =
+    new java.util.concurrent.ConcurrentHashMap[Class[?], Array[java.lang.reflect.Method]]()
+
+  /** The no-arg `get*` accessors of `cls` that can reach a child AST node: return type is a
+    * collection, an array, or any jsqlparser AST type outside the `net.sf.jsqlparser.parser`
+    * package (excluded so the walk never follows an upward parent link into a cycle).
+    */
+  private def childAccessors(cls: Class[?]): Array[java.lang.reflect.Method] =
+    accessorCache.computeIfAbsent(
+      cls,
+      c =>
+        c.getMethods.filter { m =>
+          val rt = m.getReturnType
+          m.getParameterCount == 0 &&
+          m.getName.startsWith("get") &&
+          (classOf[java.lang.Iterable[?]].isAssignableFrom(rt) || rt.isArray || isJsqlAstType(rt))
+        }
+    )
+
+  private def isJsqlAstType(rt: Class[?]): Boolean =
+    val n = rt.getName
+    n.startsWith("net.sf.jsqlparser.") && !n.startsWith("net.sf.jsqlparser.parser.")
+
+  private def isJsqlNode(value: AnyRef): Boolean = isJsqlAstType(value.getClass)
+
 class RowPolicyRewriter(enabled: Boolean = true):
   import RowPolicyRewriter._
 
@@ -112,7 +143,7 @@ class RowPolicyRewriter(enabled: Boolean = true):
           val values  = tokenValues(eff)
           val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
           try
-            rewriteSelect(stmt, eff, ctx, values, changed)
+            new DeepWalker(eff, ctx, values, changed).walk(stmt)
             if changed.get() then Rewritten(stmt.toString) else Passthrough
           catch
             // A predicate that fails to parse at rewrite time (should never happen - the
@@ -120,41 +151,62 @@ class RowPolicyRewriter(enabled: Boolean = true):
             case _: Throwable => Passthrough
         case Success(_) => Passthrough
 
-  // ---------- table-occurrence walk (mirrors ColumnPolicyRewriter.collectTables) ----------
+  // ---------- table-occurrence walk ----------
 
-  private def rewriteSelect(
-      sel: Select,
+  /** Depth-complete rewrite walk. Every jsqlparser node reachable from the statement is visited
+    * reflectively, and every holder that owns a from-item slot (PlainSelect, Join,
+    * ParenthesedFromItem, FromQuery) gets a matching base table in that slot wrapped. Reaching
+    * holders through their parents' accessors rather than a per-clause enumeration is what makes
+    * the walk complete: a subquery in WHERE / EXISTS / IN / select items / HAVING / ORDER BY /
+    * window clauses (or a clause type added by a future jsqlparser) arrives here without being
+    * named, so it cannot silently escape row filtering - the fail-open class the hand-rolled FROM
+    * walk this replaces had for FROM-shorthand, parenthesized joins, and every expression-position
+    * subquery. A bare Table reached from an expression is a column qualifier, never a slot, so it
+    * is left alone. Freshly built wrappers are marked visited so a wrapped table is not wrapped
+    * again (and a policy predicate's own subtree is never rewritten, preserving prior semantics).
+    */
+  private final class DeepWalker(
       eff: EffectiveSet,
       ctx: SchemaContext,
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean
-  ): Unit =
-    // CTE bodies first, so a base table inside a WITH item is filtered too.
-    Option(sel.getWithItemsList).foreach(_.asScala.foreach { wi =>
-      Option(wi.getParenthesedStatement).foreach {
-        case ps: ParenthesedSelect => rewriteSelect(ps.getSelect, eff, ctx, values, changed)
-        case _                     => ()
-      }
-    })
-    sel match
-      case ps: PlainSelect =>
-        Option(ps.getFromItem).foreach {
-          case t: Table               => ps.setFromItem(maybeWrap(t, eff, ctx, values, changed))
-          case sub: ParenthesedSelect => rewriteSelect(sub.getSelect, eff, ctx, values, changed)
-          case _                      => ()
+  ):
+    private val visited: java.util.Set[AnyRef] =
+      java.util.Collections.newSetFromMap(
+        new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
+      )
+
+    def walk(node: AnyRef): Unit =
+      if node != null && visited.add(node) then
+        node match
+          case ps: PlainSelect => wrapped(ps.getFromItem).foreach(ps.setFromItem)
+          case j: Join         => wrapped(j.getFromItem).foreach { w => j.setFromItem(w); () }
+          case pfi: ParenthesedFromItem => wrapped(pfi.getFromItem).foreach(pfi.setFromItem)
+          case fq: FromQuery => wrapped(fq.getFromItem).foreach { w => fq.setFromItem(w); () }
+          case _             => ()
+        childAccessors(node.getClass).foreach { m =>
+          try route(m.invoke(node))
+          catch case _: Throwable => ()
         }
-        Option(ps.getJoins).foreach(_.asScala.foreach { j =>
-          Option(j.getFromItem).foreach {
-            case t: Table               => j.setFromItem(maybeWrap(t, eff, ctx, values, changed))
-            case sub: ParenthesedSelect => rewriteSelect(sub.getSelect, eff, ctx, values, changed)
-            case _                      => ()
-          }
-        })
-      case ps: ParenthesedSelect => rewriteSelect(ps.getSelect, eff, ctx, values, changed)
-      case sol: SetOperationList =>
-        Option(sol.getSelects)
-          .foreach(_.asScala.foreach(rewriteSelect(_, eff, ctx, values, changed)))
-      case _ => ()
+
+    /** Some(wrapper) when the slot holds a base table matching a policy, None otherwise. */
+    private def wrapped(item: FromItem): Option[FromItem] =
+      item match
+        case t: Table =>
+          val w = maybeWrap(t, eff, ctx, values, changed)
+          if w eq t then None
+          else
+            visited.add(w): Unit
+            Some(w)
+        case _ => None
+
+    private def route(value: Any): Unit =
+      value match
+        case null                       => ()
+        case it: java.lang.Iterable[?]  => it.asScala.foreach(route)
+        case arr: Array[?]              => arr.foreach(route)
+        case n: AnyRef if isJsqlNode(n) => walk(n)
+        case _                          => ()
 
   /** If `t` matches one or more of the principal's row policies, return a parenthesed
     * `(SELECT * FROM t WHERE <ORed predicate>)` carrying t's original alias; else return `t`

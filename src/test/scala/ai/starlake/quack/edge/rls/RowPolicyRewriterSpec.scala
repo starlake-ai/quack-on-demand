@@ -9,7 +9,7 @@ import org.scalatest.matchers.should.Matchers
 class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   import RowPolicyRewriter._
 
-  private val superuser  = RbacUser(id = "u-super", tenant = None, username = "root", role = "admin")
+  private val superuser = RbacUser(id = "u-super", tenant = None, username = "root", role = "admin")
   private val tenantUser =
     RbacUser(id = "u-1", tenant = Some("acme"), username = "alice", role = "user")
 
@@ -31,11 +31,12 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     EffectiveSet(user, roles, groups, Nil, Nil, Nil, rowPolicies)
 
   private val rw  = new RowPolicyRewriter(enabled = true)
-  private val ctx = SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
+  private val ctx =
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
 
   /** Run the rewrite and echo, at info level, the original SQL, the policy predicate(s) in scope,
-    * and the resulting SQL (or the passthrough outcome). Every test routes through this so the
-    * test report shows the before/after of each case.
+    * and the resulting SQL (or the passthrough outcome). Every test routes through this so the test
+    * report shows the before/after of each case.
     */
   private def go(
       sql: String,
@@ -69,7 +70,10 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "passthrough for superusers" in {
-    go("SELECT * FROM customer", eff(superuser, List(policy("c_region = 'eu'")))) shouldBe Passthrough
+    go(
+      "SELECT * FROM customer",
+      eff(superuser, List(policy("c_region = 'eu'")))
+    ) shouldBe Passthrough
   }
 
   it should "passthrough when the user has no row policies" in {
@@ -89,14 +93,18 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "passthrough when no referenced table matches a policy" in {
-    go("SELECT * FROM orders", eff(tenantUser, List(policy("c_region = 'eu'", table = "customer")))) shouldBe
+    go(
+      "SELECT * FROM orders",
+      eff(tenantUser, List(policy("c_region = 'eu'", table = "customer")))
+    ) shouldBe
       Passthrough
   }
 
   // ---------- wrapping ----------
 
   it should "wrap a matched base table in a filtered subselect" in {
-    val sql = rewritten(go("SELECT c_id FROM customer", eff(tenantUser, List(policy("c_region = 'eu'")))))
+    val sql =
+      rewritten(go("SELECT c_id FROM customer", eff(tenantUser, List(policy("c_region = 'eu'")))))
     sql should include("select * from customer where")
     sql should include("c_region = 'eu'")
   }
@@ -134,28 +142,36 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "preserve the caller's table alias" in {
-    val sql = rewritten(go("SELECT c.c_id FROM customer c", eff(tenantUser, List(policy("c_region = 'eu'")))))
+    val sql = rewritten(
+      go("SELECT c.c_id FROM customer c", eff(tenantUser, List(policy("c_region = 'eu'"))))
+    )
     // outer reference c.c_id must still resolve -> wrapper carries alias `c`
     sql should include("c_id")
     sql.replaceAll("\\s+", " ") should (include(") as c") or include(") c"))
   }
 
   it should "substitute the ${user} identity token with a quoted literal" in {
-    val sql = rewritten(go("SELECT * FROM customer", eff(tenantUser, List(policy("c_owner = ${user}")))))
+    val sql =
+      rewritten(go("SELECT * FROM customer", eff(tenantUser, List(policy("c_owner = ${user}")))))
     sql should include("c_owner = 'alice'")
   }
 
   it should "expand a ${groups} list token for an IN predicate" in {
     val groups = List(RbacGroup("g-1", "acme", "sales"), RbacGroup("g-2", "acme", "eng"))
-    val sql = rewritten(
-      go("SELECT * FROM customer", eff(tenantUser, List(policy("c_dept IN (${groups})")), groups = groups))
+    val sql    = rewritten(
+      go(
+        "SELECT * FROM customer",
+        eff(tenantUser, List(policy("c_dept IN (${groups})")), groups = groups)
+      )
     )
     sql should include("'sales'")
     sql should include("'eng'")
   }
 
   it should "collapse an empty ${groups} list to NULL (matches no rows)" in {
-    val sql = rewritten(go("SELECT * FROM customer", eff(tenantUser, List(policy("c_dept IN (${groups})")))))
+    val sql = rewritten(
+      go("SELECT * FROM customer", eff(tenantUser, List(policy("c_dept IN (${groups})"))))
+    )
     sql.replaceAll("\\s+", " ") should include("in (null)")
   }
 
@@ -172,7 +188,10 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
 
   it should "match a wildcard-table policy against any table" in {
     val sql = rewritten(
-      go("SELECT * FROM orders", eff(tenantUser, List(policy("tenant_id = ${tenantId}", table = "*"))))
+      go(
+        "SELECT * FROM orders",
+        eff(tenantUser, List(policy("tenant_id = ${tenantId}", table = "*")))
+      )
     )
     sql should include("select * from orders where")
     sql should include("tenant_id = 'acme'")
@@ -194,6 +213,68 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     val odd = RbacUser(id = "u-2", tenant = Some("acme"), username = "o'brien", role = "user")
     val sql = rewritten(go("SELECT * FROM customer", eff(odd, List(policy("c_owner = ${user}")))))
     sql should include("'o''brien'")
+  }
+
+  // ---------- walk completeness: shapes that used to pass through unfiltered ----------
+  //
+  // Every case below is a SELECT that reads a row-filtered table through a node shape the
+  // hand-rolled FROM walk did not reach (deep-review C2/C3). Each must come back Rewritten
+  // with the predicate applied, never Passthrough.
+
+  it should "wrap the table in DuckDB FROM-first shorthand" in {
+    val sql = rewritten(go("FROM customer", eff(tenantUser, List(policy("c_region = 'eu'")))))
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "wrap a table inside a parenthesized join" in {
+    val sql = rewritten(
+      go(
+        "SELECT * FROM (customer c JOIN orders o ON c.c_id = o.c_id)",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "wrap a table read by a scalar subquery in the projection" in {
+    val sql = rewritten(
+      go(
+        "SELECT (SELECT max(c_id) FROM customer)",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "wrap a table inside a WHERE EXISTS subquery" in {
+    val sql = rewritten(
+      go(
+        "SELECT * FROM orders o WHERE EXISTS (SELECT 1 FROM customer c WHERE c.c_id = o.c_id)",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "wrap a table inside a WHERE IN subquery" in {
+    val sql = rewritten(
+      go(
+        "SELECT * FROM orders WHERE o_custkey IN (SELECT c_id FROM customer)",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
+  }
+
+  it should "wrap a table inside a HAVING subquery" in {
+    val sql = rewritten(
+      go(
+        "SELECT o_year, count(*) FROM orders GROUP BY o_year " +
+          "HAVING count(*) > (SELECT max(c_id) FROM customer)",
+        eff(tenantUser, List(policy("c_region = 'eu'")))
+      )
+    )
+    sql should include("c_region = 'eu'")
   }
 
   // -------- system-schema metadata queries (FlightSQL GetDbSchemas and catalog browsing) --------
