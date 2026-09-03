@@ -159,13 +159,24 @@ class DatabaseAuthenticator(
                     tenant = scope.tenantId
                   )
                 )
-          else Left(AuthFailure.InvalidCredentials("User not found"))
+          else
+            // Unknown username: burn the same bcrypt verify as a live row and answer with the
+            // exact same failure as a wrong password. Message AND timing must not distinguish
+            // the two, or the public login becomes an account-existence oracle (which also
+            // feeds targeted lockout DoS). The real reason is only visible in the manager log.
+            BCrypt
+              .verifyer()
+              .verify(password.toCharArray, ai.starlake.quack.ondemand.state.UserStore.DummyHash)
+            logger.info(s"login rejected for '$username': user not found")
+            Left(AuthFailure.InvalidCredentials("Invalid password"))
         finally ps.close()
       finally conn.close()
     catch
       case e: Exception =>
+        // Full detail stays in the log; the unauthenticated caller gets a generic message
+        // (driver exception text can carry host/port or SQL fragments).
         logger.error(s"Database authentication error for '$username': ${e.getMessage}", e)
-        Left(AuthFailure.InvalidCredentials(s"Database error: ${e.getMessage}"))
+        Left(AuthFailure.InvalidCredentials("Database error"))
 
   override def close(): Unit =
     dataSource.close()

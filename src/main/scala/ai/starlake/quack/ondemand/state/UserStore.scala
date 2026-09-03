@@ -530,7 +530,9 @@ object UserStore:
 
   // Burned on the row-miss path so a missing/disabled account costs the same bcrypt verify
   // as a wrong password on a live one -- response latency must not become an existence oracle.
-  private val DummyHash = BCrypt.withDefaults().hashToString(12, "qod-dummy".toCharArray)
+  // private[quack]: DatabaseAuthenticator burns the SAME constant on its user-not-found arm;
+  // a second definition would invite the two drifting to different cost factors.
+  private[quack] val DummyHash = BCrypt.withDefaults().hashToString(12, "qod-dummy".toCharArray)
 
   /** Build a store from the global `defaultMetastore` map. Same shape as
     * `PostgresStateStore.fromDefaultMetastore` so the user table lives next to the state table by

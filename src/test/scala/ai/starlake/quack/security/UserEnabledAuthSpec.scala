@@ -111,6 +111,42 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       finally auth.close()
     }
 
+  it should "reject an unknown username with the exact same error as a wrong password (no enumeration oracle)" in
+    withFreshDb { (store, url) =>
+      // Deep-review H5: the not-found arm answered "User not found" while a wrong password
+      // answered "Invalid password", and both strings are surfaced verbatim by the REST 401
+      // body and the FlightSQL UNAUTHENTICATED description - a public account-existence
+      // oracle that also feeds targeted lockout DoS. The two failures must be
+      // indistinguishable on the wire.
+      store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
+      val auth = new DatabaseAuthenticator(authConfig(url), roleClaim = "role")
+      try
+        val missing = auth.authenticate(AuthScope.System, "ghost", "whatever")
+        val wrongPw = auth.authenticate(AuthScope.System, "root", "wrong-password")
+        missing.isLeft shouldBe true
+        missing shouldBe wrongPw
+      finally auth.close()
+    }
+
+  it should "not leak database exception detail to the caller" in
+    withFreshDb { (store, url) =>
+      // A broken custom query (or an unreachable control-plane Postgres) used to surface the
+      // raw JDBC exception text to the unauthenticated caller.
+      val auth = new DatabaseAuthenticator(
+        authConfig(url, systemQuery = "SELECT nope FROM qodstate_missing WHERE username = ?"),
+        roleClaim = "role"
+      )
+      try
+        val r = auth.authenticate(AuthScope.System, "root", "pw")
+        r.isLeft shouldBe true
+        r.left.toOption.get match
+          case ai.starlake.quack.edge.auth.AuthFailure.InvalidCredentials(msg) =>
+            msg should not include "qodstate_missing"
+            msg.toLowerCase should not include "relation"
+          case other => fail(s"expected InvalidCredentials, got $other")
+      finally auth.close()
+    }
+
   it should "reject authentication when a legacy custom query does not project the enabled column" in
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
