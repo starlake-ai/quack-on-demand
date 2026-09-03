@@ -77,9 +77,23 @@ statement: `resumePool(key, "query")` then a bounded poll
 until a routable node appears, else a retryable "pool is resuming"
 UNAVAILABLE. REST: `POST /api/pool/suspend`, `POST /api/pool/resume`,
 `startSuspended` on create. SPI: `PoolSuspended` / `PoolResumed` events with
-reason `rest | query | module`; idle-detection policy lives in the hosted
-module, never in core. See
+reason `rest | query | module | idle`. See
 docs/superpowers/specs/2026-07-18-pool-suspend-resume-design.md.
+
+**Idle hibernation (core, ported from the hosted module).** A leader-gated sweep
+(`HibernationWiring` in `boot/`, config `quack-on-demand.hibernation`, envs
+`QOD_HIBERNATE_ENABLED` / `QOD_HIBERNATE_SWEEP_SEC` / `QOD_HIBERNATE_IDLE_MIN`)
+suspends a running pool once it has served no statements for its idle window,
+with reason `idle`. Participation is per-pool opt-in via `Pool.idleTimeoutSec`
+(0 = explicit opt-out, floor 5 min) unless `defaultIdleMinutes > 0` sets a
+manager-wide default, so the sweep is inert on a fresh install, like autoscale
+without a band. Signal: `PoolActivity` (in `route/`) records StatementExecuted
+(router sink) and PoolResumed (supervisor sink) timestamps, flushed
+GREATEST-upsert by every replica to `qodstate_pool_activity` (Liquibase `0035`);
+the decision core (`ondemand/hibernate/Hibernation.candidates`) is pure, with a
+leader-local first-seen baseline so never-queried pools hibernate too. With
+`enabled=false` Main does not wire `PoolActivity.sink` at all (the sweep's flush
+is its sole drainer, same invariant as `PoolLoadStats`).
 
 ### Demand scale-out (owner-declared band)
 

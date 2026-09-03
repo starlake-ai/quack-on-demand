@@ -1462,6 +1462,10 @@ final class PoolSupervisor(
       // Owner-declared scale-out band, persisted at create time. Both None = fixed size.
       minNodes: Option[Int] = None,
       maxNodes: Option[Int] = None,
+      // Per-pool hibernation window in seconds, persisted at create time. None = inherit the
+      // manager-wide default; 0 = explicit opt-out; positive = idle window (5-minute floor
+      // applied by the sweep).
+      idleTimeoutSec: Option[Int] = None,
       gateBypass: Boolean = false
   ): IO[List[RunningNode]] =
     gateCheck(
@@ -1553,7 +1557,8 @@ final class PoolSupervisor(
                   podTemplateYaml = podTemplateYaml,
                   lockdown = lockdown,
                   minNodes = minNodes,
-                  maxNodes = maxNodes
+                  maxNodes = maxNodes,
+                  idleTimeoutSec = idleTimeoutSec
                 )
                 IO.blocking(store.upsertPool(poolEntity)) *> IO.delay {
                   poolRows.put(poolEntity.id, poolEntity)
@@ -1654,6 +1659,13 @@ final class PoolSupervisor(
     */
   def autoscaleBand(key: PoolKey): Option[(Int, Int)] =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(p => p.minNodes.zip(p.maxNodes))
+
+  /** The pool's hibernation override, resolved from the persisted row (stays out of PoolState on
+    * purpose, like the band). None = pool unknown OR no override; 0 = explicit opt-out; a positive
+    * value is the pool's idle window in seconds (see HibernationWiringSupport.idleFor).
+    */
+  def idleTimeoutSec(key: PoolKey): Option[Int] =
+    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.idleTimeoutSec)
 
   /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
     * lock), mirroring [[setPoolLockdown]]. Does NOT validate the band shape (min < max, size inside

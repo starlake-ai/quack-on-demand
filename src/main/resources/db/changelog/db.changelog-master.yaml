@@ -73,3 +73,5 @@ databaseChangeLog:
       file: db/changelog/0033-pat-scope.yaml
   - include:
       file: db/changelog/0034-pat-attribution.yaml
+  - include:
+      file: db/changelog/0035-pool-activity.yaml

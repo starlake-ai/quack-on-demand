@@ -548,6 +548,7 @@ final case class ManagerConfig(
     catalog: CatalogConfig = CatalogConfig(),
     routing: RoutingConfig = RoutingConfig(),
     autoscale: AutoscaleConfig = AutoscaleConfig(),
+    hibernation: HibernationConfig = HibernationConfig(),
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
@@ -675,6 +676,40 @@ final case class AutoscaleConfig(
   require(hardCap >= 1, "autoscale: hardCap must be >= 1")
   def sweepInterval: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(math.max(30, sweepSeconds)).seconds
+
+/** Idle-pool hibernation: the leader suspends a running pool once it has served no statements for
+  * its idle window; the FlightSQL edge wakes it on the next statement. Participation is per-pool
+  * opt-in via `Pool.idleTimeoutSec` unless `defaultIdleMinutes > 0` sets a manager-wide default
+  * (`idleTimeoutSec = 0` still opts a pool out), so the sweep is inert on a fresh install, like
+  * autoscale without a band. Policy ported from the hosted module.
+  */
+final case class HibernationConfig(
+    @field @ConfigField(
+      envVar = "QOD_HIBERNATE_ENABLED",
+      description = "Global kill switch for the idle-pool hibernation sweep."
+    )
+    enabled: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_HIBERNATE_SWEEP_SEC",
+      description = "Sweep interval in seconds; clamped to a 60s floor."
+    )
+    sweepSeconds: Int = 300,
+    @field @ConfigField(
+      envVar = "QOD_HIBERNATE_IDLE_MIN",
+      description =
+        "Manager-wide default idle minutes before a running pool is suspended. 0 (the default) " +
+          "means hibernation is per-pool opt-in via idleTimeoutSec. Clamped to a 5-minute floor: " +
+          "activity timestamps lag by up to one sweep interval."
+    )
+    defaultIdleMinutes: Int = 0
+):
+  require(defaultIdleMinutes >= 0, "hibernation: defaultIdleMinutes must be >= 0")
+  def sweepInterval: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(math.max(60, sweepSeconds)).seconds
+  def defaultIdle: Option[scala.concurrent.duration.FiniteDuration] =
+    Option.when(defaultIdleMinutes > 0)(
+      scala.concurrent.duration.DurationInt(math.max(5, defaultIdleMinutes)).minutes
+    )
 
 /** Managed object storage: one operator root bucket, one prefix per tenant-db incarnation. Fills
   * the database's objectStore from these credentials at managed create; a background worker purges

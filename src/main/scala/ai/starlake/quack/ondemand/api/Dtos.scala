@@ -46,6 +46,9 @@ final case class CreatePoolRequest(
     pool: String,
     size: Int,
     roleDistribution: RoleDistribution,
+    // Hibernation window in seconds: -1 (default) inherits the manager-wide
+    // quack-on-demand.hibernation default, 0 opts this pool out, a positive value
+    // sets its idle window (5-minute floor applied by the sweep).
     idleTimeoutSec: Int = -1,
     maxConcurrentPerNode: Int = 0,
     // Optional placement plan. When empty, the supervisor schedules

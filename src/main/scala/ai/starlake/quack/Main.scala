@@ -349,7 +349,17 @@ object Main extends IOApp with LazyLogging:
     // StatementExecuted events; drained (and flushed to Postgres) by AutoscaleWiring
     // on every replica, since each edge only sees the statements it served.
     val poolLoadStats = new ai.starlake.quack.route.PoolLoadStats()
-    val sup           = new PoolSupervisor(
+    // Per-pool last-activity timestamps for the hibernation sweep. Fed from the
+    // router's StatementExecuted events AND the supervisor's PoolResumed events;
+    // drained (and flushed to Postgres) by HibernationWiring on every replica.
+    // Invariant: its sink is ONLY wired when the hibernation sweep runs, because
+    // that sweep's flush is its sole drainer.
+    val poolActivity = new ai.starlake.quack.route.PoolActivity()
+    val supEvents    =
+      if mgrCfg.hibernation.enabled then
+        ai.starlake.quack.spi.ManagerEventSink.fanout(poolActivity.sink, moduleEventBus.sink)
+      else moduleEventBus.sink
+    val sup = new PoolSupervisor(
       backend,
       tracker,
       store,
@@ -361,7 +371,7 @@ object Main extends IOApp with LazyLogging:
       onPoolTeardown = key => { placementDirectory.clear(key); localityTracker.clear(key) },
       locks = poolLocks,
       publish = publisher,
-      events = moduleEventBus.sink,
+      events = supEvents,
       lockdownEnabled = lockdownCfg.enabled,
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
     )
@@ -783,15 +793,20 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
-        // The load-stats sink goes FIRST: fanout has no error isolation, so a module
-        // sink that throws must not be able to starve the autoscale demand signal.
-        // Invariant: poolLoadStats.sink is ONLY wired when the autoscale sweep runs,
-        // because that sweep is its sole drainer -- feeding it with autoscale disabled
-        // would grow the per-(pool, minute) bucket map without bound.
-        events =
-          if mgrCfg.autoscale.enabled then
-            ai.starlake.quack.spi.ManagerEventSink.fanout(poolLoadStats.sink, moduleEventBus.sink)
-          else moduleEventBus.sink,
+        // The in-process sinks go FIRST: fanout has no error isolation, so a module
+        // sink that throws must not be able to starve the autoscale demand signal or
+        // the hibernation activity signal. Invariant: each of poolLoadStats.sink and
+        // poolActivity.sink is ONLY wired when its sweep runs, because that sweep is
+        // its sole drainer -- feeding either with its sweep disabled would grow the
+        // in-memory map without bound.
+        events = {
+          val sweepsFed = List(
+            Option.when(mgrCfg.autoscale.enabled)(poolLoadStats.sink),
+            Option.when(mgrCfg.hibernation.enabled)(poolActivity.sink)
+          ).flatten
+          if sweepsFed.isEmpty then moduleEventBus.sink
+          else ai.starlake.quack.spi.ManagerEventSink.fanout((sweepsFed :+ moduleEventBus.sink)*)
+        },
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
         lockdownFor = sup.effectiveLockdown,
@@ -1378,6 +1393,36 @@ object Main extends IOApp with LazyLogging:
                 )
                 val autoscaleFiber = autoscaleWiring.fiber
 
+                val hibernationWiring = new ai.starlake.quack.boot.HibernationWiring(
+                  cfg = mgrCfg.hibernation,
+                  views = () =>
+                    ai.starlake.quack.boot.HibernationWiringSupport
+                      .views(sup, mgrCfg.hibernation),
+                  activityByKey =
+                    () => ai.starlake.quack.boot.HibernationWiringSupport.activityByKey(sup, store),
+                  flushLocal = () =>
+                    poolActivity.drain().foreach { case (key, atMs) =>
+                      sup
+                        .poolId(key)
+                        .foreach(id =>
+                          store.upsertPoolActivity(id, java.time.Instant.ofEpochMilli(atMs))
+                        )
+                    },
+                  purge = () =>
+                    store.purgePoolActivity(
+                      java.time.Instant.now().minusSeconds(30L * 24 * 3600)
+                    ): Unit,
+                  suspend = key =>
+                    sup.suspendPool(key, "idle").attempt.map {
+                      case Right(Right(_)) => Right(())
+                      case Right(Left(e))  => Left(e.toString)
+                      case Left(t)         => Left(Option(t.getMessage).getOrElse(t.toString))
+                    },
+                  isLeader = () => coordinator.forall(_.isLeader),
+                  audit = auditRecorder
+                )
+                val hibernationFiber = hibernationWiring.fiber
+
                 // Managed-object-store purge worker: deletes the objects under a
                 // tombstoned tenant-db prefix once its retention window has passed.
                 val managedStoreWiring = new ai.starlake.quack.boot.ManagedStoreWiring(
@@ -1457,20 +1502,23 @@ object Main extends IOApp with LazyLogging:
                               maintenanceSchedulerFiber.flatMap { msFiber =>
                                 maintenanceDrainFiber.flatMap { mdFiber =>
                                   autoscaleFiber.flatMap { asFiber =>
-                                    managedPurgeFiber.flatMap { mpFiber =>
-                                      moduleDispatcherFibers.flatMap { modDispFibers =>
-                                        moduleSingletonFibers.flatMap { modSingFibers =>
-                                          IO.never[Unit]
-                                            .guarantee(
-                                              fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                                hrFiber.cancel *> jFiber.cancel *> pFiber.cancel *>
-                                                rlFiber.cancel *> msFiber.cancel *>
-                                                mdFiber.cancel *> asFiber.cancel *>
-                                                mpFiber.cancel *>
-                                                modDispFibers.traverse_(_.cancel) *>
-                                                modSingFibers.traverse_(_.cancel) *>
-                                                gracefulShutdown
-                                            )
+                                    hibernationFiber.flatMap { hbFiber =>
+                                      managedPurgeFiber.flatMap { mpFiber =>
+                                        moduleDispatcherFibers.flatMap { modDispFibers =>
+                                          moduleSingletonFibers.flatMap { modSingFibers =>
+                                            IO.never[Unit]
+                                              .guarantee(
+                                                fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                                  hrFiber.cancel *> jFiber.cancel *>
+                                                  pFiber.cancel *>
+                                                  rlFiber.cancel *> msFiber.cancel *>
+                                                  mdFiber.cancel *> asFiber.cancel *>
+                                                  hbFiber.cancel *> mpFiber.cancel *>
+                                                  modDispFibers.traverse_(_.cancel) *>
+                                                  modSingFibers.traverse_(_.cancel) *>
+                                                  gracefulShutdown
+                                              )
+                                          }
                                         }
                                       }
                                     }

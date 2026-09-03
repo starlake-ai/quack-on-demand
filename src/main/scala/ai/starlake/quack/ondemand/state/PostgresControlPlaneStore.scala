@@ -412,6 +412,43 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def upsertPoolActivity(poolId: String, lastStatementAt: java.time.Instant): Unit = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_pool_activity (pool_id, last_statement_at)
+          |VALUES (?, ?)
+          |ON CONFLICT (pool_id) DO UPDATE SET
+          |  last_statement_at =
+          |    GREATEST(qodstate_pool_activity.last_statement_at, EXCLUDED.last_statement_at)""".stripMargin
+    )
+    try
+      ps.setString(1, poolId)
+      ps.setTimestamp(2, Timestamp.from(lastStatementAt))
+      ps.executeUpdate()
+      ()
+    finally ps.close()
+  }
+
+  def poolActivity(): Map[String, java.time.Instant] = withConn { c =>
+    val ps = c.prepareStatement("SELECT pool_id, last_statement_at FROM qodstate_pool_activity")
+    try
+      val rs = ps.executeQuery()
+      try
+        val out = Map.newBuilder[String, java.time.Instant]
+        while rs.next() do
+          out += rs.getString("pool_id") -> rs.getTimestamp("last_statement_at").toInstant
+        out.result()
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def purgePoolActivity(olderThan: java.time.Instant): Int = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_pool_activity WHERE last_statement_at < ?")
+    try
+      ps.setTimestamp(1, Timestamp.from(olderThan))
+      ps.executeUpdate()
+    finally ps.close()
+  }
+
   // ---------------- Node ----------------
 
   def upsertNode(n: RunningNode, poolId: String): Unit = withConn { c =>

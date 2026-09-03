@@ -95,6 +95,23 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     victims.foreach(poolLoad.remove)
     victims.size
 
+  // ---------------- Pool activity (hibernation freshness) ----------------
+  private val activity = scala.collection.concurrent.TrieMap.empty[String, Instant]
+
+  def upsertPoolActivity(poolId: String, lastStatementAt: Instant): Unit =
+    activity.updateWith(poolId) {
+      case Some(prev) if prev.isAfter(lastStatementAt) => Some(prev)
+      case _                                           => Some(lastStatementAt)
+    }
+    ()
+
+  def poolActivity(): Map[String, Instant] = activity.toMap
+
+  def purgePoolActivity(olderThan: Instant): Int =
+    val victims = activity.filter(_._2.isBefore(olderThan)).keys.toList
+    victims.foreach(activity.remove)
+    victims.size
+
   // node_id -> pool_id index (matches the Postgres FK shape).
   private val nodeIndex = TrieMap.empty[String, String]
 

@@ -63,6 +63,22 @@ trait ControlPlaneStore:
   /** Delete every bucket older than `olderThan`. Returns the number of rows removed. */
   def purgePoolLoad(olderThan: java.time.Instant): Int
 
+  /** Advance the pool's last-activity timestamp, never moving it backwards (GREATEST upsert):
+    * replicas flush independently and a re-flush of an old value must not shrink the idle window.
+    * Feeds the hibernation sweep.
+    */
+  def upsertPoolActivity(poolId: String, lastStatementAt: java.time.Instant): Unit
+
+  /** Every pool's last-activity timestamp. Rows of deleted pools may linger until purged; the sweep
+    * ignores them by joining through the live registry.
+    */
+  def poolActivity(): Map[String, java.time.Instant]
+
+  /** Delete activity rows older than `olderThan` (a pool silent that long is either suspended
+    * already or gone). Returns the number of rows removed.
+    */
+  def purgePoolActivity(olderThan: java.time.Instant): Int
+
   // ---------------- Managed prefix (tombstone registry) ------------------
   // Tombstones a data-path prefix carved out of the shared managed object
   // store for a tenant-db. `insertManagedPrefix` runs at tenant-db create

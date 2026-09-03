@@ -265,6 +265,9 @@ final class PoolHandlers(
                       lockdown = lockdownValue,
                       minNodes = req.minNodes,
                       maxNodes = req.maxNodes,
+                      // -1 is the DTO's "not provided" sentinel: inherit the manager-wide
+                      // hibernation default. 0 opts the pool out; positive sets its window.
+                      idleTimeoutSec = Some(req.idleTimeoutSec).filter(_ >= 0),
                       gateBypass = gateBypass
                     )
                     .map(_ =>

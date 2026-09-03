@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0035-qodstate-pool-activity
+      author: quack-on-demand
+      changes:
+        # Per-pool last-statement timestamp feeding the hibernation sweep. Written
+        # GREATEST-upsert by every replica (each edge only sees its own statements);
+        # read whole by the HA leader; purged after 30 days of silence. No FK to
+        # qodstate_pool: rows of a deleted pool are ignored by the sweep (it joins
+        # through the live registry) and age out via the purge.
+        - createTable:
+            tableName: qodstate_pool_activity
+            columns:
+              - column:
+                  name: pool_id
+                  type: TEXT
+                  constraints: { primaryKey: true, nullable: false }
+              - column:
+                  name: last_statement_at
+                  type: TIMESTAMPTZ
+                  constraints: { nullable: false }
