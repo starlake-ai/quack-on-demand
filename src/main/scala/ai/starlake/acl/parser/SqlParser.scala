@@ -228,16 +228,14 @@ object SqlParser:
         val accesses                  = qualifiedTables.map(t => TableAccess(t, Verb.Read)).toSet
         StatementResult.Extracted(index, snippet, accesses, errors, extraction.unsupported)
 
-      // parser-3: INSERT
+      // parser-3: INSERT. The statement-level WITH clause lives on the Insert node,
+      // not on its inner Select, so it must be walked here or a CTE body could
+      // launder a read of any table behind a CTE named after a granted table.
       case ins: Insert =>
-        targetPlusReads(
-          index,
-          snippet,
-          ins.getTable,
-          selectReads(Option(ins.getSelect)),
-          Verb.Write,
-          config
-        )
+        val v = new TableExtractorVisitor()
+        v.processWithItems(ins.getWithItemsList)
+        Option(ins.getSelect).foreach(v.process)
+        targetPlusReads(index, snippet, ins.getTable, v.result, Verb.Write, config)
 
       // parser-4: UPDATE
       case upd: Update =>
@@ -264,6 +262,8 @@ object SqlParser:
       // parser-6: MERGE
       case mrg: Merge =>
         val v = new TableExtractorVisitor()
+        // Statement-level WITH first, so USING <cte> resolves as the CTE it names.
+        v.processWithItems(mrg.getWithItemsList)
         Option(mrg.getFromItem).foreach(v.visitFromItem)
         // WHEN MATCHED THEN UPDATE SET c = (SELECT ...) and WHEN NOT MATCHED
         // INSERT ... VALUES (SELECT ...) can smuggle read sources past the gate.

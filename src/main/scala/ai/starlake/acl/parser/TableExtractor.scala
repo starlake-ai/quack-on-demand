@@ -52,21 +52,29 @@ private[parser] class TableExtractorVisitor:
   def result: TableExtraction = TableExtraction(tables.toList, unsupported.toList)
 
   def process(select: Select): Unit =
-    // Collect CTE names first (from WITH clause)
-    val withItems = select.getWithItemsList
+    processWithItems(select.getWithItemsList)
+    // Visit the main select body
+    visitSelect(select)
+
+  /** Register a WITH clause's CTE names (so unqualified self-references are not extracted as base
+    * tables) and walk each CTE body for read sources. Also the entry point for the STATEMENT-level
+    * WITH of INSERT/UPDATE/DELETE/MERGE: those clauses live on the DML node, not on its inner
+    * Select, so without this call a CTE body could launder a read of any table behind a CTE named
+    * after a table the caller holds a grant on.
+    */
+  private[parser] def processWithItems(
+      withItems: java.util.List[net.sf.jsqlparser.statement.select.WithItem[?]]
+  ): Unit =
     if withItems != null then
+      // Collect CTE names first, so a CTE body referencing a later CTE is not extracted either.
       withItems.asScala.foreach { wi =>
         val aliasName = wi.getUnquotedAliasName
         if aliasName != null then cteNames += aliasName.toLowerCase
       }
-      // Then visit CTE bodies
       withItems.asScala.foreach { wi =>
         val cteSelect = wi.getSelect
         if cteSelect != null then visitSelect(cteSelect)
       }
-
-    // Visit the main select body
-    visitSelect(select)
 
   private def visitSelect(select: Select): Unit =
     if select != null && visited.add(select) then

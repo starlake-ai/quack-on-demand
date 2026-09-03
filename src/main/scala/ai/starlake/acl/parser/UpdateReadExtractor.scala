@@ -11,6 +11,9 @@ import scala.jdk.CollectionConverters.*
 object UpdateReadExtractor:
   def extract(upd: Update): TableExtraction =
     val v = new TableExtractorVisitor()
+    // Statement-level WITH first: CTE bodies are read sources, and later unqualified
+    // references to a CTE name must not extract as base tables.
+    v.processWithItems(upd.getWithItemsList)
     // SET-clause value subqueries: UPDATE t SET c = (SELECT ... FROM secret)
     Option(upd.getUpdateSets).foreach(_.asScala.foreach { us =>
       Option(us.getValues).foreach(v.visitExpression)

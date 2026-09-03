@@ -90,6 +90,55 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
     ) shouldBe true
   }
 
+  // --- 3f: top-level WITH on DML statements is walked (CTE bodies are read sources,
+  //         and an unqualified CTE reference does not launder as a base-table read) ---
+
+  test("WITH-prefixed INSERT extracts the CTE body read source") {
+    val sql =
+      "WITH mine AS (SELECT * FROM db.main.secret) INSERT INTO mine SELECT * FROM mine"
+    val accesses = extracted(sql).accesses
+    accesses.exists(a =>
+      a.table == TableRef("db", "main", "secret") && a.verb == Verb.Read
+    ) shouldBe true
+    accesses.exists(a =>
+      a.table == TableRef("db", "main", "mine") && a.verb == Verb.Write
+    ) shouldBe true
+  }
+
+  test("WITH-prefixed UPDATE extracts the CTE body read source") {
+    val sql =
+      "WITH s AS (SELECT id FROM db.main.secret) " +
+        "UPDATE db.main.t SET c = 1 WHERE id IN (SELECT id FROM s)"
+    val accesses = extracted(sql).accesses
+    accesses.exists(a =>
+      a.table == TableRef("db", "main", "secret") && a.verb == Verb.Read
+    ) shouldBe true
+    // the unqualified `s` in the IN subquery names the CTE, not a base table
+    accesses.map(_.table) should not contain TableRef("db", "main", "s")
+  }
+
+  test("WITH-prefixed DELETE extracts the CTE body read source") {
+    val sql =
+      "WITH s AS (SELECT id FROM db.main.secret) " +
+        "DELETE FROM db.main.t WHERE id IN (SELECT id FROM s)"
+    val accesses = extracted(sql).accesses
+    accesses.exists(a =>
+      a.table == TableRef("db", "main", "secret") && a.verb == Verb.Read
+    ) shouldBe true
+    accesses.map(_.table) should not contain TableRef("db", "main", "s")
+  }
+
+  test("WITH-prefixed MERGE extracts the CTE body read source, not the CTE name") {
+    val sql =
+      "WITH s AS (SELECT * FROM db.main.secret) " +
+        "MERGE INTO db.main.t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET c = s.c"
+    val accesses = extracted(sql).accesses
+    accesses.exists(a =>
+      a.table == TableRef("db", "main", "secret") && a.verb == Verb.Read
+    ) shouldBe true
+    accesses.map(_.table) should not contain TableRef("db", "main", "s")
+  }
+
   // --- 4: EXPLAIN ANALYZE <dml> is classified by its inner statement ---
 
   test("EXPLAIN ANALYZE DELETE is authorized as the DELETE it executes") {

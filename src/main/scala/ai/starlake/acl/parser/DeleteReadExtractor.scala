@@ -11,6 +11,9 @@ import scala.jdk.CollectionConverters.*
 object DeleteReadExtractor:
   def extract(del: Delete): TableExtraction =
     val v = new TableExtractorVisitor()
+    // Statement-level WITH first: CTE bodies are read sources, and later unqualified
+    // references to a CTE name must not extract as base tables.
+    v.processWithItems(del.getWithItemsList)
     // WHERE clause sub-queries
     val where = del.getWhere
     if where != null then v.visitExpression(where)
