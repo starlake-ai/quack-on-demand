@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.7.2
+
+- **Security: six SQL-authorization bypasses closed after a deep code review.**
+  A whole-codebase review found and this release fixes, each with pinning
+  tests: (1) a WITH-prefixed INSERT/UPDATE/DELETE/MERGE could launder a read
+  of any table through a CTE named after a granted table - the ACL parser now
+  walks statement-level WITH clauses; (2) the row-level-security rewriter
+  passed DuckDB `FROM t` shorthand, parenthesized joins, and every
+  expression-position subquery (EXISTS / IN / scalar / HAVING) through
+  unfiltered - the walk is now depth-complete; (3) WITH-prefixed DML and
+  `EXPLAIN ANALYZE <dml>` were classified as reads, skipping the
+  protected-write guard, RLS/CLS rewriting, write audit, and writer routing -
+  the classifier now resolves the statement's real verb; (4) lockdown pools
+  admitted local-file replacement scans through dollar-quoted (`$$...$$`) and
+  escape-string (`e'...'`) literals in FROM position - both now deny unless
+  provably remote; (5) the login endpoint distinguished "User not found" from
+  "Invalid password" in both message and timing, an account-enumeration oracle
+  that also enabled targeted lockout denial-of-service - the two failures are
+  now indistinguishable on the wire, and raw JDBC error text no longer reaches
+  unauthenticated callers; (6) a tenant admin who pointed their tenant's OIDC
+  at an IdP they control could mint a token carrying the seeded superuser's
+  username and obtain an unrestricted data-plane session bypassing ACL,
+  RLS/CLS, and lockdown - a credential validated in a tenant realm can no
+  longer bind to a superuser row. Multi-tenant deployments should upgrade.
+  Module authors: `PoolSupervisor.authorizeHandshake` gained a defaulted
+  parameter (source-compatible, binary-incompatible) - recompile modules
+  against this core.
+
+- **SCIM 2.0 provisioning.** `/api/scim/v2/{tenant}` serves RFC 7643/7644
+  Users and Groups over the RBAC store for IdP connectors (Okta, Entra):
+  CRUD, `eq` filters, pagination, PATCH (active toggle, member ops), and the
+  discovery endpoints. `Authorization: Bearer` (static key or PAT) is accepted
+  on the SCIM prefix only. The superuser realm is invisible to SCIM.
+
+- **Idle hibernation in core.** A leader-gated sweep
+  (`quack-on-demand.hibernation`, `QOD_HIBERNATE_*`) suspends a pool that has
+  served no statements for its idle window, with per-pool opt-in via
+  `Pool.idleTimeoutSec` (or a manager-wide `defaultIdleMinutes`). Inert on a
+  fresh install; the FlightSQL edge still wakes a suspended pool on the first
+  statement.
+
+- **Scoped personal access tokens.** A PAT can now carry a restriction
+  (pools, statement kinds, row caps, timeout) that attenuates the owner's
+  effective set without ever widening it; tokens record their parent chain
+  and revocation cascades to children. `qod pat create` grows the matching
+  scope flags, the profile UI shows the full scope on hover, and audit
+  records resolve PAT bearers to their owning principal.
+
+- **Lockdown pools also deny resource settings.** `SET`/`RESET`/`PRAGMA` on
+  `memory_limit`, `max_memory`, `threads`, `worker_threads`, and
+  `max_temp_directory_size` are refused for non-superusers on lockdown pools,
+  closing a resource-abuse vector (raising memory past the node's spawn-time
+  default). Known limitation: the name match is statement-wide, so a
+  statement that merely mentions a protected name (a table named `threads`,
+  a literal containing `memory_limit`) is over-denied on lockdown pools.
+
+- **RLS: quoted table identifiers no longer bypass row policies.** jsqlparser
+  keeps double quotes on quoted identifiers, and the policy match compared
+  the quoted form - Power BI-style folded SQL (`"tpch1"."customer"`) escaped
+  its row policies entirely (fail-open). Matching now unquotes; the rewritten
+  SQL keeps the caller's original quoting.
+
+- **Docs moved to starlake-docs.** The standalone website is retired; the
+  README now leads with the zero-commitment demo command.
+
 ## 0.7.1
 
 - **Fixed `qod start` printing nothing (0.7.0 regression).** The supervised
