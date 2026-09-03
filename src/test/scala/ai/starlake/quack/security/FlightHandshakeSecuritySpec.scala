@@ -345,6 +345,35 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "refuse to bind a superuser row when the credential was validated in a tenant realm (deep-review H1)" in {
+    // A tenant admin can point their tenant's OIDC config at an IdP they control and mint a
+    // token whose email claim is the seeded superuser's username. The handshake validates
+    // the signature against the TENANT's JWKS, so the resulting principal can only speak
+    // for that tenant's users: binding it to a tenant-IS-NULL superuser row (empty
+    // EffectiveSet, every guard bypassed) is a full data-plane escalation. The edge passes
+    // superuserAdmissible=false for any tenant-realm-validated credential; the superuser
+    // row must then be unreachable, with the same error as an unknown user so the refusal
+    // is not an existence oracle.
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
+    val denied = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = false
+    )
+    denied.isLeft shouldBe true
+    denied.left.toOption.get should include("not registered")
+    // the system-realm path (superuser=true handshake) is unchanged
+    sup
+      .authorizeHandshake(
+        SecurityFixtures.TenantName,
+        SecurityFixtures.PoolName,
+        SecurityFixtures.RootUsername
+      )
+      .isRight shouldBe true
+  }
+
   // ==========================================================================
   // D. JWT claim merge into EffectiveSet
   // ==========================================================================

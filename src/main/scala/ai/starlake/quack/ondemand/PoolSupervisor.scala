@@ -2631,8 +2631,8 @@ final class PoolSupervisor(
   /** User ids belonging to a group, for the SCIM Group.members projection. */
   def usersInGroup(groupId: String): List[String] = store.listUsersInGroup(groupId)
 
-  /** Batch membership read for the SCIM Groups list: one query for all users' group edges
-    * instead of one usersInGroup call per group.
+  /** Batch membership read for the SCIM Groups list: one query for all users' group edges instead
+    * of one usersInGroup call per group.
     */
   def groupsByUsers(userIds: List[String]): Map[String, Set[String]] =
     store.listGroupsByUsers(userIds)
@@ -2852,7 +2852,8 @@ final class PoolSupervisor(
       poolName: String,
       username: String,
       jwtRoles: Set[String] = Set.empty,
-      jwtGroups: Set[String] = Set.empty
+      jwtGroups: Set[String] = Set.empty,
+      superuserAdmissible: Boolean = true
   ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
     // 1. Pool + kill switches.
     findPoolKeyByTenantAndPoolName(tenantName, poolName)
@@ -2875,6 +2876,20 @@ final class PoolSupervisor(
                 //    is admissible.
                 store.findUserForLogin(tenantRow.id, username) match
                   case None =>
+                    Left(s"user '$username' is not registered in tenant '${key.tenant}'")
+                  case Some(user) if user.tenant.isEmpty && !superuserAdmissible =>
+                    // The credential was validated by a TENANT-scoped authority (per-tenant
+                    // OIDC, or the tenant arm of the auth chain), which can only speak for
+                    // that tenant's principals. Binding it to a tenant-IS-NULL superuser row
+                    // would hand out the empty EffectiveSet that bypasses ACL, RLS/CLS, the
+                    // protected-write guard and lockdown -- a tenant admin minting a token
+                    // with the seeded superuser's email on an IdP they control must land
+                    // here. Same message as an unknown user so the refusal is not an
+                    // existence oracle; the real reason goes to the log.
+                    logger.warn(
+                      s"handshake refused: tenant-realm credential for superuser row '$username' " +
+                        s"on tenant '${key.tenant}' (possible impersonation attempt)"
+                    )
                     Left(s"user '$username' is not registered in tenant '${key.tenant}'")
                   case Some(user) if !user.enabled =>
                     Left(s"user '$username' is disabled")

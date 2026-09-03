@@ -872,8 +872,15 @@ object Main extends IOApp with LazyLogging:
               if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
               else sup.getTenant(raw),
             // Handshake authorize; failures bubble up as PERMISSION_DENIED.
-            (tenant, pool, username, jwtRoles, jwtGroups) =>
-              sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups)
+            (tenant, pool, username, jwtRoles, jwtGroups, superuserAdmissible) =>
+              sup.authorizeHandshake(
+                tenant,
+                pool,
+                username,
+                jwtRoles,
+                jwtGroups,
+                superuserAdmissible
+              )
           )
           srv.start()
           srv
@@ -1190,8 +1197,8 @@ object Main extends IOApp with LazyLogging:
         scim = Some(
           new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)
         ),
-        canonicalTenantIdOf =
-          t => ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
+        canonicalTenantIdOf = t =>
+          ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
         mcpRoutes = mcpRoutes
       )
       // One managed-object-store client for both the boot probe below and the purge

@@ -34,11 +34,17 @@ final class FlightEdgeServer(
     // ConnectionContext so the per-statement ACL gate can read it
     // without further joins.
     //
-    // Last two args: the JWT `role` claim wrapped as a Set (empty when
+    // Args 4-5: the JWT `role` claim wrapped as a Set (empty when
     // Basic auth / no role claim) and the JWT `groups` claim. Names
     // resolve against qodstate_role.name / qodstate_group.name in the
     // user's tenant; unknown names are silently dropped.
-    authorize: (String, String, String, Set[String], Set[String]) => Either[
+    //
+    // Arg 6 (superuserAdmissible): false when the credential was validated
+    // against a TENANT realm (AuthScope.Tenant) -- such a principal must
+    // never bind to a tenant-IS-NULL superuser row, or a tenant admin who
+    // controls their tenant's OIDC IdP could mint the seeded superuser's
+    // username and inherit the guard-bypassing empty EffectiveSet.
+    authorize: (String, String, String, Set[String], Set[String], Boolean) => Either[
       String,
       AuthorizedHandshake
     ]
@@ -229,10 +235,15 @@ final class FlightEdgeServer(
           lookupPool = lookupPool
         )
 
-        val validation: Either[String, Option[AuthenticatedProfile]] =
+        // Second element: superuserAdmissible -- true only when the credential was NOT
+        // validated by a tenant-scoped authority. A tenant-realm principal (per-tenant OIDC,
+        // tenant arm of the auth chain) can only speak for that tenant's users, so the
+        // authorize gate must refuse to bind it to a superuser row (see the authorize
+        // callback doc above).
+        val validation: Either[String, (Option[AuthenticatedProfile], Boolean)] =
           if !authService.hasProviders then
             // No backends configured - keep v1 trust-the-client.
-            Right(None)
+            Right((None, true))
           else
             (bearer, basicPair) match
               case (Some(token), _) =>
@@ -249,7 +260,9 @@ final class FlightEdgeServer(
                     tenantArg match
                       case Some(t) => AuthScope.Tenant(t)
                       case None    => AuthScope.System
-                authService.authenticateBearer(bearerScope, token).map(Some(_))
+                authService
+                  .authenticateBearer(bearerScope, token)
+                  .map(p => (Some(p), bearerScope == AuthScope.System))
               case (None, Some((_, p))) =>
                 preResolved match
                   case Right(r) =>
@@ -275,7 +288,7 @@ final class FlightEdgeServer(
                         AuthScope.Tenant(tenantArg)
                     authService
                       .authenticateBasic(scope, r.user, p)
-                      .map(Some(_))
+                      .map(profile => (Some(profile), scope == AuthScope.System))
                       .left
                       .map(_.message)
                   case Left(err) =>
@@ -286,7 +299,7 @@ final class FlightEdgeServer(
         validation match
           case Left(err) =>
             throw CallStatus.UNAUTHENTICATED.withDescription(err).toRuntimeException()
-          case Right(profileOpt) =>
+          case Right((profileOpt, superuserAdmissible)) =>
             // Prefer the authenticated username when a provider validated;
             // fall back to whatever the Basic header carried.
             val resolvedUsername = profileOpt.map(_.username).orElse(basicUsername)
@@ -324,7 +337,8 @@ final class FlightEdgeServer(
                   resolved.poolKey.pool,
                   resolved.user,
                   jwtRoles,
-                  jwtGroups
+                  jwtGroups,
+                  superuserAdmissible
                 ) match
                   case Left(err) =>
                     // R12: the principal authenticated but isn't authorized for

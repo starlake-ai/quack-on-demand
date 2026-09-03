@@ -41,14 +41,14 @@ object FlightEdgeHarness:
       // Use the test-shared allocator (never closed) so we don't fight
       // over allocator lifetimes with the harness's own RootAllocator.
       ai.starlake.quack.edge.adapter.TestArrow.sharedAllocator,
-      nativeClient   = false,
+      nativeClient = false,
       nodeDisableSsl = true
     ):
       override def query(
           endpoint: String,
-          token:    String,
-          sql:      String,
-          session:  Option[String]
+          token: String,
+          sql: String,
+          session: Option[String]
       ): IO[QuackResponse] =
         IO.pure(TestArrow.okResponse())
     new QuackHttpAdapter(client, tracker)
@@ -75,16 +75,16 @@ object FlightEdgeHarness:
     * @param port
     *   The OS-assigned port the server is listening on.
     * @param allocator
-    *   The [[RootAllocator]] owned by this harness. Close it via
-    *   [[shutdown]] -- do NOT close it independently.
+    *   The [[RootAllocator]] owned by this harness. Close it via [[shutdown]] -- do NOT close it
+    *   independently.
     * @param shutdown
     *   Stops the server and releases the allocator. Idempotent.
     */
   final case class Harness(
-      host:      String,
-      port:      Int,
+      host: String,
+      port: Int,
       allocator: RootAllocator,
-      shutdown:  () => Unit
+      shutdown: () => Unit
   ):
     /** Build a fresh [[FlightClient]] pointed at this harness.
       *
@@ -99,22 +99,21 @@ object FlightEdgeHarness:
     * @param store
     *   Seeded in-memory control plane store (use [[SecurityFixtures.freshStore]]).
     * @param enableProviders
-    *   When `true` (default), the [[InMemoryAuthService.Service]] validates
-    *   credentials against bcrypt hashes in the store. When `false`, the
-    *   service reports `hasProviders = false` and lets the Flight server
-    *   fall through to the "trust-the-client" legacy path.
+    *   When `true` (default), the [[InMemoryAuthService.Service]] validates credentials against
+    *   bcrypt hashes in the store. When `false`, the service reports `hasProviders = false` and
+    *   lets the Flight server fall through to the "trust-the-client" legacy path.
     * @param tls
-    *   When `true`, a self-signed cert is auto-generated into a unique
-    *   per-invocation tempdir via [[FlightEdgeServer.ensureCertFiles]].
-    *   When `false` (default), the server listens on plain gRPC.
+    *   When `true`, a self-signed cert is auto-generated into a unique per-invocation tempdir via
+    *   [[FlightEdgeServer.ensureCertFiles]]. When `false` (default), the server listens on plain
+    *   gRPC.
     */
   def boot(
-      store:           InMemoryControlPlaneStore,
+      store: InMemoryControlPlaneStore,
       enableProviders: Boolean = true,
-      tls:             Boolean = false
+      tls: Boolean = false
   ): Harness =
-    val port    = ephemeralPort()
-    val host    = "127.0.0.1"
+    val port = ephemeralPort()
+    val host = "127.0.0.1"
 
     // TLS cert paths: unique tempdir per call so concurrent harnesses
     // don't race on cert file writes.
@@ -123,17 +122,17 @@ object FlightEdgeHarness:
     val keyPath  = certDir.resolve("server-key.pem").toString
 
     val cfg = EdgeConfig(
-      host          = host,
-      port          = port,
-      tlsEnabled    = tls,
-      tlsCertChain  = certPath,
+      host = host,
+      port = port,
+      tlsEnabled = tls,
+      tlsCertChain = certPath,
       tlsPrivateKey = keyPath,
       sessionTtlSec = 3600L
     )
 
-    val tracker  = new NodeLoadTracker
-    val backend  = stubBackend
-    val sup      = new PoolSupervisor(backend, tracker, store)
+    val tracker = new NodeLoadTracker
+    val backend = stubBackend
+    val sup     = new PoolSupervisor(backend, tracker, store)
     sup.restore()
 
     val adapter  = stubAdapter(tracker)
@@ -142,12 +141,12 @@ object FlightEdgeHarness:
     val si       = StatementInstruments.noop
 
     val router = new FlightSqlRouter(
-      supervisor     = sup,
-      sessions       = sessions,
-      tracker        = tracker,
-      adapter        = adapter,
-      validator      = StatementValidator.allowAll,
-      history        = history,
+      supervisor = sup,
+      sessions = sessions,
+      tracker = tracker,
+      adapter = adapter,
+      validator = StatementValidator.allowAll,
+      history = history,
       stmtInstruments = si
     )
 
@@ -173,9 +172,14 @@ object FlightEdgeHarness:
         if ai.starlake.quack.model.Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
         else sup.getTenant(raw)
 
-    val authorize =
-      (tenant: String, pool: String, username: String, jwtRoles: Set[String], jwtGroups: Set[String]) =>
-        sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups)
+    val authorize = (
+        tenant: String,
+        pool: String,
+        username: String,
+        jwtRoles: Set[String],
+        jwtGroups: Set[String],
+        superuserAdmissible: Boolean
+    ) => sup.authorizeHandshake(tenant, pool, username, jwtRoles, jwtGroups, superuserAdmissible)
 
     val allocator = new RootAllocator()
 
@@ -190,10 +194,10 @@ object FlightEdgeHarness:
     srv.start()
 
     Harness(
-      host      = host,
-      port      = port,
+      host = host,
+      port = port,
       allocator = allocator,
-      shutdown  = () => {
+      shutdown = () => {
         srv.stop()
         allocator.close()
       }
