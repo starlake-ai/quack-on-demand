@@ -80,6 +80,14 @@ object LockdownScreen:
   // (not `\s+`) so `FROM'/etc/x.parquet'` with no space still matches.
   private val FromLiteral = "(?<![a-zA-Z0-9_])from\\s*'([^']*)'".r
 
+  // DuckDB's replacement scan also accepts escape-string (e'...') and dollar-quoted
+  // ($$...$$ / $tag$...$tag$) literals in FROM position. Both are screened FAIL-CLOSED (denied
+  // unless provably remote): they have no legitimate non-path use there, and e-string escapes
+  // can encode a path (e'\x2fetc\x2fpasswd') that no path-shape heuristic would spot. `\s+`
+  // on the e-form keeps an identifier ending in `e` from misreading as FROM + e-string.
+  private val FromEscapeLiteral = "(?<![a-zA-Z0-9_])from\\s+e'((?:\\\\.|[^'\\\\])*)'".r
+  private val FromDollarLiteral = "(?<![a-zA-Z0-9_])from\\s*\\$([a-z0-9_]*)\\$(.*?)\\$\\1\\$".r
+
   // The PATH-position literal of a COPY statement: the token right after FROM or TO. Option literals
   // in the trailing `( ... )` (e.g. DELIMITER '|') are never in from/to position, so they are
   // ignored - a legit remote COPY with options is not over-denied.
@@ -395,15 +403,21 @@ object LockdownScreen:
     * exempt unless it addresses a denied DuckLake bucket.
     */
   private def barePathFrom(lower: String, deniedBuckets: Set[String]): Option[String] =
-    FromLiteral
-      .findAllMatchIn(lower)
-      .filter(m => parenDepthBefore(lower, m.start) == 0)
-      .map(m => "'" + m.group(1) + "'")
-      .flatMap { lit =>
+    // (inner text, strict): strict literal forms deny whenever they are not provably remote,
+    // the plain single-quote form keeps the looksLikePath heuristic so ordinary non-path
+    // literals stay admitted.
+    val plain  = FromLiteral.findAllMatchIn(lower).map(m => (m.start, m.group(1), false))
+    val esc    = FromEscapeLiteral.findAllMatchIn(lower).map(m => (m.start, m.group(1), true))
+    val dollar = FromDollarLiteral.findAllMatchIn(lower).map(m => (m.start, m.group(2), true))
+    (plain ++ esc ++ dollar)
+      .filter { case (start, _, _) => parenDepthBefore(lower, start) == 0 }
+      .flatMap { case (_, inner, strict) =>
+        val lit = "'" + inner + "'"
         deniedBucketOf(lit, deniedBuckets) match
           case Some(b) => Some(bucketMessage(b))
           case None    =>
-            if !isRemoteLiteral(lit) && looksLikePath(lit) then
+            if isRemoteLiteral(lit) then None
+            else if strict || looksLikePath(lit) then
               Some("reading local files in FROM position is disabled on this deployment")
             else None
       }

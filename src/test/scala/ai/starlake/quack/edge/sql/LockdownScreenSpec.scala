@@ -108,6 +108,22 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("SELECT trim(leading '/' from '/a/b.csv')") shouldBe false
   }
 
+  it should "deny dollar-quoted and escape-string replacement scans (deep-review H4)" in {
+    // DuckDB's replacement scan also accepts $$...$$ / $tag$...$tag$ and e'...' literals in
+    // FROM position; the single-quote-only regex admitted them, an open local-file read on
+    // lockdown pools. These forms have no legitimate non-path use in FROM position, so they
+    // fail closed: denied unless provably remote.
+    denied("SELECT * FROM $$/etc/passwd$$") shouldBe true
+    denied("SELECT * FROM $tag$/etc/passwd$tag$") shouldBe true
+    denied("SELECT * FROM e'/private/var/db/secret.csv'") shouldBe true
+    // escape sequences can encode the path, so a non-remote e-string denies even when it
+    // does not LOOK like a path
+    denied("SELECT * FROM e'\\x2fetc\\x2fpasswd'") shouldBe true
+    // the remote exemption still applies to the new forms
+    denied("SELECT * FROM $$s3://b/x.parquet$$") shouldBe false
+    deniedB("SELECT * FROM $$s3://lakebucket/x.parquet$$") shouldBe true
+  }
+
   "COPY" should "deny local paths, admit remote copies with options and pure table copies" in {
     denied("COPY t FROM '/etc/x.csv'") shouldBe true
     denied("COPY t TO '/tmp/x'") shouldBe true
