@@ -7,6 +7,8 @@
 
 # Quack on Demand
 
+**The open-source serving layer for DuckLake.** Multi-tenant DuckDB serving with table, row, and column level security, and Arrow Flight SQL on the wire.
+
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/starlake-ai/quack-on-demand?label=release)](https://github.com/starlake-ai/quack-on-demand/releases/latest)
 [![Docker Pulls](https://img.shields.io/docker/pulls/starlakeai/quack-on-demand.svg)](https://hub.docker.com/r/starlakeai/quack-on-demand)
@@ -17,22 +19,27 @@
 uvx qod start --demo   # the full gateway on your laptop: no install, no Postgres
 ```
 
-**The open-source serving layer for DuckLake.** Turn a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Self-hosted. Single uber-jar.
+One command boots a seeded warehouse with row, column, and table security already live. Connect with `tenant=acme` + `pool=bi` (in the admin UI login, set the tenant to `acme`) and switch principals to watch the policies apply:
 
-DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the engine. What's missing between them and a room full of analysts is the part that handles *concurrent users, authentication, authorization, and connection routing* - which DuckLake [explicitly leaves out](https://ducklake.select/faq) by design. That is Quack on Demand: think self-hosted MotherDuck, scoped to serving, on your own infrastructure.
+- `alice` / `demo-alice` (analyst) - `c_phone` comes back masked to `***`, and only `BUILDING`-segment rows appear
+- `acme-admin` / `demo-acme-admin` - same query, full unmasked data
+- a table `alice` has no grant on - denied
+
+Client connection strings, printed again by the server at boot (replace `<tenant>`, `<pool>`, `<user>`):
+
+```
+JDBC : jdbc:arrow-flight-sql://localhost:31338/?tenant=<tenant>&pool=<pool>&user=<user>&useEncryption=true&disableCertificateVerification=true
+ADBC : uri=grpc+tls://localhost:31338  (adbc_driver_flightsql; db_kwargs: username, password, plus grpc headers tenant=<tenant>, pool=<pool>)
+ODBC : Driver={Arrow Flight SQL ODBC Driver};Host=localhost;Port=31338;UseEncryption=true;DisableCertificateVerification=true;UID=<user>;PWD=<password>;TENANT=<tenant>;POOL=<pool>
+```
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
-### Project status
+## The missing serving layer
 
-**Stable.** In production use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
+DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the engine. Between them and a room full of analysts sits the part DuckLake [explicitly leaves out](https://ducklake.select/faq) by design: concurrent users, authentication, authorization, and connection routing.
 
-The manager runs as a **single instance** by default (safely restartable), and supports opt-in **active-active HA** on Kubernetes (`replicaCount > 1`). Worker pools scale horizontally in both modes.
-
-**Documentation:** https://docs.starlake.ai/qod - full guides, configuration reference, and REST API.
-Jump to: [Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://docs.starlake.ai/qod/concepts/architecture) · [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
-
----
+Quack on Demand is that part. It turns a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Think self-hosted MotherDuck, scoped to serving, on your own infrastructure. Single uber-jar.
 
 ## Who is this for?
 
@@ -46,6 +53,79 @@ Jump to: [Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart) �
 
 - Just need a single embedded DuckDB inside one application: use DuckDB directly
 - Need a distributed query engine with cross-node shuffles and joins on TB-scale tables: look at Trino / Dremio / StarRocks. Quack on Demand routes each statement to a single node; it doesn't fan out across them
+
+---
+
+## Quick start
+
+### Demo mode: no Postgres, no Docker
+
+The command at the top boots a fully seeded instance against an **embedded, throwaway Postgres**. With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the launcher fetches the release jar (sha256-verified against the GitHub release), a Java 21 runtime if none is present, and the pinned `duckdb` CLI, all cached under your user cache dir. Works the same on macOS, Linux, and Windows. `pip install qod && qod start --demo` is equivalent. Other routes to the same demo:
+
+```bash
+# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
+# drop-in like Podman/Colima/OrbStack)
+docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
+
+# from a source checkout (needs a JDK 21 and the duckdb CLI on PATH)
+sbt assembly
+java -Darrow.allocation.manager.type=Unsafe \
+  -jar distrib/quack-on-demand-assembly-*.jar demo
+```
+
+It starts an embedded ephemeral Postgres, seeds tenant `acme` (`acme_tpch.tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is deleted when you stop it with Ctrl-C.
+
+> Demo mode is insecure by design (self-signed TLS, open REST, demo credentials, ephemeral catalog). Use it to evaluate, never in production.
+
+### Full multi-tenant stack (Docker)
+
+Zero to first query in under 5 minutes. Clone this repo, then:
+
+```bash
+cp .env.example .env                            # tweak ports / auth / admin password
+LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
+```
+> **Windows: run inside WSL2** with `QOD_NATIVE_CLIENT=false LOAD_TPCH=1 ./scripts/run-docker-compose.sh`
+
+That brings up Postgres + the manager, bootstraps the demo tenants `acme` (tenant-db `acme_tpch` with pools `bi` and `etl`) and `globex` (pool `bi`), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into `acme_tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/` (log in `admin` / `admin` - change both before exposing anything beyond `localhost`). The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=acme` + `pool=bi`.
+
+Connect a BI tool or client with the [connection strings at the top](#quack-on-demand) - for this stack use `tenant=acme`, `pool=bi`, user `admin`.
+
+The Power BI walkthrough, full ADBC `db_kwargs` examples, and the Python load tester are in **[Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart)** and **[Connecting clients](https://docs.starlake.ai/qod/connecting/clients)**.
+
+Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
+
+### Other paths
+
+`qod start` runs a bare-JVM manager against your own Postgres with no checkout at all - it downloads the release jar (sha256-verified), a Java 21 runtime if needed, and the pinned duckdb, and honors the same env vars (`QOD_PG_*`, `LOAD_TPCH=1`, `NUKE=1`, `QOD_VERSION`, ...); `qod stop` tears it down. The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
+
+---
+
+## Features
+
+### Security & identity
+
+- **Arrow Flight SQL edge** with TLS on by default (auto-generated self-signed cert; drop in a CA-signed one for prod)
+- **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
+- **First-class RBAC graph**: two gates at handshake (user-scope, pool-access), then per-statement table and column checks against a cached **EffectiveSet**. See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model)
+- **Column-level security and dynamic data masking**: per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too. Both are on by default, with `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` as kill switches
+- **Admin REST API** guarded by an `X-API-Key` static key OR a session token from `/api/auth/login`
+- **Account security**: opt-in login lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), self-service password reset over SMTP (email a single-use link), and admin-forced password change at next login. Database users can carry an email; an email-format username is its own email
+
+### Data plane
+
+- **Multi-tenant pools** of Quack nodes (`READONLY` / `WRITEONLY` / `DUAL`); the router classifies each statement and picks a compatible least-loaded node
+- **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the control-plane DB: tenant isolation at the Postgres-database boundary, not just row level
+- **Single uber-jar** deployment
+
+### Operability
+
+- **React admin console** at `http://localhost:20900/ui/`: tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
+- **Observability built in**: Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards: [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json)
+- **Self-healing on restart**: the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience)
+- **Every config key** is overridable via a `QOD_*` env var
+
+---
 
 ## How it compares
 
@@ -70,91 +150,6 @@ Jump to: [Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart) �
 | Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
 
 **Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth, table / row / column level security, an audit trail, and per-tenant usage metering, in open source, on infrastructure you control.
-
----
-
-## Quick start
-
-### Fastest taste: `demo` mode (no Postgres, no Docker)
-
-One command boots a fully seeded instance against an **embedded, throwaway Postgres**. With [uv](https://docs.astral.sh/uv/) installed there are no other prerequisites - the launcher fetches the release jar (sha256-verified against the GitHub release), a Java 21 runtime if none is present, and the pinned `duckdb` CLI, all cached under your user cache dir. Works the same on macOS, Linux, and Windows:
-
-```bash
-uvx qod start --demo
-```
-
-`pip install qod && qod start --demo` is equivalent. Other routes to the same demo:
-
-```bash
-# Docker (trivial on Linux; on Mac/Windows requires Docker Desktop or a
-# drop-in like Podman/Colima/OrbStack)
-docker run --rm -p 20900:20900 -p 31338:31338 starlakeai/quack-on-demand demo
-
-# from a source checkout (needs a JDK 21 and the duckdb CLI on PATH)
-sbt assembly
-java -Darrow.allocation.manager.type=Unsafe \
-  -jar distrib/quack-on-demand-assembly-*.jar demo
-```
-
-It starts an embedded ephemeral Postgres, seeds tenant `acme` (`acme_tpch.tpch1`) with a small TPC-H dataset, boots the manager REST API on `:20900` and the FlightSQL edge on `:31338` (TLS on with an auto-generated self-signed cert; clients skip verification), and prints a connect snippet. All state lives under `/tmp/qod-demo` and is deleted when you stop it with Ctrl-C.
-
-Connect as the seeded analyst to watch row + column security apply, then switch principals:
-
-- `alice` / `demo-alice` (analyst) - `c_phone` comes back masked to `***`, and only `BUILDING`-segment rows appear
-- `acme-admin` / `demo-acme-admin` - full, unmasked data
-- a table `alice` has no grant on - denied
-
-> Demo mode is insecure by design (self-signed TLS, open REST, demo credentials, ephemeral catalog). Use it to evaluate, never in production.
-
-### Full multi-tenant stack (Docker)
-
-Zero to first query in under 5 minutes. Clone this repo, then:
-
-```bash
-cp .env.example .env                            # tweak ports / auth / admin password
-LOAD_TPCH=1 ./scripts/run-docker-compose.sh     # pulls starlakeai/quack-on-demand:latest + seeds TPC-H SF=1
-```
-> **Windows: run inside WSL2** with `QOD_NATIVE_CLIENT=false LOAD_TPCH=1 ./scripts/run-docker-compose.sh`
-
-That brings up Postgres + the manager, bootstraps the demo tenants `acme` (tenant-db `acme_tpch` with pools `bi` and `etl`) and `globex` (pool `bi`), and seeds the DuckLake catalog with TPC-H at scale factor 1 (~6M lineitem rows) into `acme_tpch.tpch1`. The admin UI is on `http://localhost:20900/ui/` (log in `admin` / `admin` - change both before exposing anything beyond `localhost`). The FlightSQL edge is on `localhost:31338`; every client scopes its session with `tenant=acme` + `pool=bi`.
-
-Connect a BI tool or JDBC client:
-
-```
-jdbc:arrow-flight-sql://localhost:31338?useEncryption=true&disableCertificateVerification=true&user=admin&password=admin&tenant=acme&pool=bi
-```
-
-ODBC strings, the Power BI walkthrough, ADBC `db_kwargs`, and the Python load tester are in **[Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart)** and **[Connecting clients](https://docs.starlake.ai/qod/connecting/clients)**.
-
-Runnable client examples live in [`examples/`](examples/): FlightSQL clients in [TypeScript](examples/typescript/), [Python](examples/python/), [Java](examples/java/), and [Rust](examples/rust/), each running a single query and the 22 TPC-H queries. An [n8n community node](https://github.com/starlake-ai/qod-n8n-node) lives in its own repo.
-
-**Other paths:** `qod start` runs a bare-JVM manager against your own Postgres with no checkout at all - it downloads the release jar (sha256-verified), a Java 21 runtime if needed, and the pinned duckdb, and honors the same env vars (`QOD_PG_*`, `LOAD_TPCH=1`, `NUKE=1`, `QOD_VERSION`, ...); `qod stop` tears it down. The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
-
----
-
-## Features
-
-### Security & identity
-
-- **Arrow Flight SQL edge** with auto-generated self-signed TLS (drop in a CA-signed cert for prod)
-- **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
-- **First-class RBAC graph** - two gates at handshake (user-scope, pool-access) plus per-statement table and column level checks against a cached **EffectiveSet**. See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model)
-- **Column-level security & dynamic data masking** - per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too. Both are enabled by default, with `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` as kill switches
-- **Admin REST API** with an `X-API-Key` static key OR a session token from `/api/auth/login`
-- **Account security** - opt-in login lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), self-service password reset over SMTP (email a single-use link), and admin-forced password change at next login. Database users can carry an email; an email-format username is its own email
-
-### Data plane
-
-- **Multi-tenant pools** of Quack nodes (`READONLY` / `WRITEONLY` / `DUAL`); the router classifies each statement and picks a compatible least-loaded node
-- **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the control-plane DB - tenant isolation at the Postgres-database boundary, not just row level
-- **Single uber-jar** deployment
-
-### Operability
-
-- **React admin console** at `http://localhost:20900/ui/` - tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
-- **Observability built in** - Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards - [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json)
-- **Self-healing on restart** - the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience)
-- **Every config key is overridable** via a `QOD_*` env var
 
 ---
 
@@ -186,6 +181,12 @@ flowchart LR
 
 ---
 
+## Project status
+
+**Stable.** In production use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
+
+The manager runs as a **single instance** by default (safely restartable), and supports opt-in **active-active HA** on Kubernetes (`replicaCount > 1`). Worker pools scale horizontally in both modes.
+
 ## Configuration
 
 Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. The security-critical ones to set before any non-localhost deploy:
@@ -200,9 +201,19 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 
 Full reference: [Configuration](https://docs.starlake.ai/qod/reference/configuration).
 
-Hosted / self-serve deployments should also flip `QOD_NODE_LOCKDOWN=true` (default off, so first-run smoke tests keep working out of the box), which denies `ATTACH`, extension `INSTALL`/`LOAD`, protected `SET`/`PRAGMA`s, and local-file read functions for non-superuser sessions and freezes the DuckDB engine's settings for the process lifetime. Individual pools can override the global default via `POST /api/pool/setLockdown` (tri-state `inherit`/`on`/`off`, superuser only), which restarts the pool's nodes immediately to apply the change; enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress; and tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting. See `skills/quack-on-demand/SKILL.md` for the full hardening runbook.
+Hosted / self-serve deployments should also harden the data plane:
 
----
+- **`QOD_NODE_LOCKDOWN=true`** (default off, so first-run smoke tests keep working out of the box) denies `ATTACH`, extension `INSTALL`/`LOAD`, protected `SET`/`PRAGMA`s, and local-file read functions for non-superuser sessions, and freezes the DuckDB engine's settings for the process lifetime
+- **Per-pool override** via `POST /api/pool/setLockdown` (tri-state `inherit`/`on`/`off`, superuser only), which restarts the pool's nodes immediately to apply the change
+- **Network policy**: enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress
+- **Catalog-reader eviction**: tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting
+
+The full hardening runbook is in `skills/quack-on-demand/SKILL.md`.
+
+## Documentation
+
+Full guides, configuration reference, and REST API: https://docs.starlake.ai/qod
+Jump to: [Quickstart](https://docs.starlake.ai/qod/getting-started/quickstart) · [`RUNNING.md`](guides/RUNNING.md) · [`API.md`](guides/API.md) · [Architecture](https://docs.starlake.ai/qod/concepts/architecture) · [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## License
 
