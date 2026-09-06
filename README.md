@@ -7,7 +7,7 @@
 
 # Quack on Demand
 
-**The open-source serving layer for DuckLake.** Multi-tenant DuckDB serving with table, row, and column level security, and Arrow Flight SQL on the wire.
+**The open-source serving layer for DuckDB and DuckLake.** Multi-tenant DuckDB serving with table, row, and column level security, and Arrow Flight SQL on the wire.
 
 [![Build](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml/badge.svg)](https://github.com/starlake-ai/quack-on-demand/actions/workflows/snapshot.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/starlake-ai/quack-on-demand?label=release)](https://github.com/starlake-ai/quack-on-demand/releases/latest)
