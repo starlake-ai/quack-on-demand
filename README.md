@@ -39,7 +39,7 @@ ODBC : Driver={Arrow Flight SQL ODBC Driver};Host=localhost;Port=31338;UseEncryp
 
 DuckLake gives you a Postgres-backed lakehouse catalog. DuckDB gives you the engine. Between them and a room full of analysts sits the part DuckLake [explicitly leaves out](https://ducklake.select/faq) by design: concurrent users, authentication, authorization, and connection routing.
 
-Quack on Demand is that part. It turns a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Think self-hosted MotherDuck, scoped to serving, on your own infrastructure. Single uber-jar.
+Quack on Demand is that part. It turns a DuckLake lakehouse into a multi-tenant SQL warehouse your whole org can query: on-demand DuckDB nodes, least-loaded routing, table-level RBAC with column-level security and dynamic data masking, and Arrow Flight SQL on the wire so Power BI, Tableau, DBeaver, and any JDBC / ODBC / ADBC client just connect. Think self-hosted MotherDuck, scoped to serving, on your own infrastructure. Single binary.
 
 ## Who is this for?
 
@@ -111,7 +111,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 - **Multi-tenant pools** of Quack nodes (`READONLY` / `WRITEONLY` / `DUAL`); the router classifies each statement and picks a compatible least-loaded node
 - **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the control-plane DB: tenant isolation at the Postgres-database boundary, not just row level
-- **Single uber-jar** deployment
+- **Single binary** deployment
 
 ### Operability
 
@@ -142,7 +142,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 | Distributed joins (TB-scale) | ❌ | ❌ | ❌ | ✅ | ❌ |
 | BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
 | DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
-| Footprint                    | library | single binary | SaaS | cluster | single uber-jar |
+| Footprint                    | library | single binary | SaaS | cluster | single binary |
 
 **Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth, table / row / column level security, an audit trail, and per-tenant usage metering, in open source, on infrastructure you control.
 
