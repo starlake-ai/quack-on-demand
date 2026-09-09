@@ -538,7 +538,10 @@ final class FlightSqlRouter(
                       // evicts the entry but does not interrupt the stream; accepted best-effort.
                       val stmtId =
                         if recordExecution then
-                          Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
+                          Some(
+                            registry
+                              .register(user, poolKey.tenant, poolKey.pool, nodeId, sql, patId)
+                          )
                         else None
                       // Locality + placement are computed from `refs` (pre-rewrite `sql`, NOT
                       // finalSql: per-principal RLS rewrites would defeat memoization).
@@ -629,7 +632,8 @@ final class FlightSqlRouter(
                                 finalSql,
                                 exclude = nodeId,
                                 recordLoad = recordExecution,
-                                prelude = prelude
+                                prelude = prelude,
+                                patId = patId
                               )
 
                           case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
@@ -718,7 +722,8 @@ final class FlightSqlRouter(
       sql: String,
       exclude: String,
       recordLoad: Boolean = true,
-      prelude: Option[String] = None
+      prelude: Option[String] = None,
+      patId: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
@@ -736,7 +741,10 @@ final class FlightSqlRouter(
                       // Mirror the primary path: registered, killable, gated on recordLoad.
                       val stmtId =
                         if recordLoad then
-                          Some(registry.register(user, poolKey.tenant, poolKey.pool, nodeId, sql))
+                          Some(
+                            registry
+                              .register(user, poolKey.tenant, poolKey.pool, nodeId, sql, patId)
+                          )
                         else None
                       val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
                       val closeOnce: () => Unit =

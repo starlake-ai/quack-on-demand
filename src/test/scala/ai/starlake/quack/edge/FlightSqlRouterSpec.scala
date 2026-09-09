@@ -959,6 +959,24 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     qr.close()
     registry.list() shouldBe Nil // closed: entry gone
 
+  it should "carry the acting patId into the registry entry" in:
+    val registry     = new ActiveStatementRegistry()
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      registry = registry
+    )
+    val result = router
+      .execute("reg-pat", "alice", poolKey, "SELECT 1", patId = Some("pat-abc"))
+      .unsafeRunSync()
+    val qr = result.toOption.get
+    registry.list().map(_.patId) shouldBe List(Some("pat-abc"))
+    qr.close()
+
   it should "deregister on a permanent failure" in:
     val registry     = new ActiveStatementRegistry()
     val perm         = () => QuackResponse.Failed(QuackError.Permanent("Parser Error: syntax"), 1L)
