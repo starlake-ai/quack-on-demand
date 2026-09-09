@@ -299,11 +299,15 @@ final class PatHandlers(
       else
         val revokedIds = pats.revoke(uid, id)
         if revokedIds.nonEmpty then
+          val ids = revokedIds.toSet
           // Order is load-bearing: the cascade above has committed, so no NEW statement can
           // start with any of these ids anywhere; killing after revoking means a statement can
-          // never be killed while its token is still live.
-          val killed = killStatements(revokedIds.toSet)
-          broadcastKill(revokedIds.toSet)
+          // never be killed while its token is still live. The cascade has already committed, so
+          // a failing kill or broadcast must not turn a successful revoke into an error -- the
+          // tokens are already dead and any still-running statement stays bounded by its own
+          // timeout (see the design spec's error handling).
+          val killed = scala.util.Try(killStatements(ids)).getOrElse(0)
+          val _      = scala.util.Try(broadcastKill(ids))
           audit.rest(
             token,
             "auth",

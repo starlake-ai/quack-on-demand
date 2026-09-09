@@ -52,7 +52,13 @@ class PatRevokeKillSpec extends AnyFlatSpec with Matchers:
         new SessionTokenStore(),
         userOf = (_, _) => None,
         audit = new AuditRecorder(auditStore, _ => None),
-        killStatements = ids => { killedSets += ids; 2 },
+        killStatements = ids => {
+          // The kill runs only after the cascade has committed -- see the load-bearing ordering
+          // comment on PatHandlers.revoke.
+          pats.findById(uid, child.id).get.revokedAt shouldNot be(empty)
+          killedSets += ids
+          2
+        },
         broadcastKill = ids => { broadcastSets += ids; () }
       )
       val out = h.revoke(Some(raw), PatRevokeRequest(child.id)).unsafeRunSync()
@@ -82,4 +88,25 @@ class PatRevokeKillSpec extends AnyFlatSpec with Matchers:
       out.isLeft shouldBe true
       killCalls shouldBe 0
       castCalls shouldBe 0
+    }
+
+  it should "still answer ok and audit once when the kill and broadcast functions both throw" in
+    withFreshDb { (users, pats) =>
+      val uid         = seedUser(users)
+      val (root, raw) = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
+      val (child, _)  = pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
+      val auditStore  = new RecordingTelemetryStore
+      val h           = new PatHandlers(
+        pats,
+        new SessionTokenStore(),
+        userOf = (_, _) => None,
+        audit = new AuditRecorder(auditStore, _ => None),
+        killStatements = _ => throw new RuntimeException("kill boom"),
+        broadcastKill = _ => throw new RuntimeException("cast boom")
+      )
+      val out = h.revoke(Some(raw), PatRevokeRequest(child.id)).unsafeRunSync()
+      out shouldBe Right(PatRevokeResponse("ok", 0))
+      val revokes = auditStore.events.filter(_.action == AuditActions.AuthPatRevoke)
+      revokes.map(_.outcome) shouldBe List("ok")
+      revokes.head.detail.get("killedStatements") shouldBe Some("0")
     }
