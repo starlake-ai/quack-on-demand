@@ -1,4 +1,4 @@
-# WIP quack-on-demand Helm chart
+# quack-on-demand Helm chart
 
 Deploys the [quack-on-demand](https://github.com/starlake-ai/quack-on-demand) manager onto Kubernetes. The manager serves the admin REST/UI on `:20900` and the FlightSQL edge on `:31338`, and supervises Quack node pods in the same namespace via its built-in `KubernetesQuackBackend`.
 
@@ -12,7 +12,17 @@ The chart does **not** bundle Postgres. Production deploys should point at a man
 
 ## Quick install
 
-The chart is **not yet published to any registry** - install it from a checkout.
+The chart is published as an OCI artifact on every release:
+
+```bash
+helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand \
+  --version <release, e.g. 0.8.1> \
+  --set postgres.host=<your-postgres-host> \
+  --set postgres.password=<your-postgres-password>
+```
+
+(Exact value keys: see [values.yaml](values.yaml); an external Postgres is
+required, per the prerequisites above.) You can also install from a checkout:
 
 ### Local kind cluster (recommended for first-run)
 

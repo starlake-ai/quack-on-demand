@@ -6,8 +6,8 @@ description: |
   the FlightSQL edge, and supervises Quack node pods in the same namespace
   via the manager's built-in KubernetesQuackBackend.
 type: application
-version: 0.1.0
-appVersion: 0.1.0
+version: 0.8.1
+appVersion: 0.8.1
 home: https://github.com/starlake-ai/quack-on-demand
 sources:
   - https://github.com/starlake-ai/quack-on-demand

@@ -30,6 +30,10 @@ Use this skill when the user wants to:
 
 ## Booting
 
+On Kubernetes, the Helm chart is published as an OCI artifact per release:
+`helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand --version <release>`
+(external Postgres required; see charts/quack-on-demand/README.md). Locally:
+
 ```bash
 # Default: TLS edge, DB auth on, Postgres state, admin user seeded
 ./scripts/run-jar.sh

@@ -361,6 +361,50 @@ jobs:
         run: docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${{ needs.prepare.outputs.version }}"
 
   # -----------------------------------------------------------------------
+  # 4b. Helm chart, published as an OCI artifact to GHCR.
+  #     GHCR rather than Docker Hub: the chart shares its name with the
+  #     manager image repository (starlakeai/quack-on-demand), and one
+  #     Docker Hub repository cannot hold both an image and a chart on the
+  #     same tags without colliding; GHCR namespaces the chart under
+  #     charts/. The version is stamped HERE, not read from the tag, so a
+  #     workflow_dispatch re-run against an older tag (whose Chart.yaml may
+  #     predate chart stamping) still publishes a correctly-versioned chart.
+  #     needs docker-merge: the chart's default image tag is appVersion, so
+  #     never publish a chart pointing at an image that failed to publish.
+  # -----------------------------------------------------------------------
+  helm-chart:
+    needs: [prepare, docker-merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Stamp chart version + appVersion
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          sed -i -E \
+            "s|^version: .*|version: ${version}|; s|^appVersion: .*|appVersion: ${version}|" \
+            charts/quack-on-demand/Chart.yaml
+          grep -E "^(version|appVersion):" charts/quack-on-demand/Chart.yaml
+
+      - name: Lint, package, push
+        run: |
+          set -euo pipefail
+          helm lint charts/quack-on-demand
+          helm package charts/quack-on-demand -d "${{ runner.temp }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push \
+            "${{ runner.temp }}/quack-on-demand-${{ needs.prepare.outputs.version }}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
+  # -----------------------------------------------------------------------
   # 4c. Node image (data-plane pod): same digest-matrix + merge shape, built
   #     from the tag checkout so operators get manager+node tags in lockstep.
   #     Before 2026-08-07 the node image only ever had -SNAPSHOT tags (built
