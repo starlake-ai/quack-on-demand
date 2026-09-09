@@ -97,7 +97,9 @@ class MustChangePasswordFlagSpec extends AnyFlatSpec with Matchers:
 
   it should "accept Some(false) enabled without a password as a flag-only update" in withSup {
     (sup, store, users) =>
-      sup.createUser(None, "alice", "pw", "admin", users).unsafeRunSync()
+      sup
+        .createUser(None, "alice", "pw", "admin", users, mustChangePassword = true)
+        .unsafeRunSync()
       val id         = store.findUser(None, "alice").get.id
       val hashBefore = store.getPasswordHash(None, "alice")
       sup
@@ -106,8 +108,9 @@ class MustChangePasswordFlagSpec extends AnyFlatSpec with Matchers:
         .isRight shouldBe true
       // The enabled flag flips, the credential is untouched (same hash the create wrote),
       // and mustChangePassword - a sibling column reachable through the same rewrite
-      // branch - is not incidentally touched by a request that never mentioned it.
+      // branch - SURVIVES as true (seeded non-default, so a regression that hardcoded
+      // the default false on this path would fail here).
       store.findUser(None, "alice").get.enabled shouldBe false
       store.getPasswordHash(None, "alice") shouldBe hashBefore
-      store.findUser(None, "alice").get.mustChangePassword shouldBe false
+      store.findUser(None, "alice").get.mustChangePassword shouldBe true
   }

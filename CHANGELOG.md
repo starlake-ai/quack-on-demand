@@ -8,11 +8,13 @@
   emit the same `AuditActions` events REST already emits for the equivalent
   call - including denials and parse failures, which previously left only a
   WARN log line.
-- **Fix: a claim-shaped statement denied on a non-dialect path could leak a
+- **Fix: a claim-shaped statement on a non-dialect path could leak a
   password into history.** A statement that *looked* like admin SQL (e.g.
-  `CREATE USER ... PASSWORD '...'`) but was denied before reaching the admin
-  executor - MCP, or `QOD_SQL_ADMIN_ENABLED=false` - recorded the raw SQL,
-  password literal included, in statement history and the denial journal.
+  `CREATE USER ... PASSWORD '...'`) on a path the dialect does not serve -
+  MCP, or `QOD_SQL_ADMIN_ENABLED=false` - recorded the raw SQL in statement
+  history when denied, and when admitted and forwarded, the node's parser
+  error (which quotes the statement, password literal included) was recorded
+  in the history error column.
   Both the SQL and the error text are now redacted for claim-shaped
   statements on every path, not just the ones the dialect actually executes.
 - **Parser: dollar-quoted and E-string literals now tokenize inside
