@@ -146,11 +146,12 @@ final class FlightProducerImpl(
     */
   private def toFlightException(f: RouterFailure): Throwable =
     val status = f match
-      case RouterFailure.AccessDenied(_) => CallStatus.UNAUTHORIZED
-      case RouterFailure.NotFound(_)     => CallStatus.NOT_FOUND
-      case RouterFailure.BadRequest(_)   => CallStatus.INVALID_ARGUMENT
-      case RouterFailure.Unavailable(_)  => CallStatus.UNAVAILABLE
-      case RouterFailure.Internal(_)     => CallStatus.INTERNAL
+      case RouterFailure.AccessDenied(_)  => CallStatus.UNAUTHORIZED
+      case RouterFailure.NotFound(_)      => CallStatus.NOT_FOUND
+      case RouterFailure.BadRequest(_)    => CallStatus.INVALID_ARGUMENT
+      case RouterFailure.Unavailable(_)   => CallStatus.UNAVAILABLE
+      case RouterFailure.Internal(_)      => CallStatus.INTERNAL
+      case RouterFailure.AlreadyExists(_) => CallStatus.ALREADY_EXISTS
     status.withDescription(f.reason).toRuntimeException()
 
   /** INTERNAL Flight exception for an unexpected throwable. The raw message may leak SQL, hostnames

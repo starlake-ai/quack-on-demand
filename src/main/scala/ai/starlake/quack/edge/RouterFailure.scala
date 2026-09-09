@@ -19,8 +19,9 @@ package ai.starlake.quack.edge
   * removes a parse-the-string anti-pattern at the producer layer.
   */
 enum RouterFailure(val reason: String):
-  case AccessDenied(override val reason: String) extends RouterFailure(reason)
-  case NotFound(override val reason: String)     extends RouterFailure(reason)
-  case BadRequest(override val reason: String)   extends RouterFailure(reason)
-  case Unavailable(override val reason: String)  extends RouterFailure(reason)
-  case Internal(override val reason: String)     extends RouterFailure(reason)
+  case AccessDenied(override val reason: String)  extends RouterFailure(reason)
+  case NotFound(override val reason: String)      extends RouterFailure(reason)
+  case BadRequest(override val reason: String)    extends RouterFailure(reason)
+  case Unavailable(override val reason: String)   extends RouterFailure(reason)
+  case Internal(override val reason: String)      extends RouterFailure(reason)
+  case AlreadyExists(override val reason: String) extends RouterFailure(reason)

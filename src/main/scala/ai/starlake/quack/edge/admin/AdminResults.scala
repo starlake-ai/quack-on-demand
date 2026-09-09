@@ -1,0 +1,59 @@
+package ai.starlake.quack.edge.admin
+
+import ai.starlake.quack.edge.QueryResult
+import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.vector.ipc.{ArrowStreamReader, ArrowStreamWriter}
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.arrow.vector.{VarCharVector, VectorSchemaRoot}
+
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.nio.channels.Channels
+import java.nio.charset.StandardCharsets
+import scala.jdk.CollectionConverters.*
+
+/** Synthesizes manager-answered admin results as tiny in-memory Arrow streams so the producer's
+  * existing streamArrow pump serves them exactly like node-proxied QueryResults. All columns are
+  * nullable UTF8: admin output is human-facing metadata, not typed data.
+  */
+object AdminResults:
+
+  val ManagerNodeId = "manager"
+
+  private val allocator = new RootAllocator(Long.MaxValue)
+
+  def table(columns: List[String], rows: List[List[Option[String]]]): QueryResult =
+    val utf8   = new ArrowType.Utf8()
+    val schema = new Schema(
+      columns.map(c => new Field(c, FieldType.nullable(utf8), null)).asJava
+    )
+    val bytes =
+      val root = VectorSchemaRoot.create(schema, allocator)
+      try
+        root.allocateNew()
+        columns.zipWithIndex.foreach { case (col, cIdx) =>
+          val vec = root.getVector(cIdx).asInstanceOf[VarCharVector]
+          rows.zipWithIndex.foreach { case (row, rIdx) =>
+            row(cIdx) match
+              case Some(v) => vec.setSafe(rIdx, v.getBytes(StandardCharsets.UTF_8))
+              case None    => vec.setNull(rIdx)
+          }
+        }
+        root.setRowCount(rows.size)
+        val out    = new ByteArrayOutputStream()
+        val writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))
+        writer.start()
+        writer.writeBatch()
+        writer.end()
+        writer.close()
+        out.toByteArray
+      finally root.close()
+    val reader = new ArrowStreamReader(new ByteArrayInputStream(bytes), allocator)
+    QueryResult(
+      rows = reader,
+      close = () => reader.close(),
+      nodeId = ManagerNodeId,
+      durationMs = 0L
+    )
+
+  def ok(detail: String): QueryResult =
+    table(List("status", "detail"), List(List(Some("ok"), Some(detail))))
