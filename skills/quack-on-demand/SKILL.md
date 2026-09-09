@@ -631,18 +631,19 @@ SHOW GRANTS FOR ROLE analyst;
 SHOW USERS;
 ```
 
-Run these as plain (non-prepared) statements where you have the choice: the
-prepared-statement path works too (dispatch lives inside `execute`, which both
-the immediate and prepared paths call), but prepare-time schema advertisement
-for a mutating admin statement shows a generic `count` column while the
-delivered result is actually `(status, detail)` - cosmetic, but confusing in a
-JDBC/ADBC tool that renders the advertised schema before running.
+The prepared-statement path advertises the correct `(status, detail)` schema
+for a mutating admin statement (dispatch lives inside `execute`, which both
+the immediate and prepared paths call), so ADBC/JDBC clients - the dialect's
+primary clients - work through Prepare/Execute exactly as they do for any
+other DDL. Nothing is executed at Prepare time; only the schema advertised at
+that step differs from an ordinary DDL statement's `Count: int64`, matching
+what the later Execute actually delivers.
 
 **Semantics worth knowing before you rely on them**:
 
 - `REVOKE <verb> ON obj FROM ROLE r` on a grant that does not exist is not an
-  error - it succeeds with `revoked = 0` in the result row (there is no
-  warning channel over FlightSQL to distinguish "revoked something" from
+  error - it succeeds with `detail = "revoked 0"` in the result row (there is
+  no warning channel over FlightSQL to distinguish "revoked something" from
   "revoked nothing").
 - `REVOKE ALL ON *.*.*` removes only a grant row stored **literally** as
   `(*, *, *)` - it is not a shorthand for "every grant this role holds." Wildcards

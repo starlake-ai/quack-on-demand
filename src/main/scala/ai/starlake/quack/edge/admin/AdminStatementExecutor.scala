@@ -159,11 +159,13 @@ final class AdminStatementExecutor(
       case Right(g) => userByName(ctx, user).map(_.map(u => (g, u)))
     }
 
+  // (status, detail): every mutation arm delivers this exact two-column shape (see
+  // AdminResults.ok, used throughout this file) - the prepared FlightSQL path advertises it at
+  // Prepare time (FlightProducerImpl.adminStatusSchema) without executing, so a mismatched
+  // shape here would break ADBC/JDBC's strict prepare-time schema check. revoked=0 (not found)
+  // is deliberately not an error - see the REVOKE semantics note in the runbook/spec.
   private def revokedResult(n: Int): QueryResult =
-    AdminResults.table(
-      List("status", "revoked"),
-      List(List(Some("ok"), Some(n.toString)))
-    )
+    AdminResults.ok(s"revoked $n")
 
   private def run(ctx: Ctx, cmd: AdminCommand): IO[Either[RouterFailure, QueryResult]] =
     cmd match

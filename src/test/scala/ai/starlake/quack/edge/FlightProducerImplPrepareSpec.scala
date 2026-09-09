@@ -149,6 +149,31 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     schema.getFields.size() shouldBe 1
     schema.getFields.get(0).getName shouldBe "Count"
 
+  it should "advertise the (status, detail) schema for a claimed admin mutation, not Count" in:
+    // Regression for the release blocker: CREATE ROLE classifies as DDL (SkipExecute), same as
+    // any other DDL, so this used to fall through to the countSchema branch above and advertise
+    // "Count: int64" for a statement that actually delivers (status, detail) - ADBC's strict
+    // prepare-time schema check then rejected the real Execute result. See
+    // FlightProducerImpl.adminStatusSchema.
+    val (producer, sent, _, peer) = setupProducer()
+    val listener                  = runPrepare(producer, peer, "CREATE ROLE analyst")
+    listener.onErrorRef.get() shouldBe null
+    listener.completed shouldBe true
+    sent shouldBe empty // not executed at prepare time - see the DDL/DML case above
+    val result = decodePrepareResult(listener.onNextValue.get())
+    val schema = parseSchema(result.getDatasetSchema.toByteArray)
+    schema.getFields.size() shouldBe 2
+    schema.getFields.get(0).getName shouldBe "status"
+    schema.getFields.get(1).getName shouldBe "detail"
+
+  it should "still advertise Count for an ordinary (non-admin) DDL statement" in:
+    val (producer, _, _, peer) = setupProducer()
+    val listener               = runPrepare(producer, peer, "CREATE TABLE t (a INT)")
+    val result                 = decodePrepareResult(listener.onNextValue.get())
+    val schema                 = parseSchema(result.getDatasetSchema.toByteArray)
+    schema.getFields.size() shouldBe 1
+    schema.getFields.get(0).getName shouldBe "Count"
+
   /** Deserialize a serialized IPC Arrow schema from raw bytes. */
   private def parseSchema(bytes: Array[Byte]): org.apache.arrow.vector.types.pojo.Schema =
     org.apache.arrow.vector.ipc.message.MessageSerializer.deserializeSchema(

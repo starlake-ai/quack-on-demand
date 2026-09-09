@@ -104,6 +104,30 @@ final class FlightProducerImpl(
   private val countSchemaBytes: ByteString =
     serializeSchema(countSchema)
 
+  /** Two nullable utf8 columns: the schema every SQL admin dialect MUTATION actually delivers
+    * (`AdminResults.ok` / the executor's other mutation arms - see AdminStatementExecutor). A
+    * mutating admin statement (`CREATE ROLE`, `GRANT`, ...) classifies as DDL, so
+    * `createPreparedStatement`'s SkipExecute branch used to advertise `countSchema` for it
+    * unconditionally, same as any other DDL. ADBC/JDBC's prepare-time schema is STRICT: the client
+    * rejected the real `(status, detail)` Execute result against the advertised `Count: int64`, so
+    * the dialect could not be driven through its primary clients at all (release blocker, fixed
+    * alongside the (status, detail) unification below). SHOW forms are unaffected -
+    * `StatementClassifier` puts `SHOW` in the `select` bucket, so `PrepareStrategy.choose` routes
+    * it to `FullExecute`, which probes for and advertises the REAL schema already; only the
+    * SkipExecute (mutation) branch needed this substitution, and it must never execute at prepare
+    * time - a claimed mutation would otherwise double-execute.
+    */
+  private val adminStatusSchema: Schema =
+    new Schema(
+      java.util.Arrays.asList(
+        new Field("status", FieldType.nullable(new ArrowType.Utf8), null),
+        new Field("detail", FieldType.nullable(new ArrowType.Utf8), null)
+      )
+    )
+
+  private val adminStatusSchemaBytes: ByteString =
+    serializeSchema(adminStatusSchema)
+
   private val preparedStatements =
     scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
 
@@ -255,7 +279,14 @@ final class FlightProducerImpl(
 
         probeSqlOpt match
           case None =>
-            // SkipExecute: no node call; advertise countSchema (see its doc for the ADBC why).
+            // SkipExecute: no node call; advertise countSchema (see its doc for the ADBC why),
+            // except a claimed SQL admin mutation, which always delivers (status, detail) -
+            // advertise adminStatusSchema instead (see its doc for the incident this fixes).
+            // Not executed here either way - only the schema advertised at Prepare differs.
+            val (skipSchema, skipSchemaBytes) =
+              if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+                (adminStatusSchema, adminStatusSchemaBytes)
+              else (countSchema, countSchemaBytes)
             val handle = java.util.UUID.randomUUID().toString
             preparedStatements.put(
               handle,
@@ -267,13 +298,13 @@ final class FlightProducerImpl(
                 poolKey,
                 preferredNode = None,
                 prepareDurationMs = None,
-                datasetSchema = countSchema
+                datasetSchema = skipSchema
               )
             )
             val resp = FlightSql.ActionCreatePreparedStatementResult
               .newBuilder()
               .setPreparedStatementHandle(ByteString.copyFromUtf8(handle))
-              .setDatasetSchema(countSchemaBytes)
+              .setDatasetSchema(skipSchemaBytes)
               // The ODBC driver throws on an ABSENT parameter_schema, so advertise
               // zero parameters explicitly via the empty schema.
               .setParameterSchema(emptySchemaBytes)

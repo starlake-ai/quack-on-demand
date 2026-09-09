@@ -11,6 +11,17 @@
   grants, row/column policies, pool grants, and `SHOW USERS`. Behind
   `QOD_SQL_ADMIN_ENABLED` (default on); excluded from the MCP server, which
   stays REST/CLI-oriented.
+- **Fix: mutating SQL admin statements failed through the prepared FlightSQL
+  path.** `createPreparedStatement` advertised the generic DML/DDL `Count:
+  int64` dataset schema for every claimed admin mutation (`CREATE ROLE`,
+  `GRANT`, `CREATE USER`, ...), since they classify as DDL; ADBC/JDBC's strict
+  prepare-time schema validation then rejected the real `(status, detail)`
+  Execute result, so the dialect could not be driven through its primary
+  clients at all. A claimed mutation now advertises the correct `(status,
+  detail)` schema at Prepare, still without executing. Also unifies every
+  mutation's result to exactly `(status, detail)`: `REVOKE`'s result no longer
+  carries a separate `revoked` column - the count now lands in `detail` (e.g.
+  `"revoked 2"`).
 - **Revoking a personal access token now also kills its live statements.**
   `POST /api/auth/pat/revoke` (and `qod auth pat revoke`) still cascades the
   revocation over the token's whole minted subtree, and now additionally kills

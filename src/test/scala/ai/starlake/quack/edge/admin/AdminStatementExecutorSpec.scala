@@ -169,10 +169,18 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     // duplicate grant is a no-op success
     run(exec, sup, "GRANT SELECT ON tpch.main.orders TO ROLE analyst").isRight shouldBe true
     sup.listRolePermissions(role.id) should have size 1
-    // revoke with non-matching verb removes nothing; REVOKE ALL removes the row
-    run(exec, sup, "REVOKE DDL ON tpch.main.orders FROM ROLE analyst").isRight shouldBe true
+    // revoke with non-matching verb removes nothing; REVOKE ALL removes the row. The result
+    // shape is (status, detail) - same as every other mutation arm - with the count folded
+    // into detail (not a dedicated "revoked" column): the prepared FlightSQL path advertises
+    // this exact shape at Prepare time without executing, so a mismatch here would break
+    // ADBC/JDBC's strict prepare-time schema check.
+    run(exec, sup, "REVOKE DDL ON tpch.main.orders FROM ROLE analyst") match
+      case Right(qr) => readAll(qr) shouldBe List(List(Some("ok"), Some("revoked 0")))
+      case other     => fail(s"expected rows, got $other")
     sup.listRolePermissions(role.id) should have size 1
-    run(exec, sup, "REVOKE ALL ON tpch.main.orders FROM ROLE analyst").isRight shouldBe true
+    run(exec, sup, "REVOKE ALL ON tpch.main.orders FROM ROLE analyst") match
+      case Right(qr) => readAll(qr) shouldBe List(List(Some("ok"), Some("revoked 1")))
+      case other     => fail(s"expected rows, got $other")
     sup.listRolePermissions(role.id) shouldBe empty
     // grant to unknown role
     run(exec, sup, "GRANT SELECT ON t TO ROLE ghost") match
@@ -319,7 +327,9 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     granted.head(2) shouldBe Some("alice")
     rowsOf("SHOW POOL GRANTS FOR USER alice") shouldBe granted
 
-    run(exec, sup, "REVOKE CONNECT ON POOL sales FROM USER alice").isRight shouldBe true
+    run(exec, sup, "REVOKE CONNECT ON POOL sales FROM USER alice") match
+      case Right(qr) => readAll(qr) shouldBe List(List(Some("ok"), Some("revoked 1")))
+      case other     => fail(s"expected rows, got $other")
     sup.listPoolPermissions(Some(tid), Some(uid), None) shouldBe empty
     run(exec, sup, "GRANT CONNECT ON POOL ghost TO USER alice") match
       case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_pool")
