@@ -55,6 +55,17 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE ROLE \"an\"\"alyst\"") shouldBe
       Right(AdminCommand.CreateRole("an\"alyst"))
 
+  it should "claim CREATE OR REPLACE ROLE but reject it with a precise error" in:
+    AdminSqlParser.claims("CREATE OR REPLACE ROLE analyst") shouldBe true
+    AdminSqlParser.parse("CREATE OR REPLACE ROLE analyst") shouldBe
+      Left("OR REPLACE is not supported for ROLE")
+
+  it should "name only reachable options in the CREATE fallback error" in:
+    AdminSqlParser.parse("CREATE FOO") shouldBe
+      Left("expected ROW POLICY or COLUMN POLICY after CREATE")
+    AdminSqlParser.parse("CREATE OR REPLACE FOO") shouldBe
+      Left("expected ROW POLICY or COLUMN POLICY after CREATE OR REPLACE")
+
   it should "parse role membership grants" in:
     AdminSqlParser.parse("GRANT ROLE analyst TO USER alice") shouldBe
       Right(AdminCommand.GrantRoleTo("analyst", Principal.User("alice")))
@@ -117,6 +128,16 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("GRANT ALL, SELECT ON t TO ROLE r").isLeft shouldBe true
     AdminSqlParser.parse("GRANT FROBNICATE ON t TO ROLE r").isLeft shouldBe true
 
+  it should "reject a table grant targeting USER or GROUP directly" in:
+    AdminSqlParser.parse("GRANT SELECT ON t TO USER alice") shouldBe
+      Left(
+        "table grants target roles; use GRANT ROLE <role> TO USER|GROUP <name> for membership"
+      )
+    AdminSqlParser.parse("GRANT SELECT ON t TO GROUP finance") shouldBe
+      Left(
+        "table grants target roles; use GRANT ROLE <role> TO USER|GROUP <name> for membership"
+      )
+
   it should "parse REVOKE with verb and REVOKE ALL as any-verb" in:
     AdminSqlParser.parse("REVOKE SELECT ON tpch.main.orders FROM ROLE analyst") shouldBe
       Right(AdminCommand.RevokeTable(Some("RO"), TableRef("tpch", "main", "orders"), "analyst"))
@@ -170,16 +191,11 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
         "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 /* ) */"
       )
       .isLeft shouldBe true
+    // Deliberate reversal (comment alignment): a mid-body block comment is now rejected outright,
+    // matching the create-time validators - it is no longer skipped and folded into the body.
     AdminSqlParser.parse(
       "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 /* ) */ AND b = 2)"
-    ) shouldBe Right(
-      AdminCommand.CreateRowPolicy(
-        TableRef("*", "*", "t"),
-        "r",
-        "a = 1 /* ) */ AND b = 2",
-        false
-      )
-    )
+    ) shouldBe Left("comments are not allowed in expressions")
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a=1;)").isLeft shouldBe true
 
   it should "reject a body whose last line comment is not followed by further content" in:
@@ -198,17 +214,17 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
       AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = 1\n  AND b = 2", false)
     )
 
-  it should "accept a mid-body comment followed by more content on a later line" in:
-    AdminSqlParser
-      .parse(
-        "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 -- note\n AND b = 2)"
-      )
-      .isRight shouldBe true
+  it should "reject a mid-body comment even when followed by more content on a later line" in:
+    // Deliberate reversal (comment alignment): Task 3-era acceptance is gone - any comment
+    // content anywhere in the body is now a single rejection surface.
     AdminSqlParser.parse(
       "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 -- note\n AND b = 2)"
-    ) shouldBe Right(
-      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = 1 -- note\n AND b = 2", false)
-    )
+    ) shouldBe Left("comments are not allowed in expressions")
+
+  it should "reject a comment-only expression body" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (-- just a comment\n)"
+    ) shouldBe Left("comments are not allowed in expressions")
 
   it should "not treat comment markers or ; inside string literals as comments" in:
     AdminSqlParser.parse(
@@ -226,6 +242,62 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Right(
       AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = ';' AND b = 2", false)
     )
+
+  it should "treat dollar-quoted predicates as opaque string content" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING ($$a = 1 AND b = 2$$)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "$$a = 1 AND b = 2$$", false)
+    )
+    // A ')' and a ';' inside the dollar-quoted body must not affect paren depth or the
+    // semicolon guard.
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING ($$a = ')' ; fake$$)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "$$a = ')' ; fake$$", false)
+    )
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING ($tag$a = ')' ; fake$tag$)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "$tag$a = ')' ; fake$tag$", false)
+    )
+
+  it should "treat E-string predicates as opaque, backslash-escaped string content" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = E'it\\'s a test')"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = E'it\\'s a test'", false)
+    )
+    // \\ is a literal backslash, not the start of an escape that swallows the closing quote.
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = E'a\\\\' AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = E'a\\\\' AND b = 2", false)
+    )
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = e'lowercase e')"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = e'lowercase e'", false)
+    )
+
+  it should "fail closed on an unterminated dollar-quoted string" in:
+    AdminSqlParser.claims("CREATE ROLE r $$unterminated") shouldBe false
+    AdminSqlParser.parse("CREATE ROLE r $$unterminated").isLeft shouldBe true
+
+  it should "fail closed on an unterminated E-string" in:
+    AdminSqlParser.claims("CREATE ROLE r E'unterminated") shouldBe false
+    AdminSqlParser.parse("CREATE ROLE r E'unterminated").isLeft shouldBe true
+
+  it should "not choke claims() on dollar-quoted or E-string predicates" in:
+    AdminSqlParser.claims(
+      "CREATE ROW POLICY ON t FOR ROLE r USING ($$a = 1$$)"
+    ) shouldBe true
+    AdminSqlParser.claims(
+      "CREATE ROW POLICY ON t FOR ROLE r USING ($tag$a = 1$tag$)"
+    ) shouldBe true
+    AdminSqlParser.claims(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = E'it''s fine')"
+    ) shouldBe true
 
   "parse column policies" should "handle MASK USING and DENY" in:
     AdminSqlParser.parse(

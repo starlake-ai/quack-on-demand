@@ -1,5 +1,7 @@
 package ai.starlake.quack.edge.admin
 
+import java.util.Locale
+
 /** Parser for the SQL admin dialect (spec 2026-09-09-sql-admin-dialect-design.md).
   *
   * Statement shells are hand-tokenized here; embedded expressions (row-policy predicates, mask
@@ -18,6 +20,9 @@ object AdminSqlParser:
     * every sink agrees on the placeholder and none of them can drift into logging the real SQL.
     */
   val RedactedPlaceholder: String = "<admin statement redacted>"
+
+  /** Recognized privilege keywords for GRANT/REVOKE ON TABLE; shared by [[privileges]]. */
+  private val PrivWords = Set("SELECT", "INSERT", "UPDATE", "DELETE", "DDL", "ALL")
 
   private final case class Tok(raw: String, upper: String, quoted: Boolean, start: Int, end: Int)
 
@@ -40,7 +45,8 @@ object AdminSqlParser:
             kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICY") ||
-            (kw(1) == "OR" && kw(2) == "REPLACE" && (kw(3) == "ROW" || kw(3) == "COLUMN"))
+            (kw(1) == "OR" && kw(2) == "REPLACE" &&
+              (kw(3) == "ROW" || kw(3) == "COLUMN" || kw(3) == "ROLE"))
           case "DROP" =>
             kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
@@ -62,6 +68,85 @@ object AdminSqlParser:
 
   private def tokenize(sql: String): Either[String, Vector[Tok]] = tokenizeUpTo(sql, Int.MaxValue)
 
+  /** The kind of construct [[scanRegion]] found starting at its given position. `Comment` covers
+    * both line (`--`) and nested block (`/* */`) forms; `StrLit` covers single-quoted strings,
+    * `E'...'` strings, and dollar-quoted strings (`$$...$$` / `$tag$...$tag$`) - all three are
+    * string-literal tokens as far as callers are concerned; `Ident` is a double-quoted identifier.
+    */
+  private enum ScanKind:
+    case StrLit, Ident, Comment
+
+  /** Scans the single quoted-string / quoted-identifier / comment construct starting at `sql(i)`,
+    * honoring every such form the dialect accepts:
+    *   - single-quoted strings, `''` doubling escapes the quote
+    *   - `E'...'` / `e'...'` strings, backslash-escaped (`\\` is a literal backslash, `\'` does not
+    *     close the string; `''` doubling also does not close it)
+    *   - dollar-quoted strings, `$$...$$` and tagged `$tag$...$tag$` (tag = ident chars)
+    *   - double-quoted identifiers, `""` doubling escapes the quote
+    *   - a line comment (`--` to end of line) or a nested block comment (`/* */`, DuckDB-matching
+    *     depth counting - `/* /* */ */` is one comment, not two)
+    *
+    * Returns `None` when `sql(i)` starts none of these, so the caller falls back to its own
+    * single-char handling (whitespace, identifiers, operators, a `$` that isn't a dollar-quote
+    * open). Shared by [[tokenizeUpTo]] (which must skip comments and emit whole tokens for every
+    * string/ident form) and `parenExpression` (which must skip the same regions when tracking paren
+    * depth and the semicolon guard, and reject on sight the moment a comment is found).
+    */
+  private def scanRegion(sql: String, i: Int): Option[Either[String, (Int, ScanKind)]] =
+    val n = sql.length
+    val c = sql(i)
+    if c == '-' && i + 1 < n && sql(i + 1) == '-' then
+      var j = i
+      while j < n && sql(j) != '\n' do j += 1
+      Some(Right((j, ScanKind.Comment)))
+    else if c == '/' && i + 1 < n && sql(i + 1) == '*' then
+      var depth = 1
+      var j     = i + 2
+      while j < n && depth > 0 do
+        if j + 1 < n && sql(j) == '/' && sql(j + 1) == '*' then { depth += 1; j += 2 }
+        else if j + 1 < n && sql(j) == '*' && sql(j + 1) == '/' then { depth -= 1; j += 2 }
+        else j += 1
+      if depth > 0 then Some(Left("unterminated block comment"))
+      else Some(Right((j, ScanKind.Comment)))
+    else if c == '"' then
+      var j      = i + 1
+      var closed = false
+      while j < n && !closed do
+        if sql(j) == '"' then
+          if j + 1 < n && sql(j + 1) == '"' then j += 2 else { closed = true; j += 1 }
+        else j += 1
+      if !closed then Some(Left("unterminated quoted identifier"))
+      else Some(Right((j, ScanKind.Ident)))
+    else if (c == 'E' || c == 'e') && i + 1 < n && sql(i + 1) == '\'' then
+      var j      = i + 2
+      var closed = false
+      while j < n && !closed do
+        if sql(j) == '\\' && j + 1 < n then j += 2
+        else if sql(j) == '\'' then
+          if j + 1 < n && sql(j + 1) == '\'' then j += 2 else { closed = true; j += 1 }
+        else j += 1
+      if !closed then Some(Left("unterminated string literal"))
+      else Some(Right((j, ScanKind.StrLit)))
+    else if c == '\'' then
+      var j      = i + 1
+      var closed = false
+      while j < n && !closed do
+        if sql(j) == '\'' then
+          if j + 1 < n && sql(j + 1) == '\'' then j += 2 else { closed = true; j += 1 }
+        else j += 1
+      if !closed then Some(Left("unterminated string literal"))
+      else Some(Right((j, ScanKind.StrLit)))
+    else if c == '$' then
+      var j = i + 1
+      while j < n && (sql(j).isLetterOrDigit || sql(j) == '_') do j += 1
+      if j < n && sql(j) == '$' then
+        val tag      = sql.substring(i, j + 1)
+        val closeIdx = sql.indexOf(tag, j + 1)
+        if closeIdx < 0 then Some(Left("unterminated dollar-quoted string"))
+        else Some(Right((closeIdx + tag.length, ScanKind.StrLit)))
+      else None
+    else None
+
   // Shared tokenizer core. `maxTokens` bounds how many tokens are collected before returning -
   // used by claims() to avoid a full-statement scan (per-token allocation and toUpperCase,
   // including on multi-megabyte string literals) on every statement of the hot path. Scanning
@@ -76,57 +161,32 @@ object AdminSqlParser:
     while i < n && failure.isEmpty && count < maxTokens do
       val c = sql(i)
       if c.isWhitespace then i += 1
-      else if c == '-' && i + 1 < n && sql(i + 1) == '-' then
-        while i < n && sql(i) != '\n' do i += 1
-      else if c == '/' && i + 1 < n && sql(i + 1) == '*' then
-        // DuckDB nests block comments, so a matching close requires depth-counting rather
-        // than a first-match indexOf, or "/* /* */ GRANT ... */" reads as a live statement.
-        var depth = 1
-        var j     = i + 2
-        while j < n && depth > 0 do
-          if j + 1 < n && sql(j) == '/' && sql(j + 1) == '*' then { depth += 1; j += 2 }
-          else if j + 1 < n && sql(j) == '*' && sql(j + 1) == '/' then { depth -= 1; j += 2 }
-          else j += 1
-        if depth > 0 then failure = Some("unterminated block comment") else i = j
-      else if c == '"' then
-        val sb     = new StringBuilder
-        var j      = i + 1
-        var closed = false
-        while j < n && !closed do
-          if sql(j) == '"' then
-            if j + 1 < n && sql(j + 1) == '"' then { sb.append('"'); j += 2 }
-            else { closed = true; j += 1 }
-          else { sb.append(sql(j)); j += 1 }
-        if !closed then failure = Some("unterminated quoted identifier")
-        else
-          val s = sb.toString
-          toks += Tok(s, s.toUpperCase, quoted = true, i, j)
-          count += 1
-          i = j
-      else if c == '\'' then
-        var j      = i + 1
-        var closed = false
-        while j < n && !closed do
-          if sql(j) == '\'' then
-            if j + 1 < n && sql(j + 1) == '\'' then j += 2 else { closed = true; j += 1 }
-          else j += 1
-        if !closed then failure = Some("unterminated string literal")
-        else
-          val s = sql.substring(i, j)
-          toks += Tok(s, s.toUpperCase, quoted = false, i, j)
-          count += 1
-          i = j
-      else if c.isLetter || c == '_' then
-        var j = i
-        while j < n && (sql(j).isLetterOrDigit || sql(j) == '_' || sql(j) == '$') do j += 1
-        val s = sql.substring(i, j)
-        toks += Tok(s, s.toUpperCase, quoted = false, i, j)
-        count += 1
-        i = j
       else
-        toks += Tok(c.toString, c.toString, quoted = false, i, i + 1)
-        count += 1
-        i += 1
+        scanRegion(sql, i) match
+          case Some(Left(err))                      => failure = Some(err)
+          case Some(Right((end, ScanKind.Comment))) => i = end
+          case Some(Right((end, ScanKind.Ident)))   =>
+            val s = sql.substring(i + 1, end - 1).replace("\"\"", "\"")
+            toks += Tok(s, s.toUpperCase(Locale.ROOT), quoted = true, i, end)
+            count += 1
+            i = end
+          case Some(Right((end, ScanKind.StrLit))) =>
+            val s = sql.substring(i, end)
+            toks += Tok(s, s.toUpperCase(Locale.ROOT), quoted = false, i, end)
+            count += 1
+            i = end
+          case None =>
+            if c.isLetter || c == '_' then
+              var j = i
+              while j < n && (sql(j).isLetterOrDigit || sql(j) == '_' || sql(j) == '$') do j += 1
+              val s = sql.substring(i, j)
+              toks += Tok(s, s.toUpperCase(Locale.ROOT), quoted = false, i, j)
+              count += 1
+              i = j
+            else
+              toks += Tok(c.toString, c.toString, quoted = false, i, i + 1)
+              count += 1
+              i += 1
     failure.toLeft(toks.result())
 
   private final class P(sql: String, toks: Vector[Tok]):
@@ -184,8 +244,6 @@ object AdminSqlParser:
       else if optKw("GROUP") then ident("group name").map(Principal.Group.apply)
       else Left(s"expected USER or GROUP, found '${if eof then "<end>" else toks(i).raw}'")
 
-    private val PrivWords = Set("SELECT", "INSERT", "UPDATE", "DELETE", "DDL", "ALL")
-
     /** Comma-separated privilege list, mapped onto the stored verb space. */
     private def privileges(): Either[String, String] =
       var privs                = Set.empty[String]
@@ -216,6 +274,9 @@ object AdminSqlParser:
         else Right("DDL")
       else if dml.nonEmpty then Right("RW")
       else if privs.contains("SELECT") then Right("RO")
+      // Unreachable by construction: privileges() only ever reaches mapVerb with a non-empty
+      // privs (the while loop's first iteration either fails closed or adds a PrivWords member),
+      // and every PrivWords member is covered by one of the branches above.
       else Left("empty privilege list")
 
     private def optDot(): Boolean =
@@ -278,6 +339,13 @@ object AdminSqlParser:
           _ = optKw("TABLE")
           ref <- tableRef()
           _   <- kw("TO")
+          _   <-
+            if (peek() == "USER" || peek() == "GROUP") && !peekQuoted then
+              Left(
+                "table grants target roles; use GRANT ROLE <role> TO USER|GROUP <name> " +
+                  "for membership"
+              )
+            else Right(())
           _ = optKw("ROLE")
           role <- ident("role name")
           out  <- end(AdminCommand.GrantTable(verb, ref, role))
@@ -315,19 +383,16 @@ object AdminSqlParser:
         yield out
 
     /** Requires the current token to be '('; scans the RAW sql for the balanced closing paren,
-      * skipping single-quoted strings ('' escape), double-quoted identifiers, and both comment
-      * forms the tokenizer accepts (line `--` and nested block `/* */`), so comment content never
-      * affects paren depth or the semicolon guard below. Rejects a bare `;` in the body - it has no
-      * legitimate use in an extracted expression and would break the downstream textual splice.
-      * Also rejects a body whose last line comment is not followed by further real content before
-      * the close: `.trim()` strips the trailing whitespace/newline that "closed" such a comment in
-      * the raw source, so a naturally-formatted `USING (\n  pred -- note\n)` would otherwise leave
-      * the trimmed body ending in a live, unterminated `--` - the same downstream splice hazard as
-      * the semicolon case. A `--` inside a string literal is still ordinary content (tracked below
-      * via lastContentEnd, not flagged as a comment start at all since inStr/inQuote take
-      * priority). Returns the trimmed body and advances the token cursor past the closing paren.
-      * The body is passed verbatim to the jsqlparser-based validators downstream - no
-      * re-tokenization here.
+      * treating every string-like construct the tokenizer accepts (single-quoted strings,
+      * E-strings, dollar-quoted strings, double-quoted identifiers) as opaque via the shared
+      * [[scanRegion]] scan, so a ')' or ';' inside one of them never affects paren depth or the
+      * semicolon guard below. Rejects a bare ';' in the body - it has no legitimate use in an
+      * extracted expression and would break the downstream textual splice. Rejects ANY comment in
+      * the body - line or block, anywhere, including a comment-only body - with a single "comments
+      * are not allowed in expressions" error, matching the create-time validators exactly; unlike
+      * quotes, a comment is never opaque content here. Returns the trimmed body and advances the
+      * token cursor past the closing paren. The body is passed verbatim to the jsqlparser-based
+      * validators downstream - no re-tokenization here.
       */
     private def parenExpression(): Either[String, String] =
       if eof || toks(i).quoted || toks(i).raw != "(" then Left("expected ( after USING")
@@ -335,59 +400,33 @@ object AdminSqlParser:
         val open                    = toks(i).start
         var j                       = open
         var depth                   = 0
-        var inStr                   = false
-        var inQuote                 = false
         var close                   = -1
-        var lastContentEnd          = -1
-        var lastLineCommentStart    = -1
         var failure: Option[String] = None
         while j < sql.length && close < 0 && failure.isEmpty do
           val c = sql(j)
-          if inStr then
-            if c == '\'' then
-              if j + 1 < sql.length && sql(j + 1) == '\'' then j += 1 else inStr = false
-            lastContentEnd = j
-            j += 1
-          else if inQuote then
-            if c == '"' then inQuote = false
-            lastContentEnd = j
-            j += 1
-          else if c == '\'' then { inStr = true; lastContentEnd = j; j += 1 }
-          else if c == '"' then { inQuote = true; lastContentEnd = j; j += 1 }
-          else if c == '-' && j + 1 < sql.length && sql(j + 1) == '-' then
-            lastLineCommentStart = j
-            while j < sql.length && sql(j) != '\n' do j += 1
-          else if c == '/' && j + 1 < sql.length && sql(j + 1) == '*' then
-            // Mirrors the tokenizer's nested-comment scan (see tokenizeUpTo) so a ')' or ';'
-            // inside a comment is invisible to depth counting and the semicolon guard. A block
-            // comment is self-terminating (always has an explicit close), so unlike a line
-            // comment it never needs lastContentEnd tracking to stay safe under trim().
-            var cdepth = 1
-            var k      = j + 2
-            while k < sql.length && cdepth > 0 do
-              if k + 1 < sql.length && sql(k) == '/' && sql(k + 1) == '*' then
-                cdepth += 1; k += 2
-              else if k + 1 < sql.length && sql(k) == '*' && sql(k + 1) == '/' then
-                cdepth -= 1; k += 2
-              else k += 1
-            if cdepth > 0 then failure = Some("unterminated comment in expression") else j = k
-          else if c == ';' then failure = Some("semicolon not allowed in expression")
-          else if c == '(' then { depth += 1; lastContentEnd = j; j += 1 }
-          else if c == ')' then
-            depth -= 1
-            // The final close (depth back to 0) sits outside the extracted body, so it must not
-            // count as trailing content - only a nested close does.
-            if depth == 0 then close = j else lastContentEnd = j
-            j += 1
+          if c.isWhitespace then j += 1
           else
-            if !c.isWhitespace then lastContentEnd = j
-            j += 1
+            scanRegion(sql, j) match
+              // Unreachable in practice: parse() tokenizes the whole statement with this same
+              // scanRegion before ever constructing a P and calling parenExpression, so an
+              // unterminated string/comment here would already have failed the statement closed.
+              // Kept as a defensive fallback rather than deleted.
+              case Some(Left(err))                    => failure = Some(err)
+              case Some(Right((_, ScanKind.Comment))) =>
+                failure = Some("comments are not allowed in expressions")
+              case Some(Right((end, _))) => j = end
+              case None                  =>
+                if c == ';' then failure = Some("semicolon not allowed in expression")
+                else if c == '(' then { depth += 1; j += 1 }
+                else if c == ')' then
+                  depth -= 1
+                  if depth == 0 then close = j
+                  j += 1
+                else j += 1
         failure match
           case Some(err) => Left(err)
           case None      =>
             if close < 0 then Left("unbalanced parentheses in expression")
-            else if lastLineCommentStart >= 0 && lastLineCommentStart > lastContentEnd then
-              Left("line comment at end of expression")
             else
               val body = sql.substring(open + 1, close).trim
               if body.isEmpty then Left("empty expression")
@@ -415,7 +454,9 @@ object AdminSqlParser:
         val orReplaceE: Either[String, Boolean] =
           if optKw("OR") then kw("REPLACE").map(_ => true) else Right(false)
         orReplaceE.flatMap { orReplace =>
-          if optKw("ROW") then
+          if orReplace && peek() == "ROLE" && !peekQuoted then
+            Left("OR REPLACE is not supported for ROLE")
+          else if optKw("ROW") then
             for
               _ <- kw("POLICY")
               _ <- kw("ON")
@@ -441,7 +482,9 @@ object AdminSqlParser:
               role <- ident("role name")
               cmd  <- columnAction(ref, col, role, orReplace)
             yield cmd
-          else Left("expected ROLE, ROW POLICY or COLUMN POLICY after CREATE")
+          else if orReplace then
+            Left("expected ROW POLICY or COLUMN POLICY after CREATE OR REPLACE")
+          else Left("expected ROW POLICY or COLUMN POLICY after CREATE")
         }
 
     private def columnAction(
@@ -564,7 +607,7 @@ object AdminSqlParser:
 
     private def policyFilter(): Either[String, PolicyFilter] =
       if optKw("ON") then
-        optKw("TABLE")
+        val _ = optKw("TABLE")
         tableRef().map(PolicyFilter.OnTable.apply)
       else if optKw("FOR") then
         for
