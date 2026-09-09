@@ -348,6 +348,8 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("SHOW ROLES") shouldBe Right(AdminCommand.ShowRoles)
     AdminSqlParser.parse("SHOW GRANTS FOR ROLE analyst") shouldBe
       Right(AdminCommand.ShowGrants("analyst"))
+    AdminSqlParser.parse("SHOW GRANTS FOR USER alice") shouldBe
+      Right(AdminCommand.ShowGrantsForUser("alice"))
     AdminSqlParser.parse("SHOW ROW POLICIES") shouldBe
       Right(AdminCommand.ShowRowPolicies(PolicyFilter.All))
     AdminSqlParser.parse("SHOW ROW POLICIES ON tpch.main.orders") shouldBe
@@ -373,6 +375,8 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
   it should "reject five adversarial SHOW forms" in:
     AdminSqlParser.parse("SHOW ROLES extra").isLeft shouldBe true
     AdminSqlParser.parse("SHOW GRANTS").isLeft shouldBe true                  // missing FOR ROLE
+    AdminSqlParser.parse("SHOW GRANTS FOR").isLeft shouldBe true              // missing ROLE|USER
+    AdminSqlParser.parse("SHOW GRANTS FOR GROUP g").isLeft shouldBe true      // not ROLE/USER
     AdminSqlParser.parse("SHOW ROW POLICIES FOR USER x").isLeft shouldBe true // no FOR USER form
     AdminSqlParser.parse("SHOW POOL GRANTS FOR ROLE r").isLeft shouldBe true  // not USER/GROUP
     AdminSqlParser.parse("SHOW \"ROLES\"").isLeft shouldBe true // quoted keyword, not SHOW ROLES
@@ -434,6 +438,30 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("ALTER USER alice PASSWORD secret").isLeft shouldBe true // not a literal
     AdminSqlParser.parse("ALTER USER alice PASSWORD ''").isLeft shouldBe true     // empty literal
     AdminSqlParser.parse("ALTER USER alice PASSWORD 'x' extra").isLeft shouldBe true
+
+  "parse ALTER USER account flags" should "handle REQUIRE PASSWORD CHANGE, ENABLE, DISABLE" in:
+    AdminSqlParser.parse("ALTER USER alice REQUIRE PASSWORD CHANGE") shouldBe
+      Right(AdminCommand.AlterUserRequirePasswordChange("alice"))
+    AdminSqlParser.parse("ALTER USER alice ENABLE") shouldBe
+      Right(AdminCommand.AlterUserEnabled("alice", enabled = true))
+    AdminSqlParser.parse("ALTER USER alice DISABLE") shouldBe
+      Right(AdminCommand.AlterUserEnabled("alice", enabled = false))
+    AdminSqlParser.claims("ALTER USER alice REQUIRE PASSWORD CHANGE") shouldBe true
+    AdminSqlParser.claims("ALTER USER alice ENABLE") shouldBe true
+    AdminSqlParser.claims("ALTER USER alice DISABLE") shouldBe true
+
+  it should "fail closed on malformed ALTER USER account-flag statements" in:
+    // REQUIRE without the trailing CHANGE keyword.
+    AdminSqlParser.parse("ALTER USER alice REQUIRE PASSWORD").isLeft shouldBe true
+    AdminSqlParser.parse("ALTER USER alice REQUIRE").isLeft shouldBe true
+    AdminSqlParser.parse("ALTER USER alice ENABLE extra").isLeft shouldBe true
+    AdminSqlParser.parse("ALTER USER alice DISABLE extra").isLeft shouldBe true
+    AdminSqlParser.parse("ALTER USER alice FROBNICATE").isLeft shouldBe true
+
+  it should "let a quoted keyword-lookalike stand in as the username" in:
+    // "ENABLE" is a quoted identifier here, not the ENABLE keyword - the real tail is PASSWORD.
+    AdminSqlParser.parse("ALTER USER \"ENABLE\" PASSWORD 'x'") shouldBe
+      Right(AdminCommand.AlterUserPassword("ENABLE", "x"))
 
   it should "still parse ALTER GROUP forms (regression)" in:
     AdminSqlParser.parse("ALTER GROUP finance ADD USER alice") shouldBe

@@ -32,6 +32,10 @@ final class AdminStatementExecutor(
     createUserFn: AdminStatementExecutor.CreateUserFn = AdminStatementExecutor.unwiredCreateUser,
     alterPasswordFn: AdminStatementExecutor.AlterPasswordFn =
       AdminStatementExecutor.unwiredAlterPassword,
+    requirePasswordChangeFn: AdminStatementExecutor.RequirePasswordChangeFn =
+      AdminStatementExecutor.unwiredRequirePasswordChange,
+    setUserEnabledFn: AdminStatementExecutor.SetUserEnabledFn =
+      AdminStatementExecutor.unwiredSetUserEnabled,
     audit: AuditRecorder = AuditRecorder.noop
 ) extends LazyLogging:
 
@@ -600,6 +604,39 @@ final class AdminStatementExecutor(
             }
         }
 
+      case AdminCommand.AlterUserRequirePasswordChange(name) =>
+        userByName(ctx, name).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(u) =>
+            mut(requirePasswordChangeFn(ctx.tenantId, name)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.UserUpdate,
+                target = Some(u.id),
+                Map("field" -> "mustChangePassword")
+              )
+              AdminResults.ok(s"password change required for $name")
+            }
+        }
+
+      case AdminCommand.AlterUserEnabled(name, enabled) =>
+        if !enabled && name == ctx.sessionUser then
+          IO.pure(Left(RouterFailure.BadRequest("cannot disable the current session user")))
+        else
+          userByName(ctx, name).flatMap {
+            case Left(f)  => IO.pure(Left(f))
+            case Right(u) =>
+              mut(setUserEnabledFn(ctx.tenantId, name, enabled)) { _ =>
+                auditOk(
+                  ctx,
+                  AuditActions.UserUpdate,
+                  target = Some(u.id),
+                  Map("enabled" -> enabled.toString)
+                )
+                AdminResults.ok(s"user $name ${if enabled then "enabled" else "disabled"}")
+              }
+          }
+
       case AdminCommand.DropUser(name, ifExists) =>
         if name == ctx.sessionUser then
           IO.pure(Left(RouterFailure.BadRequest("cannot drop the current session user")))
@@ -649,6 +686,36 @@ final class AdminStatementExecutor(
                   )
                 )
               Right(AdminResults.table(List("id", "catalog", "schema", "table", "verb"), rows))
+            }
+        }
+
+      case AdminCommand.ShowGrantsForUser(name) =>
+        userByName(ctx, name).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(u) =>
+            IO.blocking(supervisor.effectiveSetForUser(u.id)).map { effOpt =>
+              // A resolved user with no effective set (cache/store hiccup) reads as an empty
+              // grant listing, not an error - the user unquestionably exists, it simply holds
+              // no permissions right now.
+              val perms = effOpt.map(_.permissions).getOrElse(Nil)
+              val roles = effOpt.map(_.roles).getOrElse(Nil)
+              val rows  = perms.map { p =>
+                val roleName = roles.find(_.id == p.roleId).map(_.name).getOrElse("-")
+                List(
+                  Some(roleName),
+                  Some(p.id),
+                  Some(p.catalogName),
+                  Some(p.schemaName),
+                  Some(p.tableName),
+                  Some(p.verb)
+                )
+              }
+              Right(
+                AdminResults.table(
+                  List("role", "id", "catalog", "schema", "table", "verb"),
+                  rows
+                )
+              )
             }
         }
 
@@ -810,3 +877,30 @@ object AdminStatementExecutor:
 
   val unwiredAlterPassword: AlterPasswordFn =
     (_, _, _) => IO.pure(Left(SupervisorError.Internal("password rotation is not wired")))
+
+  /** (tenantId, username) -> unit. Flags the account as requiring a password change on next login
+    * WITHOUT rotating the credential - `PoolSupervisor.updateUserPassword` refuses
+    * `mustChangePassword = true` without a password in the same call (see its guard), so this
+    * cannot reuse that path the way `alterPasswordFn` / `setUserEnabledFn` do. Wired in Main over a
+    * direct control-plane store rewrite (same shape as `updateUserPassword`'s own enabled-only
+    * rewrite branch) followed by `PoolSupervisor.restore()` + `broadcastStateChanged()` - the
+    * sanctioned pattern for a store mutation made outside the supervisor's own mutators (see
+    * `ManifestImporter` / `ManifestHandlers`). Unwired default fails closed.
+    */
+  type RequirePasswordChangeFn = (String, String) => IO[Either[SupervisorError, Unit]]
+
+  val unwiredRequirePasswordChange: RequirePasswordChangeFn =
+    (_, _) => IO.pure(Left(SupervisorError.Internal("password-change requirement is not wired")))
+
+  /** (tenantId, username, enabled) -> unit. Wired in Main over the same
+    * `PoolSupervisor.updateUserPassword(..., enabled = Some(enabled))` call REST `user/update` uses
+    * for the account-lock flag - passing no password and no mustChangePassword leaves the
+    * credential and that flag untouched. A UserStore instance is required by that method's
+    * signature (unused on this call path, since it's only consulted when a password accompanies the
+    * call), which is why this needs its own injected fn rather than reusing `alterPasswordFn`.
+    * Unwired default fails closed.
+    */
+  type SetUserEnabledFn = (String, String, Boolean) => IO[Either[SupervisorError, Unit]]
+
+  val unwiredSetUserEnabled: SetUserEnabledFn =
+    (_, _, _) => IO.pure(Left(SupervisorError.Internal("account enable/disable is not wired")))

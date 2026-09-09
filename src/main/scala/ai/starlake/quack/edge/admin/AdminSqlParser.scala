@@ -567,13 +567,40 @@ object AdminSqlParser:
       else if optKw("USER") then
         for
           name <- ident("user name")
-          _ = optKw("WITH")
+          cmd  <- alterUserTail(name)
+        yield cmd
+      else Left("expected GROUP or USER after ALTER")
+
+    /** Dispatches on what follows `ALTER USER <name>`: password rotation (`[WITH] PASSWORD`, WITH
+      * is optional Postgres-style noise), `REQUIRE PASSWORD CHANGE` (flags the account without
+      * touching the credential), or `ENABLE` / `DISABLE` (account flag flip).
+      */
+    private def alterUserTail(name: String): Either[String, AdminCommand] =
+      if optKw("WITH") then
+        for
           _   <- kw("PASSWORD")
           pw  <- stringLiteral("password")
           _   <- if pw.isEmpty then Left("password must not be empty") else Right(())
           out <- end(AdminCommand.AlterUserPassword(name, pw))
         yield out
-      else Left("expected GROUP or USER after ALTER")
+      else if optKw("PASSWORD") then
+        for
+          pw  <- stringLiteral("password")
+          _   <- if pw.isEmpty then Left("password must not be empty") else Right(())
+          out <- end(AdminCommand.AlterUserPassword(name, pw))
+        yield out
+      else if optKw("REQUIRE") then
+        for
+          _   <- kw("PASSWORD")
+          _   <- kw("CHANGE")
+          out <- end(AdminCommand.AlterUserRequirePasswordChange(name))
+        yield out
+      else if optKw("ENABLE") then end(AdminCommand.AlterUserEnabled(name, enabled = true))
+      else if optKw("DISABLE") then end(AdminCommand.AlterUserEnabled(name, enabled = false))
+      else
+        Left(
+          "expected PASSWORD, REQUIRE PASSWORD CHANGE, ENABLE or DISABLE after ALTER USER <name>"
+        )
 
     private def show(): Either[String, AdminCommand] =
       if optKw("ROLES") then end(AdminCommand.ShowRoles)
@@ -581,10 +608,16 @@ object AdminSqlParser:
       else if optKw("GRANTS") then
         for
           _   <- kw("FOR")
-          _   <- kw("ROLE")
-          r   <- ident("role name")
-          out <- end(AdminCommand.ShowGrants(r))
-        yield out
+          cmd <-
+            if optKw("ROLE") then ident("role name").flatMap(r => end(AdminCommand.ShowGrants(r)))
+            else if optKw("USER") then
+              ident("user name").flatMap(u => end(AdminCommand.ShowGrantsForUser(u)))
+            else
+              Left(
+                s"expected ROLE or USER after SHOW GRANTS FOR, found " +
+                  s"'${if eof then "<end>" else toks(i).raw}'"
+              )
+        yield cmd
       else if optKw("ROW") then
         for
           _   <- kw("POLICIES")

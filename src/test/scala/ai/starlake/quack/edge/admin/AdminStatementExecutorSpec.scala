@@ -136,6 +136,67 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       }
     (sup, store, new AdminStatementExecutor(sup, alterPasswordFn = fn), calls)
 
+  // ALTER USER REQUIRE PASSWORD CHANGE / ENABLE / DISABLE tests only: builds an executor wired
+  // with fakes that record invocations AND actually flip the flag on the store row (mirroring
+  // what the real Main-wired fns do against Postgres), so tests can assert the flip via a
+  // store read-back, not just the recorded call. The store is exposed so tests can seed a user
+  // via seedUser.
+  private def setupWithAccountFlagFns(): (
+      PoolSupervisor,
+      InMemoryControlPlaneStore,
+      AdminStatementExecutor,
+      scala.collection.mutable.Buffer[(String, String)],
+      scala.collection.mutable.Buffer[(String, String, Boolean)]
+  ) =
+    val (sup, store, _) = setup()
+    val requireCalls    = scala.collection.mutable.Buffer.empty[(String, String)]
+    val enabledCalls    = scala.collection.mutable.Buffer.empty[(String, String, Boolean)]
+    val requireFn: AdminStatementExecutor.RequirePasswordChangeFn = (tid, username) =>
+      IO {
+        requireCalls += ((tid, username))
+        store.findUser(Some(tid), username) match
+          case None    => Left(SupervisorError.NotFound(s"user not found: $username"))
+          case Some(u) =>
+            store.upsertUserWithHash(
+              u.tenant,
+              u.username,
+              "x",
+              u.role,
+              enabled = u.enabled,
+              mustChangePassword = true,
+              email = u.email
+            )
+            Right(())
+      }
+    val enabledFn: AdminStatementExecutor.SetUserEnabledFn = (tid, username, enabled) =>
+      IO {
+        enabledCalls += ((tid, username, enabled))
+        store.findUser(Some(tid), username) match
+          case None    => Left(SupervisorError.NotFound(s"user not found: $username"))
+          case Some(u) =>
+            store.upsertUserWithHash(
+              u.tenant,
+              u.username,
+              "x",
+              u.role,
+              enabled = enabled,
+              mustChangePassword = u.mustChangePassword,
+              email = u.email
+            )
+            Right(())
+      }
+    (
+      sup,
+      store,
+      new AdminStatementExecutor(
+        sup,
+        requirePasswordChangeFn = requireFn,
+        setUserEnabledFn = enabledFn
+      ),
+      requireCalls,
+      enabledCalls
+    )
+
   private def tenantId(sup: PoolSupervisor): String =
     sup.getTenant("acme").orElse(sup.getTenantById("acme")).get.id
 
@@ -448,6 +509,52 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     rowsOf("SHOW COLUMN POLICIES FOR ROLE analyst") should have size 1
     rowsOf("SHOW COLUMN POLICIES ON tpch.main.other") shouldBe empty
 
+  "SHOW GRANTS FOR USER" should "flatten direct and role-via-group grants (6 columns)" in:
+    val (sup, store, exec) = setup()
+    val tid                = tenantId(sup)
+    seedUser(store, tid, "alice")
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(exec, sup, "GRANT SELECT ON tpch.main.orders TO ROLE analyst").isRight shouldBe true
+    run(exec, sup, "GRANT ROLE analyst TO USER alice").isRight shouldBe true
+    run(exec, sup, "CREATE ROLE etl").isRight shouldBe true
+    run(exec, sup, "GRANT INSERT ON tpch.main.staging TO ROLE etl").isRight shouldBe true
+    sup.createGroup(tid, "finance").unsafeRunSync().isRight shouldBe true
+    run(exec, sup, "GRANT ROLE etl TO GROUP finance").isRight shouldBe true
+    run(exec, sup, "ALTER GROUP finance ADD USER alice").isRight shouldBe true
+
+    run(exec, sup, "SHOW GRANTS FOR USER alice") match
+      case Right(qr) =>
+        val rows = readAll(qr)
+        rows.foreach(_ should have size 6)
+        rows.map(r => (r.head, r(2), r(5))) should contain allOf (
+          (Some("analyst"), Some("tpch"), Some("RO")),
+          (Some("etl"), Some("tpch"), Some("RW"))
+        )
+      case other => fail(s"expected rows, got $other")
+
+  it should "be tenant-scoped: another tenant's user resolves as NotFound" in:
+    val (sup, store, exec) = setup()
+    sup.createTenant(Tenant("globex")).unsafeRunSync()
+    val otherTid = sup.getTenant("globex").orElse(sup.getTenantById("globex")).get.id
+    seedUser(store, otherTid, "eve")
+    run(exec, sup, "SHOW GRANTS FOR USER eve") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_user")
+      case other                                => fail(s"expected NotFound, got $other")
+
+  it should "return NotFound for an unknown user" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "SHOW GRANTS FOR USER ghost") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_user")
+      case other                                => fail(s"expected NotFound, got $other")
+
+  it should "list an empty grant set for a user with no role memberships" in:
+    val (sup, store, exec) = setup()
+    val tid                = tenantId(sup)
+    seedUser(store, tid, "bob")
+    run(exec, sup, "SHOW GRANTS FOR USER bob") match
+      case Right(qr) => readAll(qr) shouldBe empty
+      case other     => fail(s"expected rows, got $other")
+
   "CREATE/DROP USER" should "create a tenant user, refuse duplicates, and drop" in:
     val (sup, _, exec, calls) = setupWithUserFn()
     run(exec, sup, "CREATE USER alice PASSWORD 'secret'").isRight shouldBe true
@@ -511,6 +618,95 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     val (sup, store, unwiredExec) = setup()
     seedUser(store, tenantId(sup), "alice")
     run(unwiredExec, sup, "ALTER USER alice PASSWORD 'x'") match
+      case Left(RouterFailure.Internal(_)) => succeed
+      case other                           => fail(s"expected Internal, got $other")
+
+  "ALTER USER REQUIRE PASSWORD CHANGE" should "flip mustChangePassword on an existing user" in:
+    val (sup, store, exec, requireCalls, _) = setupWithAccountFlagFns()
+    val tid                                 = tenantId(sup)
+    val uid                                 = seedUser(store, tid, "alice")
+    store.getUserById(uid).get.mustChangePassword shouldBe false
+    run(exec, sup, "ALTER USER alice REQUIRE PASSWORD CHANGE").isRight shouldBe true
+    requireCalls.last shouldBe ((tid, "alice"))
+    store.getUserById(uid).get.mustChangePassword shouldBe true
+
+  it should "have no self-guard - the session user may require its own password change" in:
+    val (sup, store, exec, requireCalls, _) = setupWithAccountFlagFns()
+    val tid                                 = tenantId(sup)
+    // run() always executes as user "boss".
+    seedUser(store, tid, "boss")
+    run(exec, sup, "ALTER USER boss REQUIRE PASSWORD CHANGE").isRight shouldBe true
+    requireCalls.last shouldBe ((tid, "boss"))
+
+  it should "return NotFound for an unknown user without invoking the fn" in:
+    val (sup, _, _) = setup()
+    val invoked     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val guardFn: AdminStatementExecutor.RequirePasswordChangeFn = (_, _) =>
+      IO {
+        invoked.set(true)
+        Right(())
+      }
+    val exec2 = new AdminStatementExecutor(sup, requirePasswordChangeFn = guardFn)
+    run(exec2, sup, "ALTER USER ghost REQUIRE PASSWORD CHANGE") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_user")
+      case other                                => fail(s"expected NotFound, got $other")
+    invoked.get() shouldBe false
+
+  it should "return Internal when the executor is unwired" in:
+    val (sup, store, unwiredExec) = setup()
+    seedUser(store, tenantId(sup), "alice")
+    run(unwiredExec, sup, "ALTER USER alice REQUIRE PASSWORD CHANGE") match
+      case Left(RouterFailure.Internal(_)) => succeed
+      case other                           => fail(s"expected Internal, got $other")
+
+  "ALTER USER ENABLE / DISABLE" should "flip the enabled flag on an existing user" in:
+    val (sup, store, exec, _, enabledCalls) = setupWithAccountFlagFns()
+    val tid                                 = tenantId(sup)
+    val uid                                 = seedUser(store, tid, "alice")
+    store.getUserById(uid).get.enabled shouldBe true
+    run(exec, sup, "ALTER USER alice DISABLE").isRight shouldBe true
+    enabledCalls.last shouldBe ((tid, "alice", false))
+    store.getUserById(uid).get.enabled shouldBe false
+    run(exec, sup, "ALTER USER alice ENABLE").isRight shouldBe true
+    enabledCalls.last shouldBe ((tid, "alice", true))
+    store.getUserById(uid).get.enabled shouldBe true
+
+  it should "refuse DISABLE of the current session user" in:
+    val (sup, store, exec, _, enabledCalls) = setupWithAccountFlagFns()
+    val tid                                 = tenantId(sup)
+    // run() always executes as user "boss".
+    seedUser(store, tid, "boss")
+    run(exec, sup, "ALTER USER boss DISABLE") match
+      case Left(RouterFailure.BadRequest(msg)) =>
+        msg should include("cannot disable the current session user")
+      case other => fail(s"expected BadRequest, got $other")
+    enabledCalls shouldBe empty
+
+  it should "have no self-guard for ENABLE - the session user may re-enable itself" in:
+    val (sup, store, exec, _, enabledCalls) = setupWithAccountFlagFns()
+    val tid                                 = tenantId(sup)
+    seedUser(store, tid, "boss")
+    run(exec, sup, "ALTER USER boss ENABLE").isRight shouldBe true
+    enabledCalls.last shouldBe ((tid, "boss", true))
+
+  it should "return NotFound for an unknown user without invoking the fn" in:
+    val (sup, _, _) = setup()
+    val invoked     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val guardFn: AdminStatementExecutor.SetUserEnabledFn = (_, _, _) =>
+      IO {
+        invoked.set(true)
+        Right(())
+      }
+    val exec2 = new AdminStatementExecutor(sup, setUserEnabledFn = guardFn)
+    run(exec2, sup, "ALTER USER ghost DISABLE") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_user")
+      case other                                => fail(s"expected NotFound, got $other")
+    invoked.get() shouldBe false
+
+  it should "return Internal when the executor is unwired" in:
+    val (sup, store, unwiredExec) = setup()
+    seedUser(store, tenantId(sup), "alice")
+    run(unwiredExec, sup, "ALTER USER alice ENABLE") match
       case Left(RouterFailure.Internal(_)) => succeed
       case other                           => fail(s"expected Internal, got $other")
 
@@ -588,3 +784,35 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     e.outcome shouldBe "denied"
     e.actor shouldBe "boss"
     e.detail shouldBe Map("cmd" -> "unparsed")
+
+  it should "fire user.update with field=mustChangePassword on REQUIRE PASSWORD CHANGE" in:
+    val (sup, store, _) = setup()
+    val auditStore      = new RecordingAuditStore
+    val audit           = new AuditRecorder(auditStore, _ => None)
+    val tid             = tenantId(sup)
+    val uid             = seedUser(store, tid, "alice")
+    val requireFn: AdminStatementExecutor.RequirePasswordChangeFn = (_, _) => IO.pure(Right(()))
+    val exec = new AdminStatementExecutor(sup, requirePasswordChangeFn = requireFn, audit = audit)
+    run(exec, sup, "ALTER USER alice REQUIRE PASSWORD CHANGE").isRight shouldBe true
+    val e = auditStore.events.find(_.action == AuditActions.UserUpdate).get
+    e.outcome shouldBe "ok"
+    e.target shouldBe Some(uid)
+    e.detail shouldBe Map("field" -> "mustChangePassword")
+
+  it should "fire user.update with enabled=true/false on ENABLE/DISABLE" in:
+    val (sup, store, _) = setup()
+    val auditStore      = new RecordingAuditStore
+    val audit           = new AuditRecorder(auditStore, _ => None)
+    val tid             = tenantId(sup)
+    val uid             = seedUser(store, tid, "alice")
+    val enabledFn: AdminStatementExecutor.SetUserEnabledFn = (_, _, _) => IO.pure(Right(()))
+    val exec = new AdminStatementExecutor(sup, setUserEnabledFn = enabledFn, audit = audit)
+    run(exec, sup, "ALTER USER alice DISABLE").isRight shouldBe true
+    val disabled = auditStore.events.find(_.action == AuditActions.UserUpdate).get
+    disabled.outcome shouldBe "ok"
+    disabled.target shouldBe Some(uid)
+    disabled.detail shouldBe Map("enabled" -> "false")
+    auditStore.events.clear()
+    run(exec, sup, "ALTER USER alice ENABLE").isRight shouldBe true
+    val enabled = auditStore.events.find(_.action == AuditActions.UserUpdate).get
+    enabled.detail shouldBe Map("enabled" -> "true")

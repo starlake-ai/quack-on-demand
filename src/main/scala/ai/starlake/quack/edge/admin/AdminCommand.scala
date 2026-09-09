@@ -48,9 +48,12 @@ enum AdminCommand:
   // no-privilege-escalation rule: only superusers mint superusers, via REST.
   case CreateUser(name: String, password: String, admin: Boolean)
   case AlterUserPassword(name: String, password: String)
+  case AlterUserRequirePasswordChange(name: String)
+  case AlterUserEnabled(name: String, enabled: Boolean)
   case DropUser(name: String, ifExists: Boolean)
   case ShowRoles
   case ShowGrants(role: String)
+  case ShowGrantsForUser(user: String)
   case ShowRowPolicies(filter: PolicyFilter)
   case ShowColumnPolicies(filter: PolicyFilter)
   case ShowPoolGrants(principal: Option[Principal])

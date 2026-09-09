@@ -609,6 +609,9 @@ ALTER GROUP finance ADD USER alice;
 CREATE USER alice PASSWORD 'secret';
 CREATE USER ops PASSWORD 'secret' ADMIN;
 ALTER USER alice PASSWORD 'newsecret';
+ALTER USER alice REQUIRE PASSWORD CHANGE;
+ALTER USER alice DISABLE;
+ALTER USER alice ENABLE;
 DROP USER IF EXISTS alice;
 
 -- Table ACLs
@@ -628,6 +631,7 @@ GRANT CONNECT ON POOL tpch.bi TO USER alice;
 
 -- Introspection
 SHOW GRANTS FOR ROLE analyst;
+SHOW GRANTS FOR USER alice;
 SHOW USERS;
 ```
 
@@ -700,6 +704,24 @@ what the later Execute actually delivers.
   if your schema has its own `users` table, `SHOW USERS` claims the statement
   and never reaches it - quote the identifier (`SHOW "users"`) to get DuckDB's
   normal describe-table behavior instead.
+- `ALTER USER ... REQUIRE PASSWORD CHANGE` flags the account so it must set a
+  new password on its next login, WITHOUT rotating the credential - it takes
+  no password argument. There is no self-guard: the session user may flag its
+  own account. An unknown username 404s before anything is written.
+- `ALTER USER ... ENABLE` / `DISABLE` flips the account's login/handshake gate
+  (the same `enabled` column REST `user/update` locks/unlocks). `DISABLE`
+  refuses to target the session's own username (self-disable guard, mirroring
+  `DROP USER`'s self-drop guard); `ENABLE` has no such guard - re-enabling
+  your own account is allowed. An unknown username 404s before anything is
+  written.
+- `SHOW GRANTS FOR USER u` lists the flattened effective table-grant closure
+  for a tenant user - direct role grants plus grants reached through group
+  membership - as `(role, id, catalog, schema, table, verb)`, where `role`
+  names the specific role each row was granted through ("-" if it cannot be
+  resolved). Tenant-scoped by construction (the username is resolved within
+  the session tenant, same as every other user-targeting form); an unknown
+  username 404s. A resolved user holding no grants lists as an empty result,
+  not an error.
 
 ## Federation - external catalogs via DuckDB extensions
 

@@ -766,6 +766,66 @@ object Main extends IOApp with LazyLogging:
                     .updateUserPassword(u.id, Some(newPassword), None, userStore)
                     .map(_.map(_ => ()))
               },
+            // enabled-only rewrite through the same updateUserPassword path REST user/update's
+            // lock/unlock uses - no password, no mustChangePassword, so the credential and that
+            // flag are untouched. The UserStore argument is required by the method's signature
+            // but is only consulted when a password accompanies the call, so it is unused here.
+            setUserEnabledFn = (tenantId, username, enabled) =>
+              IO.blocking(sup.findUser(Some(tenantId), username)).flatMap {
+                case None =>
+                  IO.pure(
+                    Left(
+                      ai.starlake.quack.ondemand.SupervisorError
+                        .NotFound(s"user not found: $username")
+                    )
+                  )
+                case Some(u) =>
+                  sup
+                    .updateUserPassword(u.id, None, None, userStore, enabled = Some(enabled))
+                    .map(_.map(_ => ()))
+              },
+            // No supervisor entrypoint sets mustChangePassword without a password in the same
+            // call (updateUserPassword refuses that combination), so this rewrites the stored
+            // row directly with the EXISTING hash - the same shape updateUserPassword's own
+            // enabled-only rewrite branch uses internally - then reloads the supervisor's caches
+            // and notifies HA peers. That restore()+broadcastStateChanged() pairing is the
+            // sanctioned pattern for a store mutation made outside the supervisor's own mutators
+            // (see ManifestHandlers.importManifest / ManifestImporter).
+            requirePasswordChangeFn = (tenantId, username) =>
+              IO.blocking(sup.findUser(Some(tenantId), username)).flatMap {
+                case None =>
+                  IO.pure(
+                    Left(
+                      ai.starlake.quack.ondemand.SupervisorError
+                        .NotFound(s"user not found: $username")
+                    )
+                  )
+                case Some(u) =>
+                  IO.blocking(store.getPasswordHash(u.tenant, u.username)).flatMap {
+                    case None =>
+                      IO.pure(
+                        Left(
+                          ai.starlake.quack.ondemand.SupervisorError.Internal(
+                            s"user ${u.username} has no stored password hash; update refused"
+                          )
+                        )
+                      )
+                    case Some(hash) =>
+                      IO.blocking {
+                        store.upsertUserWithHash(
+                          u.tenant,
+                          u.username,
+                          hash,
+                          u.role,
+                          enabled = u.enabled,
+                          mustChangePassword = true,
+                          email = u.email
+                        )
+                        sup.restore()
+                        sup.broadcastStateChanged()
+                      }.map(Right(_))
+                  }
+              },
             audit = auditRecorder
           )
         )
