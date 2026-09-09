@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- **SQL admin dialect: audit and history parity with REST.** Admin statements
+  executed over FlightSQL (`GRANT`, `CREATE ROLE`, `CREATE USER`, policy DDL,
+  ...) now land in statement history and metrics with the SQL redacted, and
+  emit the same `AuditActions` events REST already emits for the equivalent
+  call - including denials and parse failures, which previously left only a
+  WARN log line.
+- **Fix: a claim-shaped statement denied on a non-dialect path could leak a
+  password into history.** A statement that *looked* like admin SQL (e.g.
+  `CREATE USER ... PASSWORD '...'`) but was denied before reaching the admin
+  executor - MCP, or `QOD_SQL_ADMIN_ENABLED=false` - recorded the raw SQL,
+  password literal included, in statement history and the denial journal.
+  Both the SQL and the error text are now redacted for claim-shaped
+  statements on every path, not just the ones the dialect actually executes.
+- **Parser: dollar-quoted and E-string literals now tokenize inside
+  expressions.** `$$...$$` and `E'...'` in a row/column policy expression
+  used to make `claims()` return false, so the statement fell through to the
+  node and failed with a confusing DuckDB parser error instead of an admin
+  one. Comments are now rejected everywhere in an expression body instead of
+  being accepted in some shapes and not others.
+- **`CREATE OR REPLACE ROLE` is now claimed** and answered with a proper
+  admin error instead of falling through to a raw DuckDB parser error.
+- **`GRANT ... TO USER` on a table grant now gives a targeted error.**
+  `GRANT SELECT ON t TO USER alice` used to absorb `USER` as the role name
+  and fail with a confusing "unexpected trailing input: 'alice'"; it now
+  names the actual problem (roles only, not `USER`/`GROUP`, in the table
+  grant arm).
+- **New statements:** `SHOW GRANTS FOR USER u` (the user's effective grant
+  set, flattened through role and group membership), `ALTER USER u REQUIRE
+  PASSWORD CHANGE`, and `ALTER USER u ENABLE` / `DISABLE`.
+- **BREAKING (narrow): `POST /api/user/update` with `mustChangePassword` and
+  no `password` now succeeds.** It previously returned `400
+  invalid_argument`, refusing a flag-only update. Setting
+  `mustChangePassword` (or `enabled`) without also sending a new password is
+  now a supported, standalone update.
+
 ## 0.8.0
 
 - **SQL admin dialect over FlightSQL.** Admin-gated SQL statements sent
