@@ -107,6 +107,13 @@ object AuditActions:
   val SqlDenied = "sql.denied"
   val SqlWrite  = "sql.write"
   val SqlDdl    = "sql.ddl"
+  // SQL admin dialect (GRANT/REVOKE, CREATE ROLE, ALTER USER, ...): a claimed statement
+  // that fails AdminStatementExecutor.authorize. None of the RBAC family actions above
+  // (RoleCreate, UserCreate, ...) have a distinct "denied" variant, and the denied
+  // statement's target is not resolved at that point, so this single generic action
+  // covers every family. Distinct from SqlDenied, which is the routed data-plane path's
+  // ACL denial (a rejected SELECT/INSERT/etc, not a control-plane statement).
+  val SqlAdminDenied = "sql.admin.denied"
 
   /** Exhaustive sorted vocabulary served by GET /api/audit/actions. */
   val all: List[String] = List(
@@ -173,6 +180,7 @@ object AuditActions:
     SqlDenied,
     SqlWrite,
     SqlDdl,
+    SqlAdminDenied,
     TagCreate,
     TagDelete,
     TagHoldCreate,

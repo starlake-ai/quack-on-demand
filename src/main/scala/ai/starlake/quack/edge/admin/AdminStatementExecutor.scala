@@ -11,6 +11,7 @@ import ai.starlake.quack.ondemand.state.{
   RoleRowPolicy
 }
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 
@@ -18,12 +19,20 @@ import com.typesafe.scalalogging.LazyLogging
   * PoolSupervisor methods, so expression validation (jsqlparser), effective-cache invalidation, and
   * HA propagation apply unchanged. Fail-closed: any resolution or authorization failure returns a
   * RouterFailure; nothing here ever reaches a DuckDB node.
+  *
+  * `audit` mirrors the REST RBAC handlers' pattern (see e.g. RoleHandlers): each mutation arm of
+  * `run` fires the family-specific [[AuditActions]] event on success, right after the mutating
+  * supervisor call returns, exactly where the handlers do it. A denial at [[authorize]] fires the
+  * generic [[AuditActions.SqlAdminDenied]] instead - none of the family actions have a distinct
+  * "denied" variant, and the denied statement's target is not yet resolved at that point. Defaults
+  * to [[AuditRecorder.noop]] so every unwired construction (tests) stays a no-op.
   */
 final class AdminStatementExecutor(
     supervisor: PoolSupervisor,
     createUserFn: AdminStatementExecutor.CreateUserFn = AdminStatementExecutor.unwiredCreateUser,
     alterPasswordFn: AdminStatementExecutor.AlterPasswordFn =
-      AdminStatementExecutor.unwiredAlterPassword
+      AdminStatementExecutor.unwiredAlterPassword,
+    audit: AuditRecorder = AuditRecorder.noop
 ) extends LazyLogging:
 
   private final case class Ctx(
@@ -61,6 +70,18 @@ final class AdminStatementExecutor(
               logger.warn(
                 s"sql-admin denied user=$user tenant=${poolKey.tenant} " +
                   s"cmd=${cmd.getClass.getSimpleName}"
+              )
+              // No family-specific "denied" action exists (see the class doc); the caller's
+              // own tenant is not yet resolved to a Ctx at this point (that's what authorize
+              // failed to produce), so audit against the raw poolKey.tenant instead.
+              audit.restAs(
+                user,
+                "tenant",
+                "control-plane",
+                AuditActions.SqlAdminDenied,
+                "denied",
+                tenant = Some(poolKey.tenant),
+                detail = Map("cmd" -> cmd.getClass.getSimpleName)
               )
               IO.pure(Left(f))
             case Left(f)    => IO.pure(Left(f))
@@ -109,6 +130,25 @@ final class AdminStatementExecutor(
       render: A => QueryResult
   ): IO[Either[RouterFailure, QueryResult]] =
     op.map(_.left.map(toFailure).map(render))
+
+  private def realm(ctx: Ctx): String = if ctx.superuser then "system" else "tenant"
+
+  private def auditOk(
+      ctx: Ctx,
+      action: String,
+      target: Option[String] = None,
+      detail: Map[String, String] = Map.empty
+  ): Unit =
+    audit.restAs(
+      ctx.sessionUser,
+      realm(ctx),
+      "control-plane",
+      action,
+      "ok",
+      tenant = Some(ctx.tenantId),
+      target = target,
+      detail = detail
+    )
 
   // Resolution reads (listRoles / findUser / listGroups / listRolePermissions) hit the
   // control-plane store, which is JDBC-backed in production - IO.blocking pushes them onto
@@ -170,25 +210,50 @@ final class AdminStatementExecutor(
   private def run(ctx: Ctx, cmd: AdminCommand): IO[Either[RouterFailure, QueryResult]] =
     cmd match
       case AdminCommand.CreateRole(name) =>
-        mut(supervisor.createRole(ctx.tenantId, name))(r =>
+        mut(supervisor.createRole(ctx.tenantId, name)) { r =>
+          auditOk(ctx, AuditActions.RoleCreate, target = Some(r.id), detail = Map("name" -> name))
           AdminResults.ok(s"role ${r.name} created")
-        )
+        }
 
       case AdminCommand.DropRole(name, ifExists) =>
         roleByName(ctx, name).flatMap {
           case Left(_) if ifExists => IO.pure(Right(AdminResults.ok(s"role $name absent")))
           case Left(f)             => IO.pure(Left(f))
           case Right(r)            =>
-            mut(supervisor.deleteRole(r.id))(_ => AdminResults.ok(s"role $name dropped"))
+            mut(supervisor.deleteRole(r.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.RoleDelete,
+                target = Some(r.id),
+                detail = Map("name" -> name)
+              )
+              AdminResults.ok(s"role $name dropped")
+            }
         }
 
       case AdminCommand.GrantRoleTo(role, to) =>
         resolveRoleAndPrincipal(ctx, role, to).flatMap {
           case Left(f)                    => IO.pure(Left(f))
           case Right((r, (Some(uid), _))) =>
-            mut(supervisor.addUserRole(uid, r.id))(_ => AdminResults.ok(s"role $role granted"))
+            mut(supervisor.addUserRole(uid, r.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipUserRoleAdd,
+                target = Some(uid),
+                Map("role" -> role)
+              )
+              AdminResults.ok(s"role $role granted")
+            }
           case Right((r, (_, Some(gid)))) =>
-            mut(supervisor.addGroupRole(gid, r.id))(_ => AdminResults.ok(s"role $role granted"))
+            mut(supervisor.addGroupRole(gid, r.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipGroupRoleAdd,
+                target = Some(gid),
+                Map("role" -> role)
+              )
+              AdminResults.ok(s"role $role granted")
+            }
           case Right(_) => IO.pure(Left(RouterFailure.Internal("unresolved principal")))
         }
 
@@ -196,9 +261,25 @@ final class AdminStatementExecutor(
         resolveRoleAndPrincipal(ctx, role, from).flatMap {
           case Left(f)                    => IO.pure(Left(f))
           case Right((r, (Some(uid), _))) =>
-            mut(supervisor.removeUserRole(uid, r.id))(_ => AdminResults.ok(s"role $role revoked"))
+            mut(supervisor.removeUserRole(uid, r.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipUserRoleRemove,
+                target = Some(uid),
+                Map("role" -> role)
+              )
+              AdminResults.ok(s"role $role revoked")
+            }
           case Right((r, (_, Some(gid)))) =>
-            mut(supervisor.removeGroupRole(gid, r.id))(_ => AdminResults.ok(s"role $role revoked"))
+            mut(supervisor.removeGroupRole(gid, r.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipGroupRoleRemove,
+                target = Some(gid),
+                Map("role" -> role)
+              )
+              AdminResults.ok(s"role $role revoked")
+            }
           case Right(_) => IO.pure(Left(RouterFailure.Internal("unresolved principal")))
         }
 
@@ -206,18 +287,30 @@ final class AdminStatementExecutor(
         resolveGroupAndUser(ctx, group, user).flatMap {
           case Left(f)       => IO.pure(Left(f))
           case Right((g, u)) =>
-            mut(supervisor.addUserGroup(u.id, g.id))(_ =>
+            mut(supervisor.addUserGroup(u.id, g.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipUserGroupAdd,
+                target = Some(u.id),
+                Map("group" -> group)
+              )
               AdminResults.ok(s"user $user added to group $group")
-            )
+            }
         }
 
       case AdminCommand.AlterGroupDropUser(group, user) =>
         resolveGroupAndUser(ctx, group, user).flatMap {
           case Left(f)       => IO.pure(Left(f))
           case Right((g, u)) =>
-            mut(supervisor.removeUserGroup(u.id, g.id))(_ =>
+            mut(supervisor.removeUserGroup(u.id, g.id)) { _ =>
+              auditOk(
+                ctx,
+                AuditActions.MembershipUserGroupRemove,
+                target = Some(u.id),
+                Map("group" -> group)
+              )
               AdminResults.ok(s"user $user removed from group $group")
-            )
+            }
         }
 
       case AdminCommand.GrantTable(verb, ref, role) =>
@@ -231,9 +324,23 @@ final class AdminStatementExecutor(
               )
               if dup then IO.pure(Right(AdminResults.ok(s"grant already present")))
               else
-                mut(supervisor.grantRolePermission(r.id, ref.catalog, ref.schema, ref.table, verb))(
-                  _ => AdminResults.ok(s"granted $verb on $ref to role $role")
-                )
+                mut(
+                  supervisor.grantRolePermission(r.id, ref.catalog, ref.schema, ref.table, verb)
+                ) { p =>
+                  auditOk(
+                    ctx,
+                    AuditActions.RolePermissionGrant,
+                    target = Some(p.id),
+                    Map(
+                      "role"    -> role,
+                      "catalog" -> ref.catalog,
+                      "schema"  -> ref.schema,
+                      "table"   -> ref.table,
+                      "verb"    -> verb
+                    )
+                  )
+                  AdminResults.ok(s"granted $verb on $ref to role $role")
+                }
             }
         }
 
@@ -254,7 +361,21 @@ final class AdminStatementExecutor(
                       supervisor.revokeRolePermission(p.id).map(_.left.map(toFailure))
                   }
                 }
-                .map(_.map(_ => revokedResult(matches.size)))
+                .map(_.map { _ =>
+                  if matches.nonEmpty then
+                    auditOk(
+                      ctx,
+                      AuditActions.RolePermissionRevoke,
+                      detail = Map(
+                        "role"    -> role,
+                        "catalog" -> ref.catalog,
+                        "schema"  -> ref.schema,
+                        "table"   -> ref.table,
+                        "count"   -> matches.size.toString
+                      )
+                    )
+                  revokedResult(matches.size)
+                })
             }
         }
 
@@ -262,9 +383,15 @@ final class AdminStatementExecutor(
         resolvePoolAndPrincipal(ctx, target, to).flatMap {
           case Left(f)                  => IO.pure(Left(f))
           case Right((pid, (uid, gid))) =>
-            mut(supervisor.grantPoolPermission(ctx.tenantId, Some(pid), uid, gid))(_ =>
+            mut(supervisor.grantPoolPermission(ctx.tenantId, Some(pid), uid, gid)) { p =>
+              auditOk(
+                ctx,
+                AuditActions.PoolPermissionGrant,
+                target = Some(p.id),
+                Map("pool" -> target.pool)
+              )
               AdminResults.ok(s"pool ${target.pool} granted")
-            )
+            }
         }
 
       case AdminCommand.RevokePool(target, from) =>
@@ -284,7 +411,15 @@ final class AdminStatementExecutor(
                       supervisor.revokePoolPermission(p.id).map(_.left.map(toFailure))
                   }
                 }
-                .map(_.map(_ => revokedResult(matches.size)))
+                .map(_.map { _ =>
+                  if matches.nonEmpty then
+                    auditOk(
+                      ctx,
+                      AuditActions.PoolPermissionRevoke,
+                      detail = Map("pool" -> target.pool, "count" -> matches.size.toString)
+                    )
+                  revokedResult(matches.size)
+                })
             }
         }
 
@@ -298,9 +433,15 @@ final class AdminStatementExecutor(
                   p.tableName == ref.table
               ) match
                 case Some(p) if orReplace =>
-                  mut(supervisor.updateRowPolicy(p.id, pred))(_ =>
+                  mut(supervisor.updateRowPolicy(p.id, pred)) { _ =>
+                    auditOk(
+                      ctx,
+                      AuditActions.RoleRowPolicySet,
+                      target = Some(p.id),
+                      Map("role" -> role, "table" -> ref.toString)
+                    )
                     AdminResults.ok(s"row policy on $ref replaced")
-                  )
+                  }
                 case Some(_) =>
                   IO.pure(
                     Left(
@@ -310,9 +451,16 @@ final class AdminStatementExecutor(
                     )
                   )
                 case None =>
-                  mut(supervisor.createRowPolicy(r.id, ref.catalog, ref.schema, ref.table, pred))(
-                    _ => AdminResults.ok(s"row policy on $ref created")
-                  )
+                  mut(supervisor.createRowPolicy(r.id, ref.catalog, ref.schema, ref.table, pred)) {
+                    p =>
+                      auditOk(
+                        ctx,
+                        AuditActions.RoleRowPolicySet,
+                        target = Some(p.id),
+                        Map("role" -> role, "table" -> ref.toString)
+                      )
+                      AdminResults.ok(s"row policy on $ref created")
+                  }
             }
         }
 
@@ -327,9 +475,15 @@ final class AdminStatementExecutor(
                   p.tableName == ref.table
               ) match
                 case Some(p) =>
-                  mut(supervisor.deleteRowPolicy(p.id))(_ =>
+                  mut(supervisor.deleteRowPolicy(p.id)) { _ =>
+                    auditOk(
+                      ctx,
+                      AuditActions.RoleRowPolicyDelete,
+                      target = Some(p.id),
+                      Map("role" -> role, "table" -> ref.toString)
+                    )
                     AdminResults.ok(s"row policy on $ref dropped")
-                  )
+                  }
                 case None if ifExists => IO.pure(Right(AdminResults.ok("row policy absent")))
                 case None             =>
                   IO.pure(Left(RouterFailure.NotFound(s"not_found: row policy on $ref for $role")))
@@ -346,9 +500,15 @@ final class AdminStatementExecutor(
                   p.tableName == ref.table && p.columnName == col
               ) match
                 case Some(p) if orReplace =>
-                  mut(supervisor.updateColumnPolicy(p.id, action, transform))(_ =>
+                  mut(supervisor.updateColumnPolicy(p.id, action, transform)) { _ =>
+                    auditOk(
+                      ctx,
+                      AuditActions.RoleColumnPolicySet,
+                      target = Some(p.id),
+                      Map("role" -> role, "table" -> ref.toString, "column" -> col)
+                    )
                     AdminResults.ok(s"column policy on $ref.$col replaced")
-                  )
+                  }
                 case Some(_) =>
                   IO.pure(
                     Left(
@@ -369,7 +529,15 @@ final class AdminStatementExecutor(
                       action,
                       transform
                     )
-                  )(_ => AdminResults.ok(s"column policy on $ref.$col created"))
+                  ) { p =>
+                    auditOk(
+                      ctx,
+                      AuditActions.RoleColumnPolicySet,
+                      target = Some(p.id),
+                      Map("role" -> role, "table" -> ref.toString, "column" -> col)
+                    )
+                    AdminResults.ok(s"column policy on $ref.$col created")
+                  }
             }
         }
 
@@ -384,9 +552,15 @@ final class AdminStatementExecutor(
                   p.tableName == ref.table && p.columnName == col
               ) match
                 case Some(p) =>
-                  mut(supervisor.deleteColumnPolicy(p.id))(_ =>
+                  mut(supervisor.deleteColumnPolicy(p.id)) { _ =>
+                    auditOk(
+                      ctx,
+                      AuditActions.RoleColumnPolicyDelete,
+                      target = Some(p.id),
+                      Map("role" -> role, "table" -> ref.toString, "column" -> col)
+                    )
                     AdminResults.ok(s"column policy on $ref.$col dropped")
-                  )
+                  }
                 case None if ifExists => IO.pure(Right(AdminResults.ok("column policy absent")))
                 case None             =>
                   IO.pure(
@@ -397,17 +571,20 @@ final class AdminStatementExecutor(
 
       case AdminCommand.CreateUser(name, password, admin) =>
         val role = if admin then "admin" else "user"
-        mut(createUserFn(ctx.tenantId, name, password, role))(u =>
+        mut(createUserFn(ctx.tenantId, name, password, role)) { u =>
+          // password is never in the detail map - only the target username and its role.
+          auditOk(ctx, AuditActions.UserCreate, target = Some(u.id), Map("role" -> role))
           AdminResults.ok(s"user ${u.username} created")
-        )
+        }
 
       case AdminCommand.AlterUserPassword(name, password) =>
         userByName(ctx, name).flatMap {
           case Left(f)  => IO.pure(Left(f))
-          case Right(_) =>
-            mut(alterPasswordFn(ctx.tenantId, name, password))(_ =>
+          case Right(u) =>
+            mut(alterPasswordFn(ctx.tenantId, name, password)) { _ =>
+              auditOk(ctx, AuditActions.UserUpdate, target = Some(u.id), Map("field" -> "password"))
               AdminResults.ok(s"password updated for $name")
-            )
+            }
         }
 
       case AdminCommand.DropUser(name, ifExists) =>
@@ -418,7 +595,10 @@ final class AdminStatementExecutor(
             case Left(_) if ifExists => IO.pure(Right(AdminResults.ok(s"user $name absent")))
             case Left(f)             => IO.pure(Left(f))
             case Right(u)            =>
-              mut(supervisor.deleteUser(u.id))(_ => AdminResults.ok(s"user $name dropped"))
+              mut(supervisor.deleteUser(u.id)) { _ =>
+                auditOk(ctx, AuditActions.UserDelete, target = Some(u.id), Map("name" -> name))
+                AdminResults.ok(s"user $name dropped")
+              }
           }
 
       case AdminCommand.ShowRoles =>

@@ -4,6 +4,21 @@ import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
+import ai.starlake.quack.ondemand.telemetry.{
+  AuditActions,
+  AuditEvent,
+  AuditQuery,
+  AuditRecorder,
+  AuditRow,
+  RollupBucket,
+  RollupQuery,
+  StatementEvent,
+  StatementQuery,
+  StatementRow,
+  TelemetryStore,
+  UsageQuery,
+  UsageResult
+}
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import cats.effect.IO
@@ -12,7 +27,28 @@ import org.apache.arrow.vector.VarCharVector
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.time.Instant
+
 class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
+
+  // Minimal TelemetryStore fake that only ever receives appendAudit calls in these tests -
+  // mirrors AuditRecorderSpec's RecordingStore. `enabled = true` so AuditRecorder.restAs
+  // actually writes instead of no-op'ing.
+  private class RecordingAuditStore extends TelemetryStore:
+    val enabled = true
+    val events  = scala.collection.mutable.ListBuffer.empty[AuditEvent]
+    def appendAudit(es: List[AuditEvent]): Unit                                      = events ++= es
+    def listAudit(q: AuditQuery): List[AuditRow]                                     = Nil
+    def purgeAudit(olderThan: Instant): Int                                          = 0
+    def appendStatements(es: List[StatementEvent])                                   = ()
+    def searchStatements(q: StatementQuery)                                          = Nil
+    def purgeStatements(olderThan: Instant): Int                                     = 0
+    def rollupWatermark(): Option[Instant]                                           = None
+    def recomputeRollups(fromExclusive: Option[Instant], toInclusive: Instant): Unit = ()
+    def advanceRollupWatermark(to: Instant): Unit                                    = ()
+    def queryRollups(q: RollupQuery): List[RollupBucket]                             = Nil
+    def purgeRollups(granularity: String, olderThan: Instant): Int                   = 0
+    def queryUsage(q: UsageQuery): UsageResult = UsageResult(Nil, None)
 
   private val poolKey = PoolKey("acme", "acme_default", "sales")
 
@@ -29,6 +65,33 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     (sup, store, new AdminStatementExecutor(sup))
+
+  // Audit-event tests only: wires createUserFn the same way setupWithUserFn does (CREATE USER
+  // needs it) plus a RecordingAuditStore-backed AuditRecorder so the family-specific
+  // AuditActions events fired from run()'s mutation arms can be asserted on.
+  private def setupWithAudit(): (
+      PoolSupervisor,
+      InMemoryControlPlaneStore,
+      AdminStatementExecutor,
+      scala.collection.mutable.ListBuffer[AuditEvent]
+  ) =
+    val (sup, store, _)                                   = setup()
+    val auditStore                                        = new RecordingAuditStore
+    val audit                                             = new AuditRecorder(auditStore, _ => None)
+    val createUserFn: AdminStatementExecutor.CreateUserFn = (tid, username, password, role) =>
+      IO {
+        store.findUser(Some(tid), username) match
+          case Some(_) => Left(SupervisorError.AlreadyExists(s"user already exists: $username"))
+          case None    =>
+            val id = store.upsertUserWithHash(Some(tid), username, "x", role)
+            Right(store.getUserById(id).get)
+      }
+    (
+      sup,
+      store,
+      new AdminStatementExecutor(sup, createUserFn = createUserFn, audit = audit),
+      auditStore.events
+    )
 
   // CREATE/DROP USER tests only: builds an executor wired with a fake createUserFn that
   // writes through the store handle with a fixed hash (real hashing happens in the wired
@@ -472,3 +535,43 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
         aliceRow(3) shouldBe Some("true") // enabled
         aliceRow(4) shouldBe None         // email (seedUser sets none)
       case other => fail(s"expected rows, got $other")
+
+  "audit events" should "fire the family-specific action on a successful GRANT ROLE...TO USER" in:
+    val (sup, store, exec, events) = setupWithAudit()
+    val tid                        = tenantId(sup)
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    val uid = seedUser(store, tid, "alice")
+    events.clear()
+    run(exec, sup, "GRANT ROLE analyst TO USER alice").isRight shouldBe true
+    events.map(_.action) should contain(AuditActions.MembershipUserRoleAdd)
+    val e = events.find(_.action == AuditActions.MembershipUserRoleAdd).get
+    e.outcome shouldBe "ok"
+    e.actor shouldBe "boss"
+    e.tenant shouldBe Some(tid)
+    e.target shouldBe Some(uid)
+    e.detail shouldBe Map("role" -> "analyst")
+
+  it should "fire user.create with no password in the detail map" in:
+    val (sup, _, exec, events) = setupWithAudit()
+    run(exec, sup, "CREATE USER alice PASSWORD 'topsecret'").isRight shouldBe true
+    val e = events.find(_.action == AuditActions.UserCreate).get
+    e.outcome shouldBe "ok"
+    e.detail.values should not contain "topsecret"
+    e.detail should contain("role" -> "user")
+
+  it should "fire the generic sql.admin.denied action on an authorization denial" in:
+    val (sup, _, exec, events) = setupWithAudit()
+    exec.execute("carol", poolKey, "CREATE ROLE r1", userEff(sup)).unsafeRunSync() match
+      case Left(RouterFailure.AccessDenied(_)) => succeed
+      case other                               => fail(s"expected AccessDenied, got $other")
+    val e = events.find(_.action == AuditActions.SqlAdminDenied).get
+    e.outcome shouldBe "denied"
+    e.actor shouldBe "carol"
+    e.detail shouldBe Map("cmd" -> "CreateRole")
+
+  it should "not fire any audit event for a SHOW (read-only) statement" in:
+    val (sup, _, exec, events) = setupWithAudit()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    events.clear()
+    run(exec, sup, "SHOW ROLES").isRight shouldBe true
+    events shouldBe empty

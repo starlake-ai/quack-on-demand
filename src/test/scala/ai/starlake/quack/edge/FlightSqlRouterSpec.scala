@@ -218,6 +218,83 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
+  it should "record a redacted history row for an executed admin statement" in:
+    val (router, _, _) = setup()
+    val exec           = new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor = Some(exec)
+    )
+    val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-root", None, "root", role = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    withAdmin
+      .execute(
+        "c-adm-hist-ok",
+        "root",
+        poolKey,
+        "CREATE ROLE r1",
+        effectiveSet = Some(superuserEff)
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    val latest = withAdmin.history.snapshot(1).head
+    latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+    latest.status shouldBe "ok"
+    latest.nodeId shouldBe "manager"
+
+  it should "record a redacted history row for a denied admin statement" in:
+    val (router, _, _) = setup()
+    val exec           = new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor = Some(exec)
+    )
+    // No effectiveSet: claimed, parsed, then denied by the executor (admin_required).
+    withAdmin
+      .execute("c-adm-hist-denied", "alice", poolKey, "CREATE ROLE r1")
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = withAdmin.history.snapshot(1).head
+    latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+    latest.status shouldBe "denied"
+    latest.nodeId shouldBe "manager"
+
+  it should "redact a claim-shaped statement's sql on the routed path when the dialect denies it" in:
+    // No adminExecutor wired: the claimed CREATE USER ... PASSWORD statement falls through to
+    // the routed path exactly like an unwired dialect or an adminDispatch=false caller (MCP/
+    // preview) would, and gets denied there by the validator. Requirement 3: `record` must
+    // never let the password literal reach StatementHistoryStore on that path either.
+    val denyAll = new StatementValidator:
+      def validate(context: ValidationContext): ValidationResult = Denied("test-deny", Set.empty)
+    val (router, _, _) = setup()
+    val denying        = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      validator = denyAll,
+      stmtInstruments = si
+    )
+    denying
+      .execute("c-routed-redact", "alice", poolKey, "CREATE USER bob PASSWORD 'topsecret'")
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = denying.history.snapshot(1).head
+    latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+    latest.sql should not include "topsecret"
+    latest.status shouldBe "denied"
+
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
     val beforeCount =
       mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok").count()

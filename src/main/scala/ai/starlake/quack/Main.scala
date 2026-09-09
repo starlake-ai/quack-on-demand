@@ -765,7 +765,8 @@ object Main extends IOApp with LazyLogging:
                   sup
                     .updateUserPassword(u.id, Some(newPassword), None, userStore)
                     .map(_.map(_ => ()))
-              }
+              },
+            audit = auditRecorder
           )
         )
       if !sqlAdminEnabled then

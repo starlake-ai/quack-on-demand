@@ -11,6 +11,14 @@ package ai.starlake.quack.edge.admin
   */
 object AdminSqlParser:
 
+  /** Single source of truth for the constant every logging/history sink substitutes for a
+    * claim-shaped statement's raw text (a CREATE/ALTER USER ... PASSWORD statement's literal
+    * included). Shared by [[ai.starlake.quack.edge.FlightProducerImpl]]'s `loggableSql` and
+    * [[ai.starlake.quack.edge.FlightSqlRouter]]'s `record`/admin-dispatch history recording, so
+    * every sink agrees on the placeholder and none of them can drift into logging the real SQL.
+    */
+  val RedactedPlaceholder: String = "<admin statement redacted>"
+
   private final case class Tok(raw: String, upper: String, quoted: Boolean, start: Int, end: Int)
 
   // Bounded to the first few tokens: claims() runs on every statement on the FlightSQL hot

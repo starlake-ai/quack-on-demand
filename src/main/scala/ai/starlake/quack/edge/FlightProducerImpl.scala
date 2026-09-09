@@ -41,7 +41,8 @@ final class FlightProducerImpl(
     * DEBUG is actually enabled - not on every statement of the hot path.
     */
   private def loggableSql(sql: String): String =
-    if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then "<admin statement redacted>"
+    if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+      ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
     else sql
 
   /** Per-handle execution context, captured at Prepare time. Arrow batches are not cached (a reader

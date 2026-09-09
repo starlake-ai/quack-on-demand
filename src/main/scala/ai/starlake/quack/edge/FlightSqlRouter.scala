@@ -124,6 +124,15 @@ final class FlightSqlRouter(
         */
       patId: Option[String] = None
   ): Unit =
+    // A claim-shaped statement is redacted before it reaches ANY sink below, whether it was
+    // ultimately admitted, denied, or (with the dialect off or adminDispatch=false) simply
+    // routed here unanswered: a CREATE/ALTER USER ... PASSWORD statement carries its literal
+    // in the raw text, and the routed path is exactly the one an unwired dialect or an
+    // adminDispatch=false caller (MCP/preview) falls back to.
+    val recordedSql =
+      if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+        ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+      else sql
     history.record(
       StatementRecord(
         ts = java.time.Instant.now(),
@@ -131,7 +140,7 @@ final class FlightSqlRouter(
         tenant = poolKey.tenant,
         pool = poolKey.pool,
         nodeId = nodeId,
-        sql = sql,
+        sql = recordedSql,
         durationMs = durationMs,
         status = status,
         error = error,
@@ -146,7 +155,7 @@ final class FlightSqlRouter(
         poolKey.tenant,
         poolKey.pool,
         nodeId,
-        sql.take(500),
+        recordedSql.take(500),
         durationMs,
         prepareDurationMs,
         status,
@@ -166,7 +175,7 @@ final class FlightSqlRouter(
           None,
           "denied",
           "flightsql",
-          Map("sql" -> sql.take(500)) ++
+          Map("sql" -> recordedSql.take(500)) ++
             Option
               .when(deniedRefs.nonEmpty)(
                 "denied" -> deniedRefs.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")
@@ -188,10 +197,41 @@ final class FlightSqlRouter(
           None,
           "ok",
           "flightsql",
-          Map("sql" -> sql.take(500), "durationMs" -> durationMs.toString),
+          Map("sql" -> recordedSql.take(500), "durationMs" -> durationMs.toString),
           patId
         )
       )
+
+  /** Statement-history parity for the admin dialect: a claimed statement answered by
+    * `adminExecutor` never reaches `routedExecute`'s `record` (see `execute` below), so without
+    * this the UI's statement list would show nothing for GRANT/REVOKE/CREATE ROLE/etc. Always
+    * redacts to the constant placeholder - every admin-dispatched statement is claim-shaped by
+    * construction, so the raw text (which may carry a CREATE/ALTER USER ... PASSWORD literal) must
+    * never reach `history`. Deliberately narrower than `record`: no AuditEvent journal entry.
+    * `SqlWrite`/`SqlDdl`/`SqlDenied` are the routed data-plane path's vocabulary; the admin
+    * dialect's own family-specific [[AuditActions]] (RoleCreate, UserCreate, ...), emitted
+    * synchronously from `AdminStatementExecutor`'s mutation arms, are the audit trail for these.
+    */
+  private def recordAdmin(
+      user: String,
+      poolKey: PoolKey,
+      durationMs: Long,
+      status: String
+  ): Unit =
+    history.record(
+      StatementRecord(
+        ts = java.time.Instant.now(),
+        user = user,
+        tenant = poolKey.tenant,
+        pool = poolKey.pool,
+        nodeId = "manager",
+        sql = ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder,
+        durationMs = durationMs,
+        status = status,
+        error = None
+      )
+    )
+    stmtInstruments.record(poolKey.tenant, poolKey.pool, status, durationMs)
 
   /** Author-stamping prelude for a write, or None when stamping does not apply (DML/DDL on ducklake
     * pools outside a client-opened transaction, dbName advertised). Runs as the first PREPARE of
@@ -265,7 +305,23 @@ final class FlightSqlRouter(
       case Some(exec) if adminDispatch && ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
         // Claimed admin statements are answered by the manager (or rejected) and are
         // never forwarded to a node - the fail-closed contract of the admin dialect.
-        exec.execute(user, poolKey, sql, effectiveSet)
+        // recordExecution follows the same probe-suppression contract as the routed path
+        // (Prepare-time DESCRIBE probes must not show up in the UI's statement list).
+        if !recordExecution then exec.execute(user, poolKey, sql, effectiveSet)
+        else
+          IO.monotonic.flatMap { t0 =>
+            exec.execute(user, poolKey, sql, effectiveSet).flatMap { result =>
+              IO.monotonic.map { t1 =>
+                recordAdmin(
+                  user,
+                  poolKey,
+                  (t1 - t0).toMillis,
+                  status = if result.isRight then "ok" else "denied"
+                )
+                result
+              }
+            }
+          }
       case _ =>
         routedExecute(
           connectionId,
