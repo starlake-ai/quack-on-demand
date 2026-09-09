@@ -250,6 +250,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
     latest.status shouldBe "ok"
     latest.nodeId shouldBe "manager"
+    latest.error shouldBe None
 
   it should "record a redacted history row for a denied admin statement" in:
     val (router, _, _) = setup()
@@ -270,6 +271,29 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
     latest.status shouldBe "denied"
     latest.nodeId shouldBe "manager"
+    latest.error shouldBe None
+
+  it should "record a redacted history row for a malformed admin statement" in:
+    val (router, _, _) = setup()
+    val exec           = new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor = Some(exec)
+    )
+    withAdmin
+      .execute("c-adm-hist-malformed", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = withAdmin.history.snapshot(1).head
+    latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+    latest.status shouldBe "denied"
+    latest.nodeId shouldBe "manager"
+    // The parser's error detail (which can echo a raw token, including a password literal in
+    // a CREATE/ALTER USER statement) never reaches storage - the history row carries no error.
+    latest.error shouldBe None
 
   it should "redact a claim-shaped statement's sql on the routed path when the dialect denies it" in:
     // No adminExecutor wired: the claimed CREATE USER ... PASSWORD statement falls through to
@@ -294,6 +318,29 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
     latest.sql should not include "topsecret"
     latest.status shouldBe "denied"
+
+  it should "redact both sql and a node's quoted-statement error for an ADMITTED admin statement" in:
+    // Default validator (allowAll): the claimed statement is admitted and forwarded to the
+    // node, whose own parser error quotes the offending line back verbatim - exactly how
+    // DuckDB reports a syntax error, and exactly how a password literal could otherwise leak
+    // through the `error` field even though `sql` is redacted.
+    val nodeErr = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Parser Error: syntax error at or near \"topsecret\" - " +
+            "LINE 1: CREATE USER bob PASSWORD 'topsecret';"
+        ),
+        1L
+      )
+    val (router, _, _) = setup(stub = nodeErr)
+    router
+      .execute("c-admit-node-err", "alice", poolKey, "CREATE USER bob PASSWORD 'topsecret'")
+      .unsafeRunSync() shouldBe a[Left[?, ?]]
+    val latest = router.history.snapshot(1).head
+    latest.sql shouldBe ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
+    latest.sql should not include "topsecret"
+    latest.error shouldBe Some(ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
+    latest.error.foreach(_ should not include "topsecret")
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
     val beforeCount =

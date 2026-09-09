@@ -128,11 +128,20 @@ final class FlightSqlRouter(
     // ultimately admitted, denied, or (with the dialect off or adminDispatch=false) simply
     // routed here unanswered: a CREATE/ALTER USER ... PASSWORD statement carries its literal
     // in the raw text, and the routed path is exactly the one an unwired dialect or an
-    // adminDispatch=false caller (MCP/preview) falls back to.
+    // adminDispatch=false caller (MCP/preview) falls back to. `error` is redacted alongside
+    // `sql`: for a claim-shaped statement admitted by the ACL (dialect off, or
+    // adminDispatch=false) and forwarded to a node, DuckDB's own parser error quotes the
+    // offending line back verbatim ("LINE 1: CREATE USER alice PASSWORD 'topsecret';"), which
+    // would otherwise carry the same literal into history/journal/audit through a different
+    // field. A claim-shaped statement's node error is by construction a syntax error quoting
+    // the statement, so nothing of diagnostic value survives redacting it anyway.
+    val claimed     = ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql)
     val recordedSql =
-      if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
-        ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder
-      else sql
+      if claimed then ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder else sql
+    val recordedError =
+      if claimed then
+        error.map(_ => ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
+      else error
     history.record(
       StatementRecord(
         ts = java.time.Instant.now(),
@@ -143,7 +152,7 @@ final class FlightSqlRouter(
         sql = recordedSql,
         durationMs = durationMs,
         status = status,
-        error = error,
+        error = recordedError,
         prepareDurationMs = prepareDurationMs
       )
     )
@@ -159,7 +168,7 @@ final class FlightSqlRouter(
         durationMs,
         prepareDurationMs,
         status,
-        error.map(_.take(500)),
+        recordedError.map(_.take(500)),
         patId
       )
     )
@@ -181,7 +190,7 @@ final class FlightSqlRouter(
                 "denied" -> deniedRefs.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")
               )
               .toMap ++
-            error.map("reason" -> _.take(500)).toMap,
+            recordedError.map("reason" -> _.take(500)).toMap,
           patId
         )
       )

@@ -53,16 +53,29 @@ final class AdminStatementExecutor(
     // behind this IO.defer rather than firing eagerly on the caller's thread at construction
     // time. The genuinely blocking work (JDBC-backed store reads in run()'s resolution
     // helpers) is pushed further, onto IO.blocking, at the call sites below.
-    // Denied and malformed claimed statements get a WARN trace here so they aren't
-    // invisible server-side (they never reach statement history or metrics - full
-    // record()/metrics/journal parity for rejected admin statements is a tracked follow-up).
-    // The parse-failure branch deliberately omits the parser's error detail: `end()`'s
-    // trailing-token message can echo a raw token, which for a CREATE/ALTER USER ... PASSWORD
-    // statement may be the password literal itself.
+    // Denied and malformed claimed statements get a WARN trace here so they aren't invisible
+    // server-side; statement-history parity for both is handled by the caller (see
+    // FlightSqlRouter.execute's admin-dispatch arm / recordAdmin).
+    // The parse-failure branch deliberately omits the parser's error detail from BOTH the log
+    // line and the audit event below: `end()`'s trailing-token message can echo a raw token,
+    // which for a CREATE/ALTER USER ... PASSWORD statement may be the password literal itself.
     IO.defer {
       AdminSqlParser.parse(sql) match
         case Left(err) =>
           logger.warn(s"sql-admin parse rejected user=$user tenant=${poolKey.tenant}")
+          // Grammar-probing blind spot: a malformed claimed statement still tried to reach the
+          // admin surface, so it is audited the same generic-denial way a resolved-but-refused
+          // command is - no new vocabulary, and "unparsed" (not the parser's error text) is the
+          // only detail, for the same password-literal reason as the log line above.
+          audit.restAs(
+            user,
+            "tenant",
+            "control-plane",
+            AuditActions.SqlAdminDenied,
+            "denied",
+            tenant = Some(poolKey.tenant),
+            detail = Map("cmd" -> "unparsed")
+          )
           IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
         case Right(cmd) =>
           authorize(user, poolKey, effectiveSet) match

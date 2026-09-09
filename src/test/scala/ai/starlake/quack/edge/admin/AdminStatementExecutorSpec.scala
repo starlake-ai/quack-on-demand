@@ -575,3 +575,16 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     events.clear()
     run(exec, sup, "SHOW ROLES").isRight shouldBe true
     events shouldBe empty
+
+  it should "fire sql.admin.denied on a malformed statement with no parser text in the detail" in:
+    val (sup, _, exec, events) = setupWithAudit()
+    // GRANT ... TO ROLE with a password-shaped token to prove no raw token/literal leaks into
+    // the audit row via a future parser-message change - the detail is pinned to the constant
+    // "unparsed", never the parser's `err` string.
+    run(exec, sup, "GRANT FROBNICATE ON t TO ROLE r") match
+      case Left(RouterFailure.BadRequest(_)) => succeed
+      case other                             => fail(s"expected BadRequest, got $other")
+    val e = events.find(_.action == AuditActions.SqlAdminDenied).get
+    e.outcome shouldBe "denied"
+    e.actor shouldBe "boss"
+    e.detail shouldBe Map("cmd" -> "unparsed")
