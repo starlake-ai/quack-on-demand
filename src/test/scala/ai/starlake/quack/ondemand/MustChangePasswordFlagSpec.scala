@@ -12,8 +12,9 @@ import scala.util.Try
 
 /** Admin-side semantics of the must-change-password flag through PoolSupervisor: create-time set,
   * reset-time set/clear (an unflagged reset clears a pending flag), role-only updates leave it
-  * untouched, and Some(true) without a password is refused (there is no temp password for the flag
-  * to describe).
+  * untouched, and Some(true) without a password is a flag-only update (edge/admin's `ALTER USER ...
+  * REQUIRE PASSWORD CHANGE`) that persists the flag against the row's EXISTING hash rather than
+  * requiring a fresh credential.
   */
 class MustChangePasswordFlagSpec extends AnyFlatSpec with Matchers:
 
@@ -77,12 +78,19 @@ class MustChangePasswordFlagSpec extends AnyFlatSpec with Matchers:
     store.findUser(None, "alice").get.mustChangePassword shouldBe true
   }
 
-  it should "refuse Some(true) without a password" in withSup { (sup, store, users) =>
-    sup.createUser(None, "alice", "pw", "admin", users).unsafeRunSync()
-    val id  = store.findUser(None, "alice").get.id
-    val out =
+  it should "accept Some(true) without a password as a flag-only update" in withSup {
+    (sup, store, users) =>
+      sup.createUser(None, "alice", "pw", "admin", users).unsafeRunSync()
+      val id         = store.findUser(None, "alice").get.id
+      val hashBefore = store.getPasswordHash(None, "alice")
       sup
         .updateUserPassword(id, None, None, users, mustChangePassword = Some(true))
         .unsafeRunSync()
-    out.left.toOption.get shouldBe a[SupervisorError.InvalidArgument]
+        .isRight shouldBe true
+      // The flag is written, the credential is untouched (same hash the create wrote), and
+      // `enabled` - a sibling column reachable through the same rewrite branch - is not
+      // incidentally flipped by a request that never mentioned it.
+      store.findUser(None, "alice").get.mustChangePassword shouldBe true
+      store.getPasswordHash(None, "alice") shouldBe hashBefore
+      store.findUser(None, "alice").get.enabled shouldBe true
   }

@@ -2235,90 +2235,103 @@ final class PoolSupervisor(
       enabled: Option[Boolean] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("updateUserPassword") {
-      if mustChangePassword.contains(true) && password.isEmpty then
-        Left(
-          SupervisorError.InvalidArgument(
-            "mustChangePassword requires a password in the same request"
-          )
-        )
-      else
-        store.getUserById(userId) match
-          case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
-          case Some(u) =>
-            // email: outer None = unchanged (leave the rule untouched); Some(inner) = a
-            // write, resolved against the ROW's username so an email-format user's email
-            // stays locked to the username and a conflicting value is refused.
-            val emailCheck: Either[SupervisorError, Option[Option[String]]] = email match
-              case None        => Right(None)
-              case Some(inner) =>
-                EmailPolicy.resolve(u.username, inner) match
-                  case Left(msg)  => Left(SupervisorError.InvalidEmail(msg))
-                  case Right(eff) => Right(Some(eff))
-            emailCheck match
-              case Left(err)       => Left(err)
-              case Right(effEmail) =>
-                val newRole = role.getOrElse(u.role)
-                // A rotation always writes the flag: the requested value, or false when
-                // absent -- an unflagged admin reset hands out a normal password and
-                // clears any pending must-change state. Role-only updates leave it alone.
-                val newFlag = password.map { pw =>
-                  val flag = mustChangePassword.getOrElse(false)
-                  userStore.upsertUser(
-                    u.tenant,
-                    u.username,
-                    pw,
-                    newRole,
-                    mustChangePassword = Some(flag),
-                    email = effEmail
-                  )
-                  flag
-                }
-                // enabled and/or email land via a row rewrite through the control-plane
-                // store with the already-persisted hash, so only the intended columns
-                // move. The password branch above never writes `enabled`, so a lock
-                // rides this rewrite even when a rotation happened in the same request.
-                val needRewrite = enabled.nonEmpty || (password.isEmpty && effEmail.nonEmpty)
-                val rewriteOk: Either[SupervisorError, Unit] =
-                  if !needRewrite then Right(())
-                  else
-                    store.getPasswordHash(u.tenant, u.username) match
-                      case Some(hash) =>
-                        store.upsertUserWithHash(
-                          u.tenant,
-                          u.username,
-                          hash,
-                          newRole,
-                          enabled = enabled.getOrElse(u.enabled),
-                          mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                          email = effEmail.getOrElse(u.email)
-                        )
-                        Right(())
-                      case None =>
-                        // A row with no stored hash cannot be rewritten without inventing
-                        // a credential. Refuse loudly rather than answering ok while
-                        // writing nothing; unreachable for API-created rows because
-                        // password_hash is NOT NULL, so this only ever names corruption.
-                        Left(
-                          SupervisorError.Internal(
-                            s"user ${u.username} has no stored password hash; update refused"
-                          )
-                        )
-                rewriteOk match
-                  case Left(err) => Left(err)
-                  case Right(()) =>
-                    // upsertUserIdentity only writes (tenant, username, role) on conflict,
-                    // so the flag/email/enabled just persisted above survive; carry them
-                    // on the returned value.
-                    val updated =
-                      u.copy(
-                        role = newRole,
-                        mustChangePassword = newFlag.getOrElse(u.mustChangePassword),
-                        email = effEmail.getOrElse(u.email),
-                        enabled = enabled.getOrElse(u.enabled)
+      // mustChangePassword = Some(true) with no password is a legitimate flag-only
+      // update (ALTER USER ... REQUIRE PASSWORD CHANGE, edge/admin's
+      // RequirePasswordChangeFn seam): the needRewrite branch below persists the flag
+      // through the row's EXISTING hash rather than requiring a fresh credential.
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(u) =>
+          // email: outer None = unchanged (leave the rule untouched); Some(inner) = a
+          // write, resolved against the ROW's username so an email-format user's email
+          // stays locked to the username and a conflicting value is refused.
+          val emailCheck: Either[SupervisorError, Option[Option[String]]] = email match
+            case None        => Right(None)
+            case Some(inner) =>
+              EmailPolicy.resolve(u.username, inner) match
+                case Left(msg)  => Left(SupervisorError.InvalidEmail(msg))
+                case Right(eff) => Right(Some(eff))
+          emailCheck match
+            case Left(err)       => Left(err)
+            case Right(effEmail) =>
+              val newRole = role.getOrElse(u.role)
+              // A rotation always writes the flag: the requested value, or false when
+              // absent -- an unflagged admin reset hands out a normal password and
+              // clears any pending must-change state. Role-only updates leave it alone.
+              val newFlag = password.map { pw =>
+                val flag = mustChangePassword.getOrElse(false)
+                userStore.upsertUser(
+                  u.tenant,
+                  u.username,
+                  pw,
+                  newRole,
+                  mustChangePassword = Some(flag),
+                  email = effEmail
+                )
+                flag
+              }
+              // The effective mustChangePassword to persist: `newFlag` (set only when a
+              // password rotation happened, already folding in the requested flag with a
+              // false default) wins when present; otherwise a flag-only request (no
+              // password) uses the caller's `mustChangePassword` argument directly;
+              // otherwise the row's existing value is preserved. Without this fallback a
+              // flag-only call's `mustChangePassword` argument is silently dropped -
+              // `newFlag` is `None` whenever `password` is `None`, regardless of what was
+              // requested.
+              val effMustChangePassword =
+                newFlag.orElse(mustChangePassword).getOrElse(u.mustChangePassword)
+              // enabled, mustChangePassword (flag-only, no password), and/or email land
+              // via a row rewrite through the control-plane store with the
+              // already-persisted hash, so only the intended columns move.
+              // upsertUserIdentity below does NOT persist mustChangePassword, so a
+              // flag-only request (password empty) MUST go through this rewrite or the
+              // flag is silently dropped. The password branch above never writes
+              // `enabled`, so a lock rides this rewrite even when a rotation happened
+              // in the same request.
+              val needRewrite =
+                enabled.nonEmpty || mustChangePassword.nonEmpty ||
+                  (password.isEmpty && effEmail.nonEmpty)
+              val rewriteOk: Either[SupervisorError, Unit] =
+                if !needRewrite then Right(())
+                else
+                  store.getPasswordHash(u.tenant, u.username) match
+                    case Some(hash) =>
+                      store.upsertUserWithHash(
+                        u.tenant,
+                        u.username,
+                        hash,
+                        newRole,
+                        enabled = enabled.getOrElse(u.enabled),
+                        mustChangePassword = effMustChangePassword,
+                        email = effEmail.getOrElse(u.email)
                       )
-                    store.upsertUserIdentity(updated)
-                    invalidateEffectiveCache()
-                    Right(updated)
+                      Right(())
+                    case None =>
+                      // A row with no stored hash cannot be rewritten without inventing
+                      // a credential. Refuse loudly rather than answering ok while
+                      // writing nothing; unreachable for API-created rows because
+                      // password_hash is NOT NULL, so this only ever names corruption.
+                      Left(
+                        SupervisorError.Internal(
+                          s"user ${u.username} has no stored password hash; update refused"
+                        )
+                      )
+              rewriteOk match
+                case Left(err) => Left(err)
+                case Right(()) =>
+                  // upsertUserIdentity only writes (tenant, username, role) on conflict,
+                  // so the flag/email/enabled just persisted above survive; carry them
+                  // on the returned value.
+                  val updated =
+                    u.copy(
+                      role = newRole,
+                      mustChangePassword = effMustChangePassword,
+                      email = effEmail.getOrElse(u.email),
+                      enabled = enabled.getOrElse(u.enabled)
+                    )
+                  store.upsertUserIdentity(updated)
+                  invalidateEffectiveCache()
+                  Right(updated)
     }
   }
 

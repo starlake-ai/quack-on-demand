@@ -695,7 +695,10 @@ what the later Execute actually delivers.
   the REST reset. Unlike `DROP USER`, self-rotation is allowed - there is no
   session-user guard on this one. An unknown username 404s before the
   rotation path ever runs. Same password-literal-excluded-and-redacted note as
-  `CREATE USER` above.
+  `CREATE USER` above. `ALTER USER ... ENABLE` / `DISABLE` and `ALTER USER ...
+  REQUIRE PASSWORD CHANGE` (below) go through the same underlying upsert and
+  clear the same lockout counters as a side effect, even though neither
+  touches the password.
 - `SHOW USERS` lists the session tenant's users only (`id`, `username`,
   `role`, `enabled`, `email`) - never any credential material, since
   `RbacUser` carries no password hash. The superuser realm is invisible, as
@@ -707,13 +710,19 @@ what the later Execute actually delivers.
 - `ALTER USER ... REQUIRE PASSWORD CHANGE` flags the account so it must set a
   new password on its next login, WITHOUT rotating the credential - it takes
   no password argument. There is no self-guard: the session user may flag its
-  own account. An unknown username 404s before anything is written.
+  own account. An unknown username 404s before anything is written. Surprising
+  consequence: the write goes through the same upsert that unconditionally
+  clears `failed_attempts` / `locked_at`, so flagging a **locked-out** user for
+  a required password change also unlocks them - the same side effect an
+  admin password reset already has, just reached from a statement that never
+  mentions lockout at all.
 - `ALTER USER ... ENABLE` / `DISABLE` flips the account's login/handshake gate
   (the same `enabled` column REST `user/update` locks/unlocks). `DISABLE`
   refuses to target the session's own username (self-disable guard, mirroring
   `DROP USER`'s self-drop guard); `ENABLE` has no such guard - re-enabling
   your own account is allowed. An unknown username 404s before anything is
-  written.
+  written. `ENABLE` also clears lockout counters (see above) - re-enabling an
+  admin-disabled account also lifts any failed-login lock it had accumulated.
 - `SHOW GRANTS FOR USER u` lists the flattened effective table-grant closure
   for a tenant user - direct role grants plus grants reached through group
   membership - as `(role, id, catalog, schema, table, verb)`, where `role`

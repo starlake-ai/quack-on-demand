@@ -784,13 +784,11 @@ object Main extends IOApp with LazyLogging:
                     .updateUserPassword(u.id, None, None, userStore, enabled = Some(enabled))
                     .map(_.map(_ => ()))
               },
-            // No supervisor entrypoint sets mustChangePassword without a password in the same
-            // call (updateUserPassword refuses that combination), so this rewrites the stored
-            // row directly with the EXISTING hash - the same shape updateUserPassword's own
-            // enabled-only rewrite branch uses internally - then reloads the supervisor's caches
-            // and notifies HA peers. That restore()+broadcastStateChanged() pairing is the
-            // sanctioned pattern for a store mutation made outside the supervisor's own mutators
-            // (see ManifestHandlers.importManifest / ManifestImporter).
+            // Flag-only rewrite through the same updateUserPassword path, mirroring
+            // setUserEnabledFn above: no password, so the needRewrite branch persists
+            // mustChangePassword = true against the row's EXISTING hash rather than
+            // requiring a fresh credential (PoolSupervisor.updateUserPassword's
+            // needRewrite/guard were extended for exactly this call shape).
             requirePasswordChangeFn = (tenantId, username) =>
               IO.blocking(sup.findUser(Some(tenantId), username)).flatMap {
                 case None =>
@@ -801,30 +799,15 @@ object Main extends IOApp with LazyLogging:
                     )
                   )
                 case Some(u) =>
-                  IO.blocking(store.getPasswordHash(u.tenant, u.username)).flatMap {
-                    case None =>
-                      IO.pure(
-                        Left(
-                          ai.starlake.quack.ondemand.SupervisorError.Internal(
-                            s"user ${u.username} has no stored password hash; update refused"
-                          )
-                        )
-                      )
-                    case Some(hash) =>
-                      IO.blocking {
-                        store.upsertUserWithHash(
-                          u.tenant,
-                          u.username,
-                          hash,
-                          u.role,
-                          enabled = u.enabled,
-                          mustChangePassword = true,
-                          email = u.email
-                        )
-                        sup.restore()
-                        sup.broadcastStateChanged()
-                      }.map(Right(_))
-                  }
+                  sup
+                    .updateUserPassword(
+                      u.id,
+                      None,
+                      None,
+                      userStore,
+                      mustChangePassword = Some(true)
+                    )
+                    .map(_.map(_ => ()))
               },
             audit = auditRecorder
           )
