@@ -13,6 +13,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
 import java.nio.charset.StandardCharsets
 import java.util.Collections
+import scala.jdk.CollectionConverters.*
 
 /** Minimal FlightSqlProducer that forwards SQL to the [[FlightSqlRouter]]. The router talks to the
   * chosen Quack node through DuckDB's `quack_query` extension and hands us back an
@@ -124,10 +125,9 @@ final class FlightProducerImpl(
     */
   private val adminStatusSchema: Schema =
     new Schema(
-      java.util.Arrays.asList(
-        new Field("status", FieldType.nullable(new ArrowType.Utf8), null),
-        new Field("detail", FieldType.nullable(new ArrowType.Utf8), null)
-      )
+      ai.starlake.quack.edge.admin.AdminResults.MutationColumns
+        .map(c => new Field(c, FieldType.nullable(new ArrowType.Utf8), null))
+        .asJava
     )
 
   private val adminStatusSchemaBytes: ByteString =

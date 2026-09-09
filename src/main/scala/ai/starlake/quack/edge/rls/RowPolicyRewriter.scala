@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.rls
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RoleRowPolicy
+import com.typesafe.scalalogging.LazyLogging
 import net.sf.jsqlparser.expression.{Alias, Expression}
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.schema.Table
@@ -135,10 +136,8 @@ object RowPolicyRewriter:
 
   private def isJsqlNode(value: AnyRef): Boolean = isJsqlAstType(value.getClass)
 
-class RowPolicyRewriter(enabled: Boolean = true):
+class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
   import RowPolicyRewriter._
-
-  private val logger = org.slf4j.LoggerFactory.getLogger(getClass)
 
   def rewrite(
       sql: String,

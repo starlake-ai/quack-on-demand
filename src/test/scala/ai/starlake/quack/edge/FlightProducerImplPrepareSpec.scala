@@ -1,10 +1,12 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.admin.AdminStatementExecutor
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.google.protobuf.{Any => ProtoAny, ByteString}
@@ -26,8 +28,11 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
   /** Build a real FlightSqlRouter + FlightProducerImpl backed by a stubbed QuackHttpClient that
     * records every (sql, nodeId) pair sent. Returns the producer, the recording buffer, the
     * underlying router (so tests can inspect the history store), and the fixed peer string the
-    * test will use as `peerIdentity`. */
-  private def setupProducer() =
+    * test will use as `peerIdentity`. `wireAdmin = true` wires a real `AdminStatementExecutor`
+    * onto the router and binds the peer's session to a superuser `EffectiveSet`, so a claimed SQL
+    * admin statement (e.g. `CREATE ROLE`) is actually dispatched and mutates `sup` rather than
+    * being routed toward a node. */
+  private def setupProducer(wireAdmin: Boolean = false) =
     val backend = new QuackBackend:
       private val n = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -59,11 +64,30 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
 
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
-    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter)
+    val router =
+      if wireAdmin then
+        new FlightSqlRouter(
+          sup,
+          sessions,
+          tracker,
+          adapter,
+          adminExecutor = Some(new AdminStatementExecutor(sup))
+        )
+      else new FlightSqlRouter(sup, sessions, tracker, adapter)
     val producer = new FlightProducerImpl(router)
 
-    val peer = s"peer-${java.util.UUID.randomUUID()}"
-    ConnectionContext.bind(peer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "alice")
+    val peer          = s"peer-${java.util.UUID.randomUUID()}"
+    val superuserEff =
+      if wireAdmin then
+        Some(EffectiveSet(RbacUser("u1", None, "alice", "admin"), Nil, Nil, Nil, Nil))
+      else None
+    ConnectionContext.bind(
+      peer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "alice",
+      effectiveSet = superuserEff
+    )
     (producer, sent, router, peer)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:
@@ -165,6 +189,16 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     schema.getFields.size() shouldBe 2
     schema.getFields.get(0).getName shouldBe "status"
     schema.getFields.get(1).getName shouldBe "detail"
+
+  it should "derive the advertised admin field names from AdminResults.MutationColumns" in:
+    // Pins the single source of truth: adminStatusSchema's field names must never drift from
+    // the constant AdminResults.ok() itself builds its rows from.
+    val (producer, _, _, peer) = setupProducer()
+    val listener                = runPrepare(producer, peer, "CREATE ROLE analyst")
+    val result = decodePrepareResult(listener.onNextValue.get())
+    val schema = parseSchema(result.getDatasetSchema.toByteArray)
+    val fieldNames = (0 until schema.getFields.size()).map(schema.getFields.get(_).getName).toList
+    fieldNames shouldBe ai.starlake.quack.edge.admin.AdminResults.MutationColumns
 
   it should "still advertise Count for an ordinary (non-admin) DDL statement" in:
     val (producer, _, _, peer) = setupProducer()
@@ -478,6 +512,19 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     val ack = runUpdate(producer, "unbound-peer", "INSERT INTO t VALUES (1)")
     ack.completed shouldBe false
     ack.onErrorRef.get() should not be null
+
+  // ---- toFlightException: RouterFailure -> CallStatus, pinned through a real admin-dispatch
+  // failure rather than by widening the private mapper for a direct unit test.
+
+  it should "surface CallStatus.ALREADY_EXISTS for a claimed CREATE ROLE that collides" in:
+    val (producer, _, _, peer) = setupProducer(wireAdmin = true)
+    runUpdate(producer, peer, "CREATE ROLE analyst") // first create succeeds
+    val ack = runUpdate(producer, peer, "CREATE ROLE analyst") // second collides
+    ack.completed shouldBe false
+    val err = ack.onErrorRef.get()
+    err should not be null
+    err.asInstanceOf[org.apache.arrow.flight.FlightRuntimeException].status().code() shouldBe
+      org.apache.arrow.flight.FlightStatusCode.ALREADY_EXISTS
 
   // ---- acceptPutPreparedStatementUpdate: the path Arrow JDBC / DBeaver use ----
   // (they prepare every statement, so a literal INSERT arrives as a prepared

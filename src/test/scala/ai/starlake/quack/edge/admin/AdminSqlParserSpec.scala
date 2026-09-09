@@ -60,6 +60,13 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE OR REPLACE ROLE analyst") shouldBe
       Left("OR REPLACE is not supported for ROLE")
 
+  it should "reject a quoted \"OR\" keyword lookalike (not OR REPLACE)" in:
+    AdminSqlParser
+      .parse(
+        "CREATE \"OR\" REPLACE ROW POLICY ON t FOR ROLE r USING (1=1)"
+      )
+      .isLeft shouldBe true
+
   it should "name only reachable options in the CREATE fallback error" in:
     AdminSqlParser.parse("CREATE FOO") shouldBe
       Left("expected ROW POLICY or COLUMN POLICY after CREATE")
@@ -175,6 +182,13 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("DROP ROW POLICY IF EXISTS ON t FOR ROLE r") shouldBe
       Right(AdminCommand.DropRowPolicy(TableRef("*", "*", "t"), "r", ifExists = true))
 
+  it should "reject quoted \"IF\" \"EXISTS\" keyword lookalikes in DROP ROW POLICY" in:
+    AdminSqlParser
+      .parse(
+        "DROP ROW POLICY \"IF\" \"EXISTS\" ON t FOR ROLE r"
+      )
+      .isLeft shouldBe true
+
   it should "reject unbalanced or empty predicates" in:
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a = (1)").isLeft shouldBe true
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING ()").isLeft shouldBe true
@@ -198,7 +212,7 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Left("comments are not allowed in expressions")
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a=1;)").isLeft shouldBe true
 
-  it should "reject a body whose last line comment is not followed by further content" in:
+  it should "reject a body with a trailing line comment before the closing paren" in:
     AdminSqlParser
       .parse(
         "CREATE ROW POLICY ON t FOR ROLE r USING (\n" +
@@ -348,6 +362,22 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
   it should "reject trailing garbage on SHOW USERS" in:
     AdminSqlParser.parse("SHOW USERS extra").isLeft shouldBe true
 
+  it should "parse SHOW ROW POLICIES ON TABLE t (optional TABLE keyword)" in:
+    AdminSqlParser.parse("SHOW ROW POLICIES ON TABLE t") shouldBe
+      Right(AdminCommand.ShowRowPolicies(PolicyFilter.OnTable(TableRef("*", "*", "t"))))
+
+  it should "parse SHOW POOL GRANTS FOR GROUP g" in:
+    AdminSqlParser.parse("SHOW POOL GRANTS FOR GROUP g") shouldBe
+      Right(AdminCommand.ShowPoolGrants(Some(Principal.Group("g"))))
+
+  it should "reject five adversarial SHOW forms" in:
+    AdminSqlParser.parse("SHOW ROLES extra").isLeft shouldBe true
+    AdminSqlParser.parse("SHOW GRANTS").isLeft shouldBe true                  // missing FOR ROLE
+    AdminSqlParser.parse("SHOW ROW POLICIES FOR USER x").isLeft shouldBe true // no FOR USER form
+    AdminSqlParser.parse("SHOW POOL GRANTS FOR ROLE r").isLeft shouldBe true  // not USER/GROUP
+    AdminSqlParser.parse("SHOW \"ROLES\"").isLeft shouldBe true // quoted keyword, not SHOW ROLES
+    AdminSqlParser.claims("SHOW \"ROLES\"") shouldBe false
+
   "claims on SHOW" should "claim only the admin forms" in:
     AdminSqlParser.claims("SHOW ROLES") shouldBe true
     AdminSqlParser.claims("SHOW GRANTS FOR ROLE r") shouldBe true
@@ -378,6 +408,13 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE USER alice PASSWORD 'x' extra").isLeft shouldBe true
     AdminSqlParser.claims("CREATE USER alice PASSWORD 'x'") shouldBe true
     AdminSqlParser.claims("DROP USER alice") shouldBe true
+
+  it should "reject the dollar-quoted and E-string literal forms as passwords" in:
+    // stringLiteral's startsWith("'") clause is now the sole guard rejecting these: an E-string
+    // or dollar-quoted token is quoted = false (same as a real '...' literal) but its raw text
+    // does not start with a plain single quote.
+    AdminSqlParser.parse("CREATE USER a PASSWORD E'x'").isLeft shouldBe true
+    AdminSqlParser.parse("CREATE USER a PASSWORD $$x$$").isLeft shouldBe true
 
   it should "reject a double-quoted identifier standing in for the password literal" in:
     // "'" is a QUOTED IDENTIFIER whose content happens to start with ' - not a string

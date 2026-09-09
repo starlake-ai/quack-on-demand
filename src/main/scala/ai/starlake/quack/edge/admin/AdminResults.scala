@@ -19,6 +19,13 @@ object AdminResults:
 
   val ManagerNodeId = "manager"
 
+  /** Single source of truth for the two-column shape every SQL admin dialect MUTATION delivers.
+    * `ok()` builds its row from this list, and `FlightProducerImpl.adminStatusSchema` derives its
+    * Arrow field names from it, so the advertised Prepare/FlightInfo schema and the actual result
+    * columns can never drift apart.
+    */
+  val MutationColumns: List[String] = List("status", "detail")
+
   private val allocator = new RootAllocator(Long.MaxValue)
 
   def table(columns: List[String], rows: List[List[Option[String]]]): QueryResult =
@@ -59,4 +66,4 @@ object AdminResults:
     )
 
   def ok(detail: String): QueryResult =
-    table(List("status", "detail"), List(List(Some("ok"), Some(detail))))
+    table(MutationColumns, List(List(Some("ok"), Some(detail))))

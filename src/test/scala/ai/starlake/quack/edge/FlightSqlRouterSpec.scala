@@ -295,7 +295,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // a CREATE/ALTER USER statement) never reaches storage - the history row carries no error.
     latest.error shouldBe None
 
-  it should "redact a claim-shaped statement's sql on the routed path when the dialect denies it" in:
+  it should "redact a claim-shaped statement's sql on the routed path when denied" in:
     // No adminExecutor wired: the claimed CREATE USER ... PASSWORD statement falls through to
     // the routed path exactly like an unwired dialect or an adminDispatch=false caller (MCP/
     // preview) would, and gets denied there by the validator. Requirement 3: `record` must
@@ -319,7 +319,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.sql should not include "topsecret"
     latest.status shouldBe "denied"
 
-  it should "redact both sql and a node's quoted-statement error for an ADMITTED admin statement" in:
+  it should "redact both sql and a node's quoted-statement error for an admitted statement" in:
     // Default validator (allowAll): the claimed statement is admitted and forwarded to the
     // node, whose own parser error quotes the offending line back verbatim - exactly how
     // DuckDB reports a syntax error, and exactly how a password literal could otherwise leak
