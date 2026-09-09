@@ -78,6 +78,22 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     exec.execute("root", poolKey, "CREATE ROLE r1", superEff).unsafeRunSync().isRight shouldBe true
     run(exec, sup, "CREATE ROLE r2").isRight shouldBe true
 
+  it should "deny a tenant admin whose tenant is not the session tenant" in:
+    val (sup, _, exec) = setup()
+    // role = "admin", but tenant is some OTHER tenant id, not the session's poolKey.tenant.
+    val crossTenantAdmin = Some(
+      EffectiveSet(
+        user = RbacUser("u-other", Some("other-tenant-id"), "eve", role = "admin"),
+        roles = Nil,
+        groups = Nil,
+        permissions = Nil,
+        poolPerms = Nil
+      )
+    )
+    exec.execute("eve", poolKey, "CREATE ROLE r1", crossTenantAdmin).unsafeRunSync() match
+      case Left(RouterFailure.AccessDenied(reason)) => reason should include("admin_required")
+      case other                                    => fail(s"expected AccessDenied, got $other")
+
   "CREATE/DROP ROLE" should "create, reject duplicates, and honor IF EXISTS" in:
     val (sup, _, exec) = setup()
     run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
@@ -87,6 +103,13 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.NotFound(_)) => succeed
       case other                           => fail(s"expected NotFound, got $other")
     run(exec, sup, "DROP ROLE IF EXISTS analyst").isRight shouldBe true
+
+  it should "return AlreadyExists when CREATE ROLE targets an existing name" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(exec, sup, "CREATE ROLE analyst") match
+      case Left(RouterFailure.AlreadyExists(_)) => succeed
+      case other                                => fail(s"expected AlreadyExists, got $other")
 
   "GRANT/REVOKE table" should "store the mapped verb, dedupe, and count revokes" in:
     val (sup, _, exec) = setup()

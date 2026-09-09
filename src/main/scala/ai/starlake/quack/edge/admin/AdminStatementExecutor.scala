@@ -23,17 +23,24 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
       sql: String,
       effectiveSet: Option[EffectiveSet]
   ): IO[Either[RouterFailure, QueryResult]] =
-    AdminSqlParser.parse(sql) match
-      case Left(err)  => IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
-      case Right(cmd) =>
-        authorize(poolKey, effectiveSet) match
-          case Left(f)    => IO.pure(Left(f))
-          case Right(ctx) =>
-            logger.info(
-              s"sql-admin user=$user tenant=${ctx.tenantName} " +
-                s"cmd=${cmd.getClass.getSimpleName}"
-            )
-            run(ctx, cmd)
+    // Nothing below runs until the returned IO is actually evaluated: parsing, authorization
+    // (an in-memory tenant-cache lookup, cheap but still deferred), and the log line all sit
+    // behind this IO.defer rather than firing eagerly on the caller's thread at construction
+    // time. The genuinely blocking work (JDBC-backed store reads in run()'s resolution
+    // helpers) is pushed further, onto IO.blocking, at the call sites below.
+    IO.defer {
+      AdminSqlParser.parse(sql) match
+        case Left(err)  => IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
+        case Right(cmd) =>
+          authorize(poolKey, effectiveSet) match
+            case Left(f)    => IO.pure(Left(f))
+            case Right(ctx) =>
+              logger.info(
+                s"sql-admin user=$user tenant=${ctx.tenantName} " +
+                  s"cmd=${cmd.getClass.getSimpleName}"
+              )
+              run(ctx, cmd)
+    }
 
   /** Superuser (tenant IS NULL) anywhere; tenant admin only within the session tenant.
     * RbacUser.role is the free-text admin/user label, not an RBAC role.
@@ -45,6 +52,10 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
     eff match
       case None    => Left(RouterFailure.AccessDenied("admin_required: no principal context"))
       case Some(e) =>
+        // Both getTenant and getTenantById are id lookups against the in-memory tenant cache
+        // (getTenant lowercases its argument and matches on `id` despite the name; it never
+        // consults displayName). Don't "simplify" this into a display-name lookup - that
+        // reopens the cross-tenant display-name collision path the id-only match closes.
         supervisor.getTenant(poolKey.tenant).orElse(supervisor.getTenantById(poolKey.tenant)) match
           case None    => Left(RouterFailure.Internal(s"unknown tenant '${poolKey.tenant}'"))
           case Some(t) =>
@@ -68,31 +79,54 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
   ): IO[Either[RouterFailure, QueryResult]] =
     op.map(_.left.map(toFailure).map(render))
 
-  private def roleByName(ctx: Ctx, name: String): Either[RouterFailure, RbacRole] =
-    supervisor
-      .listRoles(ctx.tenantId)
-      .find(_.name == name)
-      .toRight(RouterFailure.NotFound(s"unknown_role: $name"))
+  // Resolution reads (listRoles / findUser / listGroups / listRolePermissions) hit the
+  // control-plane store, which is JDBC-backed in production - IO.blocking pushes them onto
+  // the blocking pool instead of running on whatever thread evaluates this IO.
 
-  private def userByName(ctx: Ctx, name: String): Either[RouterFailure, RbacUser] =
-    supervisor
-      .findUser(Some(ctx.tenantId), name)
-      .toRight(RouterFailure.NotFound(s"unknown_user: $name"))
+  private def roleByName(ctx: Ctx, name: String): IO[Either[RouterFailure, RbacRole]] =
+    IO.blocking(supervisor.listRoles(ctx.tenantId).find(_.name == name))
+      .map(_.toRight(RouterFailure.NotFound(s"unknown_role: $name")))
 
-  private def groupByName(ctx: Ctx, name: String): Either[RouterFailure, RbacGroup] =
-    supervisor
-      .listGroups(ctx.tenantId)
-      .find(_.name == name)
-      .toRight(RouterFailure.NotFound(s"unknown_group: $name"))
+  private def userByName(ctx: Ctx, name: String): IO[Either[RouterFailure, RbacUser]] =
+    IO.blocking(supervisor.findUser(Some(ctx.tenantId), name))
+      .map(_.toRight(RouterFailure.NotFound(s"unknown_user: $name")))
+
+  private def groupByName(ctx: Ctx, name: String): IO[Either[RouterFailure, RbacGroup]] =
+    IO.blocking(supervisor.listGroups(ctx.tenantId).find(_.name == name))
+      .map(_.toRight(RouterFailure.NotFound(s"unknown_group: $name")))
 
   /** Resolves a principal to (userId, groupId) with exactly one side populated. */
   private def principalIds(
       ctx: Ctx,
       p: Principal
-  ): Either[RouterFailure, (Option[String], Option[String])] =
+  ): IO[Either[RouterFailure, (Option[String], Option[String])]] =
     p match
-      case Principal.User(name)  => userByName(ctx, name).map(u => (Some(u.id), None))
-      case Principal.Group(name) => groupByName(ctx, name).map(g => (None, Some(g.id)))
+      case Principal.User(name)  => userByName(ctx, name).map(_.map(u => (Some(u.id), None)))
+      case Principal.Group(name) => groupByName(ctx, name).map(_.map(g => (None, Some(g.id))))
+
+  /** Resolves a role by name, then a principal, in sequence - shared by GrantRoleTo and
+    * RevokeRoleFrom, whose only difference is which mutator they call once resolved.
+    */
+  private def resolveRoleAndPrincipal(
+      ctx: Ctx,
+      role: String,
+      p: Principal
+  ): IO[Either[RouterFailure, (RbacRole, (Option[String], Option[String]))]] =
+    roleByName(ctx, role).flatMap {
+      case Left(f)  => IO.pure(Left(f))
+      case Right(r) => principalIds(ctx, p).map(_.map(ids => (r, ids)))
+    }
+
+  /** Resolves a group then a user, in sequence - shared by ALTER GROUP ADD/DROP USER. */
+  private def resolveGroupAndUser(
+      ctx: Ctx,
+      group: String,
+      user: String
+  ): IO[Either[RouterFailure, (RbacGroup, RbacUser)]] =
+    groupByName(ctx, group).flatMap {
+      case Left(f)  => IO.pure(Left(f))
+      case Right(g) => userByName(ctx, user).map(_.map(u => (g, u)))
+    }
 
   private def revokedResult(n: Int): QueryResult =
     AdminResults.table(
@@ -108,97 +142,88 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
         )
 
       case AdminCommand.DropRole(name, ifExists) =>
-        roleByName(ctx, name) match
+        roleByName(ctx, name).flatMap {
           case Left(_) if ifExists => IO.pure(Right(AdminResults.ok(s"role $name absent")))
           case Left(f)             => IO.pure(Left(f))
           case Right(r)            =>
             mut(supervisor.deleteRole(r.id))(_ => AdminResults.ok(s"role $name dropped"))
+        }
 
       case AdminCommand.GrantRoleTo(role, to) =>
-        val resolved = for
-          r   <- roleByName(ctx, role)
-          ids <- principalIds(ctx, to)
-        yield (r, ids)
-        resolved match
+        resolveRoleAndPrincipal(ctx, role, to).flatMap {
           case Left(f)                    => IO.pure(Left(f))
           case Right((r, (Some(uid), _))) =>
             mut(supervisor.addUserRole(uid, r.id))(_ => AdminResults.ok(s"role $role granted"))
           case Right((r, (_, Some(gid)))) =>
             mut(supervisor.addGroupRole(gid, r.id))(_ => AdminResults.ok(s"role $role granted"))
           case Right(_) => IO.pure(Left(RouterFailure.Internal("unresolved principal")))
+        }
 
       case AdminCommand.RevokeRoleFrom(role, from) =>
-        val resolved = for
-          r   <- roleByName(ctx, role)
-          ids <- principalIds(ctx, from)
-        yield (r, ids)
-        resolved match
+        resolveRoleAndPrincipal(ctx, role, from).flatMap {
           case Left(f)                    => IO.pure(Left(f))
           case Right((r, (Some(uid), _))) =>
             mut(supervisor.removeUserRole(uid, r.id))(_ => AdminResults.ok(s"role $role revoked"))
           case Right((r, (_, Some(gid)))) =>
             mut(supervisor.removeGroupRole(gid, r.id))(_ => AdminResults.ok(s"role $role revoked"))
           case Right(_) => IO.pure(Left(RouterFailure.Internal("unresolved principal")))
+        }
 
       case AdminCommand.AlterGroupAddUser(group, user) =>
-        val resolved = for
-          g <- groupByName(ctx, group)
-          u <- userByName(ctx, user)
-        yield (g, u)
-        resolved match
+        resolveGroupAndUser(ctx, group, user).flatMap {
           case Left(f)       => IO.pure(Left(f))
           case Right((g, u)) =>
             mut(supervisor.addUserGroup(u.id, g.id))(_ =>
               AdminResults.ok(s"user $user added to group $group")
             )
+        }
 
       case AdminCommand.AlterGroupDropUser(group, user) =>
-        val resolved = for
-          g <- groupByName(ctx, group)
-          u <- userByName(ctx, user)
-        yield (g, u)
-        resolved match
+        resolveGroupAndUser(ctx, group, user).flatMap {
           case Left(f)       => IO.pure(Left(f))
           case Right((g, u)) =>
             mut(supervisor.removeUserGroup(u.id, g.id))(_ =>
               AdminResults.ok(s"user $user removed from group $group")
             )
+        }
 
       case AdminCommand.GrantTable(verb, ref, role) =>
-        roleByName(ctx, role) match
+        roleByName(ctx, role).flatMap {
           case Left(f)  => IO.pure(Left(f))
           case Right(r) =>
-            val dup = supervisor
-              .listRolePermissions(r.id)
-              .exists(p =>
+            IO.blocking(supervisor.listRolePermissions(r.id)).flatMap { perms =>
+              val dup = perms.exists(p =>
                 p.catalogName == ref.catalog && p.schemaName == ref.schema &&
                   p.tableName == ref.table && p.verb == verb
               )
-            if dup then IO.pure(Right(AdminResults.ok(s"grant already present")))
-            else
-              mut(supervisor.grantRolePermission(r.id, ref.catalog, ref.schema, ref.table, verb))(
-                _ => AdminResults.ok(s"granted $verb on $ref to role $role")
-              )
+              if dup then IO.pure(Right(AdminResults.ok(s"grant already present")))
+              else
+                mut(supervisor.grantRolePermission(r.id, ref.catalog, ref.schema, ref.table, verb))(
+                  _ => AdminResults.ok(s"granted $verb on $ref to role $role")
+                )
+            }
+        }
 
       case AdminCommand.RevokeTable(verbOpt, ref, role) =>
-        roleByName(ctx, role) match
+        roleByName(ctx, role).flatMap {
           case Left(f)  => IO.pure(Left(f))
           case Right(r) =>
-            val matches = supervisor
-              .listRolePermissions(r.id)
-              .filter(p =>
+            IO.blocking(supervisor.listRolePermissions(r.id)).flatMap { perms =>
+              val matches = perms.filter(p =>
                 p.catalogName == ref.catalog && p.schemaName == ref.schema &&
                   p.tableName == ref.table && verbOpt.forall(_ == p.verb)
               )
-            matches
-              .foldLeft(IO.pure(Right(()): Either[RouterFailure, Unit])) { (acc, p) =>
-                acc.flatMap {
-                  case Left(f)  => IO.pure(Left(f))
-                  case Right(_) =>
-                    supervisor.revokeRolePermission(p.id).map(_.left.map(toFailure))
+              matches
+                .foldLeft(IO.pure(Right(()): Either[RouterFailure, Unit])) { (acc, p) =>
+                  acc.flatMap {
+                    case Left(f)  => IO.pure(Left(f))
+                    case Right(_) =>
+                      supervisor.revokeRolePermission(p.id).map(_.left.map(toFailure))
+                  }
                 }
-              }
-              .map(_.map(_ => revokedResult(matches.size)))
+                .map(_.map(_ => revokedResult(matches.size)))
+            }
+        }
 
       case other =>
         IO.pure(Left(RouterFailure.Internal(s"not yet implemented: $other"))) // Task 7
