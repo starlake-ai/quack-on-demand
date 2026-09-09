@@ -291,40 +291,65 @@ object AdminSqlParser:
         yield out
 
     /** Requires the current token to be '('; scans the RAW sql for the balanced closing paren,
-      * skipping single-quoted strings ('' escape) and double-quoted identifiers, returns the
-      * trimmed body, and advances the token cursor past the closing paren. The body is passed
-      * verbatim to the jsqlparser-based validators downstream - no re-tokenization here.
+      * skipping single-quoted strings ('' escape), double-quoted identifiers, and both comment
+      * forms the tokenizer accepts (line `--` and nested block `/* */`), so comment content never
+      * affects paren depth or the semicolon guard below. Rejects a bare `;` in the body - it has no
+      * legitimate use in an extracted expression and would break the downstream textual splice.
+      * Returns the trimmed body and advances the token cursor past the closing paren. The body is
+      * passed verbatim to the jsqlparser-based validators downstream - no re-tokenization here.
       */
     private def parenExpression(): Either[String, String] =
       if eof || toks(i).quoted || toks(i).raw != "(" then Left("expected ( after USING")
       else
-        val open    = toks(i).start
-        var j       = open
-        var depth   = 0
-        var inStr   = false
-        var inQuote = false
-        var close   = -1
-        while j < sql.length && close < 0 do
+        val open                    = toks(i).start
+        var j                       = open
+        var depth                   = 0
+        var inStr                   = false
+        var inQuote                 = false
+        var close                   = -1
+        var failure: Option[String] = None
+        while j < sql.length && close < 0 && failure.isEmpty do
           val c = sql(j)
           if inStr then
             if c == '\'' then
               if j + 1 < sql.length && sql(j + 1) == '\'' then j += 1 else inStr = false
+            j += 1
           else if inQuote then
             if c == '"' then inQuote = false
-          else if c == '\'' then inStr = true
-          else if c == '"' then inQuote = true
-          else if c == '(' then depth += 1
+            j += 1
+          else if c == '\'' then { inStr = true; j += 1 }
+          else if c == '"' then { inQuote = true; j += 1 }
+          else if c == '-' && j + 1 < sql.length && sql(j + 1) == '-' then
+            while j < sql.length && sql(j) != '\n' do j += 1
+          else if c == '/' && j + 1 < sql.length && sql(j + 1) == '*' then
+            // Mirrors the tokenizer's nested-comment scan (see tokenizeUpTo) so a ')' or ';'
+            // inside a comment is invisible to depth counting and the semicolon guard.
+            var cdepth = 1
+            var k      = j + 2
+            while k < sql.length && cdepth > 0 do
+              if k + 1 < sql.length && sql(k) == '/' && sql(k + 1) == '*' then
+                cdepth += 1; k += 2
+              else if k + 1 < sql.length && sql(k) == '*' && sql(k + 1) == '/' then
+                cdepth -= 1; k += 2
+              else k += 1
+            if cdepth > 0 then failure = Some("unterminated comment in expression") else j = k
+          else if c == ';' then failure = Some("semicolon not allowed in expression")
+          else if c == '(' then { depth += 1; j += 1 }
           else if c == ')' then
             depth -= 1
             if depth == 0 then close = j
-          j += 1
-        if close < 0 then Left("unbalanced parentheses in expression")
-        else
-          val body = sql.substring(open + 1, close).trim
-          if body.isEmpty then Left("empty expression")
-          else
-            while i < toks.length && toks(i).start <= close do i += 1
-            Right(body)
+            j += 1
+          else j += 1
+        failure match
+          case Some(err) => Left(err)
+          case None      =>
+            if close < 0 then Left("unbalanced parentheses in expression")
+            else
+              val body = sql.substring(open + 1, close).trim
+              if body.isEmpty then Left("empty expression")
+              else
+                while i < toks.length && toks(i).start <= close do i += 1
+                Right(body)
 
     private def create(): Either[String, AdminCommand] =
       if optKw("ROLE") then

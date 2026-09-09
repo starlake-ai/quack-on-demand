@@ -164,6 +164,29 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING ()").isLeft shouldBe true
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (1=1) extra").isLeft shouldBe true
 
+  it should "not let a comment's ')' or ';' influence paren depth or the semicolon guard" in:
+    AdminSqlParser
+      .parse(
+        "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 -- )"
+      )
+      .isLeft shouldBe true
+    AdminSqlParser
+      .parse(
+        "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 /* ) */"
+      )
+      .isLeft shouldBe true
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 /* ) */ AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(
+        TableRef("*", "*", "t"),
+        "r",
+        "a = 1 /* ) */ AND b = 2",
+        false
+      )
+    )
+    AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a=1;)").isLeft shouldBe true
+
   "parse column policies" should "handle MASK USING and DENY" in:
     AdminSqlParser.parse(
       "CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst " +
