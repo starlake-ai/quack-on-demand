@@ -54,3 +54,4 @@ enum AdminCommand:
   case ShowRowPolicies(filter: PolicyFilter)
   case ShowColumnPolicies(filter: PolicyFilter)
   case ShowPoolGrants(principal: Option[Principal])
+  case ShowUsers

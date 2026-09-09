@@ -39,7 +39,7 @@ object AdminSqlParser:
             (kw(1) == "COLUMN" && kw(2) == "POLICY")
           case "ALTER" => kw(1) == "GROUP" || kw(1) == "USER"
           case "SHOW"  =>
-            kw(1) == "ROLES" || kw(1) == "GRANTS" ||
+            kw(1) == "ROLES" || kw(1) == "GRANTS" || kw(1) == "USERS" ||
             (kw(1) == "ROW" && kw(2) == "POLICIES") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICIES") ||
             (kw(1) == "POOL" && kw(2) == "GRANTS")
@@ -518,6 +518,7 @@ object AdminSqlParser:
 
     private def show(): Either[String, AdminCommand] =
       if optKw("ROLES") then end(AdminCommand.ShowRoles)
+      else if optKw("USERS") then end(AdminCommand.ShowUsers)
       else if optKw("GRANTS") then
         for
           _   <- kw("FOR")

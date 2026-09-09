@@ -628,6 +628,7 @@ GRANT CONNECT ON POOL tpch.bi TO USER alice;
 
 -- Introspection
 SHOW GRANTS FOR ROLE analyst;
+SHOW USERS;
 ```
 
 Run these as plain (non-prepared) statements where you have the choice: the
@@ -649,11 +650,11 @@ JDBC/ADBC tool that renders the advertised schema before running.
   are not glob patterns over existing rows.
 - `SHOW ... ON <table>` and `SHOW GRANTS FOR ROLE r` match the stored tuple
   exactly too, same caveat.
-- `SHOW ROLES` and `SHOW GRANTS` are claimed by the dialect and will **shadow**
-  a real table literally named `roles` or `grants` in your schema. Quote the
-  identifier (`SHOW "roles"`) to bypass the dialect and reach DuckDB's normal
-  describe-table behavior instead - the claim check only fires on an unquoted
-  keyword token.
+- `SHOW ROLES`, `SHOW GRANTS`, and `SHOW USERS` are claimed by the dialect and
+  will **shadow** a real table literally named `roles`, `grants`, or `users`
+  in your schema. Quote the identifier (`SHOW "roles"`) to bypass the dialect
+  and reach DuckDB's normal describe-table behavior instead - the claim check
+  only fires on an unquoted keyword token.
 - The `ON POOL db.pool` qualifier in `GRANT/REVOKE CONNECT ON POOL ...` is
   optional and never disambiguates: pool names are unique per tenant already,
   so a bare `ON POOL sales` and a qualified `ON POOL tpch.sales` resolve
@@ -688,6 +689,10 @@ JDBC/ADBC tool that renders the advertised schema before running.
   session-user guard on this one. An unknown username 404s before the
   rotation path ever runs. Same password-literal-not-logged note as `CREATE
   USER` above.
+- `SHOW USERS` lists the session tenant's users only (`id`, `username`,
+  `role`, `enabled`, `email`) - never any credential material, since
+  `RbacUser` carries no password hash. The superuser realm is invisible, as
+  everywhere else in the dialect.
 
 ## Federation - external catalogs via DuckDB extensions
 

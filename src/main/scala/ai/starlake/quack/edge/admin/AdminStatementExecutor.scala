@@ -413,6 +413,16 @@ final class AdminStatementExecutor(
           Right(AdminResults.table(List("id", "name", "description"), rows))
         }
 
+      case AdminCommand.ShowUsers =>
+        IO.blocking {
+          val rows = supervisor
+            .listUsers(Some(ctx.tenantId))
+            .map(u =>
+              List(Some(u.id), Some(u.username), Some(u.role), Some(u.enabled.toString), u.email)
+            )
+          Right(AdminResults.table(List("id", "username", "role", "enabled", "email"), rows))
+        }
+
       case AdminCommand.ShowGrants(role) =>
         roleByName(ctx, role).flatMap {
           case Left(f)  => IO.pure(Left(f))

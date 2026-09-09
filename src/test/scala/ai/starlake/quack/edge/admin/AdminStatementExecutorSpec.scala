@@ -440,3 +440,25 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     run(unwiredExec, sup, "ALTER USER alice PASSWORD 'x'") match
       case Left(RouterFailure.Internal(_)) => succeed
       case other                           => fail(s"expected Internal, got $other")
+
+  "SHOW USERS" should "list the session tenant's users with the 5-column shape and stay tenant-scoped" in:
+    val (sup, store, exec) = setup()
+    val tid                = tenantId(sup)
+    seedUser(store, tid, "alice")
+    seedUser(store, tid, "bob")
+    // A user in a different tenant must never show up in the session tenant's listing.
+    sup.createTenant(Tenant("globex")).unsafeRunSync()
+    val otherTid = sup.getTenant("globex").orElse(sup.getTenantById("globex")).get.id
+    seedUser(store, otherTid, "eve")
+
+    run(exec, sup, "SHOW USERS") match
+      case Right(qr) =>
+        val rows = readAll(qr)
+        rows.foreach(_ should have size 5)
+        rows.map(_(1)) should contain allOf (Some("alice"), Some("bob"))
+        rows.map(_(1)) should not contain Some("eve")
+        val aliceRow = rows.find(_(1) == Some("alice")).get
+        aliceRow(2) shouldBe Some("user") // role
+        aliceRow(3) shouldBe Some("true") // enabled
+        aliceRow(4) shouldBe None         // email (seedUser sets none)
+      case other => fail(s"expected rows, got $other")

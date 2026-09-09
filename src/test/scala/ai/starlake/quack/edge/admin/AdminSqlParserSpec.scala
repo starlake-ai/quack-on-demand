@@ -271,6 +271,10 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("SHOW POOL GRANTS") shouldBe Right(AdminCommand.ShowPoolGrants(None))
     AdminSqlParser.parse("SHOW POOL GRANTS FOR USER alice") shouldBe
       Right(AdminCommand.ShowPoolGrants(Some(Principal.User("alice"))))
+    AdminSqlParser.parse("SHOW USERS") shouldBe Right(AdminCommand.ShowUsers)
+
+  it should "reject trailing garbage on SHOW USERS" in:
+    AdminSqlParser.parse("SHOW USERS extra").isLeft shouldBe true
 
   "claims on SHOW" should "claim only the admin forms" in:
     AdminSqlParser.claims("SHOW ROLES") shouldBe true
@@ -278,6 +282,7 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.claims("SHOW ROW POLICIES") shouldBe true
     AdminSqlParser.claims("SHOW COLUMN POLICIES") shouldBe true
     AdminSqlParser.claims("SHOW POOL GRANTS") shouldBe true
+    AdminSqlParser.claims("SHOW USERS") shouldBe true
     AdminSqlParser.claims("SHOW TABLES") shouldBe false
     AdminSqlParser.claims("SHOW ALL") shouldBe false
     AdminSqlParser.claims("SHOW DATABASES") shouldBe false
