@@ -353,6 +353,36 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     info.getSchema.getFields.size() shouldBe 1
     info.getSchema.getFields.get(0).getName shouldBe "Count"
 
+  // Same release-blocker regression as createPreparedStatement above, but for the literal
+  // (un-prepared) CommandStatementQuery path: a client that skips Prepare and goes straight to
+  // GetFlightInfo/DoGet must see the same (status, detail) schema, not Count, or it hits the
+  // identical ADBC/JDBC advertised-schema mismatch.
+  it should "advertise (status, detail) on getFlightInfoStatement for a claimed admin mutation" in:
+    val (producer, sent, _, peer) = setupProducer()
+    val cmd                       = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("CREATE ROLE analyst")
+      .build()
+    val info = producer.getFlightInfoStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    sent shouldBe empty // not executed - same no-double-execution invariant as Prepare
+    info.getSchema.getFields.size() shouldBe 2
+    info.getSchema.getFields.get(0).getName shouldBe "status"
+    info.getSchema.getFields.get(1).getName shouldBe "detail"
+
+  it should "still advertise Count on getFlightInfoStatement for an ordinary DDL statement" in:
+    val (producer, _, _, peer) = setupProducer()
+    val cmd                    = FlightSql.CommandStatementQuery
+      .newBuilder()
+      .setQuery("CREATE TABLE t (a INT)")
+      .build()
+    val info = producer.getFlightInfoStatement(
+      cmd, fakeCallContext(peer), FlightDescriptor.command(Array.emptyByteArray)
+    )
+    info.getSchema.getFields.size() shouldBe 1
+    info.getSchema.getFields.get(0).getName shouldBe "Count"
+
   it should "throw UNAUTHENTICATED for getSchemaStatement when peer has no connection context" in:
     val (producer, _, _, _) = setupProducer()
     val cmd                 = FlightSql.CommandStatementQuery

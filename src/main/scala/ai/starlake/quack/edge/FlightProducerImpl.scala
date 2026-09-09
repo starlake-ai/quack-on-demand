@@ -106,16 +106,20 @@ final class FlightProducerImpl(
 
   /** Two nullable utf8 columns: the schema every SQL admin dialect MUTATION actually delivers
     * (`AdminResults.ok` / the executor's other mutation arms - see AdminStatementExecutor). A
-    * mutating admin statement (`CREATE ROLE`, `GRANT`, ...) classifies as DDL, so
-    * `createPreparedStatement`'s SkipExecute branch used to advertise `countSchema` for it
-    * unconditionally, same as any other DDL. ADBC/JDBC's prepare-time schema is STRICT: the client
-    * rejected the real `(status, detail)` Execute result against the advertised `Count: int64`, so
-    * the dialect could not be driven through its primary clients at all (release blocker, fixed
-    * alongside the (status, detail) unification below). SHOW forms are unaffected -
+    * mutating admin statement (`CREATE ROLE`, `GRANT`, ...) classifies as DDL, so both
+    * `createPreparedStatement`'s SkipExecute branch AND `getFlightInfoStatement`'s
+    * `probeStatementSchema(...).getOrElse(...)` fallback used to advertise `countSchema` for it
+    * unconditionally, same as any other DDL - the Prepare/Execute path for prepared statements, and
+    * the FlightInfo/DoGet path for literal (unprepared) `CommandStatementQuery` statements.
+    * ADBC/JDBC's advertised-schema check is STRICT on both paths: the client rejected the real
+    * `(status, detail)` result against the advertised `Count: int64`, so the dialect could not be
+    * driven through its primary clients via EITHER path (release blocker, fixed alongside the
+    * (status, detail) unification below). SHOW forms are unaffected on either path -
     * `StatementClassifier` puts `SHOW` in the `select` bucket, so `PrepareStrategy.choose` routes
-    * it to `FullExecute`, which probes for and advertises the REAL schema already; only the
-    * SkipExecute (mutation) branch needed this substitution, and it must never execute at prepare
-    * time - a claimed mutation would otherwise double-execute.
+    * it to `FullExecute`/a real probe, which advertises the REAL schema already; only the
+    * DML/DDL-shaped (SkipExecute / probe-returns-None) branches needed this substitution, and
+    * neither executes the claimed statement early - a claimed mutation would otherwise
+    * double-execute.
     */
   private val adminStatusSchema: Schema =
     new Schema(
@@ -1248,8 +1252,13 @@ final class FlightProducerImpl(
     val endpoint = new FlightEndpoint(ticket)
     // The ODBC driver reads the result schema from FlightInfo.schema, so probe it
     // here. DML/DDL probes None -> advertise countSchema; an empty schema would trip
-    // ADBC's FlightInfo.schema == DoGet stream guard.
-    val schema = probeStatementSchema(peer, command.getQuery).getOrElse(countSchema)
+    // ADBC's FlightInfo.schema == DoGet stream guard. A claimed SQL admin mutation is DDL
+    // too (probes None the same way) but actually delivers (status, detail), not Count - see
+    // adminStatusSchema's doc for the incident this mirrors on the prepared path.
+    val schema = probeStatementSchema(peer, command.getQuery).getOrElse(
+      if ai.starlake.quack.edge.admin.AdminSqlParser.claims(command.getQuery) then adminStatusSchema
+      else countSchema
+    )
     new FlightInfo(
       schema,
       descriptor,
