@@ -48,7 +48,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private def setup(
       stub: () => QuackResponse = defaultStub,
       events: ManagerEventSink = ManagerEventSink.noop,
-      lockdownFor: PoolKey => Boolean = _ => false
+      lockdownFor: PoolKey => Boolean = _ => false,
+      adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
   ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -103,9 +104,93 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         adapter,
         stmtInstruments = si,
         events = events,
-        lockdownFor = lockdownFor
+        lockdownFor = lockdownFor,
+        adminExecutor = adminExecutor
       )
     (router, sessions, node)
+
+  "admin dispatch" should "answer a claimed statement at the manager when wired" in:
+    val (router, _, _) = setup()
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor =
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+    )
+    // no effectiveSet: claimed, parsed, then denied by the executor - never forwarded
+    val out = withAdmin.execute("c-adm", "alice", poolKey, "CREATE ROLE r1").unsafeRunSync()
+    out match
+      case Left(RouterFailure.AccessDenied(reason)) => reason should include("admin_required")
+      case other                                    => fail(s"expected AccessDenied, got $other")
+
+  it should "reject malformed claimed statements instead of forwarding" in:
+    val (router, _, _) = setup()
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor =
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+    )
+    withAdmin
+      .execute("c-adm2", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
+      .unsafeRunSync() match
+      case Left(RouterFailure.BadRequest(reason)) => reason should include("admin statement")
+      case other                                  => fail(s"expected BadRequest, got $other")
+
+  it should "leave unclaimed statements and the executor-less router on the routed path" in:
+    val (router, _, _) = setup()
+    // executor-less router: GRANT flows to the routed path exactly as before this feature
+    router.execute("c-1", "alice", poolKey, "SELECT 1").unsafeRunSync() shouldBe a[Right[?, ?]]
+    val withAdmin = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor =
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+    )
+    // SHOW TABLES is not an admin form: routed to the node stub, returns Right
+    withAdmin.execute("c-2", "alice", poolKey, "SHOW TABLES").unsafeRunSync() shouldBe
+      a[Right[?, ?]]
+
+  it should "run a claimed GRANT end-to-end for a superuser" in:
+    val (router, _, _) = setup()
+    val exec           = new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor = Some(exec)
+    )
+    val tenantId = router.supervisor.getTenant(poolKey.tenant).get.id
+    router.supervisor.createRole(tenantId, "analyst").unsafeRunSync()
+    val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+      ai.starlake.quack.ondemand.state.RbacUser("u-root", None, "root", role = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      Nil
+    )
+    val out = withAdmin
+      .execute(
+        "c-adm-grant",
+        "root",
+        poolKey,
+        "GRANT SELECT ON t TO ROLE analyst",
+        effectiveSet = Some(superuserEff)
+      )
+      .unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
 
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
     val beforeCount =

@@ -90,7 +90,15 @@ final class FlightSqlRouter(
       * `Main` passes the leading arguments positionally.
       */
     val protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
-      ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
+      ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
+    /** SQL admin dialect dispatch: when set, a claimed statement (GRANT/REVOKE/CREATE ROLE/etc, see
+      * [[ai.starlake.quack.edge.admin.AdminSqlParser.claims]]) is answered by the manager - or
+      * rejected - and is NEVER forwarded to a node. None (the default) leaves every construction
+      * site that does not wire it on the pre-dialect routed path. TAIL param for the same reason as
+      * `metadataFilterRewriter` / `protectedWriteGuard`: `Main` passes the leading arguments
+      * positionally.
+      */
+    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -243,6 +251,35 @@ final class FlightSqlRouter(
         * can find and kill the statement (killByPats).
         */
       patId: Option[String] = None
+  ): IO[Either[RouterFailure, QueryResult]] =
+    adminExecutor match
+      case Some(exec) if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
+        // Claimed admin statements are answered by the manager (or rejected) and are
+        // never forwarded to a node - the fail-closed contract of the admin dialect.
+        exec.execute(user, poolKey, sql, effectiveSet)
+      case _ =>
+        routedExecute(
+          connectionId,
+          user,
+          poolKey,
+          sql,
+          effectiveSet,
+          preferredNode,
+          recordExecution,
+          prepareDurationMs,
+          patId
+        )
+
+  private def routedExecute(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: Option[EffectiveSet],
+      preferredNode: Option[String],
+      recordExecution: Boolean,
+      prepareDurationMs: Option[Long],
+      patId: Option[String]
   ): IO[Either[RouterFailure, QueryResult]] =
     val s = sessions.get(connectionId).getOrElse {
       val opened = sessions.open(connectionId, user, poolKey)
