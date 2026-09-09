@@ -122,8 +122,8 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
 
   // Once a token's whole subtree is already revoked -- the only state reachable through this
   // store's own API, since mint refuses to place a child under a non-live parent -- a second
-  // revoke call has nothing left to flip and must report the no-op false, exactly like a bare
-  // (childless) token revoked twice.
+  // revoke call has nothing left to flip and must report the no-op with an empty list, exactly
+  // like a bare (childless) token revoked twice.
   it should "no-op on a second call once the token has no live descendants left" in
     withFreshDb { (users, pats) =>
       val uid       = seedUser(users)

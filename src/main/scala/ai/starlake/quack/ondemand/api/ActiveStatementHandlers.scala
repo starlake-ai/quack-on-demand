@@ -1,6 +1,11 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.edge.{ActiveStatementRegistry, StatementHistoryStore, StatementRecord}
+import ai.starlake.quack.edge.{
+  ActiveStatement,
+  ActiveStatementRegistry,
+  StatementHistoryStore,
+  StatementRecord
+}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.ControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -146,7 +151,7 @@ final class ActiveStatementHandlers(
   private def killAndRecord(id: String): Unit =
     registry.kill(id).foreach(recordKilled)
 
-  private def recordKilled(s: ai.starlake.quack.edge.ActiveStatement): Unit =
+  private def recordKilled(s: ActiveStatement): Unit =
     val now = Instant.now()
     history.record(
       StatementRecord(

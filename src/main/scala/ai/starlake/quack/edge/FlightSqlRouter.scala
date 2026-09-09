@@ -239,7 +239,8 @@ final class FlightSqlRouter(
       /** The acting PAT id, when the resolved principal authenticated with one. `None` for the raw
         * FlightSQL wire (session-authenticated, no PAT concept) and for every caller that has not
         * been narrowed to one. Threaded straight into the statement-history and paired audit rows;
-        * see [[record]].
+        * see [[record]]. Also recorded on the ActiveStatementRegistry entry so a token revocation
+        * can find and kill the statement (killByPats).
         */
       patId: Option[String] = None
   ): IO[Either[RouterFailure, QueryResult]] =
