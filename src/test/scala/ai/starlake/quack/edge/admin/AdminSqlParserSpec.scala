@@ -92,7 +92,44 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse(";").isLeft shouldBe true
 
   it should "leave the not-yet-implemented placeholder arms returning Left" in:
-    // Tasks 2-4 replace these arms with real grammar; flipping either to Right is a
-    // conscious update to this test, not an accidental regression.
-    AdminSqlParser.parse("GRANT SELECT ON t TO ROLE r").isLeft shouldBe true
+    // Task 4 replaces this arm with real grammar; flipping it to Right is a conscious
+    // update to this test, not an accidental regression.
     AdminSqlParser.parse("SHOW ROLES").isLeft shouldBe true
+
+  "parse GRANT/REVOKE on tables" should "map privilege lists onto RO/RW/DDL/ALL" in:
+    AdminSqlParser.parse("GRANT SELECT ON tpch.main.orders TO ROLE analyst") shouldBe
+      Right(AdminCommand.GrantTable("RO", TableRef("tpch", "main", "orders"), "analyst"))
+    AdminSqlParser.parse("GRANT INSERT, UPDATE, DELETE ON TABLE tpch.main.orders TO etl") shouldBe
+      Right(AdminCommand.GrantTable("RW", TableRef("tpch", "main", "orders"), "etl"))
+    AdminSqlParser.parse("GRANT SELECT, INSERT ON t TO ROLE etl") shouldBe
+      Right(AdminCommand.GrantTable("RW", TableRef("*", "*", "t"), "etl"))
+    AdminSqlParser.parse("GRANT DDL ON tpch.main.* TO ROLE dba") shouldBe
+      Right(AdminCommand.GrantTable("DDL", TableRef("tpch", "main", "*"), "dba"))
+    AdminSqlParser.parse("GRANT ALL PRIVILEGES ON *.*.* TO ROLE root_like") shouldBe
+      Right(AdminCommand.GrantTable("ALL", TableRef("*", "*", "*"), "root_like"))
+
+  it should "pad short table refs with wildcards" in:
+    AdminSqlParser.parse("GRANT SELECT ON main.orders TO ROLE r") shouldBe
+      Right(AdminCommand.GrantTable("RO", TableRef("*", "main", "orders"), "r"))
+
+  it should "reject bad privilege combinations" in:
+    AdminSqlParser.parse("GRANT DDL, SELECT ON t TO ROLE r").isLeft shouldBe true
+    AdminSqlParser.parse("GRANT ALL, SELECT ON t TO ROLE r").isLeft shouldBe true
+    AdminSqlParser.parse("GRANT FROBNICATE ON t TO ROLE r").isLeft shouldBe true
+
+  it should "parse REVOKE with verb and REVOKE ALL as any-verb" in:
+    AdminSqlParser.parse("REVOKE SELECT ON tpch.main.orders FROM ROLE analyst") shouldBe
+      Right(AdminCommand.RevokeTable(Some("RO"), TableRef("tpch", "main", "orders"), "analyst"))
+    AdminSqlParser.parse("REVOKE ALL ON tpch.main.orders FROM analyst") shouldBe
+      Right(AdminCommand.RevokeTable(None, TableRef("tpch", "main", "orders"), "analyst"))
+
+  "parse GRANT/REVOKE CONNECT ON POOL" should "handle qualified and bare pool names" in:
+    AdminSqlParser.parse("GRANT CONNECT ON POOL tpch.bi TO USER alice") shouldBe
+      Right(AdminCommand.GrantPool(PoolTarget(Some("tpch"), "bi"), Principal.User("alice")))
+    AdminSqlParser.parse("GRANT CONNECT ON POOL bi TO GROUP finance") shouldBe
+      Right(AdminCommand.GrantPool(PoolTarget(None, "bi"), Principal.Group("finance")))
+    AdminSqlParser.parse("REVOKE CONNECT ON POOL bi FROM USER alice") shouldBe
+      Right(AdminCommand.RevokePool(PoolTarget(None, "bi"), Principal.User("alice")))
+
+  it should "claim a GRANT ROLE ... unterminated block comment past the claims token budget" in:
+    AdminSqlParser.claims("GRANT ROLE r TO USER u /* unterminated") shouldBe true

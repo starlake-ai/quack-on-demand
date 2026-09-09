@@ -56,9 +56,9 @@ object AdminSqlParser:
 
   // Shared tokenizer core. `maxTokens` bounds how many tokens are collected before returning -
   // used by claims() to avoid a full-statement scan (per-token allocation and toUpperCase,
-  // including on multi-megabyte string literals) on every statement of the hot path. Comments
-  // and whitespace are always fully skipped regardless of the bound - only token production
-  // stops early - so a comment nested past the bound is still scanned for a matching close.
+  // including on multi-megabyte string literals) on every statement of the hot path. Scanning
+  // stops at the budget; the first maxTokens tokens are nonetheless correct because comment
+  // handling inside the window is complete and no input past the window can affect them.
   private def tokenizeUpTo(sql: String, maxTokens: Int): Either[String, Vector[Tok]] =
     val toks                    = Vector.newBuilder[Tok]
     var i                       = 0
@@ -127,8 +127,8 @@ object AdminSqlParser:
     private def eof: Boolean             = i >= toks.length
     private def peek(k: Int = 0): String =
       if i + k < toks.length then toks(i + k).upper else ""
-    private def peekQuoted: Boolean       = i < toks.length && toks(i).quoted
     private def quotedAt(k: Int): Boolean = i + k < toks.length && toks(i + k).quoted
+    private def peekQuoted: Boolean       = quotedAt(0)
     private def bump(): Unit              = i += 1
 
     private def kw(w: String): Either[String, Unit] =
@@ -160,6 +160,65 @@ object AdminSqlParser:
       else if optKw("GROUP") then ident("group name").map(Principal.Group.apply)
       else Left(s"expected USER or GROUP, found '${if eof then "<end>" else toks(i).raw}'")
 
+    private val PrivWords = Set("SELECT", "INSERT", "UPDATE", "DELETE", "DDL", "ALL")
+
+    /** Comma-separated privilege list, mapped onto the stored verb space. */
+    private def privileges(): Either[String, String] =
+      var privs                = Set.empty[String]
+      var fail: Option[String] = None
+      var more                 = true
+      while more && fail.isEmpty do
+        val p = peek()
+        if PrivWords(p) && !peekQuoted then
+          bump()
+          if p == "ALL" then { optKw("PRIVILEGES"); () }
+          privs += p
+        else
+          fail = Some(
+            s"expected a privilege (SELECT, INSERT, UPDATE, DELETE, DDL, ALL), " +
+              s"found '${if eof then "<end>" else toks(i).raw}'"
+          )
+        if fail.isEmpty then more = optKw(",")
+      fail.toLeft(privs).flatMap(mapVerb)
+
+    private def mapVerb(privs: Set[String]): Either[String, String] =
+      val dml = privs.intersect(Set("INSERT", "UPDATE", "DELETE"))
+      if privs.contains("ALL") then
+        if privs.size == 1 then Right("ALL")
+        else Left("ALL cannot be combined with other privileges")
+      else if privs.contains("DDL") then
+        if dml.nonEmpty || privs.contains("SELECT") then
+          Left("DDL cannot be combined with other privileges; use ALL")
+        else Right("DDL")
+      else if dml.nonEmpty then Right("RW")
+      else if privs.contains("SELECT") then Right("RO")
+      else Left("empty privilege list")
+
+    private def optDot(): Boolean =
+      if peek() == "." && !peekQuoted then { i += 1; true }
+      else false
+
+    private def refSegment(): Either[String, String] =
+      if !eof && !toks(i).quoted && toks(i).raw == "*" then { i += 1; Right("*") }
+      else ident("identifier or *")
+
+    /** 1-3 dot-separated segments; missing leading segments pad with "*". */
+    private def tableRef(): Either[String, TableRef] =
+      refSegment().flatMap { s1 =>
+        if optDot() then
+          refSegment().flatMap { s2 =>
+            if optDot() then refSegment().map(s3 => TableRef(s1, s2, s3))
+            else Right(TableRef("*", s1, s2))
+          }
+        else Right(TableRef("*", "*", s1))
+      }
+
+    private def poolTarget(): Either[String, PoolTarget] =
+      ident("pool name").flatMap { first =>
+        if optDot() then ident("pool name").map(p => PoolTarget(Some(first), p))
+        else Right(PoolTarget(None, first))
+      }
+
     def statement(): Either[String, AdminCommand] =
       if optKw("GRANT") then grant()
       else if optKw("REVOKE") then revoke()
@@ -177,7 +236,26 @@ object AdminSqlParser:
           p    <- principal()
           out  <- end(AdminCommand.GrantRoleTo(role, p))
         yield out
-      else Left("not yet implemented") // Task 2 replaces this arm
+      else if optKw("CONNECT") then
+        for
+          _   <- kw("ON")
+          _   <- kw("POOL")
+          t   <- poolTarget()
+          _   <- kw("TO")
+          p   <- principal()
+          out <- end(AdminCommand.GrantPool(t, p))
+        yield out
+      else
+        for
+          verb <- privileges()
+          _    <- kw("ON")
+          _ = optKw("TABLE")
+          ref <- tableRef()
+          _   <- kw("TO")
+          _ = optKw("ROLE")
+          role <- ident("role name")
+          out  <- end(AdminCommand.GrantTable(verb, ref, role))
+        yield out
 
     private def revoke(): Either[String, AdminCommand] =
       if optKw("ROLE") then
@@ -187,7 +265,28 @@ object AdminSqlParser:
           p    <- principal()
           out  <- end(AdminCommand.RevokeRoleFrom(role, p))
         yield out
-      else Left("not yet implemented") // Task 2 replaces this arm
+      else if optKw("CONNECT") then
+        for
+          _   <- kw("ON")
+          _   <- kw("POOL")
+          t   <- poolTarget()
+          _   <- kw("FROM")
+          p   <- principal()
+          out <- end(AdminCommand.RevokePool(t, p))
+        yield out
+      else
+        for
+          verb <- privileges()
+          _    <- kw("ON")
+          _ = optKw("TABLE")
+          ref <- tableRef()
+          _   <- kw("FROM")
+          _ = optKw("ROLE")
+          role <- ident("role name")
+          out  <- end(
+            AdminCommand.RevokeTable(if verb == "ALL" then None else Some(verb), ref, role)
+          )
+        yield out
 
     private def create(): Either[String, AdminCommand] =
       if optKw("ROLE") then
