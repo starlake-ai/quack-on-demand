@@ -249,17 +249,45 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     ).isRight shouldBe true
     sup.listColumnPoliciesByRole(role.id).unsafeRunSync() shouldBe empty
 
+  it should "succeed on DROP COLUMN POLICY IF EXISTS for a missing tuple" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "DROP COLUMN POLICY IF EXISTS ON tpch.main.customers COLUMN email FOR ROLE analyst"
+    ).isRight shouldBe true
+
   "pool grants" should "resolve the pool by name and grant/revoke per principal" in:
     val (sup, store, exec) = setup()
     val tid                = tenantId(sup)
     val uid                = seedUser(store, tid, "alice")
     run(exec, sup, "GRANT CONNECT ON POOL sales TO USER alice").isRight shouldBe true
     sup.listPoolPermissions(Some(tid), Some(uid), None) should have size 1
+
+    def rowsOf(sql: String): List[List[Option[String]]] =
+      run(exec, sup, sql) match
+        case Right(qr) => readAll(qr)
+        case Left(f)   => fail(s"expected rows for '$sql', got $f")
+
+    val granted = rowsOf("SHOW POOL GRANTS")
+    granted should have size 1
+    granted.head(2) shouldBe Some("alice")
+    rowsOf("SHOW POOL GRANTS FOR USER alice") shouldBe granted
+
     run(exec, sup, "REVOKE CONNECT ON POOL sales FROM USER alice").isRight shouldBe true
     sup.listPoolPermissions(Some(tid), Some(uid), None) shouldBe empty
     run(exec, sup, "GRANT CONNECT ON POOL ghost TO USER alice") match
       case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_pool")
       case other                                => fail(s"expected NotFound, got $other")
+
+  // Test d from the polish request (ambiguous pool name -> BadRequest, qualified form succeeds)
+  // is intentionally not added: PoolSupervisor.createPool refuses to create a second pool with
+  // the same name under the same tenant even in a different tenant-db ("pool names must be
+  // unique per tenant", PoolSupervisor.scala ~line 1524), so the two-pools-same-name fixture the
+  // test needs cannot be constructed through the public API. The `_ :: _ :: Nil => ambiguous`
+  // branch in resolvePoolId is defensive against a future relaxation of that invariant (or a
+  // pre-existing DB row from before it was added) rather than something reachable today.
 
   "SHOW" should "return listings for roles, grants, and policies" in:
     val (sup, _, exec) = setup()
@@ -284,3 +312,21 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     rowsOf("SHOW ROW POLICIES ON tpch.main.orders") should have size 1
     rowsOf("SHOW ROW POLICIES ON tpch.main.other") shouldBe empty
     rowsOf("SHOW COLUMN POLICIES") shouldBe empty
+
+  it should "filter SHOW COLUMN POLICIES by ON table and FOR ROLE" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst DENY"
+    ).isRight shouldBe true
+
+    def rowsOf(sql: String): List[List[Option[String]]] =
+      run(exec, sup, sql) match
+        case Right(qr) => readAll(qr)
+        case Left(f)   => fail(s"expected rows for '$sql', got $f")
+
+    rowsOf("SHOW COLUMN POLICIES ON tpch.main.customers") should have size 1
+    rowsOf("SHOW COLUMN POLICIES FOR ROLE analyst") should have size 1
+    rowsOf("SHOW COLUMN POLICIES ON tpch.main.other") shouldBe empty

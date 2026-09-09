@@ -397,43 +397,49 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
         }
 
       case AdminCommand.ShowRowPolicies(filter) =>
-        allRowPolicies(ctx).map { all =>
-          val filtered = applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
-          Right(
-            AdminResults.table(
-              List("role", "catalog", "schema", "table", "predicate"),
-              filtered.map { case (r, p) =>
-                List(
-                  Some(r.name),
-                  Some(p.catalogName),
-                  Some(p.schemaName),
-                  Some(p.tableName),
-                  Some(p.predicateSql)
-                )
-              }
+        allRowPolicies(ctx).flatMap { all =>
+          IO.blocking {
+            val filtered =
+              applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
+            Right(
+              AdminResults.table(
+                List("role", "catalog", "schema", "table", "predicate"),
+                filtered.map { case (r, p) =>
+                  List(
+                    Some(r.name),
+                    Some(p.catalogName),
+                    Some(p.schemaName),
+                    Some(p.tableName),
+                    Some(p.predicateSql)
+                  )
+                }
+              )
             )
-          )
+          }
         }
 
       case AdminCommand.ShowColumnPolicies(filter) =>
-        allColumnPolicies(ctx).map { all =>
-          val filtered = applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
-          Right(
-            AdminResults.table(
-              List("role", "catalog", "schema", "table", "column", "action", "transform"),
-              filtered.map { case (r, p) =>
-                List(
-                  Some(r.name),
-                  Some(p.catalogName),
-                  Some(p.schemaName),
-                  Some(p.tableName),
-                  Some(p.columnName),
-                  Some(p.action),
-                  p.transformSql
-                )
-              }
+        allColumnPolicies(ctx).flatMap { all =>
+          IO.blocking {
+            val filtered =
+              applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
+            Right(
+              AdminResults.table(
+                List("role", "catalog", "schema", "table", "column", "action", "transform"),
+                filtered.map { case (r, p) =>
+                  List(
+                    Some(r.name),
+                    Some(p.catalogName),
+                    Some(p.schemaName),
+                    Some(p.tableName),
+                    Some(p.columnName),
+                    Some(p.action),
+                    p.transformSql
+                  )
+                }
+              )
             )
-          )
+          }
         }
 
       case AdminCommand.ShowPoolGrants(principalOpt) =>
@@ -467,7 +473,7 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
       .list()
       .map(_.key)
       .filter { k =>
-        k.tenant == ctx.tenantName && k.pool == target.pool &&
+        k.tenant == ctx.tenantId && k.pool == target.pool &&
         target.qualifier.forall(q => k.tenantDb == q || k.tenantDb == s"${ctx.tenantName}_$q")
       }
     keys match
