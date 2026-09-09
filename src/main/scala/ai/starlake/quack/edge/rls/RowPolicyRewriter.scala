@@ -168,7 +168,7 @@ class RowPolicyRewriter(enabled: Boolean = true):
             // trailing `--` comment, etc.) - see Failed's doc comment.
             case _: Throwable =>
               logger.warn(
-                "row policy failed to apply at rewrite time for tenant={} user={}; denying (fail-closed)",
+                "row policy failed to apply at rewrite time for tenant={} user={}; denying",
                 eff.user.tenant.getOrElse("-"),
                 eff.user.username
               )
