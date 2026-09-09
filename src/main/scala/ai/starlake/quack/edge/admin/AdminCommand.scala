@@ -47,6 +47,7 @@ enum AdminCommand:
   // (tenant-NULL rows are unreachable by construction), consistent with the
   // no-privilege-escalation rule: only superusers mint superusers, via REST.
   case CreateUser(name: String, password: String, admin: Boolean)
+  case AlterUserPassword(name: String, password: String)
   case DropUser(name: String, ifExists: Boolean)
   case ShowRoles
   case ShowGrants(role: String)

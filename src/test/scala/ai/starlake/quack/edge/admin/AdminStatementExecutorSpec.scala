@@ -55,6 +55,24 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       }
     (sup, store, new AdminStatementExecutor(sup, createUserFn = fn), calls)
 
+  // ALTER USER PASSWORD tests only: builds an executor wired with a fake alterPasswordFn
+  // that just records invocations (the real rotation path is PoolSupervisor.updateUserPassword,
+  // not exercised here). The store is exposed so tests can seed a user via seedUser.
+  private def setupWithAlterPasswordFn(): (
+      PoolSupervisor,
+      InMemoryControlPlaneStore,
+      AdminStatementExecutor,
+      scala.collection.mutable.Buffer[(String, String, String)]
+  ) =
+    val (sup, store, _) = setup()
+    val calls           = scala.collection.mutable.Buffer.empty[(String, String, String)]
+    val fn: AdminStatementExecutor.AlterPasswordFn = (tid, username, newPassword) =>
+      IO {
+        calls += ((tid, username, newPassword))
+        Right(())
+      }
+    (sup, store, new AdminStatementExecutor(sup, alterPasswordFn = fn), calls)
+
   private def tenantId(sup: PoolSupervisor): String =
     sup.getTenant("acme").orElse(sup.getTenantById("acme")).get.id
 
@@ -384,5 +402,41 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
 
     val (sup2, _, unwiredExec) = setup()
     run(unwiredExec, sup2, "CREATE USER zed PASSWORD 'x'") match
+      case Left(RouterFailure.Internal(_)) => succeed
+      case other                           => fail(s"expected Internal, got $other")
+
+  "ALTER USER PASSWORD" should "rotate the password of an existing tenant user" in:
+    val (sup, store, exec, calls) = setupWithAlterPasswordFn()
+    val tid                       = tenantId(sup)
+    seedUser(store, tid, "alice")
+    run(exec, sup, "ALTER USER alice PASSWORD 'newsecret'").isRight shouldBe true
+    calls.last shouldBe ((tid, "alice", "newsecret"))
+
+  it should "return NotFound for an unknown user without ever invoking the fn" in:
+    val (sup, _, _) = setup()
+    val invoked     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val guardFn: AdminStatementExecutor.AlterPasswordFn = (_, _, _) =>
+      IO {
+        invoked.set(true)
+        Right(())
+      }
+    val exec2 = new AdminStatementExecutor(sup, alterPasswordFn = guardFn)
+    run(exec2, sup, "ALTER USER ghost PASSWORD 'x'") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_user")
+      case other                                => fail(s"expected NotFound, got $other")
+    invoked.get() shouldBe false
+
+  it should "allow rotating the session's own password (no self guard)" in:
+    val (sup, store, exec, calls) = setupWithAlterPasswordFn()
+    val tid                       = tenantId(sup)
+    // run() always executes as user "boss".
+    seedUser(store, tid, "boss")
+    run(exec, sup, "ALTER USER boss PASSWORD 'newsecret'").isRight shouldBe true
+    calls.last shouldBe ((tid, "boss", "newsecret"))
+
+  it should "return Internal when the executor is unwired" in:
+    val (sup, store, unwiredExec) = setup()
+    seedUser(store, tenantId(sup), "alice")
+    run(unwiredExec, sup, "ALTER USER alice PASSWORD 'x'") match
       case Left(RouterFailure.Internal(_)) => succeed
       case other                           => fail(s"expected Internal, got $other")

@@ -575,13 +575,13 @@ curl -sS -X POST http://localhost:20900/api/auth/change-password \
 ## SQL administration (FlightSQL)
 
 An admin SQL dialect is answered directly at the FlightSQL edge: GRANT/REVOKE,
-CREATE/DROP ROLE, CREATE/DROP USER, ROW/COLUMN POLICY, ALTER GROUP, and admin
-SHOW forms are claimed by `FlightSqlRouter` before a statement would otherwise
-be forwarded to a node, executed against the same `PoolSupervisor` mutators
-the REST RBAC endpoints call, and answered as a small in-memory Arrow result
-set. This is a second way to reach the RBAC/policy machinery described above -
-REST and the SQL dialect are two doors onto the same rows, and either one
-invalidates the same `EffectiveSet` cache.
+CREATE/DROP ROLE, CREATE/ALTER/DROP USER, ROW/COLUMN POLICY, ALTER GROUP, and
+admin SHOW forms are claimed by `FlightSqlRouter` before a statement would
+otherwise be forwarded to a node, executed against the same `PoolSupervisor`
+mutators the REST RBAC endpoints call, and answered as a small in-memory
+Arrow result set. This is a second way to reach the RBAC/policy machinery
+described above - REST and the SQL dialect are two doors onto the same rows,
+and either one invalidates the same `EffectiveSet` cache.
 
 Flag: `quack-on-demand.sqlAdmin.enabled` (env `QOD_SQL_ADMIN_ENABLED`, default
 `true`). Off restores the pre-feature behavior exactly: these statements fall
@@ -608,6 +608,7 @@ ALTER GROUP finance ADD USER alice;
 -- Users
 CREATE USER alice PASSWORD 'secret';
 CREATE USER ops PASSWORD 'secret' ADMIN;
+ALTER USER alice PASSWORD 'newsecret';
 DROP USER IF EXISTS alice;
 
 -- Table ACLs
@@ -680,6 +681,13 @@ JDBC/ADBC tool that renders the advertised schema before running.
   session's own username (self-drop guard, mirroring the REST posture). The
   password literal is never recorded in statement history or logs - the
   executor logs only the command kind - and the FlightSQL wire is TLS.
+- `ALTER USER ... PASSWORD` rotates a tenant user's password through the same
+  per-(tenant, username) path REST `user/update` uses, so lockout counters
+  (`failed_attempts` / `locked_at`) are cleared as part of the write, same as
+  the REST reset. Unlike `DROP USER`, self-rotation is allowed - there is no
+  session-user guard on this one. An unknown username 404s before the
+  rotation path ever runs. Same password-literal-not-logged note as `CREATE
+  USER` above.
 
 ## Federation - external catalogs via DuckDB extensions
 

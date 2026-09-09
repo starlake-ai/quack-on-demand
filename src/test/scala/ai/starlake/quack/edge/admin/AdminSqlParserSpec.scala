@@ -301,3 +301,22 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE USER alice PASSWORD 'x' extra").isLeft shouldBe true
     AdminSqlParser.claims("CREATE USER alice PASSWORD 'x'") shouldBe true
     AdminSqlParser.claims("DROP USER alice") shouldBe true
+
+  "parse ALTER USER PASSWORD" should "handle the literal and optional WITH" in:
+    AdminSqlParser.parse("ALTER USER alice PASSWORD 'newsecret'") shouldBe
+      Right(AdminCommand.AlterUserPassword("alice", "newsecret"))
+    AdminSqlParser.parse("ALTER USER alice WITH PASSWORD 'it''s'") shouldBe
+      Right(AdminCommand.AlterUserPassword("alice", "it's"))
+    AdminSqlParser.claims("ALTER USER alice PASSWORD 'x'") shouldBe true
+
+  it should "fail closed on malformed ALTER USER statements" in:
+    AdminSqlParser.parse("ALTER USER alice").isLeft shouldBe true                 // no password
+    AdminSqlParser.parse("ALTER USER alice PASSWORD secret").isLeft shouldBe true // not a literal
+    AdminSqlParser.parse("ALTER USER alice PASSWORD ''").isLeft shouldBe true     // empty literal
+    AdminSqlParser.parse("ALTER USER alice PASSWORD 'x' extra").isLeft shouldBe true
+
+  it should "still parse ALTER GROUP forms (regression)" in:
+    AdminSqlParser.parse("ALTER GROUP finance ADD USER alice") shouldBe
+      Right(AdminCommand.AlterGroupAddUser("finance", "alice"))
+    AdminSqlParser.parse("ALTER GROUP finance DROP USER alice") shouldBe
+      Right(AdminCommand.AlterGroupDropUser("finance", "alice"))

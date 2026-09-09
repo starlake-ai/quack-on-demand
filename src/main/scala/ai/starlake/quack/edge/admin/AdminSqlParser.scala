@@ -37,7 +37,7 @@ object AdminSqlParser:
             kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICY")
-          case "ALTER" => kw(1) == "GROUP"
+          case "ALTER" => kw(1) == "GROUP" || kw(1) == "USER"
           case "SHOW"  =>
             kw(1) == "ROLES" || kw(1) == "GRANTS" ||
             (kw(1) == "ROW" && kw(2) == "POLICIES") ||
@@ -234,7 +234,7 @@ object AdminSqlParser:
       else if optKw("REVOKE") then revoke()
       else if optKw("CREATE") then create()
       else if optKw("DROP") then drop()
-      else if optKw("ALTER") then alterGroup()
+      else if optKw("ALTER") then alter()
       else if optKw("SHOW") then show()
       else Left(s"not an admin statement: '${toks(0).raw}'")
 
@@ -486,25 +486,35 @@ object AdminSqlParser:
         yield out
       else Left("expected ROLE, ROW POLICY or COLUMN POLICY after DROP")
 
-    private def alterGroup(): Either[String, AdminCommand] =
-      for
-        _     <- kw("GROUP")
-        group <- ident("group name")
-        cmd   <-
-          if optKw("ADD") then
-            for
-              _   <- kw("USER")
-              u   <- ident("user name")
-              out <- end(AdminCommand.AlterGroupAddUser(group, u))
-            yield out
-          else if optKw("DROP") then
-            for
-              _   <- kw("USER")
-              u   <- ident("user name")
-              out <- end(AdminCommand.AlterGroupDropUser(group, u))
-            yield out
-          else Left("expected ADD USER or DROP USER after ALTER GROUP <name>")
-      yield cmd
+    private def alter(): Either[String, AdminCommand] =
+      if optKw("GROUP") then
+        for
+          group <- ident("group name")
+          cmd   <-
+            if optKw("ADD") then
+              for
+                _   <- kw("USER")
+                u   <- ident("user name")
+                out <- end(AdminCommand.AlterGroupAddUser(group, u))
+              yield out
+            else if optKw("DROP") then
+              for
+                _   <- kw("USER")
+                u   <- ident("user name")
+                out <- end(AdminCommand.AlterGroupDropUser(group, u))
+              yield out
+            else Left("expected ADD USER or DROP USER after ALTER GROUP <name>")
+        yield cmd
+      else if optKw("USER") then
+        for
+          name <- ident("user name")
+          _ = optKw("WITH")
+          _   <- kw("PASSWORD")
+          pw  <- stringLiteral("password")
+          _   <- if pw.isEmpty then Left("password must not be empty") else Right(())
+          out <- end(AdminCommand.AlterUserPassword(name, pw))
+        yield out
+      else Left("expected GROUP or USER after ALTER")
 
     private def show(): Either[String, AdminCommand] =
       if optKw("ROLES") then end(AdminCommand.ShowRoles)

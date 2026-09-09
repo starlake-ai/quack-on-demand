@@ -747,7 +747,25 @@ object Main extends IOApp with LazyLogging:
                 role = role,
                 userStore = userStore,
                 failIfExists = true
-              )
+              ),
+            // Same per-(tenant, username) rotation path REST user/update uses
+            // (PoolSupervisor.updateUserPassword, which clears failed_attempts /
+            // locked_at as part of the password write) - resolved by username
+            // since the dialect never carries a userId.
+            alterPasswordFn = (tenantId, username, newPassword) =>
+              IO.blocking(sup.findUser(Some(tenantId), username)).flatMap {
+                case None =>
+                  IO.pure(
+                    Left(
+                      ai.starlake.quack.ondemand.SupervisorError
+                        .NotFound(s"user not found: $username")
+                    )
+                  )
+                case Some(u) =>
+                  sup
+                    .updateUserPassword(u.id, Some(newPassword), None, userStore)
+                    .map(_.map(_ => ()))
+              }
           )
         )
       if !sqlAdminEnabled then

@@ -21,7 +21,9 @@ import com.typesafe.scalalogging.LazyLogging
   */
 final class AdminStatementExecutor(
     supervisor: PoolSupervisor,
-    createUserFn: AdminStatementExecutor.CreateUserFn = AdminStatementExecutor.unwiredCreateUser
+    createUserFn: AdminStatementExecutor.CreateUserFn = AdminStatementExecutor.unwiredCreateUser,
+    alterPasswordFn: AdminStatementExecutor.AlterPasswordFn =
+      AdminStatementExecutor.unwiredAlterPassword
 ) extends LazyLogging:
 
   private final case class Ctx(
@@ -383,6 +385,15 @@ final class AdminStatementExecutor(
           AdminResults.ok(s"user ${u.username} created")
         )
 
+      case AdminCommand.AlterUserPassword(name, password) =>
+        userByName(ctx, name).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(_) =>
+            mut(alterPasswordFn(ctx.tenantId, name, password))(_ =>
+              AdminResults.ok(s"password updated for $name")
+            )
+        }
+
       case AdminCommand.DropUser(name, ifExists) =>
         if name == ctx.sessionUser then
           IO.pure(Left(RouterFailure.BadRequest("cannot drop the current session user")))
@@ -571,3 +582,12 @@ object AdminStatementExecutor:
 
   val unwiredCreateUser: CreateUserFn =
     (_, _, _, _) => IO.pure(Left(SupervisorError.Internal("user creation is not wired")))
+
+  /** (tenantId, username, newPassword) -> unit. Wired in Main over the same per-(tenant, username)
+    * rotation path REST user/update uses (clears lockout columns as part of the write); unwired
+    * default fails closed.
+    */
+  type AlterPasswordFn = (String, String, String) => IO[Either[SupervisorError, Unit]]
+
+  val unwiredAlterPassword: AlterPasswordFn =
+    (_, _, _) => IO.pure(Left(SupervisorError.Internal("password rotation is not wired")))
