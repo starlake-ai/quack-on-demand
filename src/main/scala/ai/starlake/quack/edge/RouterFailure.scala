@@ -13,6 +13,8 @@ package ai.starlake.quack.edge
   *     retry exhausted, transaction-pinned node disappeared.
   *   - [[Internal]] -> `INTERNAL`: every "this shouldn't happen" path. Surfaces as INTERNAL to the
   *     client; the description carries the diagnostic.
+  *   - [[AlreadyExists]] -> `ALREADY_EXISTS`: an admin CREATE statement targets a name that already
+  *     exists (role, user, group).
   *
   * The connector team asked for distinct status codes per failure shape (R12). Adding a kind label
   * rather than encoding it in the message prefix keeps the wire status code authoritative and

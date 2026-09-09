@@ -22,15 +22,17 @@ object AdminResults:
   private val allocator = new RootAllocator(Long.MaxValue)
 
   def table(columns: List[String], rows: List[List[Option[String]]]): QueryResult =
+    require(rows.forall(_.size == columns.size), "row arity must match column count")
     val utf8   = new ArrowType.Utf8()
     val schema = new Schema(
       columns.map(c => new Field(c, FieldType.nullable(utf8), null)).asJava
     )
     val bytes =
-      val root = VectorSchemaRoot.create(schema, allocator)
+      val root                      = VectorSchemaRoot.create(schema, allocator)
+      var writer: ArrowStreamWriter = null
       try
         root.allocateNew()
-        columns.zipWithIndex.foreach { case (col, cIdx) =>
+        columns.indices.foreach { cIdx =>
           val vec = root.getVector(cIdx).asInstanceOf[VarCharVector]
           rows.zipWithIndex.foreach { case (row, rIdx) =>
             row(cIdx) match
@@ -39,14 +41,15 @@ object AdminResults:
           }
         }
         root.setRowCount(rows.size)
-        val out    = new ByteArrayOutputStream()
-        val writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))
+        val out = new ByteArrayOutputStream()
+        writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))
         writer.start()
         writer.writeBatch()
         writer.end()
-        writer.close()
         out.toByteArray
-      finally root.close()
+      finally
+        if writer != null then writer.close()
+        root.close()
     val reader = new ArrowStreamReader(new ByteArrayInputStream(bytes), allocator)
     QueryResult(
       rows = reader,

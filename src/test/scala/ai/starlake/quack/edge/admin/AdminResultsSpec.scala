@@ -4,6 +4,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.apache.arrow.vector.VarCharVector
 
+import scala.jdk.CollectionConverters.*
+
 class AdminResultsSpec extends AnyFlatSpec with Matchers:
 
   private def readAll(qr: ai.starlake.quack.edge.QueryResult): List[List[Option[String]]] =
@@ -30,7 +32,9 @@ class AdminResultsSpec extends AnyFlatSpec with Matchers:
     readAll(qr) shouldBe List(List(Some("analyst"), None), List(Some("etl"), Some("loader")))
 
   it should "emit a zero-row result with the schema intact" in:
-    val qr = AdminResults.table(List("a", "b"), Nil)
+    val qr         = AdminResults.table(List("a", "b"), Nil)
+    val fieldNames = qr.rows.getVectorSchemaRoot.getSchema.getFields.asScala.map(_.getName).toList
+    fieldNames shouldBe List("a", "b")
     readAll(qr) shouldBe Nil
 
   "AdminResults.ok" should "carry status=ok plus detail" in:
