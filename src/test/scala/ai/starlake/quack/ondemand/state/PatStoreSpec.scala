@@ -85,7 +85,7 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
   it should "reject a revoked token and reject garbage" in withFreshDb { (users, pats) =>
     val uid             = seedUser(users)
     val (record, token) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
-    pats.revoke(uid, record.id) shouldBe true
+    pats.revoke(uid, record.id) shouldBe List(record.id)
     pats.verify(token) shouldBe None
     pats.verify("qod_pat_notarealtoken") shouldBe None
     pats.verify("") shouldBe None
@@ -96,13 +96,13 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
     users.upsertUser(None, "bob", "pw", "admin")
     val bobId       = users.userIdOf(None, "bob").get
     val (record, _) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
-    pats.revoke(bobId, record.id) shouldBe false
+    pats.revoke(bobId, record.id) shouldBe empty
   }
 
   "delete" should "remove a revoked token row" in withFreshDb { (users, pats) =>
     val uid         = seedUser(users)
     val (record, _) = pats.mint(uid, "dead", TokenRestriction.Unrestricted, None, 0)
-    pats.revoke(uid, record.id) shouldBe true
+    pats.revoke(uid, record.id) shouldBe List(record.id)
     pats.delete(uid, record.id) shouldBe PatStore.DeleteOutcome.Deleted
     countWhere(users.dbName, s"id = '${record.id}'") shouldBe 0
   }
@@ -134,7 +134,7 @@ class PatStoreSpec extends AnyFlatSpec with Matchers:
       users.upsertUser(None, "bob", "pw", "admin")
       val bobId       = users.userIdOf(None, "bob").get
       val (record, _) = pats.mint(uid, "t", TokenRestriction.Unrestricted, None, 0)
-      pats.revoke(uid, record.id) shouldBe true
+      pats.revoke(uid, record.id) shouldBe List(record.id)
       // A dead row owned by someone else is indistinguishable from a missing one.
       pats.delete(bobId, record.id) shouldBe PatStore.DeleteOutcome.NotFound
       countWhere(users.dbName, s"id = '${record.id}'") shouldBe 1

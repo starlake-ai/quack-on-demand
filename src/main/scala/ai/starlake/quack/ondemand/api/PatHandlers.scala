@@ -287,7 +287,7 @@ final class PatHandlers(
       if !isReachable then
         audit.rest(token, "auth", AuditActions.AuthPatRevoke, "denied", target = Some(id))
         Left(notFound)
-      else if pats.revoke(uid, id) then
+      else if pats.revoke(uid, id).nonEmpty then
         audit.rest(token, "auth", AuditActions.AuthPatRevoke, "ok", target = Some(id))
         Right(())
       else

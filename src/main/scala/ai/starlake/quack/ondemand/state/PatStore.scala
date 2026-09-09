@@ -291,17 +291,18 @@ final class PatStore(
     * anchor and the recursive step require `user_id = userId`, so a bad `parent_id` can never walk
     * the subtree into another user's rows even by accident.
     *
-    * Returns `false` when there is nothing left to flip: the id is unknown, owned by a different
-    * user, or the token and its entire subtree are already revoked. It is `true` whenever at least
-    * one row in the subtree had `revoked_at IS NULL` and got revoked by this call -- note that the
-    * anchor match (`id = ? AND user_id = ?`) does not itself require the anchor to be live, so if
-    * `patId` were already revoked while a descendant of it was somehow still live, this call would
-    * revoke that descendant and return `true` rather than `false`. That state is unreachable
-    * through this store's own API: [[PatStore.mint]] refuses to place a child under a parent that
-    * is not live, and a revoke always cascades to every descendant in the same statement, so an
-    * already-revoked token can never have a live child to begin with.
+    * Returns the ids of every row flipped by the cascade, empty when there is nothing left to flip:
+    * the id is unknown, owned by a different user, or the token and its entire subtree are already
+    * revoked. A non-empty result means at least one row in the subtree had `revoked_at IS NULL` and
+    * got revoked by this call -- note that the anchor match (`id = ? AND user_id = ?`) does not
+    * itself require the anchor to be live, so if `patId` were already revoked while a descendant of
+    * it was somehow still live, this call would revoke that descendant and return its id rather
+    * than an empty list. That state is unreachable through this store's own API: [[PatStore.mint]]
+    * refuses to place a child under a parent that is not live, and a revoke always cascades to
+    * every descendant in the same statement, so an already-revoked token can never have a live
+    * child to begin with.
     */
-  def revoke(userId: String, patId: String): Boolean =
+  def revoke(userId: String, patId: String): List[String] =
     withConn { c =>
       val ps = c.prepareStatement(
         """WITH RECURSIVE subtree AS (
@@ -311,13 +312,19 @@ final class PatStore(
           |    AND p.user_id = ?
           |)
           |UPDATE qodstate_pat SET revoked_at = NOW()
-          |WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL""".stripMargin
+          |WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL
+          |RETURNING id""".stripMargin
       )
       try
         ps.setString(1, patId)
         ps.setString(2, userId)
         ps.setString(3, userId)
-        ps.executeUpdate() >= 1
+        val rs  = ps.executeQuery()
+        val buf = scala.collection.mutable.ListBuffer.empty[String]
+        try
+          while rs.next() do buf += rs.getString(1)
+        finally rs.close()
+        buf.toList
       finally ps.close()
     }
 

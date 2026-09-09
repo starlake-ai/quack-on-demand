@@ -136,7 +136,7 @@ class PatApiAdmissionSpec
       .userIdOf(None, SecurityFixtures.RootUsername)
       .getOrElse(fail("fixture user root not found"))
     val (rec, raw) = pats.mint(uid, "to-revoke", TokenRestriction.Unrestricted, None, 0)
-    pats.revoke(uid, rec.id) shouldBe true
+    pats.revoke(uid, rec.id) should not be empty
 
     List("/api/pool/list", "/api/profile/usage").foreach { path =>
       val resp = get(h.httpClient, s"${h.baseUrl}$path", apiKey = Some(raw))

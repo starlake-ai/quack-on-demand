@@ -134,7 +134,7 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
     )
     val auth = authOf(users, pats)
     auth.resolve(live) should not be empty
-    pats.revoke(uid, rec.id) shouldBe true
+    pats.revoke(uid, rec.id) should not be empty
     auth.resolve(live) shouldBe None
     auth.resolve(expired) shouldBe None
   }

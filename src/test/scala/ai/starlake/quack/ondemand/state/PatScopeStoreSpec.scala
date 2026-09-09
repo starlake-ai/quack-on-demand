@@ -81,7 +81,7 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
     withFreshDb { (users, pats) =>
       val uid       = seedUser(users)
       val (root, _) = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
-      pats.revoke(uid, root.id) shouldBe true
+      pats.revoke(uid, root.id) should not be empty
       an[PatStore.ParentNotLiveException] should be thrownBy
         pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
     }
@@ -104,7 +104,7 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
         pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
       val (_, grandRaw) = pats.mint(uid, "grand", TokenRestriction.Unrestricted, Some(child.id), 2)
 
-      pats.revoke(uid, root.id) shouldBe true
+      pats.revoke(uid, root.id) should not be empty
 
       pats.verify(rootRaw) shouldBe None
       pats.verify(childRaw) shouldBe None
@@ -116,7 +116,7 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
       val uid       = seedUser(users)
       val (a, _)    = pats.mint(uid, "a", TokenRestriction.Unrestricted, None, 0)
       val (_, bRaw) = pats.mint(uid, "b", TokenRestriction.Unrestricted, None, 0)
-      pats.revoke(uid, a.id) shouldBe true
+      pats.revoke(uid, a.id) should not be empty
       pats.verify(bRaw).isDefined shouldBe true
     }
 
@@ -128,8 +128,8 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
     withFreshDb { (users, pats) =>
       val uid       = seedUser(users)
       val (root, _) = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
-      pats.revoke(uid, root.id) shouldBe true
-      pats.revoke(uid, root.id) shouldBe false
+      pats.revoke(uid, root.id) should not be empty
+      pats.revoke(uid, root.id) shouldBe empty
     }
 
   "isInSubtree" should "accept a descendant and refuse a sibling" in
@@ -165,4 +165,15 @@ class PatScopeStoreSpec extends AnyFlatSpec with Matchers:
 
       pats.findById(bobId, root.id) shouldBe None
       pats.findById(uid, "pat-doesnotexist") shouldBe None
+    }
+
+  "revoke" should "return the ids of every token flipped in the cascade" in
+    withFreshDb { (users, pats) =>
+      val uid        = seedUser(users)
+      val (root, _)  = pats.mint(uid, "root", TokenRestriction.Unrestricted, None, 0)
+      val (child, _) = pats.mint(uid, "child", TokenRestriction.Unrestricted, Some(root.id), 1)
+      val (grand, _) = pats.mint(uid, "grand", TokenRestriction.Unrestricted, Some(child.id), 2)
+      pats.revoke(uid, child.id).toSet shouldBe Set(child.id, grand.id)
+      pats.revoke(uid, child.id) shouldBe empty // second revoke: nothing left to flip
+      pats.revoke(uid, root.id) shouldBe List(root.id)
     }
