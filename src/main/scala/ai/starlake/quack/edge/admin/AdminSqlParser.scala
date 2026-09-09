@@ -295,8 +295,15 @@ object AdminSqlParser:
       * forms the tokenizer accepts (line `--` and nested block `/* */`), so comment content never
       * affects paren depth or the semicolon guard below. Rejects a bare `;` in the body - it has no
       * legitimate use in an extracted expression and would break the downstream textual splice.
-      * Returns the trimmed body and advances the token cursor past the closing paren. The body is
-      * passed verbatim to the jsqlparser-based validators downstream - no re-tokenization here.
+      * Also rejects a body whose last line comment is not followed by further real content before
+      * the close: `.trim()` strips the trailing whitespace/newline that "closed" such a comment in
+      * the raw source, so a naturally-formatted `USING (\n  pred -- note\n)` would otherwise leave
+      * the trimmed body ending in a live, unterminated `--` - the same downstream splice hazard as
+      * the semicolon case. A `--` inside a string literal is still ordinary content (tracked below
+      * via lastContentEnd, not flagged as a comment start at all since inStr/inQuote take
+      * priority). Returns the trimmed body and advances the token cursor past the closing paren.
+      * The body is passed verbatim to the jsqlparser-based validators downstream - no
+      * re-tokenization here.
       */
     private def parenExpression(): Either[String, String] =
       if eof || toks(i).quoted || toks(i).raw != "(" then Left("expected ( after USING")
@@ -307,23 +314,30 @@ object AdminSqlParser:
         var inStr                   = false
         var inQuote                 = false
         var close                   = -1
+        var lastContentEnd          = -1
+        var lastLineCommentStart    = -1
         var failure: Option[String] = None
         while j < sql.length && close < 0 && failure.isEmpty do
           val c = sql(j)
           if inStr then
             if c == '\'' then
               if j + 1 < sql.length && sql(j + 1) == '\'' then j += 1 else inStr = false
+            lastContentEnd = j
             j += 1
           else if inQuote then
             if c == '"' then inQuote = false
+            lastContentEnd = j
             j += 1
-          else if c == '\'' then { inStr = true; j += 1 }
-          else if c == '"' then { inQuote = true; j += 1 }
+          else if c == '\'' then { inStr = true; lastContentEnd = j; j += 1 }
+          else if c == '"' then { inQuote = true; lastContentEnd = j; j += 1 }
           else if c == '-' && j + 1 < sql.length && sql(j + 1) == '-' then
+            lastLineCommentStart = j
             while j < sql.length && sql(j) != '\n' do j += 1
           else if c == '/' && j + 1 < sql.length && sql(j + 1) == '*' then
             // Mirrors the tokenizer's nested-comment scan (see tokenizeUpTo) so a ')' or ';'
-            // inside a comment is invisible to depth counting and the semicolon guard.
+            // inside a comment is invisible to depth counting and the semicolon guard. A block
+            // comment is self-terminating (always has an explicit close), so unlike a line
+            // comment it never needs lastContentEnd tracking to stay safe under trim().
             var cdepth = 1
             var k      = j + 2
             while k < sql.length && cdepth > 0 do
@@ -334,16 +348,22 @@ object AdminSqlParser:
               else k += 1
             if cdepth > 0 then failure = Some("unterminated comment in expression") else j = k
           else if c == ';' then failure = Some("semicolon not allowed in expression")
-          else if c == '(' then { depth += 1; j += 1 }
+          else if c == '(' then { depth += 1; lastContentEnd = j; j += 1 }
           else if c == ')' then
             depth -= 1
-            if depth == 0 then close = j
+            // The final close (depth back to 0) sits outside the extracted body, so it must not
+            // count as trailing content - only a nested close does.
+            if depth == 0 then close = j else lastContentEnd = j
             j += 1
-          else j += 1
+          else
+            if !c.isWhitespace then lastContentEnd = j
+            j += 1
         failure match
           case Some(err) => Left(err)
           case None      =>
             if close < 0 then Left("unbalanced parentheses in expression")
+            else if lastLineCommentStart >= 0 && lastLineCommentStart > lastContentEnd then
+              Left("line comment at end of expression")
             else
               val body = sql.substring(open + 1, close).trim
               if body.isEmpty then Left("empty expression")

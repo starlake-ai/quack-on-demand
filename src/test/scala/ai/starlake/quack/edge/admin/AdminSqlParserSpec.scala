@@ -187,6 +187,51 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     )
     AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a=1;)").isLeft shouldBe true
 
+  it should "reject a body whose last line comment is not followed by further content" in:
+    AdminSqlParser
+      .parse(
+        "CREATE ROW POLICY ON t FOR ROLE r USING (\n" +
+          "  tenant = ${tenantId} -- scope to caller\n" +
+          ")"
+      )
+      .isLeft shouldBe true
+
+  it should "keep internal newlines and reject nothing when no trailing comment is present" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (\n  a = 1\n  AND b = 2\n)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = 1\n  AND b = 2", false)
+    )
+
+  it should "accept a mid-body comment followed by more content on a later line" in:
+    AdminSqlParser
+      .parse(
+        "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 -- note\n AND b = 2)"
+      )
+      .isRight shouldBe true
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = 1 -- note\n AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = 1 -- note\n AND b = 2", false)
+    )
+
+  it should "not mistake -- , /* or ; inside a string literal for a comment or the semicolon guard" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = '--' AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = '--' AND b = 2", false)
+    )
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = '/*' AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = '/*' AND b = 2", false)
+    )
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON t FOR ROLE r USING (a = ';' AND b = 2)"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = ';' AND b = 2", false)
+    )
+
   "parse column policies" should "handle MASK USING and DENY" in:
     AdminSqlParser.parse(
       "CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst " +
