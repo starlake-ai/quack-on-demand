@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1
 
 - **SQL admin dialect: audit and history parity with REST.** Admin statements
   executed over FlightSQL (`GRANT`, `CREATE ROLE`, `CREATE USER`, policy DDL,
