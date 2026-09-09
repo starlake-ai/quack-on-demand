@@ -3,9 +3,10 @@ package ai.starlake.quack.edge.admin
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
-import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.vector.VarCharVector
 import org.scalatest.flatspec.AnyFlatSpec
@@ -28,6 +29,31 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     (sup, store, new AdminStatementExecutor(sup))
+
+  // CREATE/DROP USER tests only: builds an executor wired with a fake createUserFn that
+  // writes through the store handle with a fixed hash (real hashing happens in the wired
+  // PoolSupervisor.createUser, not exercised here) and implements the failIfExists
+  // contract itself, since the fake stands in for supervisor.createUser(..., failIfExists
+  // = true). `calls` records each invocation so the (tenantId, username, password, role)
+  // arguments the executor passes can be pinned.
+  private def setupWithUserFn(): (
+      PoolSupervisor,
+      InMemoryControlPlaneStore,
+      AdminStatementExecutor,
+      scala.collection.mutable.Buffer[(String, String, String, String)]
+  ) =
+    val (sup, store, _) = setup()
+    val calls           = scala.collection.mutable.Buffer.empty[(String, String, String, String)]
+    val fn: AdminStatementExecutor.CreateUserFn = (tid, username, password, role) =>
+      IO {
+        calls += ((tid, username, password, role))
+        store.findUser(Some(tid), username) match
+          case Some(_) => Left(SupervisorError.AlreadyExists(s"user already exists: $username"))
+          case None    =>
+            val id = store.upsertUserWithHash(Some(tid), username, "x", role)
+            Right(store.getUserById(id).get)
+      }
+    (sup, store, new AdminStatementExecutor(sup, createUserFn = fn), calls)
 
   private def tenantId(sup: PoolSupervisor): String =
     sup.getTenant("acme").orElse(sup.getTenantById("acme")).get.id
@@ -330,3 +356,33 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     rowsOf("SHOW COLUMN POLICIES ON tpch.main.customers") should have size 1
     rowsOf("SHOW COLUMN POLICIES FOR ROLE analyst") should have size 1
     rowsOf("SHOW COLUMN POLICIES ON tpch.main.other") shouldBe empty
+
+  "CREATE/DROP USER" should "create a tenant user, refuse duplicates, and drop" in:
+    val (sup, _, exec, calls) = setupWithUserFn()
+    run(exec, sup, "CREATE USER alice PASSWORD 'secret'").isRight shouldBe true
+    calls.last shouldBe ((tenantId(sup), "alice", "secret", "user"))
+    sup.findUser(Some(tenantId(sup)), "alice") should not be empty
+    run(exec, sup, "CREATE USER alice PASSWORD 'secret'") match
+      case Left(RouterFailure.AlreadyExists(_)) => succeed
+      case other                                => fail(s"expected AlreadyExists, got $other")
+    run(exec, sup, "CREATE USER ops PASSWORD 'x' ADMIN").isRight shouldBe true
+    calls.last shouldBe ((tenantId(sup), "ops", "x", "admin"))
+    run(exec, sup, "DROP USER alice").isRight shouldBe true
+    sup.findUser(Some(tenantId(sup)), "alice") shouldBe empty
+    run(exec, sup, "DROP USER alice") match
+      case Left(RouterFailure.NotFound(_)) => succeed
+      case other                           => fail(s"expected NotFound, got $other")
+    run(exec, sup, "DROP USER IF EXISTS alice").isRight shouldBe true
+
+  it should "refuse dropping the session user and stay unwired-safe" in:
+    val (sup, _, exec, _) = setupWithUserFn()
+    // run() always executes as user "boss" - DROP USER boss is a self-drop.
+    run(exec, sup, "DROP USER boss") match
+      case Left(RouterFailure.BadRequest(msg)) =>
+        msg should include("cannot drop the current session user")
+      case other => fail(s"expected BadRequest, got $other")
+
+    val (sup2, _, unwiredExec) = setup()
+    run(unwiredExec, sup2, "CREATE USER zed PASSWORD 'x'") match
+      case Left(RouterFailure.Internal(_)) => succeed
+      case other                           => fail(s"expected Internal, got $other")

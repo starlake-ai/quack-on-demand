@@ -43,6 +43,11 @@ enum AdminCommand:
       orReplace: Boolean
   )
   case DropColumnPolicy(ref: TableRef, column: String, role: String, ifExists: Boolean)
+  // Always a TENANT user in the session tenant - the dialect cannot mint superusers
+  // (tenant-NULL rows are unreachable by construction), consistent with the
+  // no-privilege-escalation rule: only superusers mint superusers, via REST.
+  case CreateUser(name: String, password: String, admin: Boolean)
+  case DropUser(name: String, ifExists: Boolean)
   case ShowRoles
   case ShowGrants(role: String)
   case ShowRowPolicies(filter: PolicyFilter)

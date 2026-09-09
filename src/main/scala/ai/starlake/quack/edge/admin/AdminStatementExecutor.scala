@@ -19,9 +19,17 @@ import com.typesafe.scalalogging.LazyLogging
   * HA propagation apply unchanged. Fail-closed: any resolution or authorization failure returns a
   * RouterFailure; nothing here ever reaches a DuckDB node.
   */
-final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLogging:
+final class AdminStatementExecutor(
+    supervisor: PoolSupervisor,
+    createUserFn: AdminStatementExecutor.CreateUserFn = AdminStatementExecutor.unwiredCreateUser
+) extends LazyLogging:
 
-  private final case class Ctx(tenantId: String, tenantName: String, superuser: Boolean)
+  private final case class Ctx(
+      tenantId: String,
+      tenantName: String,
+      superuser: Boolean,
+      sessionUser: String
+  )
 
   def execute(
       user: String,
@@ -38,7 +46,7 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
       AdminSqlParser.parse(sql) match
         case Left(err)  => IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
         case Right(cmd) =>
-          authorize(poolKey, effectiveSet) match
+          authorize(user, poolKey, effectiveSet) match
             case Left(f)    => IO.pure(Left(f))
             case Right(ctx) =>
               logger.info(
@@ -52,6 +60,7 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
     * RbacUser.role is the free-text admin/user label, not an RBAC role.
     */
   private def authorize(
+      user: String,
       poolKey: PoolKey,
       eff: Option[EffectiveSet]
   ): Either[RouterFailure, Ctx] =
@@ -67,7 +76,7 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
           case Some(t) =>
             val superuser   = e.user.tenant.isEmpty
             val tenantAdmin = e.user.role == "admin" && e.user.tenant.contains(t.id)
-            if superuser || tenantAdmin then Right(Ctx(t.id, poolKey.tenant, superuser))
+            if superuser || tenantAdmin then Right(Ctx(t.id, poolKey.tenant, superuser, user))
             else Left(RouterFailure.AccessDenied("admin_required"))
 
   private def toFailure(e: SupervisorError): RouterFailure = e match
@@ -368,6 +377,23 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
             }
         }
 
+      case AdminCommand.CreateUser(name, password, admin) =>
+        val role = if admin then "admin" else "user"
+        mut(createUserFn(ctx.tenantId, name, password, role))(u =>
+          AdminResults.ok(s"user ${u.username} created")
+        )
+
+      case AdminCommand.DropUser(name, ifExists) =>
+        if name == ctx.sessionUser then
+          IO.pure(Left(RouterFailure.BadRequest("cannot drop the current session user")))
+        else
+          userByName(ctx, name).flatMap {
+            case Left(_) if ifExists => IO.pure(Right(AdminResults.ok(s"user $name absent")))
+            case Left(f)             => IO.pure(Left(f))
+            case Right(u)            =>
+              mut(supervisor.deleteUser(u.id))(_ => AdminResults.ok(s"user $name dropped"))
+          }
+
       case AdminCommand.ShowRoles =>
         IO.blocking {
           val rows = supervisor
@@ -535,3 +561,13 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
           val (c, s, t) = key(a)
           c == ref.catalog && s == ref.schema && t == ref.table
         }
+
+object AdminStatementExecutor:
+  /** (tenantId, username, password, role) -> created user. Wired in Main over
+    * PoolSupervisor.createUser + the boot UserStore with failIfExists = true; the default keeps
+    * test/unwired constructions compiling and fail-closed.
+    */
+  type CreateUserFn = (String, String, String, String) => IO[Either[SupervisorError, RbacUser]]
+
+  val unwiredCreateUser: CreateUserFn =
+    (_, _, _, _) => IO.pure(Left(SupervisorError.Internal("user creation is not wired")))

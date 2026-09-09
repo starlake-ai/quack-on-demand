@@ -281,3 +281,23 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.claims("SHOW TABLES") shouldBe false
     AdminSqlParser.claims("SHOW ALL") shouldBe false
     AdminSqlParser.claims("SHOW DATABASES") shouldBe false
+
+  "parse CREATE/DROP USER" should "handle password literals, WITH, ADMIN, IF EXISTS" in:
+    AdminSqlParser.parse("CREATE USER alice PASSWORD 'secret'") shouldBe
+      Right(AdminCommand.CreateUser("alice", "secret", admin = false))
+    AdminSqlParser.parse("CREATE USER alice WITH PASSWORD 'it''s'") shouldBe
+      Right(AdminCommand.CreateUser("alice", "it's", admin = false))
+    AdminSqlParser.parse("CREATE USER ops PASSWORD 'x' ADMIN") shouldBe
+      Right(AdminCommand.CreateUser("ops", "x", admin = true))
+    AdminSqlParser.parse("DROP USER alice") shouldBe
+      Right(AdminCommand.DropUser("alice", ifExists = false))
+    AdminSqlParser.parse("DROP USER IF EXISTS alice") shouldBe
+      Right(AdminCommand.DropUser("alice", ifExists = true))
+
+  it should "fail closed on malformed user statements" in:
+    AdminSqlParser.parse("CREATE USER alice").isLeft shouldBe true                 // no password
+    AdminSqlParser.parse("CREATE USER alice PASSWORD secret").isLeft shouldBe true // not a literal
+    AdminSqlParser.parse("CREATE USER alice PASSWORD ''").isLeft shouldBe true     // empty literal
+    AdminSqlParser.parse("CREATE USER alice PASSWORD 'x' extra").isLeft shouldBe true
+    AdminSqlParser.claims("CREATE USER alice PASSWORD 'x'") shouldBe true
+    AdminSqlParser.claims("DROP USER alice") shouldBe true

@@ -736,7 +736,20 @@ object Main extends IOApp with LazyLogging:
       val sqlAdminEnabled =
         com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.sqlAdmin.enabled")
       val adminExecutor =
-        Option.when(sqlAdminEnabled)(new ai.starlake.quack.edge.admin.AdminStatementExecutor(sup))
+        Option.when(sqlAdminEnabled)(
+          new ai.starlake.quack.edge.admin.AdminStatementExecutor(
+            sup,
+            createUserFn = (tenantId, username, password, role) =>
+              sup.createUser(
+                tenant = Some(tenantId),
+                username = username,
+                password = password,
+                role = role,
+                userStore = userStore,
+                failIfExists = true
+              )
+          )
+        )
       if !sqlAdminEnabled then
         logger.info("SQL admin dialect is DISABLED (quack-on-demand.sqlAdmin.enabled=false)")
 

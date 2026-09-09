@@ -575,13 +575,13 @@ curl -sS -X POST http://localhost:20900/api/auth/change-password \
 ## SQL administration (FlightSQL)
 
 An admin SQL dialect is answered directly at the FlightSQL edge: GRANT/REVOKE,
-CREATE/DROP ROLE, ROW/COLUMN POLICY, ALTER GROUP, and admin SHOW forms are
-claimed by `FlightSqlRouter` before a statement would otherwise be forwarded to
-a node, executed against the same `PoolSupervisor` mutators the REST RBAC
-endpoints call, and answered as a small in-memory Arrow result set. This is a
-second way to reach the RBAC/policy machinery described above - REST and the
-SQL dialect are two doors onto the same rows, and either one invalidates the
-same `EffectiveSet` cache.
+CREATE/DROP ROLE, CREATE/DROP USER, ROW/COLUMN POLICY, ALTER GROUP, and admin
+SHOW forms are claimed by `FlightSqlRouter` before a statement would otherwise
+be forwarded to a node, executed against the same `PoolSupervisor` mutators
+the REST RBAC endpoints call, and answered as a small in-memory Arrow result
+set. This is a second way to reach the RBAC/policy machinery described above -
+REST and the SQL dialect are two doors onto the same rows, and either one
+invalidates the same `EffectiveSet` cache.
 
 Flag: `quack-on-demand.sqlAdmin.enabled` (env `QOD_SQL_ADMIN_ENABLED`, default
 `true`). Off restores the pre-feature behavior exactly: these statements fall
@@ -604,6 +604,11 @@ grammar):
 CREATE ROLE analyst;
 GRANT ROLE analyst TO USER alice;
 ALTER GROUP finance ADD USER alice;
+
+-- Users
+CREATE USER alice PASSWORD 'secret';
+CREATE USER ops PASSWORD 'secret' ADMIN;
+DROP USER IF EXISTS alice;
 
 -- Table ACLs
 GRANT SELECT ON tpch.main.orders TO ROLE analyst;
@@ -664,6 +669,17 @@ JDBC/ADBC tool that renders the advertised schema before running.
   surrounding `BEGIN` on the data connection does not cover them. They commit
   immediately regardless of an open transaction, and are not rolled back by a
   later `ROLLBACK` on that connection.
+- `CREATE USER` / `DROP USER` always target a **tenant** user in the session
+  tenant - the dialect cannot mint superusers (tenant-NULL rows are
+  unreachable by construction), consistent with the standing
+  no-privilege-escalation rule that only superusers mint superusers, via REST.
+  `WITH` before `PASSWORD` is optional Postgres-style noise; `ADMIN` sets the
+  tenant-admin role label, not RBAC superuser status. `CREATE USER` is a true
+  create (`failIfExists = true`): an existing `(tenant, username)` is refused
+  with `ALREADY_EXISTS`, never upserted. `DROP USER` refuses to drop the
+  session's own username (self-drop guard, mirroring the REST posture). The
+  password literal is never recorded in statement history or logs - the
+  executor logs only the command kind - and the FlightSQL wire is TLS.
 
 ## Federation - external catalogs via DuckDB extensions
 

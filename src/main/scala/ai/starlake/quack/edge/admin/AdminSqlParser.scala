@@ -29,12 +29,12 @@ object AdminSqlParser:
         kw(0) match
           case "GRANT" | "REVOKE" => true
           case "CREATE"           =>
-            kw(1) == "ROLE" ||
+            kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICY") ||
             (kw(1) == "OR" && kw(2) == "REPLACE" && (kw(3) == "ROW" || kw(3) == "COLUMN"))
           case "DROP" =>
-            kw(1) == "ROLE" ||
+            kw(1) == "ROLE" || kw(1) == "USER" ||
             (kw(1) == "ROW" && kw(2) == "POLICY") ||
             (kw(1) == "COLUMN" && kw(2) == "POLICY")
           case "ALTER" => kw(1) == "GROUP"
@@ -146,6 +146,14 @@ object AdminSqlParser:
         val t = toks(i)
         if t.quoted || t.raw.head.isLetter || t.raw.head == '_' then { i += 1; Right(t.raw) }
         else Left(s"expected $what, found '${t.raw}'")
+
+    /** Expects a single-quoted string literal token; returns its content with '' unescaped. */
+    private def stringLiteral(what: String): Either[String, String] =
+      if eof || !toks(i).raw.startsWith("'") then Left(s"expected $what as a quoted string literal")
+      else
+        val raw = toks(i).raw
+        i += 1
+        Right(raw.substring(1, raw.length - 1).replace("''", "'"))
 
     private def end(cmd: AdminCommand): Either[String, AdminCommand] =
       if eof then Right(cmd)
@@ -377,6 +385,16 @@ object AdminSqlParser:
           name <- ident("role name")
           out  <- end(AdminCommand.CreateRole(name))
         yield out
+      else if optKw("USER") then
+        for
+          name <- ident("user name")
+          _ = optKw("WITH")
+          _  <- kw("PASSWORD")
+          pw <- stringLiteral("password")
+          _  <- if pw.isEmpty then Left("password must not be empty") else Right(())
+          isAdmin = optKw("ADMIN")
+          out <- end(AdminCommand.CreateUser(name, pw, isAdmin))
+        yield out
       else
         val orReplaceE: Either[String, Boolean] =
           if optKw("OR") then kw("REPLACE").map(_ => true) else Right(false)
@@ -433,6 +451,12 @@ object AdminSqlParser:
         for
           name <- ident("role name")
           out  <- end(AdminCommand.DropRole(name, ifE))
+        yield out
+      else if optKw("USER") then
+        val ifE = ifExistsOpt()
+        for
+          name <- ident("user name")
+          out  <- end(AdminCommand.DropUser(name, ifE))
         yield out
       else if optKw("ROW") then
         for
