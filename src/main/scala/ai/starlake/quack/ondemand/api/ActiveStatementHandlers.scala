@@ -25,6 +25,19 @@ object KillBroadcast:
   def encode(id: String, tenants: Option[List[String]]): String =
     KillBroadcast(id, tenants).asJson.noSpaces
 
+/** qod_pat_kill NOTIFY payload: the pat ids just revoked (the full cascaded subtree). Matching a
+  * pat id IS the authorization -- ids are unguessable surrogates and the set was revoked
+  * server-side before the broadcast -- so unlike [[KillBroadcast]] no tenant scope travels along.
+  */
+final case class PatKillBroadcast(patIds: List[String])
+
+object PatKillBroadcast:
+  given Codec[PatKillBroadcast] = deriveCodec
+  val Channel                   = "qod_pat_kill"
+
+  def encode(patIds: Set[String]): String =
+    PatKillBroadcast(patIds.toList.sorted).asJson.noSpaces
+
 final class ActiveStatementHandlers(
     registry: ActiveStatementRegistry,
     history: StatementHistoryStore,
@@ -113,20 +126,38 @@ final class ActiveStatementHandlers(
         val allowed = owned.exists(s => kb.tenants.forall(_.contains(s.tenant)))
         if allowed then killAndRecord(kb.id)
 
+  /** Kill every live LOCAL statement issued with one of `patIds`, recording each as killed. Returns
+    * the kill count. The revoke path calls this directly on the serving replica and every replica
+    * reaches it through [[onPatKillBroadcast]].
+    */
+  def killByPats(patIds: Set[String]): Int =
+    val killed = registry.killByPats(patIds)
+    killed.foreach(recordKilled)
+    killed.size
+
+  /** qod_pat_kill channel receiver, wired into the HaCoordinator handler map by Main. */
+  def onPatKillBroadcast(payload: String): Unit =
+    io.circe.parser.decode[PatKillBroadcast](payload) match
+      case Left(_)  => ()
+      case Right(b) =>
+        killByPats(b.patIds.toSet)
+        ()
+
   private def killAndRecord(id: String): Unit =
-    registry.kill(id).foreach { s =>
-      val now = Instant.now()
-      history.record(
-        StatementRecord(
-          ts = now,
-          user = s.user,
-          tenant = s.tenant,
-          pool = s.pool,
-          nodeId = s.nodeId,
-          sql = s.sql,
-          durationMs = math.max(0L, Duration.between(s.startedAt, now).toMillis),
-          status = "killed",
-          error = None
-        )
+    registry.kill(id).foreach(recordKilled)
+
+  private def recordKilled(s: ai.starlake.quack.edge.ActiveStatement): Unit =
+    val now = Instant.now()
+    history.record(
+      StatementRecord(
+        ts = now,
+        user = s.user,
+        tenant = s.tenant,
+        pool = s.pool,
+        nodeId = s.nodeId,
+        sql = s.sql,
+        durationMs = math.max(0L, Duration.between(s.startedAt, now).toMillis),
+        status = "killed",
+        error = None
       )
-    }
+    )
