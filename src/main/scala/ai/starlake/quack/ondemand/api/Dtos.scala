@@ -609,6 +609,12 @@ final case class PatListResponse(tokens: List[PatEntry] = Nil)
 
 final case class PatRevokeRequest(id: String)
 
+/** Outcome of a revoke: `killedStatements` counts the live statements killed synchronously on the
+  * replica that served the call; kills on other replicas are best-effort via qod_pat_kill and land
+  * in statement history as `killed`.
+  */
+final case class PatRevokeResponse(status: String = "ok", killedStatements: Int = 0)
+
 /** Discard a dead (revoked or expired) token row from the listing; a live id is refused. */
 final case class PatDeleteRequest(id: String)
 
@@ -1299,6 +1305,7 @@ object Dtos:
   given Codec[PatEntry]          = ConfiguredCodec.derived
   given Codec[PatListResponse]   = ConfiguredCodec.derived
   given Codec[PatRevokeRequest]  = ConfiguredCodec.derived
+  given Codec[PatRevokeResponse] = ConfiguredCodec.derived
   given Codec[PatDeleteRequest]  = ConfiguredCodec.derived
 
   given Codec[StatementHistoryEntry]    = deriveCodec

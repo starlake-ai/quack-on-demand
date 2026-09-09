@@ -68,7 +68,16 @@ final class PatHandlers(
     sessions: SessionTokenStore,
     userOf: (Option[String], String) => Option[RbacUser],
     audit: AuditRecorder = AuditRecorder.noop,
-    maxDepth: Int = 8
+    maxDepth: Int = 8,
+    /** Kills this replica's live statements for the given (just-revoked) pat ids, returning the
+      * count. Main wires ActiveStatementHandlers.killByPats; the default no-op keeps every test
+      * construction site working.
+      */
+    killStatements: Set[String] => Int = _ => 0,
+    /** Fans the kill out to the other replicas (NOTIFY qod_pat_kill). Main wires this only under
+      * HA; single-replica installs keep the no-op.
+      */
+    broadcastKill: Set[String] => Unit = _ => ()
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -280,19 +289,38 @@ final class PatHandlers(
     case Caller.Session(uid)    => (uid, true)
     case Caller.Pat(uid, patId) => (uid, pats.isInSubtree(uid, patId, targetId))
 
-  def revoke(token: Option[String], req: PatRevokeRequest): Out[Unit] = IO.blocking {
+  def revoke(token: Option[String], req: PatRevokeRequest): Out[PatRevokeResponse] = IO.blocking {
     callerOf(token).flatMap { caller =>
       val id                 = req.id.trim
       val (uid, isReachable) = reachable(caller, id)
       if !isReachable then
         audit.rest(token, "auth", AuditActions.AuthPatRevoke, "denied", target = Some(id))
         Left(notFound)
-      else if pats.revoke(uid, id).nonEmpty then
-        audit.rest(token, "auth", AuditActions.AuthPatRevoke, "ok", target = Some(id))
-        Right(())
       else
-        audit.rest(token, "auth", AuditActions.AuthPatRevoke, "denied", target = Some(id))
-        Left(notFound)
+        val revokedIds = pats.revoke(uid, id)
+        if revokedIds.nonEmpty then
+          // Order is load-bearing: the cascade above has committed, so no NEW statement can
+          // start with any of these ids anywhere; killing after revoking means a statement can
+          // never be killed while its token is still live.
+          val killed = killStatements(revokedIds.toSet)
+          broadcastKill(revokedIds.toSet)
+          audit.rest(
+            token,
+            "auth",
+            AuditActions.AuthPatRevoke,
+            "ok",
+            target = Some(id),
+            detail = Map(
+              // NOT "revokedTokens": AuditEvent.forbiddenKey rejects any detail key containing
+              // "token" (secret-leak guard) and would silently drop this audit event.
+              "revokedCount"     -> revokedIds.size.toString,
+              "killedStatements" -> killed.toString
+            )
+          )
+          Right(PatRevokeResponse("ok", killed))
+        else
+          audit.rest(token, "auth", AuditActions.AuthPatRevoke, "denied", target = Some(id))
+          Left(notFound)
     }
   }
 

@@ -61,13 +61,14 @@ object PatEndpoints:
   val revoke: PublicEndpoint[
     (Option[String], PatRevokeRequest),
     (sttp.model.StatusCode, ErrorResponse),
-    Unit,
+    PatRevokeResponse,
     Any
   ] =
     base.post
       .in("auth" / "pat" / "revoke")
       .in(authToken)
       .in(jsonBody[PatRevokeRequest])
+      .out(jsonBody[PatRevokeResponse])
 
   /** Discard one of the caller's own DEAD tokens (revoked, or past its expiry) from the listing. A
     * still-live id is refused `400 pat_live` -- revoke stays the only way to retire a working
