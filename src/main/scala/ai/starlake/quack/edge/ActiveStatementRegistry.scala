@@ -13,7 +13,12 @@ final case class ActiveStatement(
     pool: String,
     nodeId: String,
     sql: String,
-    startedAt: Instant
+    startedAt: Instant,
+    /** The acting personal-access-token id, when the statement was issued with a PAT bearer. `None`
+      * for session-authenticated callers. This is what lets a token revocation find and kill the
+      * statements it authorized -- see killByPats.
+      */
+    patId: Option[String] = None
 )
 
 /** Per-replica registry of currently-executing statements.
@@ -36,11 +41,12 @@ final class ActiveStatementRegistry(sqlPreviewChars: Int = 500):
       pool: String,
       nodeId: String,
       sql: String,
+      patId: Option[String] = None,
       now: Instant = Instant.now()
   ): String =
     val id      = UUID.randomUUID().toString
     val preview = if sql.length <= sqlPreviewChars then sql else sql.take(sqlPreviewChars) + "…"
-    val info    = ActiveStatement(id, user, tenant, pool, nodeId, preview, now)
+    val info    = ActiveStatement(id, user, tenant, pool, nodeId, preview, now, patId)
     entries.put(id, Entry(info, new AtomicReference(() => ())))
     id
 
@@ -62,3 +68,12 @@ final class ActiveStatementRegistry(sqlPreviewChars: Int = 500):
       catch case _: Throwable => ()
       e.info
     }
+
+  /** Kill every live statement issued with one of `patIds`: same remove-then-cancel best-effort
+    * semantics as [[kill]], applied to the whole match set. Statements with no patId (session
+    * callers) never match. Returns the killed entries so the caller can record them.
+    */
+  def killByPats(patIds: Set[String]): List[ActiveStatement] =
+    entries.values.toList
+      .filter(_.info.patId.exists(patIds.contains))
+      .flatMap(e => kill(e.info.id))

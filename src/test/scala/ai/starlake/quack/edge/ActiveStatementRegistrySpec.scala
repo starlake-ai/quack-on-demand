@@ -38,3 +38,30 @@ class ActiveStatementRegistrySpec extends AnyFlatSpec with Matchers:
     r.deregister("unknown")
     r.deregister(id)
     r.list() shouldBe Nil
+
+  "killByPats" should "kill only statements whose patId is in the set" in:
+    val r       = new ActiveStatementRegistry()
+    val hit     = new java.util.concurrent.atomic.AtomicInteger(0)
+    val idAgent =
+      r.register("alice", "acme", "bi", "n1", "SELECT 1", patId = Some("pat-a"))
+    r.attachCancel(idAgent, () => { hit.incrementAndGet(); () })
+    val idOtherPat =
+      r.register("alice", "acme", "bi", "n1", "SELECT 2", patId = Some("pat-b"))
+    val idSession = r.register("alice", "acme", "bi", "n1", "SELECT 3")
+    val killed    = r.killByPats(Set("pat-a", "pat-unused"))
+    killed.map(_.id) shouldBe List(idAgent)
+    hit.get() shouldBe 1
+    r.list().map(_.id).toSet shouldBe Set(idOtherPat, idSession)
+
+  it should "return Nil when nothing matches and survive a throwing cancel handle" in:
+    val r  = new ActiveStatementRegistry()
+    val id = r.register("alice", "acme", "bi", "n1", "SELECT 1", patId = Some("pat-x"))
+    r.attachCancel(id, () => throw new RuntimeException("boom"))
+    r.killByPats(Set.empty) shouldBe Nil
+    r.killByPats(Set("pat-x")).map(_.id) shouldBe List(id)
+    r.list() shouldBe Nil
+
+  "register" should "carry the patId into the listed entry" in:
+    val r = new ActiveStatementRegistry()
+    r.register("alice", "acme", "bi", "n1", "SELECT 1", patId = Some("pat-7"))
+    r.list().map(_.patId) shouldBe List(Some("pat-7"))
