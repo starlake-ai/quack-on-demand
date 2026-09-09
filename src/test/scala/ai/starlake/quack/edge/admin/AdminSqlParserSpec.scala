@@ -91,11 +91,6 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("   ").isLeft shouldBe true
     AdminSqlParser.parse(";").isLeft shouldBe true
 
-  it should "leave the not-yet-implemented placeholder arms returning Left" in:
-    // Task 4 replaces this arm with real grammar; flipping it to Right is a conscious
-    // update to this test, not an accidental regression.
-    AdminSqlParser.parse("SHOW ROLES").isLeft shouldBe true
-
   "parse GRANT/REVOKE on tables" should "map privilege lists onto RO/RW/DDL/ALL" in:
     AdminSqlParser.parse("GRANT SELECT ON t TO ROLE r") shouldBe
       Right(AdminCommand.GrantTable("RO", TableRef("*", "*", "t"), "r"))
@@ -215,7 +210,7 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
       AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a = 1 -- note\n AND b = 2", false)
     )
 
-  it should "not mistake -- , /* or ; inside a string literal for a comment or the semicolon guard" in:
+  it should "not treat comment markers or ; inside string literals as comments" in:
     AdminSqlParser.parse(
       "CREATE ROW POLICY ON t FOR ROLE r USING (a = '--' AND b = 2)"
     ) shouldBe Right(
@@ -262,3 +257,27 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
       Right(
         AdminCommand.DropColumnPolicy(TableRef("*", "*", "customers"), "email", "analyst", false)
       )
+
+  "parse SHOW" should "cover all admin introspection forms" in:
+    AdminSqlParser.parse("SHOW ROLES") shouldBe Right(AdminCommand.ShowRoles)
+    AdminSqlParser.parse("SHOW GRANTS FOR ROLE analyst") shouldBe
+      Right(AdminCommand.ShowGrants("analyst"))
+    AdminSqlParser.parse("SHOW ROW POLICIES") shouldBe
+      Right(AdminCommand.ShowRowPolicies(PolicyFilter.All))
+    AdminSqlParser.parse("SHOW ROW POLICIES ON tpch.main.orders") shouldBe
+      Right(AdminCommand.ShowRowPolicies(PolicyFilter.OnTable(TableRef("tpch", "main", "orders"))))
+    AdminSqlParser.parse("SHOW COLUMN POLICIES FOR ROLE analyst") shouldBe
+      Right(AdminCommand.ShowColumnPolicies(PolicyFilter.ForRole("analyst")))
+    AdminSqlParser.parse("SHOW POOL GRANTS") shouldBe Right(AdminCommand.ShowPoolGrants(None))
+    AdminSqlParser.parse("SHOW POOL GRANTS FOR USER alice") shouldBe
+      Right(AdminCommand.ShowPoolGrants(Some(Principal.User("alice"))))
+
+  "claims on SHOW" should "claim only the admin forms" in:
+    AdminSqlParser.claims("SHOW ROLES") shouldBe true
+    AdminSqlParser.claims("SHOW GRANTS FOR ROLE r") shouldBe true
+    AdminSqlParser.claims("SHOW ROW POLICIES") shouldBe true
+    AdminSqlParser.claims("SHOW COLUMN POLICIES") shouldBe true
+    AdminSqlParser.claims("SHOW POOL GRANTS") shouldBe true
+    AdminSqlParser.claims("SHOW TABLES") shouldBe false
+    AdminSqlParser.claims("SHOW ALL") shouldBe false
+    AdminSqlParser.claims("SHOW DATABASES") shouldBe false

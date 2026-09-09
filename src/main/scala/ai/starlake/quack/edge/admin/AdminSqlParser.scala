@@ -483,4 +483,41 @@ object AdminSqlParser:
       yield cmd
 
     private def show(): Either[String, AdminCommand] =
-      Left("not yet implemented") // Task 4 replaces this
+      if optKw("ROLES") then end(AdminCommand.ShowRoles)
+      else if optKw("GRANTS") then
+        for
+          _   <- kw("FOR")
+          _   <- kw("ROLE")
+          r   <- ident("role name")
+          out <- end(AdminCommand.ShowGrants(r))
+        yield out
+      else if optKw("ROW") then
+        for
+          _   <- kw("POLICIES")
+          f   <- policyFilter()
+          out <- end(AdminCommand.ShowRowPolicies(f))
+        yield out
+      else if optKw("COLUMN") then
+        for
+          _   <- kw("POLICIES")
+          f   <- policyFilter()
+          out <- end(AdminCommand.ShowColumnPolicies(f))
+        yield out
+      else if optKw("POOL") then
+        for
+          _   <- kw("GRANTS")
+          p   <- if optKw("FOR") then principal().map(Some(_)) else Right(None)
+          out <- end(AdminCommand.ShowPoolGrants(p))
+        yield out
+      else Left("not an admin SHOW form")
+
+    private def policyFilter(): Either[String, PolicyFilter] =
+      if optKw("ON") then
+        optKw("TABLE")
+        tableRef().map(PolicyFilter.OnTable.apply)
+      else if optKw("FOR") then
+        for
+          _ <- kw("ROLE")
+          r <- ident("role name")
+        yield PolicyFilter.ForRole(r)
+      else Right(PolicyFilter.All)
