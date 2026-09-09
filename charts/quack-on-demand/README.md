@@ -99,6 +99,56 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `metrics.sink` | `prometheus` | One of `prometheus` \| `aws` \| `azure` \| `gcp` \| `none`. |
 | `loadTpc.enabled` | `false` | Inject `QOD_BOOTSTRAP_YAML=classpath:bootstrap-demo.yaml` to seed the bundled acme + globex demo manifest on boot. |
 
+## Choosing an auth provider
+
+The chart configures three independent auth axes. All are optional; the
+defaults give you database auth everywhere with the seeded admin user.
+
+**1. Admin credentials, API key, sessions** (always on): `admin.username` /
+`admin.password` (or `admin.existingSecret`) seed the superuser on every boot;
+`apiKey.value` optionally enables the static `X-API-Key` arm for `/api/*`;
+`sessionJwtSecret` signs UI sessions and is REQUIRED when `replicaCount > 1`.
+
+**2. FlightSQL data plane** (what SQL clients authenticate against): database
+auth (bcrypt rows in `qodstate_user`) is always in the chain. Layer a
+Keycloak/OIDC provider on top with:
+
+```yaml
+auth:
+  keycloak:
+    enabled: true
+    baseUrl: "http://keycloak:8080"   # in-cluster URL used for JWKS
+    realm: "qod"
+    clientId: "qod-flightsql"
+    existingSecret: "my-kc-secret"    # key: keycloakClientSecret
+    # issuer: ""  # set when the browser-facing issuer differs from baseUrl
+```
+
+Both providers authenticate the same session; the manager accepts the first
+that validates the presented credentials.
+
+**3. Admin UI login** (the `/ui/` console): `auth.management.identitySource`
+selects `db` (the default username/password/tenant form) or `oidc` (pure SSO,
+provider-agnostic via OIDC Discovery - works with Keycloak, Entra, Google,
+Okta, ...):
+
+```yaml
+auth:
+  management:
+    identitySource: "oidc"
+    publicBaseUrl: "https://qod.example.com"   # register <this>/api/auth/oidc/callback on the IdP
+    oidc:
+      issuerUrl: "https://idp.example.com/realms/qod"
+      clientId: "qod-console"
+      existingSecret: "my-mgmt-oidc-secret"    # key: mgmtOidcClientSecret
+```
+
+**Per-tenant SSO is not a chart value.** A tenant's own provider
+(`authProvider: db | keycloak | google | azure | aws` plus its `authConfig`)
+is set on the tenant at create/update time through the REST API, CLI, or UI,
+and falls back to the manager-wide config above when unset. See
+`https://docs.starlake.ai/qod/operating/auth-providers` for the full model.
+
 ## Quack node image
 
 The chart's `quackNode.image` value points at the DuckDB Quack server image - a **different artifact** from the manager image. The manager spawns one pod per Quack node and references this image in the pod spec.

@@ -290,7 +290,7 @@ flightsql:
 #     resolved via OIDC Discovery so any compliant IdP works
 #   - set QOD_MGMT_PUBLIC_BASE_URL and register
 #     ${QOD_MGMT_PUBLIC_BASE_URL}/api/auth/oidc/callback as a redirect URI
-# See website/docs/operating/auth-providers.md ("Admin UI single sign-on").
+# See https://docs.starlake.ai/qod/operating/auth-providers ("Admin UI single sign-on").
 auth:
   keycloak:
     enabled: false
@@ -313,7 +313,7 @@ auth:
   # Set to "oidc" to make /ui/ a pure OIDC SSO client (provider-agnostic via
   # OIDC Discovery). When oidc, set oidc.issuerUrl/clientId/clientSecret and
   # publicBaseUrl, and register ${publicBaseUrl}/api/auth/oidc/callback on the
-  # IdP client. See website/docs/operating/auth-providers.md.
+  # IdP client. See https://docs.starlake.ai/qod/operating/auth-providers.
   management:
     identitySource: "db"           # "db" | "oidc"
     publicBaseUrl: ""              # externally visible manager URL (redirect_uri base)
