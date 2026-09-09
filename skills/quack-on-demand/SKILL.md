@@ -680,19 +680,26 @@ JDBC/ADBC tool that renders the advertised schema before running.
   create (`failIfExists = true`): an existing `(tenant, username)` is refused
   with `ALREADY_EXISTS`, never upserted. `DROP USER` refuses to drop the
   session's own username (self-drop guard, mirroring the REST posture). The
-  password literal is never recorded in statement history or logs - the
-  executor logs only the command kind - and the FlightSQL wire is TLS.
+  password literal is excluded from statement history (the executor logs only
+  the command kind) AND redacted from the edge's DEBUG statement logging - a
+  claim-shaped statement is logged as its first keyword plus a
+  `<redacted>`-style placeholder there, never the raw text - and the FlightSQL
+  wire is TLS.
 - `ALTER USER ... PASSWORD` rotates a tenant user's password through the same
   per-(tenant, username) path REST `user/update` uses, so lockout counters
   (`failed_attempts` / `locked_at`) are cleared as part of the write, same as
   the REST reset. Unlike `DROP USER`, self-rotation is allowed - there is no
   session-user guard on this one. An unknown username 404s before the
-  rotation path ever runs. Same password-literal-not-logged note as `CREATE
-  USER` above.
+  rotation path ever runs. Same password-literal-excluded-and-redacted note as
+  `CREATE USER` above.
 - `SHOW USERS` lists the session tenant's users only (`id`, `username`,
   `role`, `enabled`, `email`) - never any credential material, since
   `RbacUser` carries no password hash. The superuser realm is invisible, as
-  everywhere else in the dialect.
+  everywhere else in the dialect. `users` is a much likelier real table name
+  than `roles` or `grants`, so the shadowing caveat above bites harder here:
+  if your schema has its own `users` table, `SHOW USERS` claims the statement
+  and never reaches it - quote the identifier (`SHOW "users"`) to get DuckDB's
+  normal describe-table behavior instead.
 
 ## Federation - external catalogs via DuckDB extensions
 

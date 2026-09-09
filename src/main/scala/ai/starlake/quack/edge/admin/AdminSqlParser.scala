@@ -147,9 +147,17 @@ object AdminSqlParser:
         if t.quoted || t.raw.head.isLetter || t.raw.head == '_' then { i += 1; Right(t.raw) }
         else Left(s"expected $what, found '${t.raw}'")
 
-    /** Expects a single-quoted string literal token; returns its content with '' unescaped. */
+    /** Expects a single-quoted string literal token; returns its content with '' unescaped. Must
+      * reject a double-quoted IDENTIFIER whose content merely starts with `'` (e.g. `PASSWORD "'"`
+      * or `PASSWORD "'abc"`) - those are `quoted = true` tokens from the tokenizer's `"..."` path,
+      * not string literals, and would otherwise either throw (raw.length 1, substring(1, 0) is out
+      * of range) or silently truncate the secret. `raw.length >= 2` is also required: every real
+      * single-quoted literal token is at least `''` (the empty string), so this is defense in depth
+      * alongside the `quoted` check, never reachable through the tokenizer's own `'...'` path.
+      */
     private def stringLiteral(what: String): Either[String, String] =
-      if eof || !toks(i).raw.startsWith("'") then Left(s"expected $what as a quoted string literal")
+      if eof || toks(i).quoted || toks(i).raw.length < 2 || !toks(i).raw.startsWith("'") then
+        Left(s"expected $what as a quoted string literal")
       else
         val raw = toks(i).raw
         i += 1

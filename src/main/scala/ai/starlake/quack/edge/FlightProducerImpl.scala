@@ -25,6 +25,25 @@ final class FlightProducerImpl(
 
   private val allocator: BufferAllocator = new RootAllocator()
 
+  /** DEBUG statement logging must never leak a SQL admin dialect password literal (`CREATE USER ...
+    * PASSWORD '...'`, `ALTER USER ... PASSWORD '...'`): those statements are otherwise logged
+    * verbatim at the three call sites below. `AdminSqlParser.claims` is the same cheap,
+    * few-tokens-only check the router uses to decide interception, so redacting on it keeps the
+    * first keyword (for operability - "what kind of statement was this") and drops the rest,
+    * including any embedded literal. This redacts every claim-shaped statement, not only the ones
+    * carrying a password, and does so even when `quack-on-demand.sqlAdmin.enabled` is off: an
+    * unwired dialect still denies a claim-shaped statement at the router, so its raw text is
+    * equally sensitive either way, and consistent redaction avoids a flag-dependent log format.
+    * scalalogging's `logger.debug` is macro-generated to lazily evaluate its interpolated
+    * arguments, so this scan only runs when DEBUG is actually enabled - not on every statement of
+    * the hot path.
+    */
+  private def loggableSql(sql: String): String =
+    if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
+      val firstKeyword = sql.trim.takeWhile(!_.isWhitespace)
+      s"<admin statement: $firstKeyword ... redacted>"
+    else sql
+
   /** Per-handle execution context, captured at Prepare time. Arrow batches are not cached (a reader
     * cannot be replayed), so the SQL re-executes through the router on every Execute: one handle
     * drives many Executes until ClosePreparedStatement, as the spec requires.
@@ -725,7 +744,7 @@ final class FlightProducerImpl(
         drainPutStream(flightStream)
         ConnectionContext.entry(peer) match
           case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
-            logger.debug(s"acceptPutStatement pool=$poolKey sql='$sql'")
+            logger.debug(s"acceptPutStatement pool=$poolKey sql='${loggableSql(sql)}'")
             ackUpdateResult(
               scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync()),
               ackStream,
@@ -751,7 +770,9 @@ final class FlightProducerImpl(
         resolvePreparedCall(handle, context) match
           case Left(err) => ackStream.onError(err)
           case Right(p)  =>
-            logger.debug(s"acceptPutPreparedStatementUpdate pool=${p.poolKey} sql='${p.sql}'")
+            logger.debug(
+              s"acceptPutPreparedStatementUpdate pool=${p.poolKey} sql='${loggableSql(p.sql)}'"
+            )
             ackUpdateResult(
               scala.util.Try(
                 router
@@ -1271,7 +1292,7 @@ final class FlightProducerImpl(
     val peer = Option(context.peerIdentity()).getOrElse("anonymous")
     ConnectionContext.entry(peer) match
       case Some(ConnectionContext.Entry(poolKey, connId, user, eff, _)) =>
-        logger.debug(s"runStatement pool=$poolKey sql='$sql'")
+        logger.debug(s"runStatement pool=$poolKey sql='${loggableSql(sql)}'")
         val outcome =
           scala.util.Try(router.execute(connId, user, poolKey, sql, eff).unsafeRunSync())
         outcome match

@@ -307,6 +307,12 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.claims("CREATE USER alice PASSWORD 'x'") shouldBe true
     AdminSqlParser.claims("DROP USER alice") shouldBe true
 
+  it should "reject a double-quoted identifier standing in for the password literal" in:
+    // "'" is a QUOTED IDENTIFIER whose content happens to start with ' - not a string
+    // literal. Must fail closed, not throw StringIndexOutOfBoundsException.
+    AdminSqlParser.parse("CREATE USER a PASSWORD \"'\"").isLeft shouldBe true
+    AdminSqlParser.parse("CREATE USER a PASSWORD \"'abc\"").isLeft shouldBe true
+
   "parse ALTER USER PASSWORD" should "handle the literal and optional WITH" in:
     AdminSqlParser.parse("ALTER USER alice PASSWORD 'newsecret'") shouldBe
       Right(AdminCommand.AlterUserPassword("alice", "newsecret"))
