@@ -474,7 +474,7 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
       .map(_.key)
       .filter { k =>
         k.tenant == ctx.tenantId && k.pool == target.pool &&
-        target.qualifier.forall(q => k.tenantDb == q || k.tenantDb == s"${ctx.tenantName}_$q")
+        target.qualifier.forall(q => k.tenantDb == q || k.tenantDb == s"${ctx.tenantId}_$q")
       }
     keys match
       case Nil =>
