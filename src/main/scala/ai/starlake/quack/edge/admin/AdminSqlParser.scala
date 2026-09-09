@@ -13,8 +13,15 @@ object AdminSqlParser:
 
   private final case class Tok(raw: String, upper: String, quoted: Boolean, start: Int, end: Int)
 
+  // Bounded to the first few tokens: claims() runs on every statement on the FlightSQL hot
+  // path and never needs more than the leading keywords to decide interception.
+  private val ClaimsTokenBudget = 5
+
   def claims(sql: String): Boolean =
-    tokenize(sql) match
+    tokenizeUpTo(sql, ClaimsTokenBudget) match
+      // A tokenizer failure (unterminated quote/comment) leaves the statement unclaimed. That
+      // is fail-closed downstream: DuckDB's own parser reports the syntax error, this dialect
+      // never mistakenly intercepts a malformed statement it can't actually parse.
       case Left(_)     => false
       case Right(toks) =>
         def kw(k: Int): String =
@@ -45,19 +52,34 @@ object AdminSqlParser:
       else new P(sql, toks).statement()
     }
 
-  private def tokenize(sql: String): Either[String, Vector[Tok]] =
+  private def tokenize(sql: String): Either[String, Vector[Tok]] = tokenizeUpTo(sql, Int.MaxValue)
+
+  // Shared tokenizer core. `maxTokens` bounds how many tokens are collected before returning -
+  // used by claims() to avoid a full-statement scan (per-token allocation and toUpperCase,
+  // including on multi-megabyte string literals) on every statement of the hot path. Comments
+  // and whitespace are always fully skipped regardless of the bound - only token production
+  // stops early - so a comment nested past the bound is still scanned for a matching close.
+  private def tokenizeUpTo(sql: String, maxTokens: Int): Either[String, Vector[Tok]] =
     val toks                    = Vector.newBuilder[Tok]
     var i                       = 0
     val n                       = sql.length
+    var count                   = 0
     var failure: Option[String] = None
-    while i < n && failure.isEmpty do
+    while i < n && failure.isEmpty && count < maxTokens do
       val c = sql(i)
       if c.isWhitespace then i += 1
       else if c == '-' && i + 1 < n && sql(i + 1) == '-' then
         while i < n && sql(i) != '\n' do i += 1
       else if c == '/' && i + 1 < n && sql(i + 1) == '*' then
-        val stop = sql.indexOf("*/", i + 2)
-        if stop < 0 then failure = Some("unterminated block comment") else i = stop + 2
+        // DuckDB nests block comments, so a matching close requires depth-counting rather
+        // than a first-match indexOf, or "/* /* */ GRANT ... */" reads as a live statement.
+        var depth = 1
+        var j     = i + 2
+        while j < n && depth > 0 do
+          if j + 1 < n && sql(j) == '/' && sql(j + 1) == '*' then { depth += 1; j += 2 }
+          else if j + 1 < n && sql(j) == '*' && sql(j + 1) == '/' then { depth -= 1; j += 2 }
+          else j += 1
+        if depth > 0 then failure = Some("unterminated block comment") else i = j
       else if c == '"' then
         val sb     = new StringBuilder
         var j      = i + 1
@@ -71,6 +93,7 @@ object AdminSqlParser:
         else
           val s = sb.toString
           toks += Tok(s, s.toUpperCase, quoted = true, i, j)
+          count += 1
           i = j
       else if c == '\'' then
         var j      = i + 1
@@ -83,15 +106,18 @@ object AdminSqlParser:
         else
           val s = sql.substring(i, j)
           toks += Tok(s, s.toUpperCase, quoted = false, i, j)
+          count += 1
           i = j
       else if c.isLetter || c == '_' then
         var j = i
         while j < n && (sql(j).isLetterOrDigit || sql(j) == '_' || sql(j) == '$') do j += 1
         val s = sql.substring(i, j)
         toks += Tok(s, s.toUpperCase, quoted = false, i, j)
+        count += 1
         i = j
       else
         toks += Tok(c.toString, c.toString, quoted = false, i, i + 1)
+        count += 1
         i += 1
     failure.toLeft(toks.result())
 
@@ -101,8 +127,9 @@ object AdminSqlParser:
     private def eof: Boolean             = i >= toks.length
     private def peek(k: Int = 0): String =
       if i + k < toks.length then toks(i + k).upper else ""
-    private def peekQuoted: Boolean = i < toks.length && toks(i).quoted
-    private def bump(): Unit        = i += 1
+    private def peekQuoted: Boolean       = i < toks.length && toks(i).quoted
+    private def quotedAt(k: Int): Boolean = i + k < toks.length && toks(i + k).quoted
+    private def bump(): Unit              = i += 1
 
     private def kw(w: String): Either[String, Unit] =
       if peek() == w && !peekQuoted then { i += 1; Right(()) }
@@ -125,7 +152,7 @@ object AdminSqlParser:
       else Left(s"unexpected trailing input: '${toks(i).raw}'")
 
     private def ifExistsOpt(): Boolean =
-      if peek() == "IF" && peek(1) == "EXISTS" then { i += 2; true }
+      if peek() == "IF" && !quotedAt(0) && peek(1) == "EXISTS" && !quotedAt(1) then { i += 2; true }
       else false
 
     private def principal(): Either[String, Principal] =
