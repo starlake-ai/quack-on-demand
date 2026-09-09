@@ -3627,6 +3627,10 @@ paths:
       responses:
         '200':
           description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PatRevokeResponse'
         '400':
           description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
             qod_session, Invalid value for: body'
@@ -7292,6 +7296,18 @@ components:
       properties:
         id:
           type: string
+    PatRevokeResponse:
+      title: PatRevokeResponse
+      type: object
+      required:
+      - status
+      - killedStatements
+      properties:
+        status:
+          type: string
+        killedStatements:
+          type: integer
+          format: int32
     PatScope:
       title: PatScope
       type: object
