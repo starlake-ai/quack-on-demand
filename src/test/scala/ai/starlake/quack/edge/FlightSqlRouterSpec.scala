@@ -146,7 +146,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "leave unclaimed statements and the executor-less router on the routed path" in:
     val (router, _, _) = setup()
     // executor-less router: GRANT flows to the routed path exactly as before this feature
-    router.execute("c-1", "alice", poolKey, "SELECT 1").unsafeRunSync() shouldBe a[Right[?, ?]]
+    router.execute("c-1", "alice", poolKey, "GRANT SELECT ON t TO ROLE r").unsafeRunSync() shouldBe
+      a[Right[?, ?]]
     val withAdmin = new FlightSqlRouter(
       router.supervisor,
       router.sessions,
@@ -159,6 +160,31 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // SHOW TABLES is not an admin form: routed to the node stub, returns Right
     withAdmin.execute("c-2", "alice", poolKey, "SHOW TABLES").unsafeRunSync() shouldBe
       a[Right[?, ?]]
+
+  it should "take the routed path for a claimed statement when adminDispatch is false" in:
+    // Guards the MCP/preview choke point (Main.scala's PreviewExecutor closure): even with
+    // adminExecutor wired, a caller that passes adminDispatch = false must see the exact
+    // pre-dialect behavior - the statement flows to the node stub instead of the dialect
+    // executor, which would otherwise AccessDenied "alice" (no admin effectiveSet) here.
+    val (router, _, _) = setup()
+    val withAdmin      = new FlightSqlRouter(
+      router.supervisor,
+      router.sessions,
+      router.tracker,
+      router.adapter,
+      stmtInstruments = si,
+      adminExecutor =
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+    )
+    withAdmin
+      .execute(
+        "c-mcp",
+        "alice",
+        poolKey,
+        "GRANT SELECT ON t TO ROLE r",
+        adminDispatch = false
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
 
   it should "run a claimed GRANT end-to-end for a superuser" in:
     val (router, _, _) = setup()

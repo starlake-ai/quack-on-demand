@@ -572,6 +572,99 @@ curl -sS -X POST http://localhost:20900/api/auth/change-password \
   -d '{"tenant":"acme","username":"alice","currentPassword":"Temp123","newPassword":"Real456"}'
 ```
 
+## SQL administration (FlightSQL)
+
+An admin SQL dialect is answered directly at the FlightSQL edge: GRANT/REVOKE,
+CREATE/DROP ROLE, ROW/COLUMN POLICY, ALTER GROUP, and admin SHOW forms are
+claimed by `FlightSqlRouter` before a statement would otherwise be forwarded to
+a node, executed against the same `PoolSupervisor` mutators the REST RBAC
+endpoints call, and answered as a small in-memory Arrow result set. This is a
+second way to reach the RBAC/policy machinery described above - REST and the
+SQL dialect are two doors onto the same rows, and either one invalidates the
+same `EffectiveSet` cache.
+
+Flag: `quack-on-demand.sqlAdmin.enabled` (env `QOD_SQL_ADMIN_ENABLED`, default
+`true`). Off restores the pre-feature behavior exactly: these statements fall
+through to the normal fail-closed denial instead of being claimed.
+
+**Who may run them**: a superuser session, or a tenant admin session acting
+within its own tenant. A non-admin session gets `PERMISSION_DENIED
+admin_required`. Admin authority is evaluated against the handshake-time
+principal snapshot cached on the connection - demoting an admin does not cut
+off dialect authority on an already-open connection until that connection's
+context TTL (`sessionTtlSec`, default 3600s) expires, matching the existing
+handshake-cache behavior for every other authorization check on the wire.
+
+**One example per statement family** (see
+`docs/superpowers/specs/2026-09-09-sql-admin-dialect-design.md` for the full
+grammar):
+
+```sql
+-- Roles and membership
+CREATE ROLE analyst;
+GRANT ROLE analyst TO USER alice;
+ALTER GROUP finance ADD USER alice;
+
+-- Table ACLs
+GRANT SELECT ON tpch.main.orders TO ROLE analyst;
+REVOKE ALL ON tpch.main.orders FROM ROLE analyst;
+
+-- Row policy (RLS)
+CREATE ROW POLICY ON tpch.main.orders FOR ROLE analyst
+  USING (region = ${tenantId} OR owner = ${user});
+
+-- Column policy (CLS mask/deny)
+CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst
+  MASK USING (SHA256(CAST(email AS VARCHAR)));
+
+-- Pool access
+GRANT CONNECT ON POOL tpch.bi TO USER alice;
+
+-- Introspection
+SHOW GRANTS FOR ROLE analyst;
+```
+
+Run these as plain (non-prepared) statements where you have the choice: the
+prepared-statement path works too (dispatch lives inside `execute`, which both
+the immediate and prepared paths call), but prepare-time schema advertisement
+for a mutating admin statement shows a generic `count` column while the
+delivered result is actually `(status, detail)` - cosmetic, but confusing in a
+JDBC/ADBC tool that renders the advertised schema before running.
+
+**Semantics worth knowing before you rely on them**:
+
+- `REVOKE <verb> ON obj FROM ROLE r` on a grant that does not exist is not an
+  error - it succeeds with `revoked = 0` in the result row (there is no
+  warning channel over FlightSQL to distinguish "revoked something" from
+  "revoked nothing").
+- `REVOKE ALL ON *.*.*` removes only a grant row stored **literally** as
+  `(*, *, *)` - it is not a shorthand for "every grant this role holds." Wildcards
+  in the `ON` clause match the stored tuple exactly, wildcards included; they
+  are not glob patterns over existing rows.
+- `SHOW ... ON <table>` and `SHOW GRANTS FOR ROLE r` match the stored tuple
+  exactly too, same caveat.
+- `SHOW ROLES` and `SHOW GRANTS` are claimed by the dialect and will **shadow**
+  a real table literally named `roles` or `grants` in your schema. Quote the
+  identifier (`SHOW "roles"`) to bypass the dialect and reach DuckDB's normal
+  describe-table behavior instead - the claim check only fires on an unquoted
+  keyword token.
+- The `ON POOL db.pool` qualifier in `GRANT/REVOKE CONNECT ON POOL ...` is
+  optional and never disambiguates: pool names are unique per tenant already,
+  so a bare `ON POOL sales` and a qualified `ON POOL tpch.sales` resolve
+  identically. A *wrong* qualifier does not fall back to name-only resolution -
+  it fails `unknown_pool`, it does not silently pick a different pool.
+- Admin SQL is FlightSQL-edge only. It is **not** available over the MCP
+  server or the REST catalog-preview/restore/undrop endpoints: those share one
+  routed-execution choke point that explicitly disables the dialect claim, so
+  a claimed statement reaching them still falls through to the ordinary
+  fail-closed denial rather than the dialect's own admin check (which does not
+  know about PAT scope attenuation the way the routed ACL path does). Use the
+  FlightSQL wire (or the REST RBAC endpoints above) for SQL administration.
+- Admin statements are control-plane writes, not data-connection writes: a
+  surrounding `BEGIN` on the data connection does not cover them. They commit
+  immediately regardless of an open transaction, and are not rolled back by a
+  later `ROLLBACK` on that connection.
+
 ## Federation - external catalogs via DuckDB extensions
 
 Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table.

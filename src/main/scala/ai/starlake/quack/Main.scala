@@ -730,6 +730,16 @@ object Main extends IOApp with LazyLogging:
       val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter()
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
+      // SQL admin dialect (GRANT/REVOKE, ROW/COLUMN POLICY, ALTER GROUP, admin SHOW forms)
+      // answered at the FlightSQL edge. Off restores the pre-feature fail-closed denial of
+      // these statements (the claim step in FlightSqlRouter.execute is simply never wired).
+      val sqlAdminEnabled =
+        com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.sqlAdmin.enabled")
+      val adminExecutor =
+        Option.when(sqlAdminEnabled)(new ai.starlake.quack.edge.admin.AdminStatementExecutor(sup))
+      if !sqlAdminEnabled then
+        logger.info("SQL admin dialect is DISABLED (quack-on-demand.sqlAdmin.enabled=false)")
+
       val journalDropped: Int => Unit = n =>
         metricsReg.composite
           .counter("qod_journal_dropped_total", "table", "audit")
@@ -844,7 +854,8 @@ object Main extends IOApp with LazyLogging:
         metadataFilterRewriter = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(
           enabled = aclCfg.enabled && aclCfg.filteredMetadata
         ),
-        protectedWriteGuard = protectedWriteGuard
+        protectedWriteGuard = protectedWriteGuard,
+        adminExecutor = adminExecutor
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
@@ -1043,7 +1054,15 @@ object Main extends IOApp with LazyLogging:
                 sql,
                 effectiveSet = narrowed,
                 recordExecution = recordExecution,
-                patId = caller.patId
+                patId = caller.patId,
+                // This closure is the single choke point every PreviewExecutor caller shares
+                // (preview, data diff, restore, undrop, AND the MCP run_sql / describe_table
+                // tools per the comment above). PAT attenuation narrows `narrowed` but the
+                // SQL admin dialect's own authorization does not know about that ceiling, so
+                // a claimed admin statement reaching this path must stay on the pre-dialect
+                // routed path (fail-closed denial or normal ACL, unchanged) rather than the
+                // dialect's superuser/tenant-admin check.
+                adminDispatch = false
               )
               // BOUNDED WAIT, not a cancellation: past this many milliseconds the
               // caller of this executor gets a failure back, but the underlying

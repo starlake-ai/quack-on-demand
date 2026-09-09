@@ -250,10 +250,19 @@ final class FlightSqlRouter(
         * see [[record]]. Also recorded on the ActiveStatementRegistry entry so a token revocation
         * can find and kill the statement (killByPats).
         */
-      patId: Option[String] = None
+      patId: Option[String] = None,
+      /** Gate on top of `adminExecutor` being wired: TAIL param, defaulted `true` so the raw
+        * FlightSQL wire (every `FlightProducerImpl` call site) is unaffected. `Main` sets this
+        * `false` on the single `fsRouter.execute` call backing `PreviewExecutor` (preview, data
+        * diff, restore, undrop, and the MCP `run_sql`/`describe_table` tools all route through that
+        * one closure) so a claimed admin statement reaching it still takes the pre-dialect routed
+        * path instead of the dialect's authorization, which does not account for PAT attenuation
+        * the way the routed ACL path does.
+        */
+      adminDispatch: Boolean = true
   ): IO[Either[RouterFailure, QueryResult]] =
     adminExecutor match
-      case Some(exec) if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
+      case Some(exec) if adminDispatch && ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) =>
         // Claimed admin statements are answered by the manager (or rejected) and are
         // never forwarded to a node - the fail-closed contract of the admin dialect.
         exec.execute(user, poolKey, sql, effectiveSet)
