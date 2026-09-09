@@ -561,6 +561,9 @@ object Main extends IOApp with LazyLogging:
           },
           ai.starlake.quack.ondemand.api.KillBroadcast.Channel -> (payload =>
             activeStmtHandlers.onKillBroadcast(payload)
+          ),
+          ai.starlake.quack.ondemand.api.PatKillBroadcast.Channel -> (payload =>
+            activeStmtHandlers.onPatKillBroadcast(payload)
           )
         )
       )
@@ -636,7 +639,15 @@ object Main extends IOApp with LazyLogging:
       // time too, not only when the resulting token is used.
       userOf = (tenant, username) => store.findUser(tenant, username),
       audit = auditRecorder,
-      maxDepth = mgrCfg.pat.maxDepth
+      maxDepth = mgrCfg.pat.maxDepth,
+      // Revocation also kills: this replica synchronously, the others via qod_pat_kill.
+      killStatements = ids => activeStmtHandlers.killByPats(ids),
+      broadcastKill = ids =>
+        if haOn then
+          store.notifyListeners(
+            ai.starlake.quack.ondemand.api.PatKillBroadcast.Channel,
+            ai.starlake.quack.ondemand.api.PatKillBroadcast.encode(ids)
+          )
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)
