@@ -182,15 +182,13 @@ postgres:
 # Quack server, NOT the manager - they're separate processes. Built from
 # docker/quack-node/Dockerfile in this repo.
 quackNode:
-  # Published image on Docker Hub. The default points at `:latest-snapshot`
-  # - the moving alias updated by the `quack-node-snapshot` GitHub Action
-  # on every push to main that touches docker/quack-node/**. Since 0.6.1
-  # every release also publishes the node image in lockstep with the
-  # manager (release.yml), so `starlakeai/quack-on-demand-node:<X.Y.Z>`
-  # exists for each release from 0.6.1 on. Override (e.g. with
-  # `--set quackNode.image=...:<X.Y.Z>`) to pin the release tag matching
-  # your manager version - recommended for reproducible deploys.
-  image: starlakeai/quack-on-demand-node:latest-snapshot
+  # Published image on Docker Hub. Empty (the default) resolves to
+  # `starlakeai/quack-on-demand-node:<appVersion>` - the node image released
+  # in lockstep with the manager (release.yml publishes both since 0.6.1),
+  # so a versioned chart deploys versioned images throughout. Override with
+  # a full image ref to pin something else; `:latest-snapshot` is the moving
+  # alias updated on every push to main that touches docker/quack-node/**.
+  image: ""
   tls:
     # By default the spawn-quack-node.sh script runs quack_serve without TLS,
     # so the manager's quack_query client must use disable_ssl=true to talk

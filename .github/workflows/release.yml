@@ -384,6 +384,10 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
       - name: Stamp chart version + appVersion
         run: |
           set -euo pipefail
