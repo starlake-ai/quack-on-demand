@@ -46,3 +46,34 @@ class RowPredicateValidatorSpec extends AnyFlatSpec with Matchers:
   it should "reject an over-long predicate" in {
     invalid("x = " + "'" + ("a" * 1100) + "'") should include("exceeds")
   }
+
+  // ---- comment/semicolon splice safety (jsqlparser accepts and silently truncates at these
+  // rather than failing the parse, so they must be rejected explicitly before parsing) ----
+
+  it should "reject a trailing line comment" in {
+    invalid("region = 'eu' -- x") should include("comments")
+  }
+
+  it should "reject an embedded block comment" in {
+    invalid("region /* x */ = 'eu'") should include("comments")
+  }
+
+  it should "reject the reviewer's exact repro: an identity-token predicate with a trailing comment" in {
+    invalid("tenant = ${tenantId} -- scope to caller") should include("comments")
+  }
+
+  it should "accept a '--' that appears inside a string literal" in {
+    valid("note = '--'") shouldBe "note = '--'"
+  }
+
+  it should "accept a '/*' that appears inside a string literal" in {
+    valid("note = '/* not a comment */'") shouldBe "note = '/* not a comment */'"
+  }
+
+  it should "reject a bare semicolon" in {
+    invalid("region = 'eu'; DROP TABLE secrets") should include("statement separator")
+  }
+
+  it should "accept a semicolon that appears inside a string literal" in {
+    valid("note = 'a;b'") shouldBe "note = 'a;b'"
+  }

@@ -25,6 +25,20 @@
   kills. A failed kill or broadcast never fails the revoke: the tokens are
   already dead and running statements stay bounded by their statement
   timeouts.
+- **Fix: a row/column policy predicate carrying a trailing SQL comment could
+  silently disable RLS/CLS.** `RowPolicyRewriter` and `ColumnPolicyRewriter`
+  splice a validated predicate/transform textually into generated SQL; a
+  trailing `-- comment` (or a `/* */` block comment, or a bare `;`) commented
+  out the rewriter's own closing parenthesis at splice time, the re-parse
+  threw, and the statement was forwarded unfiltered. `RowPredicateValidator`
+  and `TransformSqlValidator` now reject any `predicateSql`/`transformSql`
+  containing a comment marker or a bare `;` outside string literals at
+  create/update time (BEHAVIOR CHANGE: such values now fail policy
+  create/update where they previously succeeded and silently broke
+  filtering). For rows already stored before this fix, `RowPolicyRewriter`
+  gains a `Failed` outcome: a predicate that cannot be applied at rewrite
+  time now denies the statement (fail-closed) instead of forwarding it
+  unfiltered.
 
 ## 0.7.2
 

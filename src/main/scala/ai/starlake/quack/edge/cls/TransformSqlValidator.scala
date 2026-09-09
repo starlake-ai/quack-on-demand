@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.cls
 
+import ai.starlake.quack.edge.rls.SqlCommentScan
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.{Function => SqlFunction}
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
@@ -50,6 +51,16 @@ object TransformSqlValidator:
   def validate(transformSql: String, protectedColumn: String): Result =
     val trimmed = Option(transformSql).map(_.trim).getOrElse("")
     if trimmed.isEmpty then return Invalid("transformSql is empty")
+
+    // Reject splice-unsafe constructs BEFORE parsing: jsqlparser accepts a `--`/`/*` comment or a
+    // bare `;` and silently truncates at it rather than failing the parse, so the parse step below
+    // proves nothing about these. ColumnPolicyRewriter splices the validated transformSql directly
+    // into generated SQL, so an unrejected comment or statement separator here is the same
+    // splice-safety hazard as the RLS predicate case (see [[RowPredicateValidator]]).
+    if SqlCommentScan.hasComment(trimmed) then
+      return Invalid("comments are not allowed in transformSql")
+    if SqlCommentScan.hasSemicolon(trimmed) then
+      return Invalid("statement separators (;) are not allowed in transformSql")
 
     // CCJSqlParserUtil.parseExpression parses an arbitrary scalar expression directly,
     // without needing a SELECT ... FROM wrapper.

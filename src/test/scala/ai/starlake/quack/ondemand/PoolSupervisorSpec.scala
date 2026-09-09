@@ -1498,6 +1498,25 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.effectiveSetForUser(user.id).map(_.columnPolicies.map(_.columnName)) shouldBe
       Some(List("c_email"))
 
+  // ---------- row policy create: comment-carrying predicates rejected ----------
+
+  it should "reject a comment-carrying predicate at createRowPolicy (reviewer's repro)" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val t     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val role  = sup.createRole(t.id, "analyst").unsafeRunSync().toOption.get
+    val out = sup
+      .createRowPolicy(
+        role.id,
+        "*",
+        "tpch1",
+        "customer",
+        "tenant = ${tenantId} -- scope to caller"
+      )
+      .unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    out.swap.toOption.get shouldBe a[SupervisorError.InvalidArgument]
+
   // ---------- restore() propagates deletions (HA peer-delete convergence) ----------
 
   "restore()" should "drop a pool whose rows a peer deleted directly in the store" in:

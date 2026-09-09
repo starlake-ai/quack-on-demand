@@ -63,6 +63,18 @@ object RowPredicateValidator:
     if trimmed.length > MaxLen then
       return Invalid(s"predicateSql exceeds $MaxLen chars (got ${trimmed.length})")
 
+    // Reject splice-unsafe constructs BEFORE parsing: jsqlparser accepts a `--`/`/*` comment or a
+    // bare `;` and silently truncates at it rather than failing the parse (it returns Success on
+    // just the leading fragment), so the parse step below proves nothing about these. Left
+    // unrejected, a trailing `--` comment on a stored predicate later swallows the rewriter's own
+    // closing parenthesis at splice time and forwards the statement unfiltered (see
+    // [[RowPolicyRewriter]] `Failed`) - reject here so a comment-carrying predicate never reaches
+    // storage in the first place.
+    if SqlCommentScan.hasComment(trimmed) then
+      return Invalid("comments are not allowed in predicateSql")
+    if SqlCommentScan.hasSemicolon(trimmed) then
+      return Invalid("statement separators (;) are not allowed in predicateSql")
+
     // Neutralise identity tokens before parsing: `${user}` -> NULL so both bare (`u = ${user}`)
     // and list (`g IN (${groups})`) forms parse. Tokens inside string literals collapse to the
     // literal 'NULL', which is harmless for the parse check.

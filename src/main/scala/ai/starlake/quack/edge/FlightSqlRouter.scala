@@ -472,6 +472,15 @@ final class FlightSqlRouter(
           case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(s) =>
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
             Right(s)
+          case ai.starlake.quack.edge.rls.RowPolicyRewriter.Failed(_) =>
+            // Fail closed: a stored row policy could not be applied to this statement, so
+            // forwarding it would return unfiltered rows. See RowPolicyRewriter.Failed.
+            stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "failed")
+            val f = RouterFailure.AccessDenied(
+              "row policy failed to apply - contact an administrator"
+            )
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(f.reason))
+            Left(f)
 
     // System-catalog filtering runs LAST, on the CLS+RLS output: its substitutions inject
     // derived tables the other two rewriters have no policy for, and running it first would

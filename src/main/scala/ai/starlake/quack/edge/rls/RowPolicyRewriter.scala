@@ -55,6 +55,18 @@ object RowPolicyRewriter:
     */
   case object PassthroughParseFailed extends Outcome
 
+  /** A stored row policy predicate could not be applied at splice time (e.g. it fails to re-parse
+    * once wrapped and OR-combined with the statement's own SQL). Should never happen for a
+    * predicate that passed [[RowPredicateValidator]] at create/update time, but is load-bearing for
+    * rows written before that validator rejected the splice-unsafe shape (a trailing line comment,
+    * a block comment, a bare semicolon) that produced this failure mode. A policy that cannot be
+    * applied must deny the statement rather than forward it unfiltered - forwarding would silently
+    * disable row-level security for every row the unapplied policy was meant to admit or restrict.
+    * `reason` is a fixed, non-identifying string; it never carries the SQL or the predicate text,
+    * since [[FlightSqlRouter]] surfaces it to the caller.
+    */
+  final case class Failed(reason: String) extends Outcome
+
   private val TokenRegex = "\\$\\{[a-zA-Z]+\\}".r
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
@@ -126,6 +138,8 @@ object RowPolicyRewriter:
 class RowPolicyRewriter(enabled: Boolean = true):
   import RowPolicyRewriter._
 
+  private val logger = org.slf4j.LoggerFactory.getLogger(getClass)
+
   def rewrite(
       sql: String,
       kind: StatementKind,
@@ -146,9 +160,19 @@ class RowPolicyRewriter(enabled: Boolean = true):
             new DeepWalker(eff, ctx, values, changed).walk(stmt)
             if changed.get() then Rewritten(stmt.toString) else Passthrough
           catch
-            // A predicate that fails to parse at rewrite time (should never happen - the
-            // create-time validator already parsed it) must not crash the request path.
-            case _: Throwable => Passthrough
+            // A predicate that fails to apply at rewrite time (should never happen - the
+            // create-time validator already parsed it) must not crash the request path, but it
+            // also must not forward the statement unfiltered: that would silently disable the
+            // row policy for the caller. Fail closed instead of Passthrough. Load-bearing for
+            // rows stored before RowPredicateValidator rejected splice-unsafe predicates (a
+            // trailing `--` comment, etc.) - see Failed's doc comment.
+            case _: Throwable =>
+              logger.warn(
+                "row policy failed to apply at rewrite time for tenant={} user={}; denying (fail-closed)",
+                eff.user.tenant.getOrElse("-"),
+                eff.user.username
+              )
+              Failed("row policy failed to apply")
         case Success(_) => Passthrough
 
   // ---------- table-occurrence walk ----------

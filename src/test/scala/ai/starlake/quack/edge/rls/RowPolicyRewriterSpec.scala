@@ -50,6 +50,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       case Rewritten(s)           => s
       case Passthrough            => s"$sql  [passthrough]"
       case PassthroughParseFailed => s"$sql  [parse-failed]"
+      case Failed(reason)         => s"$sql  [failed: $reason]"
     info(s"original:  $sql")
     info(s"predicate: ${if preds.isEmpty then "(none)" else preds.mkString("  ;  ")}")
     info(s"result:    $result")
@@ -90,6 +91,16 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   it should "emit PassthroughParseFailed when the SQL fails to parse" in {
     go("SELEC' WRONG", eff(tenantUser, List(policy("c_region = 'eu'")))) shouldBe
       PassthroughParseFailed
+  }
+
+  it should "fail closed (not passthrough) when a stored predicate cannot be applied at splice time" in {
+    // Simulates a row already stored before RowPredicateValidator rejected splice-unsafe
+    // predicates: a trailing line comment that, once the rewriter wraps it in "(" + pred + ")",
+    // comments out the wrapper's own closing paren and throws on re-parse.
+    val effSet = eff(tenantUser, List(policy("a = 1 --")))
+    go("SELECT * FROM customer", effSet) match
+      case Failed(_) => succeed
+      case other     => fail(s"expected Failed, got $other")
   }
 
   it should "passthrough when no referenced table matches a policy" in {

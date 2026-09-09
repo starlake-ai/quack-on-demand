@@ -1051,6 +1051,37 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
 
+  it should "deny (not forward) a plain read when a stored row policy fails to apply at rewrite time" in:
+    // Simulates a row policy stored before RowPredicateValidator rejected splice-unsafe
+    // predicates: a trailing line comment that comments out the rewriter's own closing paren at
+    // splice time, throwing on re-parse. The router must deny, never forward the statement
+    // unfiltered.
+    var nodeCalled     = false
+    val (router, _, _) = setup(stub = () => { nodeCalled = true; TestArrow.okResponse() })
+    val badPolicy      = ai.starlake.quack.ondemand.state.RoleRowPolicy(
+      "rp-bad",
+      "r-1",
+      "*",
+      "main",
+      "customer",
+      "a = 1 --"
+    )
+    val out = router
+      .execute(
+        "rls-fail-1",
+        "alice",
+        poolKey,
+        "SELECT c_id FROM main.customer",
+        effectiveSet = Some(effWithRowPolicies(List(badPolicy)))
+      )
+      .unsafeRunSync()
+    out shouldBe a[Left[?, ?]]
+    out.left.get shouldBe a[RouterFailure.AccessDenied]
+    out.left.get.asInstanceOf[RouterFailure.AccessDenied].reason should include(
+      "row policy failed to apply"
+    )
+    nodeCalled shouldBe false
+
   // ---- ActiveStatementRegistry integration tests ----
 
   it should "track the statement in the registry until the caller closes the stream" in:
