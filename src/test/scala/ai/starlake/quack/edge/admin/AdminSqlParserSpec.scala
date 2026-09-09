@@ -97,6 +97,8 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("SHOW ROLES").isLeft shouldBe true
 
   "parse GRANT/REVOKE on tables" should "map privilege lists onto RO/RW/DDL/ALL" in:
+    AdminSqlParser.parse("GRANT SELECT ON t TO ROLE r") shouldBe
+      Right(AdminCommand.GrantTable("RO", TableRef("*", "*", "t"), "r"))
     AdminSqlParser.parse("GRANT SELECT ON tpch.main.orders TO ROLE analyst") shouldBe
       Right(AdminCommand.GrantTable("RO", TableRef("tpch", "main", "orders"), "analyst"))
     AdminSqlParser.parse("GRANT INSERT, UPDATE, DELETE ON TABLE tpch.main.orders TO etl") shouldBe
@@ -107,6 +109,9 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
       Right(AdminCommand.GrantTable("DDL", TableRef("tpch", "main", "*"), "dba"))
     AdminSqlParser.parse("GRANT ALL PRIVILEGES ON *.*.* TO ROLE root_like") shouldBe
       Right(AdminCommand.GrantTable("ALL", TableRef("*", "*", "*"), "root_like"))
+
+  it should "reject a quoted \"*\" segment as a literal, not the wildcard" in:
+    AdminSqlParser.parse("GRANT ALL ON \"*\".\"*\".\"*\" TO ROLE r").isLeft shouldBe true
 
   it should "pad short table refs with wildcards" in:
     AdminSqlParser.parse("GRANT SELECT ON main.orders TO ROLE r") shouldBe
@@ -133,3 +138,59 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
 
   it should "claim a GRANT ROLE ... unterminated block comment past the claims token budget" in:
     AdminSqlParser.claims("GRANT ROLE r TO USER u /* unterminated") shouldBe true
+
+  "parse row policies" should "extract the raw predicate between balanced parens" in:
+    AdminSqlParser.parse(
+      "CREATE ROW POLICY ON tpch.main.orders FOR ROLE analyst " +
+        "USING (region = ${tenantId} OR owner = ${user})"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(
+        TableRef("tpch", "main", "orders"),
+        "analyst",
+        "region = ${tenantId} OR owner = ${user}",
+        orReplace = false
+      )
+    )
+    AdminSqlParser.parse(
+      "CREATE OR REPLACE ROW POLICY ON t FOR ROLE r USING (a IN ('x)', 'y'))"
+    ) shouldBe Right(
+      AdminCommand.CreateRowPolicy(TableRef("*", "*", "t"), "r", "a IN ('x)', 'y')", true)
+    )
+    AdminSqlParser.parse("DROP ROW POLICY IF EXISTS ON t FOR ROLE r") shouldBe
+      Right(AdminCommand.DropRowPolicy(TableRef("*", "*", "t"), "r", ifExists = true))
+
+  it should "reject unbalanced or empty predicates" in:
+    AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (a = (1)").isLeft shouldBe true
+    AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING ()").isLeft shouldBe true
+    AdminSqlParser.parse("CREATE ROW POLICY ON t FOR ROLE r USING (1=1) extra").isLeft shouldBe true
+
+  "parse column policies" should "handle MASK USING and DENY" in:
+    AdminSqlParser.parse(
+      "CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst " +
+        "MASK USING (SHA256(CAST(email AS VARCHAR)))"
+    ) shouldBe Right(
+      AdminCommand.CreateColumnPolicy(
+        TableRef("tpch", "main", "customers"),
+        "email",
+        "analyst",
+        "mask",
+        Some("SHA256(CAST(email AS VARCHAR))"),
+        orReplace = false
+      )
+    )
+    AdminSqlParser.parse(
+      "CREATE OR REPLACE COLUMN POLICY ON customers COLUMN ssn FOR ROLE analyst DENY"
+    ) shouldBe Right(
+      AdminCommand.CreateColumnPolicy(
+        TableRef("*", "*", "customers"),
+        "ssn",
+        "analyst",
+        "deny",
+        None,
+        orReplace = true
+      )
+    )
+    AdminSqlParser.parse("DROP COLUMN POLICY ON customers COLUMN email FOR ROLE analyst") shouldBe
+      Right(
+        AdminCommand.DropColumnPolicy(TableRef("*", "*", "customers"), "email", "analyst", false)
+      )

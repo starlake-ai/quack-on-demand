@@ -200,6 +200,8 @@ object AdminSqlParser:
 
     private def refSegment(): Either[String, String] =
       if !eof && !toks(i).quoted && toks(i).raw == "*" then { i += 1; Right("*") }
+      else if !eof && toks(i).quoted && toks(i).raw == "*" then
+        Left("quoted \"*\" is a literal identifier, not the * wildcard")
       else ident("identifier or *")
 
     /** 1-3 dot-separated segments; missing leading segments pad with "*". */
@@ -288,13 +290,97 @@ object AdminSqlParser:
           )
         yield out
 
+    /** Requires the current token to be '('; scans the RAW sql for the balanced closing paren,
+      * skipping single-quoted strings ('' escape) and double-quoted identifiers, returns the
+      * trimmed body, and advances the token cursor past the closing paren. The body is passed
+      * verbatim to the jsqlparser-based validators downstream - no re-tokenization here.
+      */
+    private def parenExpression(): Either[String, String] =
+      if eof || toks(i).quoted || toks(i).raw != "(" then Left("expected ( after USING")
+      else
+        val open    = toks(i).start
+        var j       = open
+        var depth   = 0
+        var inStr   = false
+        var inQuote = false
+        var close   = -1
+        while j < sql.length && close < 0 do
+          val c = sql(j)
+          if inStr then
+            if c == '\'' then
+              if j + 1 < sql.length && sql(j + 1) == '\'' then j += 1 else inStr = false
+          else if inQuote then
+            if c == '"' then inQuote = false
+          else if c == '\'' then inStr = true
+          else if c == '"' then inQuote = true
+          else if c == '(' then depth += 1
+          else if c == ')' then
+            depth -= 1
+            if depth == 0 then close = j
+          j += 1
+        if close < 0 then Left("unbalanced parentheses in expression")
+        else
+          val body = sql.substring(open + 1, close).trim
+          if body.isEmpty then Left("empty expression")
+          else
+            while i < toks.length && toks(i).start <= close do i += 1
+            Right(body)
+
     private def create(): Either[String, AdminCommand] =
       if optKw("ROLE") then
         for
           name <- ident("role name")
           out  <- end(AdminCommand.CreateRole(name))
         yield out
-      else Left("not yet implemented") // Task 3 replaces this arm
+      else
+        val orReplaceE: Either[String, Boolean] =
+          if optKw("OR") then kw("REPLACE").map(_ => true) else Right(false)
+        orReplaceE.flatMap { orReplace =>
+          if optKw("ROW") then
+            for
+              _ <- kw("POLICY")
+              _ <- kw("ON")
+              _ = optKw("TABLE")
+              ref  <- tableRef()
+              _    <- kw("FOR")
+              _    <- kw("ROLE")
+              role <- ident("role name")
+              _    <- kw("USING")
+              pred <- parenExpression()
+              out  <- end(AdminCommand.CreateRowPolicy(ref, role, pred, orReplace))
+            yield out
+          else if optKw("COLUMN") then
+            for
+              _ <- kw("POLICY")
+              _ <- kw("ON")
+              _ = optKw("TABLE")
+              ref  <- tableRef()
+              _    <- kw("COLUMN")
+              col  <- ident("column name")
+              _    <- kw("FOR")
+              _    <- kw("ROLE")
+              role <- ident("role name")
+              cmd  <- columnAction(ref, col, role, orReplace)
+            yield cmd
+          else Left("expected ROLE, ROW POLICY or COLUMN POLICY after CREATE")
+        }
+
+    private def columnAction(
+        ref: TableRef,
+        col: String,
+        role: String,
+        orReplace: Boolean
+    ): Either[String, AdminCommand] =
+      if optKw("DENY") then
+        end(AdminCommand.CreateColumnPolicy(ref, col, role, "deny", None, orReplace))
+      else if optKw("MASK") then
+        for
+          _    <- kw("USING")
+          expr <- parenExpression()
+          out  <-
+            end(AdminCommand.CreateColumnPolicy(ref, col, role, "mask", Some(expr), orReplace))
+        yield out
+      else Left("expected DENY or MASK USING (...) in column policy")
 
     private def drop(): Either[String, AdminCommand] =
       if optKw("ROLE") then
@@ -303,7 +389,33 @@ object AdminSqlParser:
           name <- ident("role name")
           out  <- end(AdminCommand.DropRole(name, ifE))
         yield out
-      else Left("not yet implemented") // Task 3 replaces this arm
+      else if optKw("ROW") then
+        for
+          _ <- kw("POLICY")
+          ifE = ifExistsOpt()
+          _ <- kw("ON")
+          _ = optKw("TABLE")
+          ref  <- tableRef()
+          _    <- kw("FOR")
+          _    <- kw("ROLE")
+          role <- ident("role name")
+          out  <- end(AdminCommand.DropRowPolicy(ref, role, ifE))
+        yield out
+      else if optKw("COLUMN") then
+        for
+          _ <- kw("POLICY")
+          ifE = ifExistsOpt()
+          _ <- kw("ON")
+          _ = optKw("TABLE")
+          ref  <- tableRef()
+          _    <- kw("COLUMN")
+          col  <- ident("column name")
+          _    <- kw("FOR")
+          _    <- kw("ROLE")
+          role <- ident("role name")
+          out  <- end(AdminCommand.DropColumnPolicy(ref, col, role, ifE))
+        yield out
+      else Left("expected ROLE, ROW POLICY or COLUMN POLICY after DROP")
 
     private def alterGroup(): Either[String, AdminCommand] =
       for
