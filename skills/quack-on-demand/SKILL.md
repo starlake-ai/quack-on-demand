@@ -682,9 +682,8 @@ JDBC/ADBC tool that renders the advertised schema before running.
   session's own username (self-drop guard, mirroring the REST posture). The
   password literal is excluded from statement history (the executor logs only
   the command kind) AND redacted from the edge's DEBUG statement logging - a
-  claim-shaped statement is logged as its first keyword plus a
-  `<redacted>`-style placeholder there, never the raw text - and the FlightSQL
-  wire is TLS.
+  claim-shaped statement is logged as a constant redacted placeholder there,
+  never a substring of the raw text, and the FlightSQL wire is TLS.
 - `ALTER USER ... PASSWORD` rotates a tenant user's password through the same
   per-(tenant, username) path REST `user/update` uses, so lockout counters
   (`failed_attempts` / `locked_at`) are cleared as part of the write, same as

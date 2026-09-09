@@ -44,11 +44,25 @@ final class AdminStatementExecutor(
     // behind this IO.defer rather than firing eagerly on the caller's thread at construction
     // time. The genuinely blocking work (JDBC-backed store reads in run()'s resolution
     // helpers) is pushed further, onto IO.blocking, at the call sites below.
+    // Denied and malformed claimed statements get a WARN trace here so they aren't
+    // invisible server-side (they never reach statement history or metrics - full
+    // record()/metrics/journal parity for rejected admin statements is a tracked follow-up).
+    // The parse-failure branch deliberately omits the parser's error detail: `end()`'s
+    // trailing-token message can echo a raw token, which for a CREATE/ALTER USER ... PASSWORD
+    // statement may be the password literal itself.
     IO.defer {
       AdminSqlParser.parse(sql) match
-        case Left(err)  => IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
+        case Left(err) =>
+          logger.warn(s"sql-admin parse rejected user=$user tenant=${poolKey.tenant}")
+          IO.pure(Left(RouterFailure.BadRequest(s"admin statement: $err")))
         case Right(cmd) =>
           authorize(user, poolKey, effectiveSet) match
+            case Left(f @ RouterFailure.AccessDenied(_)) =>
+              logger.warn(
+                s"sql-admin denied user=$user tenant=${poolKey.tenant} " +
+                  s"cmd=${cmd.getClass.getSimpleName}"
+              )
+              IO.pure(Left(f))
             case Left(f)    => IO.pure(Left(f))
             case Right(ctx) =>
               logger.info(

@@ -441,7 +441,7 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.Internal(_)) => succeed
       case other                           => fail(s"expected Internal, got $other")
 
-  "SHOW USERS" should "list the session tenant's users with the 5-column shape and stay tenant-scoped" in:
+  "SHOW USERS" should "list the tenant's users with the 5-column shape and stay tenant-scoped" in:
     val (sup, store, exec) = setup()
     val tid                = tenantId(sup)
     seedUser(store, tid, "alice")

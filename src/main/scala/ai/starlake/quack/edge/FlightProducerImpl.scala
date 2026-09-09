@@ -28,20 +28,20 @@ final class FlightProducerImpl(
   /** DEBUG statement logging must never leak a SQL admin dialect password literal (`CREATE USER ...
     * PASSWORD '...'`, `ALTER USER ... PASSWORD '...'`): those statements are otherwise logged
     * verbatim at the three call sites below. `AdminSqlParser.claims` is the same cheap,
-    * few-tokens-only check the router uses to decide interception, so redacting on it keeps the
-    * first keyword (for operability - "what kind of statement was this") and drops the rest,
-    * including any embedded literal. This redacts every claim-shaped statement, not only the ones
-    * carrying a password, and does so even when `quack-on-demand.sqlAdmin.enabled` is off: an
-    * unwired dialect still denies a claim-shaped statement at the router, so its raw text is
-    * equally sensitive either way, and consistent redaction avoids a flag-dependent log format.
-    * scalalogging's `logger.debug` is macro-generated to lazily evaluate its interpolated
-    * arguments, so this scan only runs when DEBUG is actually enabled - not on every statement of
-    * the hot path.
+    * few-tokens-only check the router uses to decide interception, so redacting on it drops the
+    * whole statement behind a constant placeholder. A per-statement "first keyword" extract was
+    * considered and rejected: taking the raw text's leading non-whitespace run is not safe against
+    * comment-obfuscated statements (`CREATE/**/USER/**/a/**/PASSWORD/**/'secret'` tokenizes to a
+    * single whitespace-free run, so that run - literal included - would be the whole statement).
+    * This redacts every claim-shaped statement, not only the ones carrying a password, and does so
+    * even when `quack-on-demand.sqlAdmin.enabled` is off: an unwired dialect still denies a
+    * claim-shaped statement at the router, so its raw text is equally sensitive either way, and
+    * consistent redaction avoids a flag-dependent log format. scalalogging's `logger.debug` is
+    * macro-generated to lazily evaluate its interpolated arguments, so this scan only runs when
+    * DEBUG is actually enabled - not on every statement of the hot path.
     */
   private def loggableSql(sql: String): String =
-    if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then
-      val firstKeyword = sql.trim.takeWhile(!_.isWhitespace)
-      s"<admin statement: $firstKeyword ... redacted>"
+    if ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql) then "<admin statement redacted>"
     else sql
 
   /** Per-handle execution context, captured at Prepare time. Arrow batches are not cached (a reader

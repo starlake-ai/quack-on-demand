@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **SQL admin dialect over FlightSQL.** Admin-gated SQL statements sent
+  through the FlightSQL edge are now answered directly by the manager and
+  never forwarded to a node: `GRANT` / `REVOKE` table ACLs, row and column
+  policies (including masking), role/group management and membership,
+  `GRANT` / `REVOKE` pool `CONNECT`, and user management (`CREATE USER`,
+  `ALTER USER ... PASSWORD`, `DROP USER`). `SHOW` introspection covers roles,
+  grants, row/column policies, pool grants, and `SHOW USERS`. Behind
+  `QOD_SQL_ADMIN_ENABLED` (default on); excluded from the MCP server, which
+  stays REST/CLI-oriented.
 - **Revoking a personal access token now also kills its live statements.**
   `POST /api/auth/pat/revoke` (and `qod auth pat revoke`) still cascades the
   revocation over the token's whole minted subtree, and now additionally kills

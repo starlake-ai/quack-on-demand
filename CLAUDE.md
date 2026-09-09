@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 sbt run                 # run the manager (forks JVM - see "JVM forking" below)
-sbt test                # run the full Scala test suite (~714 tests)
+sbt test                # run the full Scala test suite (~2802 tests)
 sbt assembly            # build distrib/quack-on-demand-assembly-*.jar (UI is bundled in)
 sbt "testOnly ai.starlake.quack.route.RouterSpec"        # one test class
 sbt "testOnly *RouterSpec -- -z 'picks the least-loaded'" # one test by name fragment
