@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - **SQL admin dialect over FlightSQL.** Admin-gated SQL statements sent
   through the FlightSQL edge are now answered directly by the manager and
