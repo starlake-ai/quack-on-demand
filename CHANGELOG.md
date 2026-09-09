@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Revoking a personal access token now also kills its live statements.**
+  `POST /api/auth/pat/revoke` (and `qod auth pat revoke`) still cascades the
+  revocation over the token's whole minted subtree, and now additionally kills
+  every in-flight statement issued with any of those tokens: synchronously on
+  the replica serving the call, and on the other replicas of an HA cluster via
+  a new `qod_pat_kill` LISTEN/NOTIFY channel (best-effort, typically
+  milliseconds). Killed statements land in statement history with status
+  `killed`; the `AuthPatRevoke` audit event gains `revokedCount` and
+  `killedStatements` detail entries. BREAKING (wire shape): the revoke
+  endpoint's 200 body was empty and is now
+  `{"status":"ok","killedStatements":N}` where N counts the serving replica's
+  kills. A failed kill or broadcast never fails the revoke: the tokens are
+  already dead and running statements stay bounded by their statement
+  timeouts.
+
 ## 0.7.2
 
 - **Security: six SQL-authorization bypasses closed after a deep code review.**

@@ -126,7 +126,10 @@ mint, list, revoke and delete any of the caller's own tokens, and a PAT may now 
 scoped child of itself and may list, revoke and delete within its own subtree only -
 never a sibling, its own parent, or any other token of its owner. Revoking a token
 cascades to its whole subtree in the same statement, so a stolen token cannot be rolled
-forward past its own revocation by minting a successor first.
+forward past its own revocation by minting a successor first. The revoke also kills the
+in-flight statements of every token in that subtree (locally at once, across HA replicas
+via NOTIFY moments later); the response reports `killedStatements` for the serving
+replica, and killed statements show in statement history with status `killed`.
 
 A PAT can also be **scoped** narrower than its owner's own grants, so an AI agent holds
 a credential it cannot exceed. Scope axes are `roles` / `databases` / `pools` / `tools`
