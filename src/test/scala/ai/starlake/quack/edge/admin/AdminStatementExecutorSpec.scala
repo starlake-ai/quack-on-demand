@@ -4,9 +4,10 @@ import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.PoolSupervisor
-import ai.starlake.quack.edge.RouterFailure
+import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import cats.effect.unsafe.implicits.global
+import org.apache.arrow.vector.VarCharVector
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -160,3 +161,126 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
       passwordHash = "x",
       role = "user"
     )
+
+  private def readAll(qr: QueryResult): List[List[Option[String]]] =
+    try
+      val reader = qr.rows
+      val root   = reader.getVectorSchemaRoot
+      val out    = List.newBuilder[List[Option[String]]]
+      while reader.loadNextBatch() do
+        (0 until root.getRowCount).foreach { r =>
+          out += (0 until root.getSchema.getFields.size).toList.map { c =>
+            val vec = root.getVector(c).asInstanceOf[VarCharVector]
+            if vec.isNull(r) then None else Some(new String(vec.get(r), "UTF-8"))
+          }
+        }
+      out.result()
+    finally qr.close()
+
+  "row policies" should "create, refuse duplicate, OR REPLACE, and drop" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE ROW POLICY ON tpch.main.orders FOR ROLE analyst USING (region = ${tenantId})"
+    ).isRight shouldBe true
+    val role = sup.listRoles(tenantId(sup)).find(_.name == "analyst").get
+    sup.listRowPoliciesByRole(role.id).unsafeRunSync().map(_.predicateSql) shouldBe
+      List("region = ${tenantId}")
+    run(
+      exec,
+      sup,
+      "CREATE ROW POLICY ON tpch.main.orders FOR ROLE analyst USING (1=1)"
+    ) match
+      case Left(RouterFailure.AlreadyExists(_)) => succeed
+      case other                                => fail(s"expected AlreadyExists, got $other")
+    run(
+      exec,
+      sup,
+      "CREATE OR REPLACE ROW POLICY ON tpch.main.orders FOR ROLE analyst USING (owner = ${user})"
+    ).isRight shouldBe true
+    sup.listRowPoliciesByRole(role.id).unsafeRunSync().map(_.predicateSql) shouldBe
+      List("owner = ${user}")
+    run(exec, sup, "DROP ROW POLICY ON tpch.main.orders FOR ROLE analyst").isRight shouldBe true
+    sup.listRowPoliciesByRole(role.id).unsafeRunSync() shouldBe empty
+    run(exec, sup, "DROP ROW POLICY ON tpch.main.orders FOR ROLE analyst") match
+      case Left(RouterFailure.NotFound(_)) => succeed
+      case other                           => fail(s"expected NotFound, got $other")
+    run(
+      exec,
+      sup,
+      "DROP ROW POLICY IF EXISTS ON tpch.main.orders FOR ROLE analyst"
+    ).isRight shouldBe true
+
+  it should "surface predicate-validator rejections as BadRequest" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE ROW POLICY ON t FOR ROLE analyst USING (EXISTS (SELECT 1 FROM x))"
+    ) match
+      case Left(RouterFailure.BadRequest(_)) => succeed
+      case other                             => fail(s"expected BadRequest, got $other")
+
+  "column policies" should "create mask and deny, OR REPLACE, and drop" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst " +
+        "MASK USING (SHA256(CAST(email AS VARCHAR)))"
+    ).isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE OR REPLACE COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst DENY"
+    ).isRight shouldBe true
+    val role = sup.listRoles(tenantId(sup)).find(_.name == "analyst").get
+    val pols = sup.listColumnPoliciesByRole(role.id).unsafeRunSync()
+    pols.map(p => (p.columnName, p.action, p.transformSql)) shouldBe
+      List(("email", "deny", None))
+    run(
+      exec,
+      sup,
+      "DROP COLUMN POLICY ON tpch.main.customers COLUMN email FOR ROLE analyst"
+    ).isRight shouldBe true
+    sup.listColumnPoliciesByRole(role.id).unsafeRunSync() shouldBe empty
+
+  "pool grants" should "resolve the pool by name and grant/revoke per principal" in:
+    val (sup, store, exec) = setup()
+    val tid                = tenantId(sup)
+    val uid                = seedUser(store, tid, "alice")
+    run(exec, sup, "GRANT CONNECT ON POOL sales TO USER alice").isRight shouldBe true
+    sup.listPoolPermissions(Some(tid), Some(uid), None) should have size 1
+    run(exec, sup, "REVOKE CONNECT ON POOL sales FROM USER alice").isRight shouldBe true
+    sup.listPoolPermissions(Some(tid), Some(uid), None) shouldBe empty
+    run(exec, sup, "GRANT CONNECT ON POOL ghost TO USER alice") match
+      case Left(RouterFailure.NotFound(reason)) => reason should include("unknown_pool")
+      case other                                => fail(s"expected NotFound, got $other")
+
+  "SHOW" should "return listings for roles, grants, and policies" in:
+    val (sup, _, exec) = setup()
+    run(exec, sup, "CREATE ROLE analyst").isRight shouldBe true
+    run(exec, sup, "GRANT SELECT ON tpch.main.orders TO ROLE analyst").isRight shouldBe true
+    run(
+      exec,
+      sup,
+      "CREATE ROW POLICY ON tpch.main.orders FOR ROLE analyst USING (1=1)"
+    ).isRight shouldBe true
+
+    def rowsOf(sql: String): List[List[Option[String]]] =
+      run(exec, sup, sql) match
+        case Right(qr) => readAll(qr)
+        case Left(f)   => fail(s"expected rows for '$sql', got $f")
+
+    rowsOf("SHOW ROLES").map(_(1)) should contain(Some("analyst"))
+    rowsOf("SHOW GRANTS FOR ROLE analyst").map(r => (r(1), r(4))) shouldBe
+      List((Some("tpch"), Some("RO")))
+    rowsOf("SHOW ROW POLICIES").map(_.head) shouldBe List(Some("analyst"))
+    rowsOf("SHOW ROW POLICIES FOR ROLE analyst") should have size 1
+    rowsOf("SHOW ROW POLICIES ON tpch.main.orders") should have size 1
+    rowsOf("SHOW ROW POLICIES ON tpch.main.other") shouldBe empty
+    rowsOf("SHOW COLUMN POLICIES") shouldBe empty

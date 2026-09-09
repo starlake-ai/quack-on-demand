@@ -3,7 +3,13 @@ package ai.starlake.quack.edge.admin
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacGroup, RbacRole, RbacUser}
+import ai.starlake.quack.ondemand.state.{
+  RbacGroup,
+  RbacRole,
+  RbacUser,
+  RoleColumnPolicy,
+  RoleRowPolicy
+}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -225,5 +231,301 @@ final class AdminStatementExecutor(supervisor: PoolSupervisor) extends LazyLoggi
             }
         }
 
-      case other =>
-        IO.pure(Left(RouterFailure.Internal(s"not yet implemented: $other"))) // Task 7
+      case AdminCommand.GrantPool(target, to) =>
+        resolvePoolAndPrincipal(ctx, target, to).flatMap {
+          case Left(f)                  => IO.pure(Left(f))
+          case Right((pid, (uid, gid))) =>
+            mut(supervisor.grantPoolPermission(ctx.tenantId, Some(pid), uid, gid))(_ =>
+              AdminResults.ok(s"pool ${target.pool} granted")
+            )
+        }
+
+      case AdminCommand.RevokePool(target, from) =>
+        resolvePoolAndPrincipal(ctx, target, from).flatMap {
+          case Left(f)                  => IO.pure(Left(f))
+          case Right((pid, (uid, gid))) =>
+            IO.blocking(
+              supervisor
+                .listPoolPermissions(Some(ctx.tenantId), uid, gid)
+                .filter(_.poolId.contains(pid))
+            ).flatMap { matches =>
+              matches
+                .foldLeft(IO.pure(Right(()): Either[RouterFailure, Unit])) { (acc, p) =>
+                  acc.flatMap {
+                    case Left(f)  => IO.pure(Left(f))
+                    case Right(_) =>
+                      supervisor.revokePoolPermission(p.id).map(_.left.map(toFailure))
+                  }
+                }
+                .map(_.map(_ => revokedResult(matches.size)))
+            }
+        }
+
+      case AdminCommand.CreateRowPolicy(ref, role, pred, orReplace) =>
+        roleByName(ctx, role).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(r) =>
+            supervisor.listRowPoliciesByRole(r.id).flatMap { existing =>
+              existing.find(p =>
+                p.catalogName == ref.catalog && p.schemaName == ref.schema &&
+                  p.tableName == ref.table
+              ) match
+                case Some(p) if orReplace =>
+                  mut(supervisor.updateRowPolicy(p.id, pred))(_ =>
+                    AdminResults.ok(s"row policy on $ref replaced")
+                  )
+                case Some(_) =>
+                  IO.pure(
+                    Left(
+                      RouterFailure.AlreadyExists(
+                        s"row policy already exists on $ref for role $role; use CREATE OR REPLACE"
+                      )
+                    )
+                  )
+                case None =>
+                  mut(supervisor.createRowPolicy(r.id, ref.catalog, ref.schema, ref.table, pred))(
+                    _ => AdminResults.ok(s"row policy on $ref created")
+                  )
+            }
+        }
+
+      case AdminCommand.DropRowPolicy(ref, role, ifExists) =>
+        roleByName(ctx, role).flatMap {
+          case Left(_) if ifExists => IO.pure(Right(AdminResults.ok("row policy absent")))
+          case Left(f)             => IO.pure(Left(f))
+          case Right(r)            =>
+            supervisor.listRowPoliciesByRole(r.id).flatMap { existing =>
+              existing.find(p =>
+                p.catalogName == ref.catalog && p.schemaName == ref.schema &&
+                  p.tableName == ref.table
+              ) match
+                case Some(p) =>
+                  mut(supervisor.deleteRowPolicy(p.id))(_ =>
+                    AdminResults.ok(s"row policy on $ref dropped")
+                  )
+                case None if ifExists => IO.pure(Right(AdminResults.ok("row policy absent")))
+                case None             =>
+                  IO.pure(Left(RouterFailure.NotFound(s"not_found: row policy on $ref for $role")))
+            }
+        }
+
+      case AdminCommand.CreateColumnPolicy(ref, col, role, action, transform, orReplace) =>
+        roleByName(ctx, role).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(r) =>
+            supervisor.listColumnPoliciesByRole(r.id).flatMap { existing =>
+              existing.find(p =>
+                p.catalogName == ref.catalog && p.schemaName == ref.schema &&
+                  p.tableName == ref.table && p.columnName == col
+              ) match
+                case Some(p) if orReplace =>
+                  mut(supervisor.updateColumnPolicy(p.id, action, transform))(_ =>
+                    AdminResults.ok(s"column policy on $ref.$col replaced")
+                  )
+                case Some(_) =>
+                  IO.pure(
+                    Left(
+                      RouterFailure.AlreadyExists(
+                        s"column policy already exists on $ref.$col for role $role; " +
+                          "use CREATE OR REPLACE"
+                      )
+                    )
+                  )
+                case None =>
+                  mut(
+                    supervisor.createColumnPolicy(
+                      r.id,
+                      ref.catalog,
+                      ref.schema,
+                      ref.table,
+                      col,
+                      action,
+                      transform
+                    )
+                  )(_ => AdminResults.ok(s"column policy on $ref.$col created"))
+            }
+        }
+
+      case AdminCommand.DropColumnPolicy(ref, col, role, ifExists) =>
+        roleByName(ctx, role).flatMap {
+          case Left(_) if ifExists => IO.pure(Right(AdminResults.ok("column policy absent")))
+          case Left(f)             => IO.pure(Left(f))
+          case Right(r)            =>
+            supervisor.listColumnPoliciesByRole(r.id).flatMap { existing =>
+              existing.find(p =>
+                p.catalogName == ref.catalog && p.schemaName == ref.schema &&
+                  p.tableName == ref.table && p.columnName == col
+              ) match
+                case Some(p) =>
+                  mut(supervisor.deleteColumnPolicy(p.id))(_ =>
+                    AdminResults.ok(s"column policy on $ref.$col dropped")
+                  )
+                case None if ifExists => IO.pure(Right(AdminResults.ok("column policy absent")))
+                case None             =>
+                  IO.pure(
+                    Left(RouterFailure.NotFound(s"not_found: column policy on $ref.$col for $role"))
+                  )
+            }
+        }
+
+      case AdminCommand.ShowRoles =>
+        IO.blocking {
+          val rows = supervisor
+            .listRoles(ctx.tenantId)
+            .map(r => List(Some(r.id), Some(r.name), r.description))
+          Right(AdminResults.table(List("id", "name", "description"), rows))
+        }
+
+      case AdminCommand.ShowGrants(role) =>
+        roleByName(ctx, role).flatMap {
+          case Left(f)  => IO.pure(Left(f))
+          case Right(r) =>
+            IO.blocking {
+              val rows = supervisor
+                .listRolePermissions(r.id)
+                .map(p =>
+                  List(
+                    Some(p.id),
+                    Some(p.catalogName),
+                    Some(p.schemaName),
+                    Some(p.tableName),
+                    Some(p.verb)
+                  )
+                )
+              Right(AdminResults.table(List("id", "catalog", "schema", "table", "verb"), rows))
+            }
+        }
+
+      case AdminCommand.ShowRowPolicies(filter) =>
+        allRowPolicies(ctx).map { all =>
+          val filtered = applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
+          Right(
+            AdminResults.table(
+              List("role", "catalog", "schema", "table", "predicate"),
+              filtered.map { case (r, p) =>
+                List(
+                  Some(r.name),
+                  Some(p.catalogName),
+                  Some(p.schemaName),
+                  Some(p.tableName),
+                  Some(p.predicateSql)
+                )
+              }
+            )
+          )
+        }
+
+      case AdminCommand.ShowColumnPolicies(filter) =>
+        allColumnPolicies(ctx).map { all =>
+          val filtered = applyFilter(all, filter)(p => (p.catalogName, p.schemaName, p.tableName))
+          Right(
+            AdminResults.table(
+              List("role", "catalog", "schema", "table", "column", "action", "transform"),
+              filtered.map { case (r, p) =>
+                List(
+                  Some(r.name),
+                  Some(p.catalogName),
+                  Some(p.schemaName),
+                  Some(p.tableName),
+                  Some(p.columnName),
+                  Some(p.action),
+                  p.transformSql
+                )
+              }
+            )
+          )
+        }
+
+      case AdminCommand.ShowPoolGrants(principalOpt) =>
+        val idsIO: IO[Either[RouterFailure, (Option[String], Option[String])]] =
+          principalOpt match
+            case None    => IO.pure(Right((None, None)))
+            case Some(p) => principalIds(ctx, p)
+        idsIO.flatMap {
+          case Left(f)           => IO.pure(Left(f))
+          case Right((uid, gid)) =>
+            IO.blocking {
+              val rows = supervisor
+                .listPoolPermissions(Some(ctx.tenantId), uid, gid)
+                .map { p =>
+                  val userName  = p.userId.flatMap(supervisor.findUserById).map(_.username)
+                  val groupName = p.groupId
+                    .flatMap(g => supervisor.listGroups(ctx.tenantId).find(_.id == g).map(_.name))
+                  List(Some(p.id), p.poolId, userName, groupName)
+                }
+              Right(AdminResults.table(List("id", "poolId", "user", "group"), rows))
+            }
+        }
+
+  /** `ON POOL bi` resolves within the session tenant; `ON POOL tpch.bi` also matches the qualifier
+    * against PoolKey.tenantDb, either verbatim or as "<tenant>_<qualifier>". A pure, synchronous
+    * function - callers push the supervisor reads it makes (list/poolId) onto IO.blocking rather
+    * than this helper doing so itself.
+    */
+  private def resolvePoolId(ctx: Ctx, target: PoolTarget): Either[RouterFailure, String] =
+    val keys = supervisor
+      .list()
+      .map(_.key)
+      .filter { k =>
+        k.tenant == ctx.tenantName && k.pool == target.pool &&
+        target.qualifier.forall(q => k.tenantDb == q || k.tenantDb == s"${ctx.tenantName}_$q")
+      }
+    keys match
+      case Nil =>
+        val shown = target.qualifier.fold(target.pool)(q => s"$q.${target.pool}")
+        Left(RouterFailure.NotFound(s"unknown_pool: $shown"))
+      case k :: Nil =>
+        supervisor.poolId(k).toRight(RouterFailure.Internal(s"pool id missing for $k"))
+      case _ =>
+        Left(
+          RouterFailure.BadRequest(
+            s"ambiguous pool '${target.pool}': qualify as <tenantDb>.${target.pool}"
+          )
+        )
+
+  /** Resolves the target pool, then a principal, in sequence - shared by GrantPool and RevokePool.
+    * resolvePoolId's supervisor reads run on IO.blocking; principalIds is already IO-returning and
+    * is simply flatMapped, matching resolveRoleAndPrincipal above.
+    */
+  private def resolvePoolAndPrincipal(
+      ctx: Ctx,
+      target: PoolTarget,
+      p: Principal
+  ): IO[Either[RouterFailure, (String, (Option[String], Option[String]))]] =
+    IO.blocking(resolvePoolId(ctx, target)).flatMap {
+      case Left(f)    => IO.pure(Left(f))
+      case Right(pid) => principalIds(ctx, p).map(_.map(ids => (pid, ids)))
+    }
+
+  private def allRowPolicies(ctx: Ctx): IO[List[(RbacRole, RoleRowPolicy)]] =
+    IO.blocking(supervisor.listRoles(ctx.tenantId)).flatMap { roles =>
+      roles.foldLeft(IO.pure(List.empty[(RbacRole, RoleRowPolicy)])) { (acc, r) =>
+        acc.flatMap(got => supervisor.listRowPoliciesByRole(r.id).map(ps => got ++ ps.map((r, _))))
+      }
+    }
+
+  private def allColumnPolicies(ctx: Ctx): IO[List[(RbacRole, RoleColumnPolicy)]] =
+    IO.blocking(supervisor.listRoles(ctx.tenantId)).flatMap { roles =>
+      roles.foldLeft(IO.pure(List.empty[(RbacRole, RoleColumnPolicy)])) { (acc, r) =>
+        acc.flatMap(got =>
+          supervisor.listColumnPoliciesByRole(r.id).map(ps => got ++ ps.map((r, _)))
+        )
+      }
+    }
+
+  /** The ON filter matches the STORED tuple exactly, wildcards included (documented). `key`
+    * extracts (catalog, schema, table) from the policy row so this stays shared between row and
+    * column policies, which have no common supertype for those fields.
+    */
+  private def applyFilter[A](
+      all: List[(RbacRole, A)],
+      filter: PolicyFilter
+  )(key: A => (String, String, String)): List[(RbacRole, A)] =
+    filter match
+      case PolicyFilter.All           => all
+      case PolicyFilter.ForRole(name) => all.filter(_._1.name == name)
+      case PolicyFilter.OnTable(ref)  =>
+        all.filter { case (_, a) =>
+          val (c, s, t) = key(a)
+          c == ref.catalog && s == ref.schema && t == ref.table
+        }
