@@ -128,6 +128,7 @@ WORKDIR /app
 # --chmod on the scripts.
 COPY --from=build --chown=quack:quack /quack-on-demand.jar           /app/quack-on-demand.jar
 COPY --chown=quack:quack --chmod=0755 scripts/spawn-quack-node.sh    /app/scripts/spawn-quack-node.sh
+COPY --chown=quack:quack --chmod=0755 scripts/_load-common.sh        /app/scripts/_load-common.sh
 COPY --chown=quack:quack --chmod=0755 scripts/load-tpch-dbgen.sh     /app/scripts/load-tpch-dbgen.sh
 COPY --chown=quack:quack --chmod=0755 scripts/load-tpcds-dbgen.sh    /app/scripts/load-tpcds-dbgen.sh
 COPY --chown=quack:quack --chmod=0755 scripts/load-ssb-dbgen.sh      /app/scripts/load-ssb-dbgen.sh
