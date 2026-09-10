@@ -510,17 +510,32 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   s3_url_style="$(read_env QOD_S3_URL_STYLE path)"
   s3_use_ssl="$(read_env QOD_S3_USE_SSL false)"
   _dl_root="$(read_env QOD_DUCKLAKE_DATA_PATH /app/ducklake/data)"
+  # Strip a trailing slash before deriving the parent, mirroring
+  # replaceLastSegment's stripSuffix("/") - without it a root written as
+  # s3://ducklake/tpch/ derives .../tpch/acme_tpch instead of .../acme_tpch,
+  # landing one directory below what the manager's own derivation resolves
+  # to. Applies to local roots too, so a non-default
+  # QOD_DUCKLAKE_DATA_PATH=/app/ducklake/custom/data seeds under
+  # /app/ducklake/custom/<db> instead of the old hardcoded /app/ducklake/<db>.
+  _dl_root="${_dl_root%/}"
+  _dl_parent="${_dl_root%/*}"
+  # This case is now ONLY the S3-credential-forwarding gate, not the path
+  # derivation (that's $_dl_parent/<db> unconditionally, right below).
+  # az://azure://abfss:// deliberately excluded: azure seeding is
+  # unsupported here (only QOD_S3_* is forwarded into the exec; the
+  # az/azure/abfss arm of _load-common.sh's load_resolve_storage() reads
+  # QOD_AZURE_CONNECTION_STRING, which this script never forwards - follow-up).
   case "$_dl_root" in
-    s3://*|s3a://*|gs://*|r2://*|az://*|azure://*|abfss://*)
-      remote_root="${_dl_root%/*}"
+    s3://*|s3a://*|gs://*|r2://*)
+      is_remote=1
       ;;
     *)
-      remote_root=""
+      is_remote=0
       ;;
   esac
   s3_env_flags=()
-  if [[ -n "$remote_root" ]]; then
-    echo "S3 mode: seeding will write under $remote_root/<db> (QOD_DUCKLAKE_DATA_PATH=$_dl_root)"
+  if [[ "$is_remote" == "1" ]]; then
+    echo "S3 mode: seeding will write under $_dl_parent/<db> (QOD_DUCKLAKE_DATA_PATH=$_dl_root)"
     s3_env_flags=(
       -e QOD_S3_ENDPOINT="$s3_endpoint"
       -e QOD_S3_ACCESS_KEY_ID="$s3_access_key_id"
@@ -530,9 +545,9 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
       -e QOD_S3_USE_SSL="$s3_use_ssl"
     )
   fi
-  tpch_data_path="${remote_root:-/app/ducklake}/acme_tpch"
-  tpcds_data_path="${remote_root:-/app/ducklake}/globex_tpcds"
-  ssb_data_path="${remote_root:-/app/ducklake}/acme_tpch"
+  tpch_data_path="$_dl_parent/acme_tpch"
+  tpcds_data_path="$_dl_parent/globex_tpcds"
+  ssb_data_path="$_dl_parent/acme_tpch"
 
   # The manager image is JRE-only and does not ship psql. Pre-create only
   # the demo tenant-db Postgres databases we are actually going to seed,
