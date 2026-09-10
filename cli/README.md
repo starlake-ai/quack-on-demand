@@ -59,6 +59,29 @@ TLS certs) anchors under the platform user data dir. `qod stop` finds the
 running manager by its ports and tears it and its nodes down (SIGTERM, then
 SIGKILL after `FORCE_AFTER` seconds).
 
+### Configure `qod start` once with `qod setup`
+
+Run `qod setup` before your first `qod start` so you don't have to export
+the same env vars every time. With no flags on a terminal it prompts for
+Postgres coordinates, admin credentials, the static API key, and the
+auth/TLS toggles, and writes them to the CLI config file (same file/path as
+the connection profiles below, under a separate `[start]` table - see
+`qod setup --help`):
+
+```bash
+qod setup                                    # guided prompts
+qod setup --pg-host db.internal --pg-password hunter2 --no-tls --non-interactive
+qod setup --set QOD_MIN_PORT=21900           # any other QOD_*/PROXY_* var
+qod setup --show                             # inspect what is stored (secrets redacted)
+qod setup --unset QOD_API_KEY --non-interactive
+```
+
+`qod start` merges this file UNDER the real process env, so an actual shell
+`export QOD_PG_HOST=...` still wins - `qod setup` only fills in what you
+haven't exported. `qod start --demo` ignores it: the demo is intentionally
+self-contained (embedded ephemeral Postgres), so a stored external-Postgres
+config would be surprising there.
+
 ## Quick start
 
 ```bash

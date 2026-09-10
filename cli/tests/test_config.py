@@ -112,3 +112,37 @@ def test_config_use_refuses_unknown_profile():
     assert r.exit_code == 1
     assert "unknown profile" in r.output
     assert default_profile() == "default"
+
+
+def test_start_env_roundtrip():
+    from qod_cli.config import load_start_env, save_start_env
+
+    assert load_start_env() == {}
+    save_start_env({"QOD_PG_HOST": "db.internal", "QOD_PG_PORT": "5432"})
+    assert load_start_env() == {"QOD_PG_HOST": "db.internal", "QOD_PG_PORT": "5432"}
+
+
+def test_start_env_merges_and_removes():
+    from qod_cli.config import load_start_env, save_start_env
+
+    save_start_env({"QOD_PG_HOST": "a", "QOD_API_KEY": "k1"})
+    save_start_env({"QOD_PG_HOST": "b"}, remove=["QOD_API_KEY"])
+    assert load_start_env() == {"QOD_PG_HOST": "b"}
+
+
+def test_start_env_is_separate_from_profiles():
+    from qod_cli.config import load_settings, load_start_env, save_profile, save_start_env
+
+    save_profile("default", {"manager_url": "http://mgr:1"})
+    save_start_env({"QOD_PG_HOST": "db.internal"})
+    assert load_settings().manager_url == "http://mgr:1"
+    assert load_start_env() == {"QOD_PG_HOST": "db.internal"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes not applicable on Windows")
+def test_start_env_file_mode_is_0600():
+    from qod_cli.config import save_start_env
+
+    save_start_env({"QOD_PG_HOST": "db.internal"})
+    mode = stat.S_IMODE(config_path().stat().st_mode)
+    assert mode == 0o600

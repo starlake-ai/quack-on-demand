@@ -92,7 +92,7 @@ Runnable client examples live in [`examples/`](examples/): FlightSQL clients in 
 
 ### Other paths
 
-`qod start` runs the manager against your own Postgres with no checkout at all - it downloads everything it needs (sha256-verified) and honors the same env vars (`QOD_PG_*`, `LOAD_TPCH=1`, `NUKE=1`, `QOD_VERSION`, ...); `qod stop` tears it down. The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
+`qod start` runs the manager against your own Postgres with no checkout at all - it downloads everything it needs (sha256-verified) and honors the same env vars (`QOD_PG_*`, `LOAD_TPCH=1`, `NUKE=1`, `QOD_VERSION`, ...); `qod stop` tears it down. Run `uvx qod setup` once to persist the Postgres coordinates, admin credentials, API key, and auth/TLS toggles to your CLI config file so `uvx qod start` picks them up without re-exporting anything (`uvx qod setup --show` to inspect, `--set KEY=VALUE` for anything not on the guided prompts, `--non-interactive` for scripted setup; a real shell env var still wins over the stored config). The Helm chart + a local kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/). See [`RUNNING.md`](guides/RUNNING.md) for external Postgres, env vars, and TLS.
 
 ---
 

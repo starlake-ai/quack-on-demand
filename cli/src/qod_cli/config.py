@@ -4,6 +4,12 @@ Resolution order per setting: explicit override (command flag) > QOD_* env
 var > profile file > built-in default. The profile file is TOML at the
 platform config dir (QOD_CONFIG_FILE overrides the full path) and is written
 with mode 0600 because it can hold a session token and an opt-in SQL password.
+
+The same file also holds a separate top-level `[start]` table: arbitrary
+QOD_*/PROXY_* env vars persisted by `qod setup` and merged into `qod start`'s
+launch env (see load_start_env/save_start_env below). It is unrelated to the
+`[profiles.*]` tables above - those configure the CLI as a *client* talking to
+a manager; `[start]` configures the manager process `qod start` launches.
 """
 
 from __future__ import annotations
@@ -124,6 +130,30 @@ def save_profile(profile: str, values: dict) -> None:
     profiles = data.setdefault("profiles", {})
     current = profiles.setdefault(profile, {})
     current.update({k: v for k, v in values.items() if v is not None})
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        tomli_w.dump(data, f)
+    os.chmod(path, 0o600)
+
+
+def load_start_env() -> dict[str, str]:
+    """Persisted QOD_*/PROXY_* env vars for `qod start`, written by `qod setup`.
+
+    Lives in the same file/path as CLI connection profiles (a distinct
+    top-level `[start]` table, not a profile) - `qod setup` is the only
+    writer, `qod start` merges this UNDER the real process env, so a real
+    `export QOD_...` still wins per call (same precedence as everywhere
+    else in this module: explicit > env var > file > default)."""
+    return {str(k): str(v) for k, v in _read_file().get("start", {}).items()}
+
+
+def save_start_env(values: dict[str, str], remove: list[str] | None = None) -> None:
+    data = _read_file()
+    start = data.setdefault("start", {})
+    start.update({k: v for k, v in values.items() if v is not None})
+    for key in remove or ():
+        start.pop(key, None)
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:

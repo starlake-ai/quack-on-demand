@@ -269,6 +269,28 @@ def test_start_resolves_relative_jar_before_chdir(runner, wired, monkeypatch, tm
     assert pathlib.Path(jar_arg).is_absolute()
 
 
+def test_start_applies_setup_config(runner, wired, monkeypatch):
+    from qod_cli.config import save_start_env
+    from qod_cli.main import app
+
+    save_start_env({"QOD_PG_HOST": "db.internal", "QOD_PG_PASSWORD": "s3cret"})
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 0, result.output
+    assert wired["env"]["QOD_PG_HOST"] == "db.internal"
+    assert wired["env"]["QOD_PG_PASSWORD"] == "s3cret"
+
+
+def test_start_real_env_var_wins_over_setup_config(runner, wired, monkeypatch):
+    from qod_cli.config import save_start_env
+    from qod_cli.main import app
+
+    save_start_env({"QOD_PG_HOST": "from-setup"})
+    monkeypatch.setenv("QOD_PG_HOST", "from-shell")
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 0, result.output
+    assert wired["env"]["QOD_PG_HOST"] == "from-shell"
+
+
 def test_start_load_flags_warn_and_skip_on_windows(runner, wired, monkeypatch, tmp_path):
     from qod_cli.commands import start as start_cmd
     from qod_cli.main import app

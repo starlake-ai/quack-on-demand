@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 
 from .. import launcher
+from ..config import load_start_env
 from ._launch import _exec, resolve_jar, resolve_java
 
 # Tenant-db Postgres databases created by the bundled demo manifests; NUKE=1
@@ -140,7 +141,10 @@ def start(
     without the checkout). Postgres is assumed reachable (QOD_PG_* env vars);
     supports run-jar's LOAD_TPCH/LOAD_TPCDS/LOAD_SSB/LOAD_TPC, DEMO, NUKE,
     JAVA_OPTS, JAVA_BIN, JAR_CACHE_DIR, DUCKDB_VERSION, and DUCKDB_CACHE_DIR.
-    With --demo, runs the self-contained demo instead (no Postgres needed).
+    Run `qod setup` once to persist QOD_PG_*/admin/API-key/TLS settings so you
+    don't have to export them every time - a real env var still overrides it.
+    With --demo, runs the self-contained demo instead (no Postgres needed,
+    and qod setup's stored config is not applied - see qod setup --help).
     Ctrl-C tears the manager and its nodes down gracefully (same as qod stop)."""
     if demo:
         from .demo import run_demo
@@ -159,8 +163,12 @@ def start(
         typer.echo(f"could not provision duckdb: {e}", err=True)
         raise typer.Exit(1)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
+    # `qod setup` persists QOD_*/PROXY_* vars to the CLI config file; a real
+    # process env var still wins (same precedence as everywhere else in the
+    # CLI: explicit > env var > file > built-in default).
+    base_env = {**load_start_env(), **os.environ}
     env = launcher.runtime_env(
-        dict(os.environ), app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
+        base_env, app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
     )
 
     # Durable state anchor: certs/ and any relative paths land here, and the
