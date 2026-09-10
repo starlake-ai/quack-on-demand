@@ -263,10 +263,7 @@ if (( ${#LOOPBACK_PROXY_PORTS[@]} > 0 )); then
 fi
 
 # ---- Port-conflict auto-bump ----
-declare_pg_port() {
-  read_env PG_PORT 5432
-}
-PG_PORT_EFFECTIVE="$(declare_pg_port)"
+PG_PORT_EFFECTIVE="$(read_env PG_PORT 5432)"
 
 if [[ "$PG_PORT_EFFECTIVE" == "5432" ]] && lsof -nP -iTCP:5432 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
   echo "host port 5432 is already in use by another process." >&2
@@ -309,10 +306,17 @@ _has_profile() {
 # exported (not .env-file) endpoint reaches the manager container but not
 # this profile-activation decision, splitting the two halves of the stack.
 s3_endpoint="$(read_env QOD_S3_ENDPOINT "")"
-if [[ "$s3_endpoint" == rustfs:* ]]; then
+# Strip http(s):// before matching: spawn-quack-node.sh and _load-common.sh
+# both accept (and the k8s rig's values write) a scheme-ful
+# http://rustfs:9000 as a first-class spelling, not just bare rustfs:9000.
+# Match against the stripped copy only - $s3_endpoint itself is forwarded
+# to the seed exec and the container unchanged, whichever form it was.
+s3_endpoint_bare="${s3_endpoint#http://}"
+s3_endpoint_bare="${s3_endpoint_bare#https://}"
+if [[ "$s3_endpoint_bare" == rustfs:* ]]; then
   echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'rustfs' compose profile"
   _has_profile rustfs || _profiles+=("rustfs")
-elif [[ "$s3_endpoint" == seaweedfs:* ]]; then
+elif [[ "$s3_endpoint_bare" == seaweedfs:* ]]; then
   echo "WARN: QOD_S3_ENDPOINT=$s3_endpoint (environment or .env) still points at the retired" >&2
   echo "      'seaweedfs' service (replaced by 'rustfs' on 2026-09-10). The 'rustfs' compose" >&2
   echo "      profile is NOT being activated for this run - set QOD_S3_ENDPOINT=rustfs:9000" >&2
