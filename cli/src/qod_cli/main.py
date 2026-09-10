@@ -110,13 +110,14 @@ from .commands import sql_cmd  # noqa: E402
 app.command("sql")(sql_cmd.sql)
 
 from .commands import setup as setup_cmd  # noqa: E402
-from .commands import start, stop  # noqa: E402
+from .commands import start, status as status_cmd, stop  # noqa: E402
 
 app.command(
     "start", context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )(start.start)
 app.command("stop")(stop.stop)
 app.command("setup")(setup_cmd.setup)
+app.command("status")(status_cmd.status)
 
 
 def main() -> None:
