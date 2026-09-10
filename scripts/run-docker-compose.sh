@@ -156,6 +156,36 @@ if [[ "$IMAGE_SOURCE" == "pull" ]] && [[ "$QOD_VERSION" == "latest" ]]; then
 fi
 ENV_FILE="${ENV_FILE:-.env}"
 ENV_SEED="${ENV_SEED:-.env.example}"
+
+# read_env KEY DEFAULT: KEY's effective value under this repo's standard
+# precedence (see run-jar.sh) - explicit override > env var > file > default.
+# There's no per-call flag here, so it's process env (an actual `export
+# KEY=...`, or `KEY=... ./run-docker-compose.sh`) first, then $ENV_FILE, then
+# DEFAULT. Bash indirection (${!key-}) reads the process-env variable named
+# by $key dynamically and is nounset-safe (empty, not an error, when unset).
+# Every call site in this script (the rustfs/seaweedfs profile detection
+# below, and the demo-seed Postgres/S3 vars further down) MUST go through
+# this so a real env var always wins - reading .env directly split-brains
+# against docker-compose.yml's own `${VAR}` interpolation, which already
+# prefers the process env over .env by compose's own rules.
+read_env() {
+  local key="$1" default="$2" v
+  v="${!key-}"
+  if [[ -n "$v" ]]; then
+    echo "$v"
+    return
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    local raw
+    # [A-Z0-9_]+, not [A-Z_]+: several keys read below (QOD_S3_ENDPOINT,
+    # S3_BUCKET, ...) contain digits, which the letters-only class would
+    # silently fail to strip, leaking "KEY=" into the returned value.
+    raw="$(grep -E "^[[:space:]]*$key[[:space:]]*=" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*[A-Z0-9_]+[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
+    echo "${raw:-$default}"
+  else
+    echo "$default"
+  fi
+}
 # An explicitly-set DEMO=... with no LOAD_* flag implies the full demo:
 # LOAD_TPC=1 (all benchmarks at SF=1; minimal still skips TPC-DS below).
 # Set any LOAD_* flag yourself (0/false = skip) to control what loads.
@@ -271,9 +301,10 @@ fi
 
 # ---- Compose profile resolution -------------------------------------------
 # Two sources:
-#   1. Auto: when .env's QOD_S3_ENDPOINT points at the in-compose rustfs
-#      service, activate the `rustfs` profile so the manager doesn't come
-#      up writing to s3:// against a never-started RustFS container.
+#   1. Auto: when QOD_S3_ENDPOINT (in the environment or .env - see read_env
+#      above) points at the in-compose rustfs service, activate the `rustfs`
+#      profile so the manager doesn't come up writing to s3:// against a
+#      never-started RustFS container.
 #   2. Explicit: PROFILES=foo,bar from the caller's env. Merges with the
 #      auto-detected set. De-duplicated. Lets the user add `observability`
 #      etc. without touching .env.
@@ -286,15 +317,19 @@ _has_profile() {
   for x in "${_profiles[@]:-}"; do [[ "$x" == "$1" ]] && return 0; done
   return 1
 }
-s3_endpoint="$(grep -E '^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
-  | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
+# Via read_env, not a direct .env grep: docker-compose.yml's own `${VAR}`
+# interpolation already prefers a real process env var over .env, so this
+# detection must resolve QOD_S3_ENDPOINT the same way - otherwise an
+# exported (not .env-file) endpoint reaches the manager container but not
+# this profile-activation decision, splitting the two halves of the stack.
+s3_endpoint="$(read_env QOD_S3_ENDPOINT "")"
 if [[ "$s3_endpoint" == rustfs:* ]]; then
   echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'rustfs' compose profile"
   _has_profile rustfs || _profiles+=("rustfs")
 elif [[ "$s3_endpoint" == seaweedfs:* ]]; then
-  echo "WARN: .env's QOD_S3_ENDPOINT=$s3_endpoint still points at the retired 'seaweedfs'" >&2
-  echo "      service (replaced by 'rustfs' on 2026-09-10). The 'rustfs' compose profile is" >&2
-  echo "      NOT being activated for this run - update .env to QOD_S3_ENDPOINT=rustfs:9000" >&2
+  echo "WARN: QOD_S3_ENDPOINT=$s3_endpoint (environment or .env) still points at the retired" >&2
+  echo "      'seaweedfs' service (replaced by 'rustfs' on 2026-09-10). The 'rustfs' compose" >&2
+  echo "      profile is NOT being activated for this run - set QOD_S3_ENDPOINT=rustfs:9000" >&2
   echo "      (auto-activates the profile on your next run), otherwise the stack comes up" >&2
   echo "      unable to reach the object store." >&2
 fi
@@ -442,19 +477,8 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   done
   unset _var _val
 
-  read_env() {
-    local key="$1" default="$2"
-    if [[ -f "$ENV_FILE" ]]; then
-      local raw
-      # [A-Z0-9_]+, not [A-Z_]+: several keys read below (QOD_S3_ENDPOINT,
-      # S3_BUCKET, ...) contain digits, which the letters-only class silently
-      # failed to strip, leaking "KEY=" into the returned value.
-      raw="$(grep -E "^[[:space:]]*$key[[:space:]]*=" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*[A-Z0-9_]+[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
-      echo "${raw:-$default}"
-    else
-      echo "$default"
-    fi
-  }
+  # read_env is defined near the top of the script (right after ENV_FILE is
+  # set) so the rustfs/seaweedfs profile detection above can share it.
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
 

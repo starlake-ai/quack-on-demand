@@ -382,7 +382,8 @@ volumes:
 # s3:// URL, which every Quack node resolves identically regardless of host.
 #
 # run-docker-compose.sh's demo-seed execs follow suit automatically: whenever
-# QOD_S3_ENDPOINT is set in .env, each loader's DATA_PATH is derived as
+# QOD_S3_ENDPOINT is set (environment or .env - a real env var wins, matching
+# compose's own `${VAR}` interpolation), each loader's DATA_PATH is derived as
 # s3://${S3_BUCKET}/<db> (matching what the manager's bootstrap import already
 # created the DuckLake catalog at) instead of the /app/ducklake/<db> default,
 # and the QOD_S3_* credentials are forwarded into the exec so the loader can
