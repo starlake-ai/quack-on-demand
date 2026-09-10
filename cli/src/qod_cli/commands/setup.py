@@ -10,6 +10,10 @@ docker-compose-style `.env` sourced into the shell) still wins over this.
 
 from __future__ import annotations
 
+import os
+import shutil
+import socket
+import subprocess
 import sys
 
 import typer
@@ -41,6 +45,56 @@ def _redact(key: str, value: str) -> str:
     if key not in _SECRET_KEYS or not value:
         return value
     return "*" * min(len(value), 8)
+
+
+_CONNECTION_KEYS = {
+    "QOD_PG_HOST",
+    "QOD_PG_PORT",
+    "QOD_PG_USER",
+    "QOD_PG_PASSWORD",
+    "QOD_PG_DBNAME",
+}
+
+
+def _check_connection(merged: dict[str, str]) -> tuple[bool, str]:
+    """Best-effort Postgres reachability check against the EFFECTIVE config
+    (stored values merged with this invocation's), run before anything is
+    persisted. Two tiers: a plain TCP connect (no dependencies) catches wrong
+    host/port/firewall; when `psql` is on PATH - the same opportunistic
+    convention `qod start` uses for control-plane pre-creation - a
+    `SELECT 1` against the maintenance DB verifies the credentials too.
+    Credentials ride env vars (PGPASSWORD), never argv."""
+    host = merged.get("QOD_PG_HOST", "localhost")
+    port = merged.get("QOD_PG_PORT", "5432")
+    try:
+        with socket.create_connection((host, int(port)), timeout=2):
+            pass
+    except (OSError, ValueError) as e:
+        return False, f"cannot reach {host}:{port} ({e})"
+    if shutil.which("psql") is None:
+        return True, f"{host}:{port} reachable (credentials unverified: psql not on PATH)"
+    env = {
+        **os.environ,
+        "PGHOST": host,
+        "PGPORT": port,
+        "PGUSER": merged.get("QOD_PG_USER", "postgres"),
+        "PGPASSWORD": merged.get("QOD_PG_PASSWORD", ""),
+        "PGCONNECT_TIMEOUT": "5",
+    }
+    try:
+        proc = subprocess.run(
+            ["psql", "--dbname", "postgres", "--no-psqlrc", "-tAc", "SELECT 1"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"{host}:{port} reachable but psql check timed out"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return False, f"{host}:{port} reachable but login failed: {detail[-1] if detail else 'unknown error'}"
+    return True, f"connection check ok ({host}:{port})"
 
 
 def _is_interactive() -> bool:
@@ -88,6 +142,12 @@ def setup(
     ),
     show: bool = typer.Option(
         False, "--show", help="Print the stored config and exit; no writes, no prompts."
+    ),
+    skip_checks: bool = typer.Option(
+        False,
+        "--skip-checks",
+        help="Skip the Postgres connection check before saving (e.g. when "
+        "configuring for a host unreachable from here).",
     ),
 ):
     """Configure `qod start` once so you can run it bare afterwards.
@@ -163,6 +223,35 @@ def setup(
 
     values = {k: v for k, v in named.items() if v is not None}
     values.update(set_values)
+
+    # Connection check before saving, only when this invocation touches
+    # connection-relevant keys (so e.g. `--set QOD_MIN_PORT=...` while the
+    # database happens to be down is not blocked). Interactive runs always
+    # collect them, so they always check.
+    touches_connection = bool(
+        _CONNECTION_KEYS.intersection(values) or _CONNECTION_KEYS.intersection(unset)
+    )
+    if touches_connection and not skip_checks:
+        merged_preview = {**current, **values}
+        for key in unset:
+            merged_preview.pop(key, None)
+        ok, detail = _check_connection(merged_preview)
+        if ok:
+            # stderr in json mode so machine-readable stdout stays pure JSON.
+            typer.echo(detail, err=ctx.obj.json_output)
+        elif interactive:
+            typer.echo(f"connection check failed: {detail}", err=True)
+            if not typer.confirm("save anyway?", default=False):
+                typer.echo("nothing saved.", err=True)
+                raise typer.Exit(1)
+        else:
+            typer.echo(
+                f"connection check failed: {detail}\n"
+                "nothing saved. Fix the coordinates, or pass --skip-checks to "
+                "save without checking.",
+                err=True,
+            )
+            raise typer.Exit(1)
 
     save_start_env(values, remove=unset)
     merged = {**current, **values}
