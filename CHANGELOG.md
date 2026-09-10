@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.2
+
+- **`qod setup`: configure `qod start` once.** New CLI command persisting the
+  env vars `qod start` reads (Postgres coordinates, admin credentials, API
+  key, auth/TLS toggles, arbitrary `QOD_*`/`PROXY_*` via `--set`) into the
+  CLI config file under a `[start]` table; guided prompts on a terminal,
+  flags/`--set`/`--unset`/`--show` for scripts. A real shell export still
+  wins, and `qod start --demo` deliberately ignores the stored config.
+  Before saving, connection coordinates are verified (TCP probe, plus a
+  `SELECT 1` login check when `psql` is on `PATH`); `--skip-checks` opts out.
+- **`qod status`: one glance at what is running.** Manager `/health` and
+  `/ready`, FlightSQL edge coordinates with a live port check, local manager
+  pids, per-pool healthy/total nodes when logged in, and the stored setup
+  summary. Exits 1 when the manager is unreachable, for scripting.
+- **Local rigs: SeaweedFS replaced by RustFS** (kind local-stack and docker
+  compose). BREAKING (dev rigs): the compose profile is now `rustfs` (was
+  `seaweedfs`), data dir `./rustfs` (env `RUSTFS_DIR`), S3 endpoint
+  `rustfs:9000`; a stale `seaweedfs` endpoint in `.env` warns instead of
+  half-starting. RustFS does not auto-create buckets, so both rigs run a
+  one-shot bucket-create step before the stack serves.
+- **Compose wrapper hardening.** The wrapper script now honors the repo-wide
+  precedence everywhere (process env wins over `.env`, incl. `PG_PORT` and
+  profile auto-detection, scheme-tolerant endpoint matching); demo seeding
+  derives its DuckLake data path from `QOD_DUCKLAKE_DATA_PATH` exactly as
+  the manager does (trailing slashes and nested or local roots included), so
+  S3-mode seeding no longer mismatches the catalog; data/cert/store dirs are
+  prepared with correct ownership on every run, not only under `NUKE=1`.
+- **Fix: demo seeding inside released images.** `scripts/_load-common.sh`
+  was never copied into the Docker image after the loader refactor, so
+  in-pod `LOAD_TPCH` seeding failed in every released image since; the
+  image now ships it.
+- **Helm chart published as an OCI artifact.** Every release pushes the
+  chart to `oci://ghcr.io/starlake-ai/charts/quack-on-demand`, stamped to
+  the release version; the chart's node-pod image now defaults to the
+  release `appVersion` instead of `latest-snapshot`, so a versioned chart
+  deploys versioned images throughout.
+
 ## 0.8.1
 
 - **SQL admin dialect: audit and history parity with REST.** Admin statements
