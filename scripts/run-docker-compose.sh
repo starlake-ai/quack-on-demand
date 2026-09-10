@@ -126,20 +126,12 @@ if [[ "$NUKE" == "1" ]]; then
     docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
       'rm -rf /work/pgdata /work/ducklake /work/certs /work/rustfs /work/seaweedfs /work/seaweedfs-config'
   fi
-  # Pre-create the bind-mount dirs with the right ownership. Without
-  # this, docker auto-creates them root-owned on `up`, and the
-  # manager's `quack` user (uid 1000, set in the Dockerfile) gets
-  # EACCES on `./certs` (TLS cert write fails -> FlightSQL edge
-  # silently dies) and `./ducklake` (TPC-H seed `mkdir` fails). Chown
-  # via the ephemeral container so it works even when the host user
-  # is not uid 1000. Postgres re-chowns ./pgdata to uid 70 on its own
-  # init, so we leave that one root-owned. (./rustfs gets the same
-  # treatment unconditionally, further below - not just on NUKE, since
-  # unlike SeaweedFS the rustfs image runs non-root and a root-owned
-  # ./rustfs is a hard EACCES failure, not a latent one.)
-  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
-  docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-    'chown 1000:1000 /work/ducklake /work/certs'
+  # Pre-create ./pgdata so `up` doesn't have to. Postgres re-chowns it to
+  # uid 70 on its own init regardless of starting ownership, so it's the
+  # one bind-mount dir that doesn't need our chown - see below for
+  # ./ducklake, ./certs, ./rustfs, which do (and are prepared unconditionally
+  # on every run now, not just here).
+  mkdir -p "$REPO_DIR/pgdata"
   echo "booting from a clean slate."
 fi
 
@@ -272,13 +264,7 @@ fi
 
 # ---- Port-conflict auto-bump ----
 declare_pg_port() {
-  if [[ -f "$ENV_FILE" ]]; then
-    local raw
-    raw="$(grep -E '^[[:space:]]*PG_PORT[[:space:]]*=' "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*PG_PORT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
-    echo "${raw:-5432}"
-  else
-    echo "5432"
-  fi
+  read_env PG_PORT 5432
 }
 PG_PORT_EFFECTIVE="$(declare_pg_port)"
 
@@ -350,13 +336,19 @@ for p in "${_profiles[@]:-}"; do
   COMPOSE_PROFILES+=("--profile" "$p")
 done
 
-# ---- Prepare ./rustfs ownership (every run, not just NUKE) ---------------
-# The rustfs image runs as the non-root uid 10001 (unlike SeaweedFS, which
-# ran as root, so this gap was latent before). Without pre-creating the
-# dir, Docker auto-creates ./rustfs root-owned on `up` and RustFS gets
-# EACCES on /data - a hard failure on the very first boot, not just after a
-# NUKE. Runs on every invocation where the rustfs profile is active, cheap
-# and idempotent (mkdir -p + chown are no-ops once already correct).
+# ---- Prepare bind-mount dir ownership (every run, not just NUKE) ---------
+# Without pre-creating these, Docker auto-creates them root-owned on `up`,
+# and the manager's `quack` user (uid 1000, set in the Dockerfile) gets
+# EACCES on `./certs` (TLS cert write fails -> FlightSQL edge silently dies)
+# and `./ducklake` (TPC-H seed `mkdir` fails, and it's still needed in S3
+# mode too, for DuckDB's local TEMP_DIR spill). This used to run only inside
+# the NUKE=1 block, so a fresh checkout's first `up` (no prior NUKE) hit both
+# failures. ./rustfs gets the same treatment, gated on the rustfs profile
+# being active, chowned to its image's non-root uid 10001 instead (unlike
+# SeaweedFS, which ran as root, so that gap was latent before). All of this
+# is cheap and idempotent (mkdir -p + chown are no-ops once already correct).
+mkdir -p "$REPO_DIR/ducklake" "$REPO_DIR/certs"
+docker run --rm -v "$REPO_DIR:/work" alpine sh -c 'chown 1000:1000 /work/ducklake /work/certs'
 if _has_profile rustfs; then
   mkdir -p "$REPO_DIR/rustfs"
   docker run --rm -v "$REPO_DIR:/work" alpine sh -c 'chown 10001:10001 /work/rustfs'
@@ -419,7 +411,10 @@ esac
 if _has_profile rustfs; then
   echo -n "waiting for rustfs-mb bucket bootstrap "
   mb_container="quack-on-demand-rustfs-mb"
-  mb_deadline=$(( $(date +%s) + 60 ))
+  # rustfs-mb's own in-container retry loop is 60 iterations * 2s sleep, up
+  # to ~120s; this deadline must stay comfortably above that or the wrapper
+  # gives up before the container itself would.
+  mb_deadline=$(( $(date +%s) + 150 ))
   while true; do
     mb_status="$(docker inspect -f '{{.State.Status}}' "$mb_container" 2>/dev/null || true)"
     if [[ "$mb_status" == "exited" ]]; then
@@ -435,7 +430,7 @@ if _has_profile rustfs; then
     fi
     if (( $(date +%s) > mb_deadline )); then
       echo
-      echo "ERROR: rustfs-mb did not finish within 60s." >&2
+      echo "ERROR: rustfs-mb did not finish within 150s." >&2
       echo "       Check 'docker compose -f $COMPOSE_FILE logs rustfs-mb'." >&2
       exit 1
     fi
@@ -482,25 +477,46 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
 
-  # S3-mode seeding: when QOD_S3_ENDPOINT is set (the same signal that
-  # auto-activates the rustfs profile above, but also true for an external
-  # S3 endpoint under Option B), the manager's bootstrap import creates the
-  # DuckLake catalog at s3://<bucket>/<db>, not /app/ducklake/<db>. A loader
-  # exec'd with the local path then fails ATTACH with "DATA_PATH parameter
-  # ... does not match existing data path in the catalog" - mirror the kind
-  # rig's loader execs (run-local-stack-k8s.sh) by deriving DATA_PATH from
-  # S3_BUCKET and forwarding the same QOD_S3_* vars _load-common.sh's
-  # load_resolve_storage() reads to author the DuckDB SECRET. TEMP_DIR
-  # stays local either way - spill must never go to the bucket.
+  # S3-mode seeding: key off QOD_DUCKLAKE_DATA_PATH itself, not QOD_S3_ENDPOINT.
+  # An endpoint alone was the wrong signal in both directions - it can be set
+  # while DATA_PATH is still local (seeding then derived a bucket path nothing
+  # wrote to), and a stale/unrelated endpoint could flip seeding into S3 mode
+  # even though DATA_PATH was local. Mirror exactly how the manager derives
+  # each tenant-db's actual data path instead
+  # (PoolSupervisor.effectiveMetastoreFor -> replaceLastSegment,
+  # PoolSupervisor.scala:239-251): replace the root's last path segment with
+  # the tenant-db name. This also handles a nested root (s3://bucket/a/b) the
+  # same way the manager does. Forwards the same QOD_S3_* vars
+  # _load-common.sh's load_resolve_storage() reads to author the DuckDB
+  # SECRET. TEMP_DIR stays local either way - spill must never go to the
+  # bucket (and matters in S3 mode too, since DuckDB's spill dir is separate
+  # from DATA_PATH).
+  #
+  # Known limitation (Option B - external AWS S3, no QOD_S3_ENDPOINT
+  # override, relying on AWS's default endpoint resolution): unset
+  # QOD_S3_ENDPOINT still reaches _load-common.sh's SECRET as `ENDPOINT ''`
+  # rather than omitting the clause. Fixing that is out of scope here (would
+  # touch _load-common.sh, shared with every other launcher) - tracked as a
+  # follow-up; for now, Option B seeding needs QOD_S3_ENDPOINT set explicitly
+  # (e.g. to s3.amazonaws.com) even though the manager itself tolerates it
+  # unset.
   s3_access_key_id="$(read_env QOD_S3_ACCESS_KEY_ID quack)"
   s3_secret_access_key="$(read_env QOD_S3_SECRET_ACCESS_KEY quackquack)"
   s3_region="$(read_env QOD_S3_REGION us-east-1)"
   s3_url_style="$(read_env QOD_S3_URL_STYLE path)"
   s3_use_ssl="$(read_env QOD_S3_USE_SSL false)"
-  s3_bucket="$(read_env S3_BUCKET ducklake)"
+  _dl_root="$(read_env QOD_DUCKLAKE_DATA_PATH /app/ducklake/data)"
+  case "$_dl_root" in
+    s3://*|s3a://*|gs://*|r2://*|az://*|azure://*|abfss://*)
+      remote_root="${_dl_root%/*}"
+      ;;
+    *)
+      remote_root=""
+      ;;
+  esac
   s3_env_flags=()
-  if [[ -n "$s3_endpoint" ]]; then
-    echo "S3 mode: seeding will write to s3://${s3_bucket}/<db> (QOD_S3_ENDPOINT=$s3_endpoint)"
+  if [[ -n "$remote_root" ]]; then
+    echo "S3 mode: seeding will write under $remote_root/<db> (QOD_DUCKLAKE_DATA_PATH=$_dl_root)"
     s3_env_flags=(
       -e QOD_S3_ENDPOINT="$s3_endpoint"
       -e QOD_S3_ACCESS_KEY_ID="$s3_access_key_id"
@@ -510,14 +526,9 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
       -e QOD_S3_USE_SSL="$s3_use_ssl"
     )
   fi
-  tpch_data_path="/app/ducklake/acme_tpch"
-  tpcds_data_path="/app/ducklake/globex_tpcds"
-  ssb_data_path="/app/ducklake/acme_tpch"
-  if [[ -n "$s3_endpoint" ]]; then
-    tpch_data_path="s3://${s3_bucket}/acme_tpch"
-    tpcds_data_path="s3://${s3_bucket}/globex_tpcds"
-    ssb_data_path="s3://${s3_bucket}/acme_tpch"
-  fi
+  tpch_data_path="${remote_root:-/app/ducklake}/acme_tpch"
+  tpcds_data_path="${remote_root:-/app/ducklake}/globex_tpcds"
+  ssb_data_path="${remote_root:-/app/ducklake}/acme_tpch"
 
   # The manager image is JRE-only and does not ship psql. Pre-create only
   # the demo tenant-db Postgres databases we are actually going to seed,
@@ -594,8 +605,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
 fi
 
 # ---- Summary ----
-tls="${TLS:-$(grep -E '^[[:space:]]*TLS[[:space:]]*=' "$ENV_FILE" 2>/dev/null | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*TLS[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//')}"
-tls="${tls:-false}"
+tls="$(read_env TLS false)"
 scheme=$([[ "$tls" == "true" ]] && echo "grpc+tls" || echo "grpc")
 
 cat <<EOM
