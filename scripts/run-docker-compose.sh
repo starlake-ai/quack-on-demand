@@ -133,11 +133,13 @@ if [[ "$NUKE" == "1" ]]; then
   # silently dies) and `./ducklake` (TPC-H seed `mkdir` fails). Chown
   # via the ephemeral container so it works even when the host user
   # is not uid 1000. Postgres re-chowns ./pgdata to uid 70 on its own
-  # init, so we leave that one root-owned. ./rustfs is chowned to
-  # 10001:10001 (the non-root uid the rustfs image runs as) the same way.
-  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs" "$REPO_DIR/rustfs"
+  # init, so we leave that one root-owned. (./rustfs gets the same
+  # treatment unconditionally, further below - not just on NUKE, since
+  # unlike SeaweedFS the rustfs image runs non-root and a root-owned
+  # ./rustfs is a hard EACCES failure, not a latent one.)
+  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
   docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-    'chown 1000:1000 /work/ducklake /work/certs && chown 10001:10001 /work/rustfs'
+    'chown 1000:1000 /work/ducklake /work/certs'
   echo "booting from a clean slate."
 fi
 
@@ -291,9 +293,10 @@ if [[ "$s3_endpoint" == rustfs:* ]]; then
   _has_profile rustfs || _profiles+=("rustfs")
 elif [[ "$s3_endpoint" == seaweedfs:* ]]; then
   echo "WARN: .env's QOD_S3_ENDPOINT=$s3_endpoint still points at the retired 'seaweedfs'" >&2
-  echo "      service (replaced by 'rustfs' on 2026-09-10). Update .env to" >&2
-  echo "      QOD_S3_ENDPOINT=rustfs:9000 (and the 'rustfs' profile is auto-activated for" >&2
-  echo "      you) - the stack will otherwise come up unable to reach the object store." >&2
+  echo "      service (replaced by 'rustfs' on 2026-09-10). The 'rustfs' compose profile is" >&2
+  echo "      NOT being activated for this run - update .env to QOD_S3_ENDPOINT=rustfs:9000" >&2
+  echo "      (auto-activates the profile on your next run), otherwise the stack comes up" >&2
+  echo "      unable to reach the object store." >&2
 fi
 if [[ -n "${PROFILES:-}" ]]; then
   IFS=',' read -ra _user_profiles <<< "$PROFILES"
@@ -311,6 +314,18 @@ for p in "${_profiles[@]:-}"; do
   [[ -n "$p" ]] || continue
   COMPOSE_PROFILES+=("--profile" "$p")
 done
+
+# ---- Prepare ./rustfs ownership (every run, not just NUKE) ---------------
+# The rustfs image runs as the non-root uid 10001 (unlike SeaweedFS, which
+# ran as root, so this gap was latent before). Without pre-creating the
+# dir, Docker auto-creates ./rustfs root-owned on `up` and RustFS gets
+# EACCES on /data - a hard failure on the very first boot, not just after a
+# NUKE. Runs on every invocation where the rustfs profile is active, cheap
+# and idempotent (mkdir -p + chown are no-ops once already correct).
+if _has_profile rustfs; then
+  mkdir -p "$REPO_DIR/rustfs"
+  docker run --rm -v "$REPO_DIR:/work" alpine sh -c 'chown 10001:10001 /work/rustfs'
+fi
 
 # ---- Inject QOD_BOOTSTRAP_YAML before up when a bench or explicit DEMO asks ----
 # The JVM reads this at startup, so it must be in .env before `docker compose up`.
@@ -358,6 +373,42 @@ case "$IMAGE_SOURCE" in
     ;;
 esac
 
+# ---- Wait for the RustFS bucket bootstrap (rustfs profile only) ----------
+# `quack` cannot depends_on the profiled rustfs-mb service without breaking
+# the default (no-profile) run - see the comment on the quack service in
+# docker-compose.yml. Close the race here instead: the manager's boot-time
+# DuckLake init (when QOD_DUCKLAKE_DATA_PATH is s3://) can hit the bucket
+# before rustfs-mb creates it, so wait for that one-shot container to exit
+# 0 before even starting the manager-readiness wait below. Mirrors the k8s
+# smoke rig's `kubectl wait --for=condition=complete job/rustfs-mb`.
+if _has_profile rustfs; then
+  echo -n "waiting for rustfs-mb bucket bootstrap "
+  mb_container="quack-on-demand-rustfs-mb"
+  mb_deadline=$(( $(date +%s) + 60 ))
+  while true; do
+    mb_status="$(docker inspect -f '{{.State.Status}}' "$mb_container" 2>/dev/null || true)"
+    if [[ "$mb_status" == "exited" ]]; then
+      mb_exit="$(docker inspect -f '{{.State.ExitCode}}' "$mb_container" 2>/dev/null || echo 1)"
+      if [[ "$mb_exit" == "0" ]]; then
+        echo " ok"
+        break
+      fi
+      echo
+      echo "ERROR: rustfs-mb exited $mb_exit; the S3 bucket may not exist." >&2
+      echo "       Check 'docker compose -f $COMPOSE_FILE logs rustfs-mb'." >&2
+      exit 1
+    fi
+    if (( $(date +%s) > mb_deadline )); then
+      echo
+      echo "ERROR: rustfs-mb did not finish within 60s." >&2
+      echo "       Check 'docker compose -f $COMPOSE_FILE logs rustfs-mb'." >&2
+      exit 1
+    fi
+    echo -n "."
+    sleep 2
+  done
+fi
+
 # ---- Wait for manager ----
 echo -n "waiting for manager REST on :20900 "
 deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
@@ -395,7 +446,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
     local key="$1" default="$2"
     if [[ -f "$ENV_FILE" ]]; then
       local raw
-      raw="$(grep -E "^[[:space:]]*$key[[:space:]]*=" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*[A-Z_]+[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
+      # [A-Z0-9_]+, not [A-Z_]+: several keys read below (QOD_S3_ENDPOINT,
+      # S3_BUCKET, ...) contain digits, which the letters-only class silently
+      # failed to strip, leaking "KEY=" into the returned value.
+      raw="$(grep -E "^[[:space:]]*$key[[:space:]]*=" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*[A-Z0-9_]+[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
       echo "${raw:-$default}"
     else
       echo "$default"
@@ -403,6 +457,43 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   }
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
+
+  # S3-mode seeding: when QOD_S3_ENDPOINT is set (the same signal that
+  # auto-activates the rustfs profile above, but also true for an external
+  # S3 endpoint under Option B), the manager's bootstrap import creates the
+  # DuckLake catalog at s3://<bucket>/<db>, not /app/ducklake/<db>. A loader
+  # exec'd with the local path then fails ATTACH with "DATA_PATH parameter
+  # ... does not match existing data path in the catalog" - mirror the kind
+  # rig's loader execs (run-local-stack-k8s.sh) by deriving DATA_PATH from
+  # S3_BUCKET and forwarding the same QOD_S3_* vars _load-common.sh's
+  # load_resolve_storage() reads to author the DuckDB SECRET. TEMP_DIR
+  # stays local either way - spill must never go to the bucket.
+  s3_access_key_id="$(read_env QOD_S3_ACCESS_KEY_ID quack)"
+  s3_secret_access_key="$(read_env QOD_S3_SECRET_ACCESS_KEY quackquack)"
+  s3_region="$(read_env QOD_S3_REGION us-east-1)"
+  s3_url_style="$(read_env QOD_S3_URL_STYLE path)"
+  s3_use_ssl="$(read_env QOD_S3_USE_SSL false)"
+  s3_bucket="$(read_env S3_BUCKET ducklake)"
+  s3_env_flags=()
+  if [[ -n "$s3_endpoint" ]]; then
+    echo "S3 mode: seeding will write to s3://${s3_bucket}/<db> (QOD_S3_ENDPOINT=$s3_endpoint)"
+    s3_env_flags=(
+      -e QOD_S3_ENDPOINT="$s3_endpoint"
+      -e QOD_S3_ACCESS_KEY_ID="$s3_access_key_id"
+      -e QOD_S3_SECRET_ACCESS_KEY="$s3_secret_access_key"
+      -e QOD_S3_REGION="$s3_region"
+      -e QOD_S3_URL_STYLE="$s3_url_style"
+      -e QOD_S3_USE_SSL="$s3_use_ssl"
+    )
+  fi
+  tpch_data_path="/app/ducklake/acme_tpch"
+  tpcds_data_path="/app/ducklake/globex_tpcds"
+  ssb_data_path="/app/ducklake/acme_tpch"
+  if [[ -n "$s3_endpoint" ]]; then
+    tpch_data_path="s3://${s3_bucket}/acme_tpch"
+    tpcds_data_path="s3://${s3_bucket}/globex_tpcds"
+    ssb_data_path="s3://${s3_bucket}/acme_tpch"
+  fi
 
   # The manager image is JRE-only and does not ship psql. Pre-create only
   # the demo tenant-db Postgres databases we are actually going to seed,
@@ -438,9 +529,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
       -e PG_PASS="$pg_pass" \
       -e DB_NAME="acme_tpch" \
       -e SCHEMA_NAME="tpch1" \
-      -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e DATA_PATH="$tpch_data_path" \
       -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCH" \
+      "${s3_env_flags[@]+"${s3_env_flags[@]}"}" \
       quack /app/scripts/load-tpch-dbgen.sh
   fi
 
@@ -453,9 +545,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
       -e PG_PASS="$pg_pass" \
       -e DB_NAME="globex_tpcds" \
       -e SCHEMA_NAME="tpcds1" \
-      -e DATA_PATH="/app/ducklake/globex_tpcds" \
+      -e DATA_PATH="$tpcds_data_path" \
       -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_TPCDS" \
+      "${s3_env_flags[@]+"${s3_env_flags[@]}"}" \
       quack /app/scripts/load-tpcds-dbgen.sh
   fi
 
@@ -468,9 +561,10 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
       -e PG_PASS="$pg_pass" \
       -e DB_NAME="acme_tpch" \
       -e SCHEMA_NAME="ssb1" \
-      -e DATA_PATH="/app/ducklake/acme_tpch" \
+      -e DATA_PATH="$ssb_data_path" \
       -e TEMP_DIR="/app/ducklake/.tmp" \
       -e SF="$LOAD_SSB" \
+      "${s3_env_flags[@]+"${s3_env_flags[@]}"}" \
       quack /app/scripts/load-ssb-dbgen.sh
   fi
 fi

@@ -85,6 +85,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Deliberately does NOT depends_on rustfs/rustfs-mb: `quack` carries no
+    # profile (it must come up on a plain `docker compose up`), and a
+    # depends_on toward a profiled service is not honored from a
+    # profile-less one - compose would refuse to start rustfs-mb for it at
+    # all, breaking the default (no S3) run. When the rustfs profile is
+    # active and QOD_DUCKLAKE_DATA_PATH points at s3://, the bucket-exists
+    # race against the manager's boot-time DuckLake init is instead closed
+    # by run-docker-compose.sh, which waits for rustfs-mb to exit 0 after
+    # `up` and before the manager-readiness wait. A raw `docker compose
+    # --profile rustfs up -d` (bypassing the wrapper) does not get that
+    # wait and can race it.
     environment:
       # ----- Postgres connection (the service name is the hostname) -----
       QOD_PG_HOST:     postgres
@@ -219,9 +230,14 @@ services:
   # change them.
   #
   # The image runs as the non-root user rustfs (uid/gid 10001), so the
-  # bind mount must be writable by that uid - run-docker-compose.sh's
-  # NUKE path chowns ./rustfs to 10001:10001 via an ephemeral container,
-  # the same trick it uses for ./ducklake and ./certs.
+  # bind mount must be writable by that uid. run-docker-compose.sh
+  # pre-creates and chowns ./rustfs to 10001:10001 (via an ephemeral
+  # container, the same trick it uses for ./ducklake and ./certs) on every
+  # invocation, not just NUKE - Docker would otherwise auto-create it
+  # root-owned on first `up` and RustFS gets EACCES on /data. Bringing this
+  # profile up with a raw `docker compose --profile rustfs up -d` (bypassing
+  # the wrapper script) must mkdir + chown ./rustfs to 10001:10001 by hand
+  # first.
   rustfs:
     image: rustfs/rustfs:latest
     container_name: quack-on-demand-rustfs
@@ -346,6 +362,10 @@ volumes:
 # http://localhost:${RUSTFS_CONSOLE_PORT:-9001}/ (RUSTFS_CONSOLE_ENABLE=true
 # above) - that page is a file browser (buckets/keys, download links),
 # RustFS's equivalent of SeaweedFS's Filer UI. No extra container needed.
+# It logs in with the same RUSTFS_ACCESS_KEY/RUSTFS_SECRET_KEY as the S3 API
+# (${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack} by
+# default) - DON'T expose this port to a public network without changing them,
+# same caution as Grafana's anonymous-admin port above.
 #
 # S3 API for `aws s3 ls` / `s5cmd ls` / `mc ls`:
 #   http://localhost:${RUSTFS_S3_PORT:-9000}    creds: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
@@ -360,3 +380,11 @@ volumes:
 # (and QOD_S3_ENDPOINT=rustfs:9000) so the same loader writes parquet
 # to the bucket instead of /app/ducklake. The path the catalog persists is the
 # s3:// URL, which every Quack node resolves identically regardless of host.
+#
+# run-docker-compose.sh's demo-seed execs follow suit automatically: whenever
+# QOD_S3_ENDPOINT is set in .env, each loader's DATA_PATH is derived as
+# s3://${S3_BUCKET}/<db> (matching what the manager's bootstrap import already
+# created the DuckLake catalog at) instead of the /app/ducklake/<db> default,
+# and the QOD_S3_* credentials are forwarded into the exec so the loader can
+# author the same DuckDB S3 SECRET. TEMP_DIR always stays local regardless -
+# spill must never go to the bucket.
