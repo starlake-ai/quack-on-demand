@@ -60,7 +60,7 @@ class KubernetesQuackBackendSpec
 
   it should "forward QOD_S3_* env vars from the manager process to the spawned pod" in:
     val fakeEnv = Map(
-      "QOD_S3_ENDPOINT"          -> "http://seaweedfs:8333",
+      "QOD_S3_ENDPOINT"          -> "http://rustfs:9000",
       "QOD_S3_ACCESS_KEY_ID"     -> "quack",
       "QOD_S3_SECRET_ACCESS_KEY" -> "quackquack",
       "QOD_S3_REGION"            -> "us-east-1",
@@ -100,7 +100,7 @@ class KubernetesQuackBackendSpec
       .get(0)
     val env = container.getEnv.asScala.map(e => e.getName -> e.getValue).toMap
 
-    env.get("QOD_S3_ENDPOINT") shouldBe Some("http://seaweedfs:8333")
+    env.get("QOD_S3_ENDPOINT") shouldBe Some("http://rustfs:9000")
     env.get("QOD_S3_ACCESS_KEY_ID") shouldBe Some("quack")
     env.get("QOD_S3_SECRET_ACCESS_KEY") shouldBe Some("quackquack")
     env.get("QOD_S3_REGION") shouldBe Some("us-east-1")

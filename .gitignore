@@ -91,6 +91,9 @@ project/project/
 .env
 .env.local
 pgdata/
+rustfs/
+# Legacy SeaweedFS bind-mounts (replaced by rustfs/ 2026-09-10) - kept
+# ignored so pre-existing checkouts don't show them as untracked.
 seaweedfs/
 seaweedfs-config/
 

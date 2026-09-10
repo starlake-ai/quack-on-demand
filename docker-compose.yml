@@ -14,8 +14,7 @@
 #   ./pgdata          -> postgres data dir   (`qod` + every tenant-db)   [PGDATA_DIR]
 #   ./ducklake        -> DuckLake data files (parquet, one subdir per db) [DUCKLAKE_DIR]
 #   ./certs           -> self-signed TLS cert + key (auto-gen first boot)  [CERTS_DIR]
-#   ./seaweedfs       -> SeaweedFS object data (seaweedfs profile)     [SEAWEEDFS_DIR]
-#   ./seaweedfs-config-> SeaweedFS S3 creds   (seaweedfs profile) [SEAWEEDFS_CONFIG_DIR]
+#   ./rustfs          -> RustFS object data   (rustfs profile)          [RUSTFS_DIR]
 #
 # NOTE: `NUKE=1 scripts/run-docker-compose.sh` only wipes the repo-relative
 # defaults; external folders you point these vars at are left untouched.
@@ -135,11 +134,13 @@ services:
       # to keep using the ./ducklake bind-mount; set it to s3://bucket/path
       # (or s3a://, etc.) to switch to object storage.
       #
-      # The bundled `seaweedfs` profile (docker compose --profile seaweedfs
-      # up -d) brings up a single-node SeaweedFS exposing an S3 API at
-      # seaweedfs:8333 and creates the bucket named by S3_BUCKET. Pair it
-      # with QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>, point
-      # QOD_S3_ENDPOINT at seaweedfs:8333, and the stack runs end-to-end
+      # The bundled `rustfs` profile (docker compose --profile rustfs
+      # up -d) brings up a single-node RustFS exposing an S3 API at
+      # rustfs:9000 and creates the bucket named by S3_BUCKET (RustFS does
+      # not auto-create buckets on PutObject, so a one-shot rustfs-mb
+      # service creates it first). Pair it with
+      # QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>, point
+      # QOD_S3_ENDPOINT at rustfs:9000, and the stack runs end-to-end
       # without touching ./ducklake. For external S3 (AWS, R2, MinIO, GCS
       # HMAC) leave the profile off and fill in the endpoint + credentials.
       QOD_S3_ENDPOINT:          ${QOD_S3_ENDPOINT:-}
@@ -157,16 +158,16 @@ services:
       # value, so non-proxied environments are unaffected.
       #
       # Bundled in-network hostnames are always added to NO_PROXY so the
-      # manager/seeder/Quack nodes reach `postgres` and `seaweedfs:8333`
+      # manager/seeder/Quack nodes reach `postgres` and `rustfs:9000`
       # directly. Without this, libcurl in DuckDB's httpfs routes the
       # s3:// PUTs through the corporate proxy and they come back as
       # 407 Proxy Authentication Required / 502 Bad Gateway.
       HTTP_PROXY:  ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY:    "localhost,127.0.0.1,postgres,seaweedfs${NO_PROXY:+,${NO_PROXY}}"
+      NO_PROXY:    "localhost,127.0.0.1,postgres,rustfs${NO_PROXY:+,${NO_PROXY}}"
       http_proxy:  ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy:    "localhost,127.0.0.1,postgres,seaweedfs${no_proxy:+,${no_proxy}}"
+      no_proxy:    "localhost,127.0.0.1,postgres,rustfs${no_proxy:+,${no_proxy}}"
 
     ports:
       - "${MANAGER_PORT:-20900}:20900"   # REST + UI
@@ -196,145 +197,98 @@ services:
       - ${DUCKLAKE_DIR:-./ducklake}:/app/ducklake
       - ${CERTS_DIR:-./certs}:/app/certs
 
-  # ----- Optional: SeaweedFS as an in-compose S3 backend -----
+  # ----- Optional: RustFS as an in-compose S3 backend -----
   #
   # Opt in with:
-  #   docker compose --profile seaweedfs up -d
+  #   docker compose --profile rustfs up -d
   #
-  # SeaweedFS runs "server -s3" in single-node mode (master + volume + filer +
-  # s3 gateway) so the whole object store is one container. The S3 API listens
-  # on :8333; the manager + quack nodes reach it as `seaweedfs:8333` on the
-  # compose network, and host clients can hit it on the same port.
+  # RustFS (https://rustfs.com) is a single S3-compatible object-store
+  # binary - no separate master/volume/filer processes, so the whole
+  # store is one container. The S3 API listens on :9000; the manager +
+  # quack nodes reach it as `rustfs:9000` on the compose network, and
+  # host clients can hit it on the same port. A web console (RustFS's
+  # equivalent of SeaweedFS's Filer UI file browser) listens on :9001.
   #
-  # Persistence: ./seaweedfs on the host (bind-mount), same pattern as the
+  # Persistence: ./rustfs on the host (bind-mount), same pattern as the
   # postgres/ducklake/certs volumes.
   #
-  # Credentials are baked in via /etc/seaweedfs/s3.json. Defaults match the
-  # QOD_S3_* env vars on the quack service. Override S3_ACCESS_KEY_ID /
-  # S3_SECRET_ACCESS_KEY / S3_BUCKET in .env if you change them.
-  # Pre-init: write /etc/seaweedfs/s3.json BEFORE seaweedfs starts so the S3
-  # gateway loads our credentials on first boot. Without this, seaweedfs boots
-  # with default (no-auth) IAM and only picks up s3.json on a restart, which
-  # makes the bucket appear unauthenticated to any client racing the restart.
-  seaweedfs-config:
-    image: alpine:3
-    container_name: quack-on-demand-seaweedfs-config
-    profiles: ["seaweedfs"]
-    environment:
-      S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
-      S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
-    volumes:
-      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
-    # $$VAR escapes compose's variable substitution so the in-container shell
-    # resolves the env vars set above; bare $VAR would be expanded by compose
-    # against .env and arrive empty.
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        cat > /etc/seaweedfs/s3.json <<JSON
-        {
-          "identities": [
-            {
-              "name": "quack",
-              "credentials": [
-                { "accessKey": "$${S3_ACCESS_KEY_ID}", "secretKey": "$${S3_SECRET_ACCESS_KEY}" }
-              ],
-              "actions": ["Admin", "Read", "Write", "List", "Tagging"]
-            }
-          ]
-        }
-        JSON
-        echo "wrote /etc/seaweedfs/s3.json"
-
-  seaweedfs:
-    image: chrislusf/seaweedfs:latest
-    container_name: quack-on-demand-seaweedfs
-    profiles: ["seaweedfs"]
+  # Credentials are plain env vars (RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY)
+  # - no config file to pre-seed, unlike SeaweedFS's s3.json. Defaults
+  # match the QOD_S3_* env vars on the quack service. Override
+  # S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY / S3_BUCKET in .env if you
+  # change them.
+  #
+  # The image runs as the non-root user rustfs (uid/gid 10001), so the
+  # bind mount must be writable by that uid - run-docker-compose.sh's
+  # NUKE path chowns ./rustfs to 10001:10001 via an ephemeral container,
+  # the same trick it uses for ./ducklake and ./certs.
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: quack-on-demand-rustfs
+    profiles: ["rustfs"]
     restart: unless-stopped
-    depends_on:
-      seaweedfs-config:
-        condition: service_completed_successfully
+    user: "10001:10001"
     command:
-      - server
-      - -dir=/data
-      - -s3
-      - -s3.config=/etc/seaweedfs/s3.json
-    ports:
-      # 8333 = S3 API. 9333 = master, 8080 = volume, 8888 = filer - exposed
-      # too so `weed shell` / Web UIs work from the host when debugging.
-      - "${SEAWEEDFS_S3_PORT:-8333}:8333"
-      - "${SEAWEEDFS_MASTER_PORT:-9333}:9333"
-      - "${SEAWEEDFS_VOLUME_PORT:-8080}:8080"
-      - "${SEAWEEDFS_FILER_PORT:-8888}:8888"
-    volumes:
-      # SeaweedFS object data + config. Externalize with SEAWEEDFS_DIR /
-      # SEAWEEDFS_CONFIG_DIR (default ./seaweedfs, ./seaweedfs-config).
-      - ${SEAWEEDFS_DIR:-./seaweedfs}:/data
-      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
-    healthcheck:
-      # /status returns JSON on the master once volume + filer + s3 are up.
-      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null"]
-      interval: 5s
-      timeout:  3s
-      retries:  30
-
-  # One-shot bucket bootstrap. SeaweedFS auto-creates buckets on first PUT,
-  # but the DuckLake catalog's CREATE TABLE issues a HeadBucket first - if
-  # the bucket doesn't yet exist that 404 surfaces as a confusing "S3 error"
-  # to DuckDB. Create it explicitly before the quack manager starts touching
-  # the path. Also writes /etc/seaweedfs/s3.json on the first boot so the
-  # credentials the quack service uses actually exist on the gateway.
-  seaweedfs-init:
-    image: chrislusf/seaweedfs:latest
-    container_name: quack-on-demand-seaweedfs-init
-    profiles: ["seaweedfs"]
-    depends_on:
-      seaweedfs:
-        condition: service_healthy
+      - /data
     environment:
-      S3_BUCKET:            ${S3_BUCKET:-ducklake}
-      S3_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
-      S3_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+      RUSTFS_ADDRESS:          ":9000"
+      RUSTFS_ACCESS_KEY:       ${QOD_S3_ACCESS_KEY_ID:-quack}
+      RUSTFS_SECRET_KEY:       ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+      RUSTFS_CONSOLE_ENABLE:   "true"
+      RUSTFS_CONSOLE_ADDRESS:  ":9001"
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+    ports:
+      # 9000 = S3 API. 9001 = web console (file browser + bucket UI).
+      - "${RUSTFS_S3_PORT:-9000}:9000"
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
     volumes:
-      - ${SEAWEEDFS_CONFIG_DIR:-./seaweedfs-config}:/etc/seaweedfs
+      # RustFS object data. Externalize with RUSTFS_DIR (default ./rustfs).
+      - ${RUSTFS_DIR:-./rustfs}:/data
+    # No exec-based healthcheck here: the rustfs image is a minimal single
+    # binary with no wget/curl to probe with, unlike SeaweedFS's
+    # Debian-based image. The rustfs-mb service below establishes
+    # readiness itself by retrying against the S3 API.
+
+  # One-shot bucket bootstrap. Unlike SeaweedFS (which auto-created
+  # buckets on first PUT), RustFS requires the bucket to exist before
+  # DuckLake's catalog issues its first HeadBucket / PUT, so this creates
+  # it explicitly before the quack manager starts touching the path. The
+  # retry loop also stands in for the healthcheck rustfs itself doesn't have.
+  rustfs-mb:
+    image: amazon/aws-cli:2.22.35
+    container_name: quack-on-demand-rustfs-mb
+    profiles: ["rustfs"]
+    depends_on:
+      - rustfs
+    environment:
+      S3_BUCKET:             ${S3_BUCKET:-ducklake}
+      AWS_ACCESS_KEY_ID:     ${QOD_S3_ACCESS_KEY_ID:-quack}
+      AWS_SECRET_ACCESS_KEY: ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+      AWS_REGION:            ${QOD_S3_REGION:-us-east-1}
     entrypoint: ["/bin/sh", "-c"]
     # $$VAR escapes compose's variable substitution so the in-container shell
-    # resolves the env vars set under `environment:` above. A single $VAR
-    # would be expanded by compose at YAML-load time (against .env) and
-    # arrive empty.
+    # resolves these at runtime; a bare $VAR would be expanded by compose at
+    # YAML-load time (against .env) and arrive empty - same trick the old
+    # seaweedfs services used for their s3.json heredocs.
     command:
       - |
         set -eu
-        # Seed s3.json on first boot so the gateway recognises our keys.
-        if [ ! -f /etc/seaweedfs/s3.json ]; then
-          cat > /etc/seaweedfs/s3.json <<JSON
-        {
-          "identities": [
-            {
-              "name": "quack",
-              "credentials": [
-                { "accessKey": "$${S3_ACCESS_KEY_ID}", "secretKey": "$${S3_SECRET_ACCESS_KEY}" }
-              ],
-              "actions": ["Admin", "Read", "Write", "List", "Tagging"]
-            }
-          ]
-        }
-        JSON
-          echo "seeded /etc/seaweedfs/s3.json (restart seaweedfs to pick up auth)."
-        fi
-        # Create the bucket through the filer-backed S3 API. PUT is idempotent
-        # in SeaweedFS - second call returns 200, not 409.
-        echo "ensuring bucket s3://$${S3_BUCKET}/ on seaweedfs:8333..."
-        echo "s3.bucket.create -name $${S3_BUCKET}" | weed shell -master=seaweedfs:9333 \
-          || echo "bucket create returned non-zero (already exists?); continuing."
-        echo "seaweedfs bucket ready: $${S3_BUCKET}"
+        ep=http://rustfs:9000
+        for i in $$(seq 1 60); do
+          if aws --endpoint-url "$$ep" s3api head-bucket --bucket "$${S3_BUCKET}" 2>/dev/null; then
+            echo "bucket $${S3_BUCKET} already exists"; exit 0
+          fi
+          if aws --endpoint-url "$$ep" s3 mb "s3://$${S3_BUCKET}" 2>/dev/null; then
+            echo "bucket $${S3_BUCKET} created"; exit 0
+          fi
+          echo "rustfs not ready yet ($$i/60); retrying..."; sleep 2
+        done
+        echo "rustfs never became ready" >&2; exit 1
 
   # --- Prometheus + Grafana (observability profile) ------------------------
   # Optional. Bring up with
   #   docker compose --profile observability up -d
-  # alongside (or without) the seaweedfs profile. Configs come from
+  # alongside (or without) the rustfs profile. Configs come from
   # `observability/`, mounted read-only. Grafana is anonymous-admin so the
   # dashboard is reachable without a login - DON'T expose the port to a
   # public network without flipping that off.
@@ -387,18 +341,14 @@ volumes:
   prometheus-data:
   grafana-data:
 
-# --- SeaweedFS file browser ---------------------------------------------------
-# The `seaweedfs` profile's `seaweedfs` service exposes the SeaweedFS Filer
-# UI on http://localhost:${SEAWEEDFS_FILER_PORT:-8888}/ - that page already
-# IS a file browser (directory tree, drilling into buckets/keys, download
-# links). No extra container needed.
-#
-# Other useful UIs from the same SeaweedFS container:
-#   - http://localhost:${SEAWEEDFS_MASTER_PORT:-9333}/     master / cluster status
-#   - http://localhost:${SEAWEEDFS_VOLUME_PORT:-8080}/ui/  volume server UI
+# --- RustFS console ------------------------------------------------------------
+# The `rustfs` profile's `rustfs` service exposes a web console on
+# http://localhost:${RUSTFS_CONSOLE_PORT:-9001}/ (RUSTFS_CONSOLE_ENABLE=true
+# above) - that page is a file browser (buckets/keys, download links),
+# RustFS's equivalent of SeaweedFS's Filer UI. No extra container needed.
 #
 # S3 API for `aws s3 ls` / `s5cmd ls` / `mc ls`:
-#   http://localhost:${SEAWEEDFS_S3_PORT:-8333}    creds: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
+#   http://localhost:${RUSTFS_S3_PORT:-9000}    creds: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
 
 # TPC-H seeding is done by `docker compose exec quack /app/scripts/load-tpch-dbgen.sh`
 # (driven by scripts/run-docker-compose.sh when LOAD_TPCH is set). The loader is
@@ -406,7 +356,7 @@ volumes:
 # the manager spawns nodes against, so the absolute DATA_PATH the catalog persists
 # matches what nodes later resolve. No separate compose service required.
 #
-# When using the seaweedfs profile, set QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>
-# (and QOD_S3_ENDPOINT=seaweedfs:8333) so the same loader writes parquet
+# When using the rustfs profile, set QOD_DUCKLAKE_DATA_PATH=s3://${S3_BUCKET}/<db>
+# (and QOD_S3_ENDPOINT=rustfs:9000) so the same loader writes parquet
 # to the bucket instead of /app/ducklake. The path the catalog persists is the
 # s3:// URL, which every Quack node resolves identically regardless of host.

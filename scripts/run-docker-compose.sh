@@ -46,8 +46,8 @@
 #                                                 (default true)
 #   WAIT_TIMEOUT        manager readiness wait    (default 90 s)
 #   PROFILES            comma-separated list of compose profiles to
-#                       activate (e.g. "observability,seaweedfs"). Merges
-#                       with auto-detected profiles - the `seaweedfs`
+#                       activate (e.g. "observability,rustfs"). Merges
+#                       with auto-detected profiles - the `rustfs`
 #                       profile auto-activates when QOD_S3_ENDPOINT in
 #                       .env points at it, so you only need PROFILES
 #                       for the OTHER opt-in profiles (`observability`).
@@ -116,13 +116,15 @@ if [[ "$NUKE" == "1" ]]; then
   # known opt-in profiles so a teardown is exhaustive regardless of which
   # combination was used last time.
   docker compose -f docker-compose.yml \
-    --profile seaweedfs --profile observability \
+    --profile rustfs --profile observability \
     down --remove-orphans 2>/dev/null || true
+  # ./seaweedfs and ./seaweedfs-config are legacy leftovers from before the
+  # RustFS switch (2026-09-10); wipe them too so old checkouts clean up.
   if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" \
-     || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" ]]; then
-    echo "wiping ./pgdata, ./ducklake, ./certs, ./seaweedfs, ./seaweedfs-config via ephemeral container..."
+     || -d "$REPO_DIR/rustfs" || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" ]]; then
+    echo "wiping ./pgdata, ./ducklake, ./certs, ./rustfs (+ legacy ./seaweedfs, ./seaweedfs-config) via ephemeral container..."
     docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-      'rm -rf /work/pgdata /work/ducklake /work/certs /work/seaweedfs /work/seaweedfs-config'
+      'rm -rf /work/pgdata /work/ducklake /work/certs /work/rustfs /work/seaweedfs /work/seaweedfs-config'
   fi
   # Pre-create the bind-mount dirs with the right ownership. Without
   # this, docker auto-creates them root-owned on `up`, and the
@@ -131,12 +133,11 @@ if [[ "$NUKE" == "1" ]]; then
   # silently dies) and `./ducklake` (TPC-H seed `mkdir` fails). Chown
   # via the ephemeral container so it works even when the host user
   # is not uid 1000. Postgres re-chowns ./pgdata to uid 70 on its own
-  # init, so we leave that one root-owned. ./seaweedfs and
-  # ./seaweedfs-config are root-owned inside the container (seaweedfs
-  # image runs as root), so they stay root-owned here too.
-  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs"
+  # init, so we leave that one root-owned. ./rustfs is chowned to
+  # 10001:10001 (the non-root uid the rustfs image runs as) the same way.
+  mkdir -p "$REPO_DIR/pgdata" "$REPO_DIR/ducklake" "$REPO_DIR/certs" "$REPO_DIR/rustfs"
   docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-    'chown 1000:1000 /work/ducklake /work/certs'
+    'chown 1000:1000 /work/ducklake /work/certs && chown 10001:10001 /work/rustfs'
   echo "booting from a clean slate."
 fi
 
@@ -268,9 +269,9 @@ fi
 
 # ---- Compose profile resolution -------------------------------------------
 # Two sources:
-#   1. Auto: when .env's QOD_S3_ENDPOINT points at the in-compose seaweedfs
-#      service, activate the `seaweedfs` profile so the manager doesn't come
-#      up writing to s3:// against a never-started SeaweedFS container.
+#   1. Auto: when .env's QOD_S3_ENDPOINT points at the in-compose rustfs
+#      service, activate the `rustfs` profile so the manager doesn't come
+#      up writing to s3:// against a never-started RustFS container.
 #   2. Explicit: PROFILES=foo,bar from the caller's env. Merges with the
 #      auto-detected set. De-duplicated. Lets the user add `observability`
 #      etc. without touching .env.
@@ -285,9 +286,14 @@ _has_profile() {
 }
 s3_endpoint="$(grep -E '^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
   | tail -1 | sed -E 's/[[:space:]]*#.*$//; s/^[[:space:]]*QOD_S3_ENDPOINT[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//' || true)"
-if [[ "$s3_endpoint" == seaweedfs:* ]]; then
-  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'seaweedfs' compose profile"
-  _has_profile seaweedfs || _profiles+=("seaweedfs")
+if [[ "$s3_endpoint" == rustfs:* ]]; then
+  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'rustfs' compose profile"
+  _has_profile rustfs || _profiles+=("rustfs")
+elif [[ "$s3_endpoint" == seaweedfs:* ]]; then
+  echo "WARN: .env's QOD_S3_ENDPOINT=$s3_endpoint still points at the retired 'seaweedfs'" >&2
+  echo "      service (replaced by 'rustfs' on 2026-09-10). Update .env to" >&2
+  echo "      QOD_S3_ENDPOINT=rustfs:9000 (and the 'rustfs' profile is auto-activated for" >&2
+  echo "      you) - the stack will otherwise come up unable to reach the object store." >&2
 fi
 if [[ -n "${PROFILES:-}" ]]; then
   IFS=',' read -ra _user_profiles <<< "$PROFILES"
@@ -487,14 +493,12 @@ EOM
 # Per-profile URL summaries. Checked against the same _profiles list the
 # resolution step populated above, so what we print matches what was
 # actually activated.
-if _has_profile seaweedfs; then
+if _has_profile rustfs; then
   cat <<EOM
 
-seaweedfs (S3-compatible object store + UIs):
-  Filer UI:   http://localhost:${SEAWEEDFS_FILER_PORT:-8888}/        (file browser)
-  Master UI:  http://localhost:${SEAWEEDFS_MASTER_PORT:-9333}/        (cluster status)
-  Volume UI:  http://localhost:${SEAWEEDFS_VOLUME_PORT:-8080}/ui/
-  S3 API:     http://localhost:${SEAWEEDFS_S3_PORT:-8333}             (\`aws s3 ls\` / s5cmd)
+rustfs (S3-compatible object store + console):
+  Console:    http://localhost:${RUSTFS_CONSOLE_PORT:-9001}/        (file browser)
+  S3 API:     http://localhost:${RUSTFS_S3_PORT:-9000}              (\`aws s3 ls\` / s5cmd)
   credentials: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
 EOM
 fi
