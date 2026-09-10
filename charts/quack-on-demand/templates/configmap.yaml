@@ -79,7 +79,7 @@ data:
   {{- end }}
 
   {{- if eq (include "qod.s3Enabled" .) "true" }}
-  # ---- Object store (S3 / SeaweedFS / MinIO / R2) --------------------------
+  # ---- Object store (S3 / RustFS / MinIO / R2) -----------------------------
   # storage.dataPath is an s3:// URL. These vars land on the manager pod's
   # env; KubernetesQuackBackend forwards the `QOD_S3_*` prefix verbatim
   # into every spawned node pod, where spawn-quack-node.sh consumes them to

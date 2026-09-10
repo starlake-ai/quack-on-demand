@@ -34,7 +34,7 @@ storage:
   dataPath: s3://qod-ducklake/qod-test
 
 s3:
-  endpoint:  http://seaweedfs:8333
+  endpoint:  http://rustfs:9000
   region:    us-east-1
   urlStyle:  path
   useSsl:    false

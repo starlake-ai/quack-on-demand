@@ -91,11 +91,11 @@
     <text x="205" y="570" class="sub">Metastore</text>
   </g>
 
-  <!-- SeaweedFS (bottom-right) -->
+  <!-- RustFS (bottom-right) -->
   <g>
     <rect class="box" x="460" y="530" rx="10" ry="10" width="160" height="50" fill="#ffffff" stroke="#0d9488"/>
     <image href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgODUgODUiIGZpbGw9IiNmZmYiIGZpbGwtcnVsZT0iZXZlbm9kZCIgc3Ryb2tlPSIjMDAwIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjx1c2UgeGxpbms6aHJlZj0iI0EiIHg9IjIuNSIgeT0iMi41Ii8+PHN5bWJvbCBpZD0iQSIgb3ZlcmZsb3c9InZpc2libGUiPjxwYXRoIGQ9Ik00MCAzLjYyMWwzOS45ODUgNS43NTJ2My4zODdjMCA1LjAzNi0xNy45MSA5LjA5NS00MCA5LjA5NVMwIDE3Ljc5NiAwIDEyLjc2VjkuMDgxem0wIDI0LjQzOGMxNi43MDMgMCAzMS4wMDctMi4zMjEgMzYuOTk3LTUuNjJsMS45NjItMy4yMTIuOC0yLjkydjMuNjIxTDY2LjY3NyA3My45NDJDNjYuNjc3IDc3LjMgNTQuNzQyIDgwIDQwLjAxNSA4MHMtMjYuNjQ2LTIuNy0yNi42NDYtNi4wNThMLjI4NyAxOS45MjhWMTYuMzhsMy4wMTggNi4xNzVDOS4zMSAyNS43OTYgMjMuNDc4IDI4LjA1OSA0MCAyOC4wNTl6IiBmaWxsPSIjOGMzMTIzIiBzdHJva2U9Im5vbmUiLz48cGF0aCBkPSJNNDAgMGMyMi4wOSAwIDQwIDQuMDczIDQwIDkuMDhzLTE3LjkyNSA5LjA1MS00MCA5LjA1MVMuMDE1IDE0LjExNy4wMTUgOS4wOCAxNy45MSAwIDQwIDB6bTAgMjQuNDM4YzIwLjU5NiAwIDM3LjU0MS0zLjUxOCAzOS43NDQtOC4wNzNMNjYuNjYyIDcwLjM4YzAgMy4zNTgtMTEuOTM1IDYuMDU5LTI2LjY2MiA2LjA1OXMtMjYuNjYyLTIuNjg2LTI2LjY2Mi02LjA0NEwuMjU3IDE2LjM4QzIuNDc1IDIwLjkyIDE5LjQyIDI0LjQzOCA0MCAyNC40Mzh6IiBzdHJva2U9Im5vbmUiIGZpbGw9IiNlMDUyNDMiLz48cGF0aCBkPSJNMzAuNTg1IDI5LjU5MWgxNy4zMjJ2MTYuNjQySDMwLjU4NXptLTEzLjc3NiAzMC43M2MwLTQuNTQ1IDMuODA5LTguMjA0IDguNTQtOC4yMDRzOC41NCAzLjY1OSA4LjU0IDguMjA0LTMuODA5IDguMjA0LTguNTQgOC4yMDQtOC41NC0zLjY1OS04LjU0LTguMjA0em00NC40NTEgNy44MjVINDQuMTVsOC41NTUtMTUuMjk5IDguNTU1IDE1LjI5OXoiIHN0cm9rZT0ibm9uZSIvPjwvc3ltYm9sPjwvc3ZnPg==" x="472" y="542" width="26" height="26" preserveAspectRatio="xMidYMid meet"/>
-    <text x="525" y="553" class="label">SeaweedFS</text>
+    <text x="525" y="553" class="label">RustFS</text>
     <text x="525" y="570" class="sub">S3 Filesystem</text>
   </g>
 
@@ -134,7 +134,7 @@
   <!-- Quack nodes -> Postgres -->
   <path class="edge" d="M 320 480 C 270 500, 240 515, 220 530" marker-end="url(#arrow)"/>
 
-  <!-- Quack nodes -> SeaweedFS -->
+  <!-- Quack nodes -> RustFS -->
   <path class="edge" d="M 440 480 C 490 500, 520 515, 540 530" marker-end="url(#arrow)"/>
 
   <!-- Footer -->

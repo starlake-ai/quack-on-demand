@@ -1,0 +1,123 @@
+#
+# Single-pod RustFS (S3-compatible object store, https://rustfs.com) for
+# the kind smoke rig. Exposes the S3 API on port 9000 so the chart's
+# DuckLake DATA_PATH can point at `s3://qod-ducklake/qod-test` and both
+# the manager-side TPC-H loader and the spawned Quack node pods
+# read/write parquet through the same object-store endpoint.
+#
+# Not production-grade:
+#   - emptyDir under /data (data evaporates with the pod)
+#   - single replica
+#   - hard-coded credentials in plain env vars
+#   - http only (no TLS termination)
+#
+# Bucket creation: unlike SeaweedFS (which this rig used before and which
+# auto-created buckets on first PutObject), RustFS requires the bucket to
+# exist, so the rustfs-mb Job below creates `qod-ducklake` once the S3
+# endpoint answers. The run script waits for the Job before installing
+# the chart.
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rustfs
+  template:
+    metadata:
+      labels:
+        app: rustfs
+    spec:
+      # The image runs as the non-root user rustfs (uid/gid 10001); fsGroup
+      # makes the emptyDir group-writable for it.
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:latest
+          args:
+            - /data
+          env:
+            - name: RUSTFS_ADDRESS
+              value: ":9000"
+            - name: RUSTFS_ACCESS_KEY
+              value: quack
+            - name: RUSTFS_SECRET_KEY
+              value: quackquack
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_OBS_LOGGER_LEVEL
+              value: warn
+          ports:
+            - containerPort: 9000
+              name: s3
+          volumeMounts:
+            - mountPath: /data
+              name: data
+          readinessProbe:
+            tcpSocket:
+              port: 9000
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+spec:
+  selector:
+    app: rustfs
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+---
+# One-shot bucket creation. head-bucket first so NUKE-less re-runs are a
+# no-op; the until-loop rides out the window where the Service exists but
+# the pod is not ready yet. The Job is re-applied on every run (delete +
+# apply in the run script) since completed Jobs are immutable.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rustfs-mb
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: rustfs-mb
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mb
+          image: amazon/aws-cli:2.22.35
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: quack
+            - name: AWS_SECRET_ACCESS_KEY
+              value: quackquack
+            - name: AWS_REGION
+              value: us-east-1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              ep=http://rustfs:9000
+              for i in $(seq 1 60); do
+                if aws --endpoint-url "$ep" s3api head-bucket --bucket qod-ducklake 2>/dev/null; then
+                  echo "bucket qod-ducklake already exists"; exit 0
+                fi
+                if aws --endpoint-url "$ep" s3 mb s3://qod-ducklake 2>/dev/null; then
+                  echo "bucket qod-ducklake created"; exit 0
+                fi
+                echo "rustfs not ready yet ($i/60); retrying..."; sleep 2
+              done
+              echo "rustfs never became ready" >&2; exit 1
