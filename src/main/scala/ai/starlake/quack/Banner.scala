@@ -14,30 +14,29 @@ object Banner:
     s"jdbc:postgresql://${meta.getOrElse("pgHost", "localhost")}:${meta
         .getOrElse("pgPort", "5432")}/${meta.getOrElse("dbName", "qod")}"
 
-  /** Probe the control-plane Postgres BEFORE anything else touches it. Right(()) when a connection
-    * opens within `timeoutSec`; Left(operator message) otherwise. Pure of exit decisions so it is
-    * unit-testable; Main prints the message and exits on Left.
+  /** Probe the control-plane Postgres BEFORE anything else touches it, creating the control-plane
+    * database when the server is up but the database is missing (SQLState 3D000), so a fresh
+    * install needs no `psql` in the launcher. Right(()) when the database is reachable (or was
+    * just created) within `timeoutSec`; Left(operator message) on any other failure. Pure of exit
+    * decisions so it is unit-testable; Main prints the message and exits on Left.
     */
   def postgresPreflight(meta: Map[String, String], timeoutSec: Int = 5): Either[String, Unit] =
     val url  = jdbcControlPlaneUrl(meta)
     val user = meta.getOrElse("pgUser", "postgres")
     println(s"control-plane Postgres: $url (user $user)")
-    try
-      DriverManager.setLoginTimeout(timeoutSec)
-      val c = DriverManager.getConnection(url, user, meta.getOrElse("pgPassword", ""))
-      c.close()
-      Right(())
-    catch
-      case t: Throwable =>
+    ai.starlake.quack.ondemand.state.ControlPlaneBootstrap
+      .ensureDatabase(meta, timeoutSec = timeoutSec) match
+      case Right(created) =>
+        if created then
+          println(s"control-plane database '${meta.getOrElse("dbName", "qod")}' did not exist; created it")
+        Right(())
+      case Left(reason) =>
         Left(
           s"""$Line
              | Postgres is NOT reachable; refusing to start.
              |   url    : $url
              |   user   : $user
-             |   error  : ${Option(t.getMessage)
-              .getOrElse(t.getClass.getSimpleName)
-              .linesIterator
-              .next()}
+             |   error  : $reason
              | Check that Postgres is running and that the QOD_* metastore overrides
              | (quack-on-demand.defaultMetastore: pgHost/pgPort/pgUser/pgPassword/dbName)
              | point at it.

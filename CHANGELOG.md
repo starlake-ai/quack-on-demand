@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.3 (unreleased)
+
+- **Manager creates the control-plane database at startup.** The boot
+  preflight now classifies the initial connect failure: when the server is
+  reachable but the control-plane database is missing (SQLState `3D000`), it
+  is created through the admin database (`PG_ADMIN_DB`, default `postgres`)
+  and boot proceeds, logging `control-plane database '<db>' did not exist;
+  created it`. Every other failure (server unreachable, bad credentials)
+  still refuses to start with the existing operator message. This removes
+  the launchers' `psql` dependency: a fresh install needs only a Postgres
+  user with `CREATEDB`. The `psql` preflight arms in `run-jar.sh` and the
+  CLI remain as optional fail-fast conveniences.
+
 ## 0.8.2
 
 - **`qod setup`: configure `qod start` once.** New CLI command persisting the
