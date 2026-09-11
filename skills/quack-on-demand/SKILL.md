@@ -28,6 +28,27 @@ Use this skill when the user wants to:
 - `docs/superpowers/FOLLOWUPS.md` - triaged backlog
 - `README.md` - full feature list + operational notes
 
+## CLI version check (do this before CLI-driven operations)
+
+When about to operate through the `qod` CLI, first compare the installed
+version against the latest release and ASK the user to upgrade when stale
+(never upgrade on their behalf):
+
+```bash
+qod --version                # prints: qod X.Y.Z
+curl -s https://pypi.org/pypi/qod/json | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])"
+```
+
+- Versions equal, or the installed one ends in `.dev0` (a source checkout) -
+  say nothing and proceed.
+- Installed older than PyPI - tell the user, name both versions, and offer
+  the upgrade command matching how they run it: `uv tool upgrade qod`
+  (uv tool installs), `pip install -U qod` (pip), or for `uvx qod` users
+  note that uvx resolves the latest on a fresh cache (`uvx qod@latest`
+  forces it). Wait for their go-ahead before any upgrade.
+- PyPI unreachable (offline, proxy) - skip the check silently; never block
+  operations on it.
+
 ## Booting
 
 On Kubernetes, the Helm chart is published as an OCI artifact per release:
