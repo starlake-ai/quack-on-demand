@@ -27,6 +27,24 @@ class BannerSpec extends AnyFlatSpec with Matchers:
     msg should include("pgHost/pgPort/pgUser/pgPassword/dbName")
   }
 
+  it should "create the control-plane database when the server is up but the database is missing" in {
+    import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+    TestPostgres.ensureReachable()
+    val name = s"qod_cpb_banner_test_${System.nanoTime()}"
+    val m = Map(
+      "pgHost"     -> TestPostgres.pgHost,
+      "pgPort"     -> TestPostgres.pgPort.toString,
+      "pgUser"     -> TestPostgres.pgUser,
+      "pgPassword" -> TestPostgres.pgPass,
+      "dbName"     -> name
+    )
+    try
+      Banner.postgresPreflight(m) shouldBe Right(())
+      // The database must now exist: a second probe succeeds without creating anything.
+      Banner.postgresPreflight(m) shouldBe Right(())
+    finally scala.util.Try(TestPostgres.dropDatabase(name))
+  }
+
   "startup" should "render copy-pasteable strings with TLS on and 0.0.0.0 mapped" in {
     val b = Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true)
     b should include("http://localhost:20900/ui")
