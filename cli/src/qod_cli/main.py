@@ -109,6 +109,10 @@ from .commands import sql_cmd  # noqa: E402
 
 app.command("sql")(sql_cmd.sql)
 
+from .commands import skill_cmd  # noqa: E402
+
+app.add_typer(skill_cmd.app, name="skill")
+
 from .commands import setup as setup_cmd  # noqa: E402
 from .commands import start, status as status_cmd, stop  # noqa: E402
 

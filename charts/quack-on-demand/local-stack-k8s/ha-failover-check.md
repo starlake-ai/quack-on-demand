@@ -7,8 +7,8 @@ Manual end-to-end verification of manager HA. Prereq: the local-stack rig.
    `helm upgrade qod ../.. -n qod --reuse-values --set replicaCount=2 --set sessionJwtSecret=$(openssl rand -hex 32)`
    Wait: `kubectl -n qod get pods -l app.kubernetes.io/name=quack-on-demand` shows 2/2 Ready.
 2. Find the leader: `kubectl -n qod logs <pod> | grep "ha: acquired leadership"` (exactly one pod).
-3. Start the load test (see skills/quack-on-demand/SKILL.md, load-test invocation)
-   against the FlightSQL NodePort.
+3. Start the load test (`scripts/tpch-load-test/tpch-load-test.py --tenant acme
+   --pool bi`; see the script's `--help`) against the FlightSQL NodePort.
 4. Kill the leader mid-run: `kubectl -n qod delete pod <leader> --grace-period=0 --force`.
 5. Assert:
    - The load test reports only a bounded burst of failures (connections that

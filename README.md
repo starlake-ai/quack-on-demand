@@ -203,7 +203,14 @@ Hosted / self-serve deployments should also harden the data plane:
 - **Network policy**: enable `networkPolicy.enabled=true` in the Helm chart to restrict node-pod ingress/egress
 - **Catalog-reader eviction**: tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting
 
-The full hardening runbook is in `skills/quack-on-demand/SKILL.md`.
+The full hardening runbook is in `plugins/qod/skills/quack-on-demand/SKILL.md`.
+
+## Claude Code skill
+
+The operator runbook also ships as a Claude Code skill, so Claude can drive a live manager through the `qod` CLI. Install it one of two ways:
+
+- With the CLI: `qod skill install` (after `uv tool install qod` or `pip install qod`) asks which LLM to install for (Claude Code, GitHub Copilot, Gemini CLI) and copies it into the matching skills directory (`~/.claude/skills` etc.; `--platform claude|copilot|gemini|all` skips the prompt); re-run after a CLI upgrade to refresh it
+- As a plugin: `/plugin marketplace add starlake-ai/quack-on-demand`, then `/plugin install quack-on-demand@quack-on-demand`
 
 ## Documentation
 

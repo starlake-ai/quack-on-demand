@@ -1,0 +1,17 @@
+{
+  "name": "quack-on-demand",
+  "description": "Claude Code skills for operating Quack on Demand, the multi-tenant DuckDB/DuckLake FlightSQL gateway.",
+  "owner": {
+    "name": "Starlake AI",
+    "url": "https://github.com/starlake-ai"
+  },
+  "plugins": [
+    {
+      "name": "quack-on-demand",
+      "source": "./plugins/qod",
+      "description": "Operate a Quack on Demand FlightSQL gateway through the qod CLI: boot/stop the manager, manage tenants, pools, RBAC and policies, inspect nodes, run SQL.",
+      "homepage": "https://docs.starlake.ai/qod",
+      "repository": "https://github.com/starlake-ai/quack-on-demand"
+    }
+  ]
+}

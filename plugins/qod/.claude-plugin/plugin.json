@@ -1,0 +1,10 @@
+{
+  "name": "quack-on-demand",
+  "description": "Operate a Quack on Demand FlightSQL gateway through the qod CLI: boot/stop the manager, manage tenants, pools, RBAC and policies, inspect nodes, run SQL.",
+  "author": {
+    "name": "Starlake AI",
+    "url": "https://github.com/starlake-ai"
+  },
+  "homepage": "https://docs.starlake.ai/qod",
+  "repository": "https://github.com/starlake-ai/quack-on-demand"
+}

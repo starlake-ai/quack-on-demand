@@ -1,6 +1,6 @@
 ---
 name: quack-on-demand
-description: Operate a quack-on-demand FlightSQL gateway - boot/stop the manager, manage tenants/pools/ACLs, inspect nodes, run load tests
+description: Operate a quack-on-demand FlightSQL gateway - boot/stop the manager, manage tenants/pools/ACLs, inspect nodes, run SQL
 ---
 
 # Quack on Demand
@@ -13,20 +13,26 @@ Use this skill when the user wants to:
 - Grant / revoke ACLs
 - Inspect node health, throughput, latency
 - See what SQL recently ran and where
-- Run load tests
+- Run ad-hoc SQL against the FlightSQL edge
 - Diagnose typical failure modes (dead nodes, expired sessions, ACL denials)
 
-## Repo layout (the bits operators touch)
+## Tooling
 
-- `scripts/run-jar.sh` - boot from the uber-jar; `QOD_VERSION=BUILD` runs `sbt assembly` first, `QOD_VERSION=LOCAL` reuses the newest `distrib/` jar
-- `scripts/stop-jar.sh` - SIGTERM → wait → SIGKILL
-- `scripts/tpch-load-test/tpch-load-test.py` - Python FlightSQL load tester (ADBC driver)
-- `scripts/adbc.sh` - run one SQL query against the FlightSQL edge and print it as a table (ADBC driver, self-provisioning venv)
-- `scripts/start-quack-ducklake.sh` - standalone single-node Quack for testing (no manager)
-- `scripts/load-tpch-dbgen.sh` - generate TPCH (SF=1 by default; override via `SF=10`) into the metastore using DuckDB's `dbgen()` table function; self-skips when `lineitem` is already populated
-- `src/main/resources/application.conf` - config (every key has a `QOD_*` env-var override)
-- `docs/superpowers/FOLLOWUPS.md` - triaged backlog
-- `README.md` - full feature list + operational notes
+Everything here runs through the `qod` CLI (PyPI package `qod`) against a live
+manager - no source checkout is needed. The pieces:
+
+- `qod start` / `qod stop` / `qod status` - run a manager from the released
+  uber-jar (auto-downloaded and cached) against your Postgres; `qod setup`
+  persists the `QOD_*` settings it needs
+- `qod start --demo` - fully self-contained evaluation stack (embedded Postgres)
+- `qod <noun> <verb>` - the REST control plane (tenants, databases, pools,
+  nodes, RBAC, policies, telemetry)
+- `qod sql` - run SQL against the FlightSQL edge (one statement, a script, or a REPL)
+- Docs: https://docs.starlake.ai/qod (guides, configuration reference, REST API)
+
+Every manager config scalar has a `QOD_*` env-var override (or `PROXY_*` for
+FlightSQL edge keys); prefer env vars - the bundled `application.conf` is baked
+into the jar.
 
 ## CLI setup (do this before CLI-driven operations)
 
@@ -51,6 +57,10 @@ curl -s https://pypi.org/pypi/qod/json | python3 -c "import sys,json; print(json
   forces it).
 - PyPI unreachable (offline, proxy) - skip the check silently; never block
   operations on it.
+- After an upgrade, `qod skill install` refreshes the locally installed copy
+  of this skill; it prompts for the target LLM (claude, copilot, gemini, all)
+  and `--platform <name>` skips the prompt. No-op for plugin installs, which
+  update via `/plugin marketplace update`.
 
 **2. Logged in?** `qod whoami` verifies the current session. If it errors,
 log in first - every non-public command needs a session:
@@ -73,39 +83,56 @@ anywhere you need raw JSON for scripting.
 
 On Kubernetes, the Helm chart is published as an OCI artifact per release:
 `helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand --version <release>`
-(external Postgres required; see charts/quack-on-demand/README.md). Locally:
+(external Postgres required; see https://docs.starlake.ai/qod). Locally,
+`qod start` supervises the released uber-jar, downloaded and cached on first
+use (Java 21+ required; the `duckdb` CLI and node spawn scripts are
+provisioned automatically):
 
 ```bash
+# One-time: persist Postgres coordinates, admin password, API key, TLS prefs
+# so a bare `qod start` works afterwards (a real env var still wins)
+qod setup
+
 # Default: TLS edge, DB auth on, Postgres state, admin user seeded
-./scripts/run-jar.sh
+qod start
 
-# Build the uber-jar first
-QOD_VERSION=BUILD ./scripts/run-jar.sh
-
-# Newest distrib/ jar, no rebuild, no Central lookup
-QOD_VERSION=LOCAL ./scripts/run-jar.sh
+# Pin a release, or run a jar you already have
+qod start --version 0.8.3
+qod start --jar /path/to/quack-on-demand-assembly.jar
 
 # Disable DB auth (UI then skips the login screen)
-QOD_AUTH_DB_ENABLED=false ./scripts/run-jar.sh
+QOD_AUTH_DB_ENABLED=false qod start
 
-# Disable TLS on the FlightSQL edge
-PROXY_TLS_ENABLED=false ./scripts/run-jar.sh
+# Is anything running, and what is it serving?
+qod status
 
-# Stop everything
-./scripts/stop-jar.sh
+# Stop everything (manager + quack nodes)
+qod stop
 ```
 
-The start script is idempotent on CWD (anchors at the repo root). Default credentials: `admin@localhost.local` / `admin` (rotate via `QOD_ADMIN_PASSWORD`). The manager logs `auth: providers configured` when DB auth is on, and `auth: OPEN` otherwise.
+`qod start` runs the manager in the foreground; Ctrl-C tears the manager and
+its nodes down gracefully (same as `qod stop` from another terminal - never
+kill the JVM directly, or DuckDB node processes are orphaned holding ports
+`21900+`). Durable state (`certs/`, DuckLake data, node state) lives under the
+platform user-data dir (`~/.local/share/qod` on Linux,
+`~/Library/Application Support/qod` on macOS); jars and the provisioned duckdb
+CLI cache under the user-cache dir. Default credentials:
+`admin@localhost.local` / `admin` (rotate via `QOD_ADMIN_PASSWORD`). The
+manager logs `auth: providers configured` when DB auth is on, and
+`auth: OPEN` otherwise.
 
-**Self-contained demo (`demo` subcommand).** For evaluation with no external Postgres and no Docker, the assembly jar takes a `demo` argument that boots everything against an embedded, ephemeral Postgres (zonky), seeds the minimal demo, and tears it all down on exit. Prerequisites: JDK 21 + `duckdb` on `PATH`.
+**Self-contained demo.** For evaluation with no external Postgres and no
+Docker, `qod start --demo` boots everything against an embedded, ephemeral
+Postgres (zonky), seeds the minimal demo, and tears it all down on exit
+(`qod setup`'s stored config is deliberately not applied):
 
 ```bash
-java -Darrow.allocation.manager.type=Unsafe -jar distrib/quack-on-demand-assembly-*.jar demo
+qod start --demo
 ```
 
-It creates a demo home under `/tmp/qod-demo` (override `QOD_DEMO_HOME`) holding the embedded PG data dir + the DuckLake data path, runs the whole demo config overlay (TLS off, REST open, ACL/RLS/CLS on) - a posture produced ONLY on this code path, never on a normal `run-jar.sh` boot - seeds tenant `acme` (`acme_tpch.tpch1`) with TPC-H at SF 0.1, and prints a connect banner. Seeded principals: `alice`/`demo-alice` (analyst - sees `c_phone` masked + only `BUILDING` rows), `acme-admin`/`demo-acme-admin` (full), and any ungranted table is denied. Ctrl-C stops the manager, stops the embedded PG, and deletes the demo home. Insecure by design; not for production.
+It creates a demo home under `/tmp/qod-demo` (override `QOD_DEMO_HOME`) holding the embedded PG data dir + the DuckLake data path, runs the whole demo config overlay (TLS off, REST open, ACL/RLS/CLS on) - a posture produced ONLY on this code path, never on a normal `qod start` boot - seeds tenant `acme` (`acme_tpch.tpch1`) with TPC-H at SF 0.1, and prints a connect banner. Seeded principals: `alice`/`demo-alice` (analyst - sees `c_phone` masked + only `BUILDING` rows), `acme-admin`/`demo-acme-admin` (full), and any ungranted table is denied. Ctrl-C stops the manager, stops the embedded PG, and deletes the demo home. Insecure by design; not for production.
 
-Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` to `run-jar.sh`, or the equivalent bench flag to `run-docker-compose.sh`. In that case the script sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`run-jar.sh` uses the filesystem path `src/main/resources/bootstrap-demo.yaml`; `run-docker-compose.sh` uses `classpath:bootstrap-demo.yaml`). A bare `./scripts/run-jar.sh` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe.
+Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` (or `LOAD_SSB=1`, or `LOAD_TPC=1` for all) in the environment of `qod start`, which seeds the benchmark in the background and sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`classpath:bootstrap-demo.yaml`). A bare `qod start` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe. (`LOAD_*` seeding is not yet supported on Windows through `qod start` - the bundled loaders are bash.)
 
 A second profile targets fronting a single DuckDB instance: `DEMO=minimal` (with any
 `LOAD_*` flag) imports `bootstrap-demo-minimal.yaml` instead: tenant `acme` only, one pool
@@ -114,12 +141,12 @@ A second profile targets fronting a single DuckDB instance: `DEMO=minimal` (with
 consulted when `QOD_BOOTSTRAP_YAML` is unset, and bootstrap only imports into a fresh
 control plane, so switch profiles with `NUKE=1`:
 
-    NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
+    NUKE=1 DEMO=minimal LOAD_TPCH=1 qod start
 
-On a terminal, `NUKE=1` asks you to type the destruction target's name
-(control-plane db / compose project / kind namespace) before proceeding;
-non-tty runs skip the prompt (CI unchanged; a script that wants no prompt
-redirects stdin, e.g. `< /dev/null`).
+On a terminal, `NUKE=1` asks you to type the control-plane database's name
+before proceeding (it drops the control plane and the demo tenant-dbs and
+wipes the local state dirs); non-tty runs skip the prompt (a script that
+wants no prompt redirects stdin, e.g. `< /dev/null`).
 
 `DEMO=minimal` plus `LOAD_TPCDS` warns and skips the TPC-DS loader (no globex tenant in
 this profile).
@@ -562,9 +589,8 @@ off dialect authority on an already-open connection until that connection's
 context TTL (`sessionTtlSec`, default 3600s) expires, matching the existing
 handshake-cache behavior for every other authorization check on the wire.
 
-**One example per statement family** (see
-`docs/superpowers/specs/2026-09-09-sql-admin-dialect-design.md` for the full
-grammar):
+**One example per statement family** (the semantics bullets below cover the
+sharp edges of the grammar):
 
 ```sql
 -- Roles and membership
@@ -947,15 +973,15 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 | `unresolved secret 'X' in source '<alias>'` in supervisor log | Source's setupSql references `{{secret.X}}` but no matching row | Add the secret row via `qod federation secret set` |
 | `unsubstituted placeholder` at boot | Typo in setupSql like `{{secret.X}` (missing brace) | Fix setupSql via re-create (POST upserts); recycle the pool |
 | `catalog 'fedpg' does not exist` from the client | Pool was not recycled after editing the source | Drop and recreate the pool, or wait for idle-timeout recycle |
-| `missing RO grant on fedpg.public.X` | ACL not granted on the federated alias | `INSERT INTO qodstate_role_permission(role_id, catalog_name, schema_name, table_name, verb) VALUES (..., 'RO')` |
-| `kind env var is required` from spawn script | Manager invoked the script without setting `kind` | Old `LocalQuackBackend` build - rebuild the manager (`sbt assembly`) and restart |
+| `missing RO grant on fedpg.public.X` | ACL not granted on the federated alias | `qod role permission grant --role-id <roleId> --catalog fedpg --schema public --table X --verb RO` |
+| `kind env var is required` from spawn script | Manager invoked the script without setting `kind` | Manager release too old for this feature - upgrade (`qod start` with a current release) and restart |
 | `secret '<name>' for source '<alias>' has no existing value to reuse` on YAML import | Imported `***REDACTED***` for a new source that didn't exist before | Provide the actual `value` or `externalRef` for that secret in the YAML |
 | YAML import HTTP 400 `duplicate alias '<X>' in payload` | Two sources in the imported YAML have the same alias | Dedupe in the YAML before re-importing |
 
 ### What does NOT need an ACL change
 
 The existing RBAC graph covers federated tables with zero changes:
-- Grant `RO` on `fedpg.public.orders` to role `analyst` via `INSERT INTO qodstate_role_permission` (verb `RO`).
+- Grant `RO` on `fedpg.public.orders` to role `analyst` via `qod role permission grant` (verb `RO`), exactly like a DuckLake table.
 - Federated writes (INSERT/UPDATE/DELETE on a federated alias) require an `RW` grant on the same triple; otherwise they are denied.
 - Read-only is enforced at ATTACH time (the user's `setupSql` should include `READ_ONLY`), not in the validator.
 
@@ -1115,75 +1141,40 @@ oldest daily bucket still retained.
 |---|---|---|
 | `QOD_USAGE_RETENTION_DAYS` | `400` | Delete daily rollup buckets older than N days (hourly purge); `0` = keep forever |
 
-## Ad-hoc queries
+## Ad-hoc queries (qod sql)
 
-`scripts/adbc.sh` runs a single SQL statement against the FlightSQL edge and prints the result as a terminal table. It's the quickest way to confirm what a given user actually sees - handy for spot-checking ACL, column-, and row-level policies. On first run it provisions an ADBC driver venv under `${QOD_ADBC_VENV:-$HOME/.cache/qod-adbc/venv}`; behind a proxy set `PIP_PROXY` so the one-time install can reach PyPI.
+`qod sql` runs SQL against the FlightSQL edge and prints a terminal table
+(`--csv`, or the global `--json`, for machine output). `qod login` stores the
+edge host/port/TLS and the SQL username in the active CLI profile, so after a
+login it needs no flags beyond the routing target. It's the quickest way to
+confirm what a given user actually sees - handy for spot-checking ACL,
+column-, and row-level policies.
 
 ```bash
-# Query as a tenant user (Basic auth + tenant/pool routing headers).
-# --insecure trusts the edge's self-signed dev cert.
-scripts/adbc.sh --url grpc+tls://localhost:31338 \
-  --user alice --password demo-alice \
-  --tenant acme --pool bi --insecure \
-  --query "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
+# Query as the profile's user (prompts once for the SQL password)
+qod sql --tenant acme --pool bi \
+  "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
 
-# Same query as the bootstrap superuser (system realm) -- bypasses RLS/CLS,
-# so diffing the two outputs shows exactly what a policy filtered or masked.
-scripts/adbc.sh --url grpc+tls://localhost:31338 \
-  --user root --password demo-root \
-  --tenant acme --pool bi --superuser --insecure \
-  --query "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
+# Same query as a superuser (system realm) - bypasses RLS/CLS, so diffing the
+# two outputs shows exactly what a policy filtered or masked. Keep one CLI
+# profile per principal and pick one with --profile.
+qod --profile root sql --tenant acme --pool bi --superuser \
+  "SELECT c_mktsegment, count(*) FROM tpch1.customer GROUP BY 1 ORDER BY 1"
 
-# SQL on stdin instead of --query; edge with TLS off uses grpc://
-echo "SELECT 1" | scripts/adbc.sh --url grpc://localhost:31338 --tenant acme --pool bi
+# Interactive REPL (\q quits), or a script file (first error aborts, exit 1)
+qod sql
+qod sql --file setup.sql
+echo "SELECT 1" | qod sql --file -
 ```
 
-Flags: `--url` (required), `--user` / `--password` (or `LT_USER` / `LT_PASSWORD`), `--query` (or `LT_QUERY`, or stdin), `--tenant` / `--pool` (or `LT_TENANT` / `LT_POOL`), `--superuser`, `--insecure`. Unqualified table names resolve against the pool's default schema, but the FlightSQL prepare-time probe needs a real table - schema-qualify (`tpch1.customer`) if you hit "Table … does not exist" at prepare.
+Connection settings resolve like every other CLI setting: flags > `QOD_HOST` /
+`QOD_PORT` / `QOD_TLS` / `QOD_USER` / `QOD_PASSWORD` / `QOD_TENANT` /
+`QOD_POOL` / `QOD_SUPERUSER` env vars > the profile written by `qod login`.
+Unqualified table names resolve against the pool's default schema, but the
+FlightSQL prepare-time probe needs a real table - schema-qualify
+(`tpch1.customer`) if you hit "Table … does not exist" at prepare.
 
 Two-part names are only unambiguous when the head is a schema in the pool's default catalog, as in `tpch1.customer` above. When the head instead names an attached catalog (the tenant-db itself, e.g. `acme_tpch`, or a federation alias) under ACL, it's rejected as ambiguous - the engine would bind it catalog-first while the ACL check can't tell which catalog you meant. Write the full three-part form instead: `acme_tpch.tpch1.customer`.
-
-## Load testing
-
-`--tenant` and `--pool` are REQUIRED on every invocation (or set `LT_TENANT` / `LT_POOL`). The demo bootstrap creates tenants `acme` + `globex` with pool `bi`.
-
-```bash
-# Defaults: 8 workers × 100 iterations against the live edge (TLS on)
-./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
-
-# Higher concurrency
-./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi \
-  --workers 24 --iterations 50 --warmup 5
-
-# Custom credentials / URL
-LT_USER=alice LT_PASSWORD=secret \
-  ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
-
-# Or pin tenant/pool via env vars
-LT_TENANT=acme LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
-
-# Single query repeated
-LT_QUERY='SELECT count(*) FROM lineitem' \
-  ./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi
-
-# System-realm login (bootstrap `admin`, qodstate_user.tenant IS NULL).
-# Adds the `superuser=true` gRPC header; tenant/pool still drive routing.
-./scripts/tpch-load-test/tpch-load-test.py --tenant acme --pool bi --superuser
-LT_SUPERUSER=true LT_TENANT=acme LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
-
-# TPC-DS workload (requires `scripts/load-tpcds-dbgen.sh` to have seeded the
-# globex_tpcds tenant-db; --schema defaults to tpcds1 to match the SF=1 seed).
-./scripts/tpch-load-test/tpch-load-test.py --workload tpcds --tenant globex --pool bi
-LT_WORKLOAD=tpcds LT_TENANT=globex LT_POOL=bi ./scripts/tpch-load-test/tpch-load-test.py
-```
-
-Reports throughput, success rate, latency percentiles (p50/p95/p99). Two curated workloads ship:
-
-- `--workload tpch` (default) - TPC-H subset (Q1, Q3, Q5, Q6, Q10, Q12, Q14) against schema `tpch1`.
-- `--workload tpcds` - TPC-DS subset (Q3, Q7, Q19, Q42, Q52, Q55, Q98) against schema `tpcds1`. Mixes per-group aggregation, 5- and 6-way joins, top-N, and a window function (Q98's `OVER (PARTITION BY i_class)`).
-
-Override `--schema` (or `$LT_SCHEMA`) when the target tenant-db was seeded at a non-1 scale factor (e.g. `--schema tpcds10`).
-
-The Python script needs `pip install adbc_driver_flightsql adbc_driver_manager pyarrow`. The auto-install on first run prints the right command if anything is missing.
 
 ## Hardening (lockdown, pod security, network policy, reader eviction)
 
@@ -1273,8 +1264,9 @@ opt-in except pod security:
   and the object store) and `networkpolicy-manager.yaml` (ingress on
   `:20900`/`:31338` from `networkPolicy.ingressFrom`, egress to node pods,
   Postgres, DNS, optional SMTP). Tune `networkPolicy.postgres.cidr`,
-  `networkPolicy.objectStore.cidrs`, and `networkPolicy.nodePortRange` in
-  `charts/quack-on-demand/values.yaml`. Sanity-check a rendered policy with
+  `networkPolicy.objectStore.cidrs`, and `networkPolicy.nodePortRange` in the
+  chart values (`helm show values oci://ghcr.io/starlake-ai/charts/quack-on-demand`).
+  Sanity-check a rendered policy with
   `helm template --set networkPolicy.enabled=true` before applying.
 
 - **Catalog-reader idle eviction** - each cached `DuckLakeCatalogReader`
@@ -1298,12 +1290,11 @@ opt-in except pod security:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/*` returns 401 | No valid credential on the call (missing/wrong key, expired session) | `qod login`, or pass `X-API-Key: <key>` on raw REST calls |
-| `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `stop` + `start` (reconcile respawns) |
+| `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
 | `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `qod role permission grant` or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `qod pool delete` + `qod pool create` |
-| Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |
-| Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See README "Behind a corporate proxy". |
+| Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See "Behind a corporate proxy" in the project README on GitHub. |
 
 ## Where state lives
 
@@ -1312,15 +1303,14 @@ opt-in except pod security:
 - **Federation** - `qodstate_federated_source`, `qodstate_federated_secret`
 - **DuckLake catalog metadata** - `ducklake_*` tables in each managed tenant-db's own Postgres database (`${tenant}_${suffix}`), separate from the control plane
 - **DuckLake data files** - `defaultMetastore.dataPath` on disk (or s3://, gs://, az://)
-- **Self-signed TLS cert** - `certs/server-{cert,key}.pem` (auto-generated by `openssl req -x509` on first boot if missing)
-- **Manager log on startup script invocation** - `/tmp/quack-startup.log`
+- **Self-signed TLS cert** - `certs/server-{cert,key}.pem` under `qod start`'s state dir (the platform user-data dir), auto-generated on first boot if missing
+- **Manager log** - `qod start` runs the manager in the foreground; its log is the terminal output
 
 ## When operating
 
 - The default admin password is `admin`. Rotate via `QOD_ADMIN_PASSWORD` before exposing the edge.
-- The REST API is OPEN by default (no `QOD_API_KEY` set). Set the env var or restrict the listening interface before going beyond localhost.
-- All scalars in `application.conf` have matching `QOD_*` env-var overrides. Prefer env vars over editing the file (the conf is bundled into the jar at build time).
-- When in doubt about state, check `docs/superpowers/FOLLOWUPS.md` - it's the authoritative list of known issues and recently-closed work, headed by a `HEAD <sha>` line so you can see the baseline.
+- With no `QOD_API_KEY` pinned, boot generates a random one and prints it in a startup banner; it changes on every restart, so pin `QOD_API_KEY` (and `QOD_SESSION_JWT_SECRET`) before any non-localhost deploy.
+- All config scalars have matching `QOD_*` env-var overrides. Prefer env vars over editing `application.conf` (it is bundled into the jar at build time).
 
 ## Common UI URLs
 

@@ -228,7 +228,7 @@ Two security-critical knobs should be pinned before any non-localhost deploy: `Q
 
 ## Operator runbook
 
-[skills/quack-on-demand/SKILL.md](skills/quack-on-demand/SKILL.md) is the operator runbook: REST API curl recipes, tenant/pool/ACL CRUD, typical failure modes, load-test invocation. When the user asks operational questions ("how do I create a pool", "why is auth failing"), prefer the patterns there over reinventing them.
+[plugins/qod/skills/quack-on-demand/SKILL.md](plugins/qod/skills/quack-on-demand/SKILL.md) is the operator runbook: `qod` CLI recipes for tenant/pool/ACL CRUD, typical failure modes. When the user asks operational questions ("how do I create a pool", "why is auth failing"), prefer the patterns there over reinventing them. It is deliberately checkout-free (it must work for users who only installed the CLI or the Claude Code plugin) - never add repo paths, scripts, or sbt invocations to it. The wheel bundles a copy at `cli/src/qod_cli/skills/quack-on-demand/SKILL.md` (served by `qod skill install`); `cli/tests/test_skill_freshness.py` fails until the copy is refreshed after any skill edit.
 
 ## Things to avoid
 
