@@ -75,6 +75,10 @@ control plane, so switch profiles with `NUKE=1`:
 
     NUKE=1 DEMO=minimal LOAD_TPCH=1 ./scripts/run-jar.sh
 
+On a terminal, `NUKE=1` asks you to type the destruction target's name
+(control-plane db / compose project / kind namespace) before proceeding;
+non-tty runs skip the prompt (CI unchanged) and `NUKE_YES=1` bypasses it.
+
 `DEMO=minimal` plus `LOAD_TPCDS` warns and skips the TPC-DS loader (no globex tenant in
 this profile).
 
