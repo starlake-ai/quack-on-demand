@@ -43,7 +43,30 @@ def _psql(pg: dict, sql: str):
     )
 
 
+def _confirm_nuke(pg: dict) -> None:
+    """NUKE is irreversible (drops the control plane and demo tenant-dbs,
+    wipes the per-user state dirs). On a terminal, require typing the
+    control-plane db name so a pasted NUKE=1 cannot destroy data silently.
+    Non-tty runs skip the prompt (scripted use unchanged); NUKE_YES=1 is
+    the explicit interactive bypass. Deliberately NOT a password check:
+    NUKE runs with the invoker's OS privileges and must keep working when
+    the stack is too broken to verify credentials against."""
+    if os.environ.get("NUKE_YES") == "1" or not sys.stdin.isatty():
+        return
+    expected = pg["dbname"]
+    typer.echo(
+        f"NUKE=1 will drop the '{expected}' control plane, the demo "
+        "tenant-dbs, and wipe the local ducklake/state/certs dirs.",
+        err=True,
+    )
+    answer = typer.prompt(f"Type '{expected}' to proceed (anything else aborts)")
+    if answer != expected:
+        typer.echo("aborted; nothing was touched.", err=True)
+        raise typer.Exit(1)
+
+
 def _nuke(state_dir: Path, pg: dict) -> None:
+    _confirm_nuke(pg)
     typer.echo("NUKE=1: tearing down state...", err=True)
     if shutil.which("psql"):
         for db in (pg["dbname"], *_DEMO_DBS):

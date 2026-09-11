@@ -150,6 +150,17 @@ for img in "$IMAGE" "$NODE_IMAGE"; do
 done
 
 # ---- 3. in-cluster Postgres + SeaweedFS ----------------------------------
+# Same confirmation contract as run-docker-compose.sh's NUKE: tty-only,
+# type the target to proceed, NUKE_YES=1 or non-tty skips (CI unchanged).
+if [[ "$NUKE" == "1" && "${NUKE_YES:-0}" != "1" && -t 0 ]]; then
+  echo "NUKE=1 will delete namespace '$NAMESPACE' (all pods, the in-cluster Postgres and SeaweedFS data)."
+  printf "Type '%s' to proceed (anything else aborts): " "$NAMESPACE"
+  read -r _nuke_answer
+  if [[ "$_nuke_answer" != "$NAMESPACE" ]]; then
+    echo "aborted; nothing was touched." >&2
+    exit 1
+  fi
+fi
 if [[ "$NUKE" == "1" ]]; then
   echo "[3/5] NUKE=1: deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
