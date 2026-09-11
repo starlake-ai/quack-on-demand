@@ -28,26 +28,46 @@ Use this skill when the user wants to:
 - `docs/superpowers/FOLLOWUPS.md` - triaged backlog
 - `README.md` - full feature list + operational notes
 
-## CLI version check (do this before CLI-driven operations)
+## CLI setup (do this before CLI-driven operations)
 
-When about to operate through the `qod` CLI, first compare the installed
-version against the latest release and ASK the user to upgrade when stale
-(never upgrade on their behalf):
+The `qod` CLI is the primary way to drive the manager. Before operating
+through it, make sure it is installed, current, and logged in.
+
+**1. Installed and current?**
 
 ```bash
-qod --version                # prints: qod X.Y.Z
+qod --version                # prints: qod X.Y.Z; command not found = not installed
 curl -s https://pypi.org/pypi/qod/json | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])"
 ```
 
+- Not installed - install it: `uv tool install qod` when `uv` is available,
+  else `pip install qod`. (`uvx qod ...` also works for one-off runs with no
+  install.)
 - Versions equal, or the installed one ends in `.dev0` (a source checkout) -
-  say nothing and proceed.
-- Installed older than PyPI - tell the user, name both versions, and offer
-  the upgrade command matching how they run it: `uv tool upgrade qod`
-  (uv tool installs), `pip install -U qod` (pip), or for `uvx qod` users
-  note that uvx resolves the latest on a fresh cache (`uvx qod@latest`
-  forces it). Wait for their go-ahead before any upgrade.
+  proceed.
+- Installed older than PyPI - upgrade with the command matching the install
+  method: `uv tool upgrade qod` (uv tool installs), `pip install -U qod`
+  (pip); `uvx qod` users resolve the latest on a fresh cache (`uvx qod@latest`
+  forces it).
 - PyPI unreachable (offline, proxy) - skip the check silently; never block
   operations on it.
+
+**2. Logged in?** `qod whoami` verifies the current session. If it errors,
+log in first - every non-public command needs a session:
+
+```bash
+qod login --username admin                  # prompts for the password; system realm
+qod login --username alice --tenant acme    # tenant-scoped principal
+```
+
+`qod login` mints a session and stores the token plus the FlightSQL edge
+settings in the active CLI profile file (mode 0600; `QOD_CONFIG_FILE`
+overrides the path), so subsequent commands need no flags. Non-interactive
+alternative: set `QOD_API_KEY` (static key) or `QOD_TOKEN` (session or PAT
+token) in the environment - each command sends it as `X-API-Key`. Use
+`--profile <name>` (or `QOD_PROFILE`) to keep several managers side by side,
+`QOD_MANAGER_URL` for a non-default manager URL, and `qod --json ...`
+anywhere you need raw JSON for scripting.
 
 ## Booting
 
@@ -113,14 +133,11 @@ The REST API has three acceptable credentials:
    (see "Personal access tokens and the MCP server" below)
 
 ```bash
-# Get a session token (admin role required)
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+# Mint a session and store it in the CLI profile (admin role required)
+qod login --username admin        # prompts for the password
 
-# Use it on every /api/* call
-curl -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list
+# Every subsequent command rides that session
+qod pool list
 ```
 
 If `QOD_API_KEY` is unset (or empty), only the static-key arm is disabled: every non-public `/api/...` call still requires a session or PAT, and a keyless call answers 401. There is no open mode; keyless dev scripts must log in first.
@@ -131,17 +148,9 @@ The admin UI isn't admin-exclusive: a tenant-scoped `role=user` principal can lo
 
 ```bash
 # Log in as a regular tenant user (demo credentials from the bootstrap manifest)
-TOKEN=$(curl -sS -X POST http://localhost:20900/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"demo-alice","tenant":"acme"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+qod login --username alice --tenant acme    # prompts for the password (demo-alice)
 
 # Own usage and recent statements - the only data endpoints this session can reach
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/profile/usage?days=7'
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/profile/statements?limit=20'
-
-# CLI equivalents
-qod auth login --username alice --tenant acme
 qod profile usage --days 7
 qod profile statements --limit 20
 ```
@@ -185,34 +194,18 @@ are load-bearing.
 
 ```bash
 # Mint an unscoped token (session required; the token is printed ONCE - store it now)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/create \
-  -H 'Content-Type: application/json' -d '{"name":"claude-code"}'
+qod auth pat create --name claude-code [--expires-at 2027-01-01T00:00:00Z]
 # {"id":"pat-...","name":"claude-code","token":"qod_pat_..."}
 
 # Mint a scoped token for an agent: read-only, one database, two tools, no admin standing
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/create \
-  -H 'Content-Type: application/json' -d '{
-    "name": "claude-agent",
-    "databases": ["acme_db"],
-    "tools": ["run_sql", "list_tables"],
-    "verbCeiling": "RO",
-    "dropAdmin": true,
-    "maxRows": 500
-  }'
-
-# List (metadata only; the raw token is unrecoverable after mint; the scope summary
-# and parentId/depth on each row show what an agent's own PAT has minted)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/list
-# Revoke
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/auth/pat/revoke \
-  -H 'Content-Type: application/json' -d '{"id":"pat-..."}'
-
-# CLI equivalents
-qod auth pat create --name claude-code [--expires-at 2027-01-01T00:00:00Z]
 qod auth pat create --name claude-agent \
   --database acme_db --tool run_sql --tool list_tables \
   --verb-ceiling RO --drop-admin --max-rows 500
+
+# List (metadata only; the raw token is unrecoverable after mint; the scope summary
+# and parentId/depth on each row show what an agent's own PAT has minted)
 qod auth pat list
+# Revoke
 qod auth pat revoke --id pat-...
 ```
 
@@ -254,19 +247,12 @@ export QOD_AUTH_LOCKOUT_ENABLED=true
 export QOD_AUTH_LOCKOUT_MAX_FAILURES=10   # default; locks after this many consecutive bad passwords
 
 # A locked-out user (or anyone who forgot their password) self-serves a reset -
-# this endpoint is public (no API key) and always returns 200, even for an
-# unknown username or an account without an email, to avoid leaking existence
-curl -sS -X POST http://localhost:20900/api/auth/forgot-password \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","tenant":"acme"}'
-
-# The mailed link carries a single-use, 1-hour token:
-curl -sS -X POST http://localhost:20900/api/auth/reset-password \
-  -H 'Content-Type: application/json' \
-  -d '{"token":"<from the emailed link>","newPassword":"a-new-password"}'
-
-# CLI equivalents
+# the endpoint is public (no session needed) and always answers 200, even for
+# an unknown username or an account without an email, to avoid leaking existence
 qod auth forgot-password --username alice --tenant acme
+
+# The mailed link carries a single-use, 1-hour token; the command prompts for
+# the token and the new password:
 qod auth reset-password
 ```
 
@@ -275,9 +261,7 @@ Lockout only ever applies to rows with an `email` set (`qod user create/update -
 An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically. This includes the seeded admin (`admin@localhost.local` by default): because its username is email-format, it is auto-assigned `email = username`, so it IS eligible for lockout when lockout is on, and for self-service reset. A locked superuser is still recoverable without the email flow: restarting the manager re-seeds the admin (resetting the password to `QOD_ADMIN_PASSWORD` and clearing `failed_attempts` / `locked_at` in the same statement), and the static `X-API-Key` bypasses login lockout entirely. Note that `admin@localhost.local` is not a routable mailbox, so the seeded admin's self-service email reset will not deliver by default - set `QOD_ADMIN_USERNAME` to a real deliverable address if you want the admin to self-recover by email, otherwise use restart or the API key.
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"<user-id>","password":"a-new-password"}'
+qod user update <user-id> --password a-new-password
 ```
 
 An admin password reset also unconditionally clears the lock (`failed_attempts` and `locked_at`), same as the self-service reset.
@@ -315,109 +299,82 @@ Semantics worth knowing: `userName` and a group's `displayName` are immutable (a
 
 ```bash
 # List tenants
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/tenant/list | python3 -m json.tool
+qod tenant list
 
-# Create a tenant with metastore overrides
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/create \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"acme","metastore":{"dbName":"tpch","schemaName":"tpch1"}}'
+# Create a tenant, then its database (metastore keys omitted here resolve from
+# the manager's defaultMetastore at spawn time; --metastore KEY=VALUE overrides)
+qod tenant create acme
+qod database create --tenant acme --name tpch \
+  --metastore dbName=tpch --metastore schemaName=tpch1
 
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":3,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":1}}'
+qod pool create --tenant acme --db acme_tpch --pool bi --size 3 \
+  --writeonly 1 --readonly 1 --dual 1
 
 # Scale up
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/scale \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","targetSize":6,
-       "roleDistribution":{"writeonly":1,"readonly":2,"dual":3}}'
+qod pool scale --tenant acme --db acme_tpch --pool bi --target-size 6 \
+  --writeonly 1 --readonly 2 --dual 3
 
-# Stop a pool: scales it down to 0 nodes but KEEPS the pool (force=true skips graceful drain)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/stop \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
+# Stop a pool: scales it down to 0 nodes but KEEPS the pool (--force skips graceful drain)
+qod pool stop --tenant acme --db acme_tpch --pool bi --force
 
 # Suspend a pool (scale-to-zero, keeps the role distribution for resume)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/suspend \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
+qod pool suspend --tenant acme --db acme_tpch --pool bi
 
 # Resume a suspended pool
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/resume \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
+qod pool resume --tenant acme --db acme_tpch --pool bi
 
 # A suspended pool also wakes automatically on the first FlightSQL statement
 # (bounded by PROXY_RESUME_HOLD_TIMEOUT_SEC, default 60s). A stopped pool
-# (pool/stop) stays down; a disabled pool is never auto-woken.
+# (pool stop) stays down; a disabled pool is never auto-woken.
 
-# Autoscale band: declare minNodes/maxNodes and the manager adds/removes READONLY
+# Autoscale band: declare min/max nodes and the manager adds/removes READONLY
 # nodes with demand, never leaving the band. Both bounds together or neither.
 # Rules: 1 <= min <= max <= QOD_AUTOSCALE_HARD_CAP (16); min must cover the
 # write-capable nodes (writeonly + dual); the CURRENT size must sit inside the
 # band (so a stopped pool, size 0, cannot take one - scale it up first); a pool
 # with authored cohorts cannot be elastic. Violations return 400 invalid_band.
 # Create a pool with a band:
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","size":2,
-       "roleDistribution":{"writeonly":1,"readonly":1,"dual":0},
-       "minNodes":2,"maxNodes":6}'
-
-# Set (or change) the band on an existing pool
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setAutoscale \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","minNodes":2,"maxNodes":6}'
-
-# Clear the band (omit BOTH bounds) - the pool goes back to a fixed size
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/setAutoscale \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi"}'
-
-# CLI equivalents
 qod pool create --tenant acme --db acme_tpch --pool bi --size 2 \
   --writeonly 1 --readonly 1 --min-nodes 2 --max-nodes 6
-qod pool set-autoscale --tenant acme --db acme_tpch --pool bi --min-nodes 2 --max-nodes 6
-qod pool set-autoscale --tenant acme --db acme_tpch --pool bi   # clears it
 
-# pool/scale on a banded pool refuses a targetSize outside [min, max] with
+# Set (or change) the band on an existing pool
+qod pool set-autoscale --tenant acme --db acme_tpch --pool bi --min-nodes 2 --max-nodes 6
+
+# Clear the band (omit BOTH bounds) - the pool goes back to a fixed size
+qod pool set-autoscale --tenant acme --db acme_tpch --pool bi
+
+# pool scale on a banded pool refuses a target size outside [min, max] with
 # 400 outside_band ("adjust the band first via pool/setAutoscale") - the next
 # sweep would just undo it. Widen or clear the band, then scale.
-# To pin a pool: set minNodes == maxNodes. That is a legal band meaning "hold
-# exactly this size, never scale", and it keeps manual scaling constrained to
-# that size. To stop the sweep manager-wide: QOD_AUTOSCALE_ENABLED=false (bands
-# stay recorded and are simply not acted on). Actions land in the audit log with
-# actor "autoscale" and in the manager log as
+# To pin a pool: set --min-nodes == --max-nodes. That is a legal band meaning
+# "hold exactly this size, never scale", and it keeps manual scaling constrained
+# to that size. To stop the sweep manager-wide: QOD_AUTOSCALE_ENABLED=false
+# (bands stay recorded and are simply not acted on). Actions land in the audit
+# log with actor "autoscale" and in the manager log as
 # "autoscale: acme/acme_tpch/bi out 2 -> 3 util=0.91".
 
 # Delete a pool: stops nodes AND removes the pool from the registry
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/delete \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","force":true}'
+qod pool delete --tenant acme --db acme_tpch --pool bi --force
 
 # Delete a tenant (must have no pools first)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/tenant/delete \
-  -H 'Content-Type: application/json' -d '{"name":"acme"}'
+qod tenant delete acme
 
 # Size a pool's k8s node pods: cpu and memory are each applied as request AND
 # limit on the quack container (Guaranteed QoS when both set). Applies on the
 # next node spawn; restart the pool's nodes to apply now. Empty clears.
 # Set DuckDB memory (database/pool init SQL, SET memory_limit) to ~80% of pod
 # memory so the engine spills before the kernel OOM-kills the pod.
-curl -sS -X POST "http://localhost:20900/api/pool/setResources" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","cpu":"2","memory":"8Gi"}'
+qod pool set-resources --tenant acme --db acme_tpch --pool bi --cpu 2 --memory 8Gi
 
-# Supply a full Pod-manifest template (superuser only; requires
+# Supply a full Pod-manifest template from a YAML file (superuser only; requires
 # QOD_POD_TEMPLATE_ENABLED=true). The manager overlays the pod name, its
 # identity labels, and the quack container's env contract and resources; a
 # container named 'quack' is required. Use for sidecars, volumes, affinity.
-curl -sS -X POST "http://localhost:20900/api/pool/setPodTemplate" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","podTemplateYaml":"apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: placeholder\n    - name: log-shipper\n      image: busybox"}'
+qod pool set-pod-template --tenant acme --db acme_tpch --pool bi --file pod-template.yaml
 ```
 
-The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `setResources` for node-pod sizing.
+The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
 
 `pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser sessions and static-`X-API-Key` callers bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
 
@@ -433,77 +390,66 @@ Hosted deployments can cap a tenant's *cumulated* cores and memory across all it
 
 Grants live in the normalized `qodstate_*` tables in Postgres. The endpoints are always mounted (Postgres is the only control-plane store since 2026-06-12).
 
-### Endpoint reference
+### Command reference
 
 ```bash
 # Roles
-GET  /api/role/list?tenant=acme
-POST /api/role/create       body: {"tenant":"acme","name":"analyst","description":"..."}
-POST /api/role/delete       body: {"id":"<roleId>"}
+qod role list --tenant acme
+qod role create --tenant acme --name analyst --description "..."
+qod role delete <roleId>
 
-# Role table permissions  (verb: SELECT | INSERT | UPDATE | DELETE | ALL)
-GET  /api/role/permission/list?roleId=<roleId>
-POST /api/role/permission/grant   body: {"roleId":"<roleId>","catalog":"acme_tpch","schema":"tpch1","table":"customer","verb":"SELECT"}
-POST /api/role/permission/revoke  body: {"id":"<permissionId>"}
+# Role table permissions (verb: RO | RW | DDL | ALL)
+qod role permission list --role-id <roleId>
+qod role permission grant --role-id <roleId> --catalog acme_tpch --schema tpch1 --table customer --verb RO
+qod role permission revoke <permissionId>
 
 # Users
-POST /api/user/create       body: {"tenant":"acme","username":"alice","password":"...","role":"user"}
+qod user create --tenant acme --username alice --role user   # prompts for the password
 
 # Groups
-POST /api/group/create      body: {"tenant":"acme","name":"analysts"}
+qod group create --tenant acme --name analysts
 
-# Memberships (each has a matching /remove)
-POST /api/membership/group-role/add   body: {"groupId":"<groupId>","roleId":"<roleId>"}
-POST /api/membership/user-group/add   body: {"userId":"<userId>","groupId":"<groupId>"}
-POST /api/membership/user-role/add    body: {"userId":"<userId>","roleId":"<roleId>"}
+# Memberships (each has a matching remove)
+qod membership group-role add --group-id <groupId> --role-id <roleId>
+qod membership user-group add --user-id <userId> --group-id <groupId>
+qod membership user-role add --user-id <userId> --role-id <roleId>
 
 # Pool access - governs which pools a principal can reach
-GET  /api/pool/permission/list?tenant=acme
-POST /api/pool/permission/grant   body: {"tenant":"acme","poolId":"<poolId>","groupId":"<groupId>"}
-POST /api/pool/permission/revoke  body: {"id":"<id>"}
+qod pool permission list --tenant acme
+qod pool permission grant --tenant acme --pool-id <poolId> --group-id <groupId>
+qod pool permission revoke <id>
 ```
 
 ### Grant a team read access (6-step flow)
 
 ```bash
-# 1. Create a role
-ROLE_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"analyst","description":"Read-only analyst"}' \
+# 1. Create a role (qod --json prints the raw response so the id can be captured)
+ROLE_ID=$(qod --json role create --tenant acme --name analyst --description "Read-only analyst" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 
-# 2. Grant SELECT on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"tpch1\",\"table\":\"customer\",\"verb\":\"SELECT\"}"
+# 2. Grant RO on acme_tpch.tpch1.customer (repeat per table, or use "*" to wildcard any field)
+qod role permission grant --role-id "$ROLE_ID" \
+  --catalog acme_tpch --schema tpch1 --table customer --verb RO
 
 # 3. Create a group
-GROUP_ID=$(curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/group/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"analysts"}' \
+GROUP_ID=$(qod --json group create --tenant acme --name analysts \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 
 # 4. Attach the role to the group
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/add \
-  -H 'Content-Type: application/json' \
-  -d "{\"groupId\":\"$GROUP_ID\",\"roleId\":\"$ROLE_ID\"}"
+qod membership group-role add --group-id "$GROUP_ID" --role-id "$ROLE_ID"
 
-# 5. Add a user to the group (or use membership/user-role/add to attach the role directly to a user)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/user-group/add \
-  -H 'Content-Type: application/json' \
-  -d "{\"userId\":\"<userId>\",\"groupId\":\"$GROUP_ID\"}"
+# 5. Add a user to the group (or use membership user-role add to attach the role directly to a user)
+qod membership user-group add --user-id <userId> --group-id "$GROUP_ID"
 
 # 6. Grant the group access to the pool (REQUIRED - without this the group cannot reach the pool)
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d "{\"tenant\":\"acme\",\"poolId\":\"<poolId>\",\"groupId\":\"$GROUP_ID\"}"
+qod pool permission grant --tenant acme --pool-id <poolId> --group-id "$GROUP_ID"
 ```
 
-Retrieve `<userId>` and `<poolId>` from `/api/user/list?tenant=acme` and `/api/pool/list` respectively.
+Retrieve `<userId>` and `<poolId>` from `qod user list --tenant acme` and `qod pool list` respectively.
 
 ### DML and DDL grants
 
-Use the same `role/permission/grant` endpoint with `verb` set to `INSERT` / `UPDATE` / `DELETE` for DML writes, or `CREATE` / `DROP` / `ALTER` for DDL. Use `ALL` to cover every verb on a table at once. The validator collapses granular verbs to `Read`, `Write`, or `Ddl` per table at enforcement time.
+Use the same `qod role permission grant` command with `--verb RW` for DML writes (covers reads too), `--verb DDL` for CREATE / DROP / ALTER, or `--verb ALL` to cover everything on a table at once. The verb vocabulary is deliberately coarse (`RO` / `RW` / `DDL` / `ALL`, matching what the validator enforces per table); granular SQL keywords like `SELECT` or `INSERT` are only accepted by the SQL admin dialect (below), which maps them onto these four at parse time.
 
 ### Metadata browsing (information_schema)
 
@@ -522,9 +468,8 @@ that turns the filter off for that principal and restores the unfiltered read (u
 for a tooling or admin account that must see the whole catalog):
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/grant \
-  -H 'Content-Type: application/json' \
-  -d "{\"roleId\":\"$ROLE_ID\",\"catalog\":\"acme_tpch\",\"schema\":\"information_schema\",\"table\":\"*\",\"verb\":\"RO\"}"
+qod role permission grant --role-id "$ROLE_ID" \
+  --catalog acme_tpch --schema information_schema --table '*' --verb RO
 ```
 
 The grant must name `information_schema` literally (a wildcard schema does not count as
@@ -559,16 +504,13 @@ whole feature off manager-wide and go back to the pre-0.6.7 grant-required postu
 
 ```bash
 # Remove a table permission from a role
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/role/permission/revoke \
-  -H 'Content-Type: application/json' -d '{"id":"<permissionId>"}'
+qod role permission revoke <permissionId>
 
 # Detach a role from a group
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/membership/group-role/remove \
-  -H 'Content-Type: application/json' -d "{\"groupId\":\"<groupId>\",\"roleId\":\"<roleId>\"}"
+qod membership group-role remove --group-id <groupId> --role-id <roleId>
 
 # Remove pool access
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/pool/permission/revoke \
-  -H 'Content-Type: application/json' -d '{"id":"<poolPermissionId>"}'
+qod pool permission revoke <poolPermissionId>
 ```
 
 The EffectiveSet cache is invalidated on every RBAC mutation, so changes take effect on the next handshake - no TTL window to wait for.
@@ -581,25 +523,20 @@ Create with a temporary password (or reset one) that only works against
 `POST /api/auth/change-password`:
 
 ```bash
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/create \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","username":"alice","password":"Temp123","role":"user","mustChangePassword":true}'
+qod user create --tenant acme --username alice --password Temp123 --role user \
+  --must-change-password
 
 # reset an existing password as temporary
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/user/update \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"<userId>","password":"Temp123","mustChangePassword":true}'
+qod user update <userId> --password Temp123 --must-change-password
 ```
 
 Until changed, REST login answers `401 password_change_required` and the FlightSQL
 handshake fails `UNAUTHENTICATED` with "password change required". The user swaps it
-(no session needed; also available anytime for voluntary rotation, and CLI
-`qod auth change-password`):
+(no session needed; also available anytime for voluntary rotation; prompts for the
+current and new passwords):
 
 ```bash
-curl -sS -X POST http://localhost:20900/api/auth/change-password \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","username":"alice","currentPassword":"Temp123","newPassword":"Real456"}'
+qod auth change-password --username alice --tenant acme
 ```
 
 ## SQL administration (FlightSQL)
@@ -779,17 +716,8 @@ For `ducklake` creates, Postgres connection keys are optional: anything omitted 
 Example: create an in-memory tenant-db that only serves federated sources.
 
 ```bash
-curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/database/create" \
-  -d '{
-    "tenant": "acme",
-    "name": "fed",
-    "kind": "memory",
-    "metastore": {},
-    "dataPath": "",
-    "defaultDatabase": "fedpg",
-    "defaultSchema": "public"
-  }'
+qod database create --tenant acme --name fed --kind memory \
+  --default-database fedpg --default-schema public
 ```
 
 ### Update a database
@@ -803,13 +731,13 @@ curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
 # the database's kind requires (incl. pgPassword on ducklake) is rejected.
 # Engine defaults only in initSql, never credentials: the value is stored
 # unredacted and inlined in pod specs; secrets belong in federation sources.
-curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"acme_tpch","initSql":"SET memory_limit = '\''8GB'\'';"}'
+qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit = '8GB';"
 
 # Rotate the metastore password (restarts the db's nodes):
 # Send the FULL metastore map when editing it (minus pgPassword to keep it): the map is replaced, and dropping a required key is rejected.
-curl -sS -X POST "http://localhost:20900/api/database/update" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"acme_tpch","metastore":{"dbName":"acme_tpch","pgHost":"localhost","pgPort":"5432","pgUser":"postgres","schemaName":"main","pgPassword":"newpass"}}'
+qod database update --tenant acme --name acme_tpch \
+  --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
+  --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass
 ```
 
 ### Per-database object-store credentials
@@ -828,14 +756,11 @@ specific scope per path). Keys, by `dataPath` scheme:
 ```bash
 # Create a database that authenticates its own bucket, distinct from the
 # manager-wide default credentials.
-curl -sS -X POST "http://localhost:20900/api/database/create" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{
-    "tenant": "acme",
-    "name": "coldstore",
-    "kind": "ducklake",
-    "dataPath": "s3://acme-coldstore/ducklake",
-    "objectStore": {"s3_region": "us-east-1", "s3_access_key_id": "AKIA...", "s3_secret_access_key": "..."}
-  }'
+qod database create --tenant acme --name coldstore --kind ducklake \
+  --data-path s3://acme-coldstore/ducklake \
+  --object-store s3_region=us-east-1 \
+  --object-store s3_access_key_id=AKIA... \
+  --object-store s3_secret_access_key=...
 ```
 
 An empty (or absent) `objectStore` falls back to the global env credentials -
@@ -882,14 +807,10 @@ In HA, replicas race that first create, so the losing ones can log one false
 "unreachable" WARN at first boot; it self-heals.
 
 ```bash
-# Create a managed database. No dataPath, no objectStore: the server resolves
+# Create a managed database. No data path, no object store: the server resolves
 # both. The response's dataPath is s3://<bucket>/<tenant>_<name>-<id8>/ where
 # id8 is the first 8 chars of the tenant-db surrogate id, so recreating a
 # deleted name always lands on a fresh empty prefix.
-curl -sS -X POST "http://localhost:20900/api/database/create" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"sales","kind":"ducklake","managedStorage":true}'
-
-# CLI equivalent
 qod database create --tenant acme --name sales --kind ducklake --managed-storage
 ```
 
@@ -910,14 +831,10 @@ no BYO-to-managed (or managed-to-BYO) migration, recreate instead.
 
 ```bash
 # Delete: tombstone now, objects purged after retainDays (7 by default).
-curl -sS -X POST "http://localhost:20900/api/database/delete" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"acme_sales"}'
+qod database delete --tenant acme --name acme_sales
 
 # Delete and make the storage purge-eligible immediately (the worker drains it
 # on its next sweep; the call itself still returns straight away).
-curl -sS -X POST "http://localhost:20900/api/database/delete" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","name":"acme_sales","purgeManagedData":true}'
-
 qod database delete --tenant acme --name acme_sales --purge-managed-data
 ```
 
@@ -959,13 +876,9 @@ Two operator cautions:
 ### Register a federated source
 
 ```bash
-curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources" \
-  -d '{
-    "alias": "fedpg",
-    "description": "Prod warehouse Postgres",
-    "setupSql": "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST '\''pg.prod'\'', PORT 5432, DATABASE '\''warehouse'\'', USER '\''svc_qod'\'', PASSWORD '\''{{secret.PG_PWD}}'\''); ATTACH '\'''\'' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
-  }'
+qod federation create acme acme_fed --alias fedpg \
+  --description "Prod warehouse Postgres" \
+  --setup-sql "INSTALL postgres; LOAD postgres; CREATE OR REPLACE SECRET fedpg_sec (TYPE POSTGRES, HOST 'pg.prod', PORT 5432, DATABASE 'warehouse', USER 'svc_qod', PASSWORD '{{secret.PG_PWD}}'); ATTACH '' AS {{alias}} (TYPE POSTGRES, SECRET fedpg_sec, READ_ONLY);"
 ```
 
 Placeholders:
@@ -975,17 +888,14 @@ Placeholders:
 ### Add a Postgres-backed secret
 
 ```bash
-curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -d '{"name": "PG_PWD", "value": "hunter2"}'
+qod federation secret set acme acme_fed fedpg --name PG_PWD --value hunter2
 ```
 
 Or a secret backed by an external store (env var, AWS Secrets Manager, etc.):
 
 ```bash
-curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/fedpg/secrets" \
-  -d '{"name": "PG_PWD", "externalRef": "vault:secret/data/qod/fedpg#password"}'
+qod federation secret set acme acme_fed fedpg --name PG_PWD \
+  --external-ref "vault:secret/data/qod/fedpg#password"
 ```
 
 ### Switch the secret resolver
@@ -1004,18 +914,21 @@ curl -X PUT -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: application/json' \
 
 ### Export / import as YAML
 
+These two endpoints have no `qod` command yet - call them over REST (the
+static `QOD_API_KEY` or a session/PAT token goes in `X-API-Key`).
+
 Export (`***REDACTED***` replaces every value-backed secret; `externalRef` is left as-is):
 
 ```bash
-curl -H 'X-API-Key: '"$API_KEY" \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/export" > fed.yaml
+curl -H "X-API-Key: $QOD_API_KEY" \
+  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/export" > fed.yaml
 ```
 
 Re-import after editing. Secrets with `value: "***REDACTED***"` (and no `externalRef`) reuse the existing row's value, so a round-trip never requires re-typing passwords:
 
 ```bash
-curl -X POST -H 'X-API-Key: '"$API_KEY" -H 'Content-Type: text/plain' \
-  "$MGR/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/import" --data-binary @fed.yaml
+curl -X POST -H "X-API-Key: $QOD_API_KEY" -H 'Content-Type: text/plain' \
+  "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/import" --data-binary @fed.yaml
 ```
 
 Import semantics: replace-by-alias inside the tenant-db. Sources absent from the YAML are deleted; secrets absent from a source are deleted.
@@ -1031,7 +944,7 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `unresolved secret 'X' in source '<alias>'` in supervisor log | Source's setupSql references `{{secret.X}}` but no matching row | Add the secret row via `PUT .../federated-sources/<alias>/secrets` |
+| `unresolved secret 'X' in source '<alias>'` in supervisor log | Source's setupSql references `{{secret.X}}` but no matching row | Add the secret row via `qod federation secret set` |
 | `unsubstituted placeholder` at boot | Typo in setupSql like `{{secret.X}` (missing brace) | Fix setupSql via re-create (POST upserts); recycle the pool |
 | `catalog 'fedpg' does not exist` from the client | Pool was not recycled after editing the source | Drop and recreate the pool, or wait for idle-timeout recycle |
 | `missing RO grant on fedpg.public.X` | ACL not granted on the federated alias | `INSERT INTO qodstate_role_permission(role_id, catalog_name, schema_name, table_name, verb) VALUES (..., 'RO')` |
@@ -1050,15 +963,17 @@ The existing RBAC graph covers federated tables with zero changes:
 
 ```bash
 # Live node table (used by the UI)
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/pool/list \
+qod pool list
+
+# Compact one-line-per-node view of the same data
+qod --json pool list \
   | python3 -c "import sys,json; d=json.load(sys.stdin); \
     [print(f'{n[\"nodeId\"]:28s} role={n[\"role\"]:9s} healthy={n[\"healthy\"]} \
 served={n[\"totalServed\"]:5d} p50={n[\"p50Ms\"]:4.0f} p95={n[\"p95Ms\"]:4.0f} p99={n[\"p99Ms\"]:4.0f}') \
      for p in d['pools'] for n in p['nodes']]"
 
 # Recent statement history (newest first)
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/node/statements?limit=20' \
-  | python3 -m json.tool
+qod node statements --limit 20
 ```
 
 Per-node fields surfaced via `/api/pool/list`:
@@ -1077,29 +992,21 @@ Quarantine is durable operator state, separate from node health. Check the quara
 ```bash
 # Quarantine a node: stop routing new statements to it (running ones finish).
 # Durable: survives manager restarts; only unquarantine clears it. Superuser only.
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/quarantine \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+qod node quarantine --tenant acme --db acme_tpch --pool bi --node-id bi-1
 
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/unquarantine \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+qod node unquarantine --tenant acme --db acme_tpch --pool bi --node-id bi-1
 
 # Restart a node: kills everything running on it, respawns with the same id, and clears any quarantine. Superuser only.
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/node/restart \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","nodeId":"bi-1"}'
+qod node restart --tenant acme --db acme_tpch --pool bi --node-id bi-1
 
 # In-flight statements (tenant admins see only their tenant).
-curl -sS -H "X-API-Key: $TOKEN" http://localhost:20900/api/node/active-statements
+qod node active-statements
 
 # Best-effort kill by statement id from the list above. "accepted" is not a guarantee:
 # the manager closes the stream; a node that ignores disconnect keeps executing.
 # Response is "accepted" (stream closed, best-effort) or "already-completed" (statement finished before the kill arrived).
-# Escalate with node/restart when the statement must die.
-curl -sS -H "X-API-Key: $TOKEN" -X POST http://localhost:20900/api/statement/kill \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"<statement-id>"}'
+# Escalate with node restart when the statement must die.
+qod statement kill <statement-id>
 ```
 
 ## Audit log
@@ -1108,22 +1015,19 @@ The audit log records control-plane mutations, auth events, data-plane denials, 
 
 ```bash
 # Most recent 50 control-plane events
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?family=control-plane&limit=50' | python3 -m json.tool
+qod audit list --family control-plane --limit 50
 
 # Page through with the keyset cursor (use nextBefore from the previous response)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?before=<nextBefore-from-previous-page>'
+qod audit list --before <nextBefore-from-previous-page>
 
 # Failed logins in a time window
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/audit/list?action=auth.login.failure&from=2026-07-01T00:00:00Z'
+qod audit list --action auth.login.failure --from 2026-07-01T00:00:00Z
 
 # Only no-tenant rows (anonymous auth failures, node ops, manifest imports; superuser only)
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/audit/list?noTenant=true' | python3 -m json.tool
+qod audit list --no-tenant
 
-# Exhaustive action vocabulary for exact ?action= filters
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/audit/actions' | python3 -m json.tool
+# Exhaustive action vocabulary for exact --action filters
+qod audit actions
 ```
 
 Filters: `family`, `tenant` (superuser: returns only that tenant's rows; null-tenant rows not included when this is set), `noTenant=true` (superuser: only null-tenant rows; wins over `tenant`), `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
@@ -1144,17 +1048,15 @@ Statement history records every FlightSQL statement (including reads). Raw rows 
 
 ```bash
 # Most recent 50 statements for a tenant
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&limit=50' | python3 -m json.tool
+qod history statements --tenant acme --limit 50
 
 # Page through with the keyset cursor (use nextBefore from the previous response)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?before=<nextBefore-from-previous-page>'
+qod history statements --before <nextBefore-from-previous-page>
 
 # Find yesterday's slow statements: fetch the window, filter durationMs locally
 # (there is no duration filter parameter on the endpoint)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/statements?tenant=acme&pool=bi&from=2026-07-05T00:00:00Z&to=2026-07-06T00:00:00Z&limit=500' \
+qod --json history statements --tenant acme --pool bi \
+  --from 2026-07-05T00:00:00Z --to 2026-07-06T00:00:00Z --limit 500 \
   | python3 -c "
 import sys, json
 rows = json.load(sys.stdin).get('statements', [])
@@ -1164,14 +1066,12 @@ for r in sorted(slow, key=lambda x: -x.get('durationMs', 0)):
 "
 
 # Hourly trend for the last 7 days
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/trends?granularity=hour&tenant=acme&pool=bi&from=2026-06-29T00:00:00Z&to=2026-07-06T00:00:00Z' \
-  | python3 -m json.tool
+qod history trends --granularity hour --tenant acme --pool bi \
+  --from 2026-06-29T00:00:00Z --to 2026-07-06T00:00:00Z
 
 # Daily trend for the last 30 days
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/history/trends?granularity=day&tenant=acme&from=2026-06-06T00:00:00Z&to=2026-07-06T00:00:00Z' \
-  | python3 -m json.tool
+qod history trends --granularity day --tenant acme \
+  --from 2026-06-06T00:00:00Z --to 2026-07-06T00:00:00Z
 ```
 
 Statement filters: `tenant`, `pool`, `user`, `status` (`ok`, `denied`, `transient`, `permanent`, `no-node`, `no-pool`, or `pin-lost`), `q` (substring on SQL), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
@@ -1194,17 +1094,14 @@ Durable per-tenant / per-pool / per-user metering over daily rollups. Tenant-sco
 history endpoints: superusers see all tenants, tenant admins are pinned to their own.
 
 ```bash
-# Month-to-date per tenant (defaults: current calendar month UTC, groupBy=tenant)
-curl -sS -H "X-API-Key: $TOKEN" 'http://localhost:20900/api/usage' | python3 -m json.tool
+# Month-to-date per tenant (defaults: current calendar month UTC, group-by tenant)
+qod usage
 
 # A closed month per pool, for billing
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&groupBy=pool&tenant=acme' \
-  | python3 -m json.tool
+qod usage --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z --group-by pool --tenant acme
 
 # CSV extraction for billing (columns per the spec contract)
-curl -sS -H "X-API-Key: $TOKEN" \
-  'http://localhost:20900/api/usage?from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z' \
+qod --json usage --from 2026-06-01T00:00:00Z --to 2026-07-01T00:00:00Z \
   | jq -r '["tenant","statements","errors","denied","engine_ms"],
            (.groups[] | [.tenant, .statements, .errors, .denied, .engineMs]) | @csv'
 ```
@@ -1347,9 +1244,8 @@ opt-in except pod security:
     nodes immediately so the new posture takes effect:
     ```bash
     # Per-pool override (superuser only; restarts the pool's nodes immediately).
-    # lockdown: "inherit" (default, follow QOD_NODE_LOCKDOWN) | "on" | "off"
-    curl -sS -X POST "http://localhost:20900/api/pool/setLockdown" -H "X-API-Key: $TOKEN" -H 'Content-Type: application/json' \
-      -d '{"tenant":"acme","tenantDb":"acme_tpch","pool":"bi","lockdown":"off"}'
+    # --lockdown: inherit (default, follow QOD_NODE_LOCKDOWN) | on | off
+    qod pool set-lockdown --tenant acme --db acme_tpch --pool bi --lockdown off
     ```
   - Verify: with the flag on, `SELECT * FROM read_text('/etc/passwd')` and
     `ATTACH ':memory:' AS x` are denied for a tenant user, `SET
@@ -1401,11 +1297,11 @@ opt-in except pod security:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/api/*` returns 401 | `QOD_API_KEY` is set but the header is missing/wrong | Pass `X-API-Key: <key>` or log in via `/api/auth/login` |
+| `/api/*` returns 401 | No valid credential on the call (missing/wrong key, expired session) | `qod login`, or pass `X-API-Key: <key>` on raw REST calls |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `stop` + `start` (reconcile respawns) |
-| `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via the role-permission API or set `QOD_ACL_ENABLED=false` |
+| `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `qod role permission grant` or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
-| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `pool/delete` + `pool/create` |
+| `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `qod pool delete` + `qod pool create` |
 | Python load test: "PyArrow not installed" | Missing pyarrow | `pip install --break-system-packages pyarrow` on macOS |
 | Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See README "Behind a corporate proxy". |
 
