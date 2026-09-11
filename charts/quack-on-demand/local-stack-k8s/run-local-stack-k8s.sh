@@ -8,7 +8,7 @@
 #      docker-builds from the source tree). Load both into the cluster
 #      via `docker save | ctr import` (single-platform, no kind /
 #      multi-arch quirks).
-#   3. Apply the in-cluster Postgres + RustFS + Prometheus + Grafana.
+#   3. Apply the in-cluster Postgres + SeaweedFS + Prometheus + Grafana.
 #      The dashboard ConfigMap is rebuilt from observability/grafana-dashboard-k8s.json
 #      so the repo file stays the single source of truth.
 #   4. Helm-install the chart from `values-local-stack.yaml`.
@@ -102,7 +102,7 @@ if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
         kind delete cluster --name ${KIND_CLUSTER}
         $0
 
-      (Postgres + RustFS data is ephemeral emptyDir, so this only
+      (Postgres + SeaweedFS data is ephemeral emptyDir, so this only
       costs you the previous TPC-H seed.)
 EOM
     exit 1
@@ -149,18 +149,15 @@ for img in "$IMAGE" "$NODE_IMAGE"; do
     | docker exec -i "$control_plane_node" ctr -n k8s.io images import - >/dev/null
 done
 
-# ---- 3. in-cluster Postgres + RustFS --------------------------------------
+# ---- 3. in-cluster Postgres + SeaweedFS ----------------------------------
 if [[ "$NUKE" == "1" ]]; then
   echo "[3/5] NUKE=1: deleting namespace '$NAMESPACE'..."
   kubectl delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
 fi
-echo "[3/5] applying Postgres + RustFS + Prometheus + Grafana + Keycloak in '$NAMESPACE'..."
+echo "[3/5] applying Postgres + SeaweedFS + Prometheus + Grafana + Keycloak in '$NAMESPACE'..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/local-postgres.yaml"
-# Completed Jobs are immutable, so drop the previous bucket-create Job
-# before re-applying the manifest (head-bucket inside makes re-runs no-ops).
-kubectl -n "$NAMESPACE" delete job rustfs-mb --ignore-not-found >/dev/null
-kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/rustfs.yaml"
+kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/seaweedfs.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/prometheus.yaml"
 kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/grafana.yaml"
 
@@ -216,10 +213,7 @@ else
 fi
 
 kubectl -n "$NAMESPACE" rollout status deploy/postgres   --timeout=120s
-kubectl -n "$NAMESPACE" rollout status deploy/rustfs     --timeout=120s
-# RustFS does not auto-create buckets (SeaweedFS did); wait for the
-# bucket-create Job so DATA_PATH writes cannot race a missing bucket.
-kubectl -n "$NAMESPACE" wait --for=condition=complete job/rustfs-mb --timeout=120s
+kubectl -n "$NAMESPACE" rollout status deploy/seaweedfs  --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/prometheus --timeout=120s
 kubectl -n "$NAMESPACE" rollout status deploy/grafana    --timeout=120s
 # Keycloak cold-starts slowly (--import-realm parses the JSON before the
@@ -279,7 +273,7 @@ kubectl -n "$NAMESPACE" apply -f "$SCRIPT_DIR/ingress.yaml"
 # ---- 5. optional TPC demo seed ------------------------------------------
 #
 # Runs inside the manager pod via the bundled loader scripts.
-# The pod has cluster DNS so it reaches `postgres` + `rustfs` directly;
+# The pod has cluster DNS so it reaches `postgres` + `seaweedfs` directly;
 # no host duckdb, no port-forward orchestration.
 # LOAD_TPCH, LOAD_TPCDS, and LOAD_SSB opt in independently (the legacy
 # LOAD_TPC=N shortcut is resolved at top-of-file into all three).
@@ -349,7 +343,7 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
             SF="$LOAD_TPCH" \
             TEMP_DIR=/tmp/duckdb-tpch-load \
             DATA_PATH="s3://qod-ducklake/acme_tpch" \
-            QOD_S3_ENDPOINT="http://rustfs:9000" \
+            QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-tpch-dbgen.sh
@@ -363,7 +357,7 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
             SF="$LOAD_TPCDS" \
             TEMP_DIR=/tmp/duckdb-tpcds-load \
             DATA_PATH="s3://qod-ducklake/globex_tpcds" \
-            QOD_S3_ENDPOINT="http://rustfs:9000" \
+            QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-tpcds-dbgen.sh
@@ -377,7 +371,7 @@ if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
             SF="$LOAD_SSB" \
             TEMP_DIR=/tmp/duckdb-ssb-load \
             DATA_PATH="s3://qod-ducklake/acme_tpch" \
-            QOD_S3_ENDPOINT="http://rustfs:9000" \
+            QOD_S3_ENDPOINT="http://seaweedfs:8333" \
             QOD_S3_ACCESS_KEY_ID=quack QOD_S3_SECRET_ACCESS_KEY=quackquack \
             QOD_S3_REGION=us-east-1 QOD_S3_URL_STYLE=path QOD_S3_USE_SSL=false \
         /app/scripts/load-ssb-dbgen.sh

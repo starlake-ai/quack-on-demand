@@ -46,10 +46,10 @@
 #                                                 (default true)
 #   WAIT_TIMEOUT        manager readiness wait    (default 90 s)
 #   PROFILES            comma-separated list of compose profiles to
-#                       activate (e.g. "observability,rustfs"). Merges
-#                       with auto-detected profiles - the `rustfs`
-#                       profile auto-activates when QOD_S3_ENDPOINT in
-#                       .env points at it, so you only need PROFILES
+#                       activate (e.g. "observability,seaweedfs"). Merges
+#                       with auto-detected profiles - the `seaweedfs`
+#                       profile auto-activates when QOD_S3_ENDPOINT (env
+#                       or .env) points at it, so you only need PROFILES
 #                       for the OTHER opt-in profiles (`observability`).
 #                                                 (default unset)
 #
@@ -116,21 +116,23 @@ if [[ "$NUKE" == "1" ]]; then
   # known opt-in profiles so a teardown is exhaustive regardless of which
   # combination was used last time.
   docker compose -f docker-compose.yml \
-    --profile rustfs --profile observability \
+    --profile seaweedfs --profile observability \
     down --remove-orphans 2>/dev/null || true
-  # ./seaweedfs and ./seaweedfs-config are legacy leftovers from before the
-  # RustFS switch (2026-09-10); wipe them too so old checkouts clean up.
+  # ./rustfs is a legacy leftover from the 2026-09-10..09-11 RustFS-as-
+  # bundled-object-store detour (rolled back to SeaweedFS); wipe it too so
+  # checkouts that ran that era clean up.
   if [[ -d "$REPO_DIR/pgdata" || -d "$REPO_DIR/ducklake" || -d "$REPO_DIR/certs" \
-     || -d "$REPO_DIR/rustfs" || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" ]]; then
-    echo "wiping ./pgdata, ./ducklake, ./certs, ./rustfs (+ legacy ./seaweedfs, ./seaweedfs-config) via ephemeral container..."
+     || -d "$REPO_DIR/seaweedfs" || -d "$REPO_DIR/seaweedfs-config" || -d "$REPO_DIR/rustfs" ]]; then
+    echo "wiping ./pgdata, ./ducklake, ./certs, ./seaweedfs, ./seaweedfs-config (+ legacy ./rustfs) via ephemeral container..."
     docker run --rm -v "$REPO_DIR:/work" alpine sh -c \
-      'rm -rf /work/pgdata /work/ducklake /work/certs /work/rustfs /work/seaweedfs /work/seaweedfs-config'
+      'rm -rf /work/pgdata /work/ducklake /work/certs /work/seaweedfs /work/seaweedfs-config /work/rustfs'
   fi
   # Pre-create ./pgdata so `up` doesn't have to. Postgres re-chowns it to
   # uid 70 on its own init regardless of starting ownership, so it's the
   # one bind-mount dir that doesn't need our chown - see below for
-  # ./ducklake, ./certs, ./rustfs, which do (and are prepared unconditionally
-  # on every run now, not just here).
+  # ./ducklake, ./certs (and ./seaweedfs/./seaweedfs-config, prepared but
+  # not chowned - see the prep step), which are all prepared unconditionally
+  # on every run now, not just here.
   mkdir -p "$REPO_DIR/pgdata"
   echo "booting from a clean slate."
 fi
@@ -155,7 +157,7 @@ ENV_SEED="${ENV_SEED:-.env.example}"
 # KEY=...`, or `KEY=... ./run-docker-compose.sh`) first, then $ENV_FILE, then
 # DEFAULT. Bash indirection (${!key-}) reads the process-env variable named
 # by $key dynamically and is nounset-safe (empty, not an error, when unset).
-# Every call site in this script (the rustfs/seaweedfs profile detection
+# Every call site in this script (the seaweedfs profile detection
 # below, and the demo-seed Postgres/S3 vars further down) MUST go through
 # this so a real env var always wins - reading .env directly split-brains
 # against docker-compose.yml's own `${VAR}` interpolation, which already
@@ -285,9 +287,9 @@ fi
 # ---- Compose profile resolution -------------------------------------------
 # Two sources:
 #   1. Auto: when QOD_S3_ENDPOINT (in the environment or .env - see read_env
-#      above) points at the in-compose rustfs service, activate the `rustfs`
-#      profile so the manager doesn't come up writing to s3:// against a
-#      never-started RustFS container.
+#      above) points at the in-compose seaweedfs service, activate the
+#      `seaweedfs` profile so the manager doesn't come up writing to s3://
+#      against a never-started SeaweedFS container.
 #   2. Explicit: PROFILES=foo,bar from the caller's env. Merges with the
 #      auto-detected set. De-duplicated. Lets the user add `observability`
 #      etc. without touching .env.
@@ -307,21 +309,21 @@ _has_profile() {
 # this profile-activation decision, splitting the two halves of the stack.
 s3_endpoint="$(read_env QOD_S3_ENDPOINT "")"
 # Strip http(s):// before matching: spawn-quack-node.sh and _load-common.sh
-# both accept (and the k8s rig's values write) a scheme-ful
-# http://rustfs:9000 as a first-class spelling, not just bare rustfs:9000.
-# Match against the stripped copy only - $s3_endpoint itself is forwarded
-# to the seed exec and the container unchanged, whichever form it was.
+# both accept a scheme-ful http://seaweedfs:8333 as a first-class spelling,
+# not just bare seaweedfs:8333. Match against the stripped copy only -
+# $s3_endpoint itself is forwarded to the seed exec and the container
+# unchanged, whichever form it was.
 s3_endpoint_bare="${s3_endpoint#http://}"
 s3_endpoint_bare="${s3_endpoint_bare#https://}"
-if [[ "$s3_endpoint_bare" == rustfs:* ]]; then
-  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'rustfs' compose profile"
-  _has_profile rustfs || _profiles+=("rustfs")
-elif [[ "$s3_endpoint_bare" == seaweedfs:* ]]; then
-  echo "WARN: QOD_S3_ENDPOINT=$s3_endpoint (environment or .env) still points at the retired" >&2
-  echo "      'seaweedfs' service (replaced by 'rustfs' on 2026-09-10). The 'rustfs' compose" >&2
-  echo "      profile is NOT being activated for this run - set QOD_S3_ENDPOINT=rustfs:9000" >&2
-  echo "      (auto-activates the profile on your next run), otherwise the stack comes up" >&2
-  echo "      unable to reach the object store." >&2
+if [[ "$s3_endpoint_bare" == seaweedfs:* ]]; then
+  echo "detected QOD_S3_ENDPOINT=$s3_endpoint -> auto-activating 'seaweedfs' compose profile"
+  _has_profile seaweedfs || _profiles+=("seaweedfs")
+elif [[ "$s3_endpoint_bare" == rustfs:* ]]; then
+  echo "WARN: QOD_S3_ENDPOINT=$s3_endpoint (environment or .env) points at 'rustfs', which this" >&2
+  echo "      stack no longer bundles (the 0.8.2 RustFS detour was rolled back to SeaweedFS)." >&2
+  echo "      The 'seaweedfs' compose profile is NOT being activated for this run - update .env" >&2
+  echo "      to QOD_S3_ENDPOINT=seaweedfs:8333 (auto-activates the profile on your next run)," >&2
+  echo "      otherwise the stack comes up unable to reach the object store." >&2
 fi
 if [[ -n "${PROFILES:-}" ]]; then
   IFS=',' read -ra _user_profiles <<< "$PROFILES"
@@ -347,15 +349,16 @@ done
 # and `./ducklake` (TPC-H seed `mkdir` fails, and it's still needed in S3
 # mode too, for DuckDB's local TEMP_DIR spill). This used to run only inside
 # the NUKE=1 block, so a fresh checkout's first `up` (no prior NUKE) hit both
-# failures. ./rustfs gets the same treatment, gated on the rustfs profile
-# being active, chowned to its image's non-root uid 10001 instead (unlike
-# SeaweedFS, which ran as root, so that gap was latent before). All of this
-# is cheap and idempotent (mkdir -p + chown are no-ops once already correct).
+# failures. ./seaweedfs and ./seaweedfs-config get a plain `mkdir -p` only,
+# no chown: the seaweedfs image runs as root in-container, so a root-owned
+# bind mount (Docker's own auto-create default) is already writable by it -
+# unlike an image that runs non-root, which would need the same chown
+# treatment ./ducklake/./certs get here. All of this is cheap and idempotent
+# (mkdir -p + chown are no-ops once already correct).
 mkdir -p "$REPO_DIR/ducklake" "$REPO_DIR/certs"
 docker run --rm -v "$REPO_DIR:/work" alpine sh -c 'chown 1000:1000 /work/ducklake /work/certs'
-if _has_profile rustfs; then
-  mkdir -p "$REPO_DIR/rustfs"
-  docker run --rm -v "$REPO_DIR:/work" alpine sh -c 'chown 10001:10001 /work/rustfs'
+if _has_profile seaweedfs; then
+  mkdir -p "$REPO_DIR/seaweedfs" "$REPO_DIR/seaweedfs-config"
 fi
 
 # ---- Inject QOD_BOOTSTRAP_YAML before up when a bench or explicit DEMO asks ----
@@ -404,44 +407,10 @@ case "$IMAGE_SOURCE" in
     ;;
 esac
 
-# ---- Wait for the RustFS bucket bootstrap (rustfs profile only) ----------
-# `quack` cannot depends_on the profiled rustfs-mb service without breaking
-# the default (no-profile) run - see the comment on the quack service in
-# docker-compose.yml. Close the race here instead: the manager's boot-time
-# DuckLake init (when QOD_DUCKLAKE_DATA_PATH is s3://) can hit the bucket
-# before rustfs-mb creates it, so wait for that one-shot container to exit
-# 0 before even starting the manager-readiness wait below. Mirrors the k8s
-# smoke rig's `kubectl wait --for=condition=complete job/rustfs-mb`.
-if _has_profile rustfs; then
-  echo -n "waiting for rustfs-mb bucket bootstrap "
-  mb_container="quack-on-demand-rustfs-mb"
-  # rustfs-mb's own in-container retry loop is 60 iterations * 2s sleep, up
-  # to ~120s; this deadline must stay comfortably above that or the wrapper
-  # gives up before the container itself would.
-  mb_deadline=$(( $(date +%s) + 150 ))
-  while true; do
-    mb_status="$(docker inspect -f '{{.State.Status}}' "$mb_container" 2>/dev/null || true)"
-    if [[ "$mb_status" == "exited" ]]; then
-      mb_exit="$(docker inspect -f '{{.State.ExitCode}}' "$mb_container" 2>/dev/null || echo 1)"
-      if [[ "$mb_exit" == "0" ]]; then
-        echo " ok"
-        break
-      fi
-      echo
-      echo "ERROR: rustfs-mb exited $mb_exit; the S3 bucket may not exist." >&2
-      echo "       Check 'docker compose -f $COMPOSE_FILE logs rustfs-mb'." >&2
-      exit 1
-    fi
-    if (( $(date +%s) > mb_deadline )); then
-      echo
-      echo "ERROR: rustfs-mb did not finish within 150s." >&2
-      echo "       Check 'docker compose -f $COMPOSE_FILE logs rustfs-mb'." >&2
-      exit 1
-    fi
-    echo -n "."
-    sleep 2
-  done
-fi
+# No bucket-bootstrap wait here: SeaweedFS auto-creates buckets on first
+# PutObject, so there is no one-shot job to race against (unlike an object
+# store that needs the bucket pre-created) - see the comment on the quack
+# service in docker-compose.yml.
 
 # ---- Wait for manager ----
 echo -n "waiting for manager REST on :20900 "
@@ -477,7 +446,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   unset _var _val
 
   # read_env is defined near the top of the script (right after ENV_FILE is
-  # set) so the rustfs/seaweedfs profile detection above can share it.
+  # set) so the seaweedfs profile detection above can share it.
   pg_user="$(read_env PG_USER     postgres)"
   pg_pass="$(read_env PG_PASSWORD azizam)"
 
@@ -640,12 +609,14 @@ EOM
 # Per-profile URL summaries. Checked against the same _profiles list the
 # resolution step populated above, so what we print matches what was
 # actually activated.
-if _has_profile rustfs; then
+if _has_profile seaweedfs; then
   cat <<EOM
 
-rustfs (S3-compatible object store + console):
-  Console:    http://localhost:${RUSTFS_CONSOLE_PORT:-9001}/        (file browser)
-  S3 API:     http://localhost:${RUSTFS_S3_PORT:-9000}              (\`aws s3 ls\` / s5cmd)
+seaweedfs (S3-compatible object store + UIs):
+  Filer UI:   http://localhost:${SEAWEEDFS_FILER_PORT:-8888}/        (file browser)
+  Master UI:  http://localhost:${SEAWEEDFS_MASTER_PORT:-9333}/        (cluster status)
+  Volume UI:  http://localhost:${SEAWEEDFS_VOLUME_PORT:-8080}/ui/
+  S3 API:     http://localhost:${SEAWEEDFS_S3_PORT:-8333}             (\`aws s3 ls\` / s5cmd)
   credentials: ${QOD_S3_ACCESS_KEY_ID:-quack} / ${QOD_S3_SECRET_ACCESS_KEY:-quackquack}
 EOM
 fi

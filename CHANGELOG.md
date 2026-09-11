@@ -12,6 +12,10 @@
   the launchers' `psql` dependency: a fresh install needs only a Postgres
   user with `CREATEDB`. The `psql` preflight arms in `run-jar.sh` and the
   CLI remain as optional fail-fast conveniences.
+- **Local rigs: reverted to SeaweedFS as the bundled object store** (the
+  0.8.2 RustFS replacement is rolled back); the wrapper-script hardening
+  from that work is retained (env precedence, data-path-derived seeding,
+  port handling).
 
 ## 0.8.2
 

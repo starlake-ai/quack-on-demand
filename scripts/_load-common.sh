@@ -130,7 +130,7 @@ load_ensure_pg_database() {
   fi
 }
 
-# Detect remote DATA_PATH (s3:// / RustFS / MinIO / R2, gs://, azure://) and
+# Detect remote DATA_PATH (s3:// / SeaweedFS / MinIO / R2, gs://, azure://) and
 # set STORAGE_SQL to the matching DuckDB extension + SECRET so the ATTACH can
 # read/write parquet against the bucket. Local paths are mkdir'd and
 # canonicalized (DuckLake persists the exact string in the catalog).

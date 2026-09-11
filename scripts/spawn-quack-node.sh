@@ -50,7 +50,7 @@ if [[ "$schemaName" == "$dbName" ]]; then
 fi
 
 # Detect whether dataPath points at a remote object store. DuckLake accepts
-# s3:// (covers AWS S3, RustFS, MinIO, R2, GCS via the S3-interop endpoint)
+# s3:// (covers AWS S3, SeaweedFS, MinIO, R2, GCS via the S3-interop endpoint)
 # and azure:// / abfss:// when the matching DuckDB extension is loaded. For
 # remote schemes we skip the local mkdir (the parent dir doesn't exist on the
 # container fs) and emit the SQL needed to install httpfs/azure + a SECRET so

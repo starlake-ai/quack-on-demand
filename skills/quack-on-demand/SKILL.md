@@ -835,7 +835,7 @@ the manager with:
 
 ```bash
 export QOD_MANAGED_STORE_ENABLED=true
-export QOD_MANAGED_STORE_ENDPOINT=http://rustfs:9000      # empty = AWS default resolution
+export QOD_MANAGED_STORE_ENDPOINT=http://seaweedfs:8333    # empty = AWS default resolution
 export QOD_MANAGED_STORE_REGION=us-east-1
 export QOD_MANAGED_STORE_BUCKET=qod-managed
 export QOD_MANAGED_STORE_ACCESS_KEY_ID=...

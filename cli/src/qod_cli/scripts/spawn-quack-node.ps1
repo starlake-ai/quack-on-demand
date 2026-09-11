@@ -71,7 +71,7 @@ ERROR: schemaName ($schemaName) must differ from dbName ($dbName).
 }
 
 # Detect whether dataPath points at a remote object store. DuckLake accepts
-# s3:// (AWS S3, RustFS, MinIO, R2, GCS via the S3-interop endpoint) and
+# s3:// (AWS S3, SeaweedFS, MinIO, R2, GCS via the S3-interop endpoint) and
 # azure:// / abfss:// when the matching DuckDB extension is loaded. For remote
 # schemes we skip the local mkdir and emit the SQL needed to install
 # httpfs/azure + a SECRET so the ATTACH below can read/write parquet.

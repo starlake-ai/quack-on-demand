@@ -91,11 +91,12 @@ project/project/
 .env
 .env.local
 pgdata/
-rustfs/
-# Legacy SeaweedFS bind-mounts (replaced by rustfs/ 2026-09-10) - kept
-# ignored so pre-existing checkouts don't show them as untracked.
 seaweedfs/
 seaweedfs-config/
+# Legacy RustFS bind-mount from the 2026-09-10..09-11 RustFS detour (rolled
+# back to SeaweedFS) - kept ignored so checkouts that ran that era don't
+# show it as untracked.
+rustfs/
 
 # Native quackwire JNI shim - local CMake build tree.
 # Per-platform `libquackwire.{so,dylib}` binaries are published to Maven

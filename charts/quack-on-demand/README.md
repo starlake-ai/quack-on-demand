@@ -26,7 +26,7 @@ required, per the prerequisites above.) You can also install from a checkout:
 
 ### Local kind cluster (recommended for first-run)
 
-The bundled `run-local-stack-k8s.sh` script handles everything: creates a kind cluster, applies an in-cluster Postgres + RustFS, then `helm install`s the chart wired against them. Requires `kind`, `kubectl`, `helm`, and `docker`.
+The bundled `run-local-stack-k8s.sh` script handles everything: creates a kind cluster, applies an in-cluster Postgres + SeaweedFS, then `helm install`s the chart wired against them. Requires `kind`, `kubectl`, `helm`, and `docker`.
 
 ```bash
 git clone https://github.com/starlake-ai/quack-on-demand

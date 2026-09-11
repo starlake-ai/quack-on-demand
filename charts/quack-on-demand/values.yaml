@@ -207,7 +207,7 @@ quackNode:
 # used by the manager-side loader and by every spawned Quack node, so it
 # must be reachable from both. Default is `s3://qod-ducklake/qod-test`
 # against the `s3:` block below - set s3.endpoint to your object store
-# (RustFS in the kind smoke; MinIO, real S3, R2, etc. elsewhere).
+# (SeaweedFS in the kind smoke; MinIO, real S3, R2, etc. elsewhere).
 # Override to a filesystem path only when the manager and the node pods
 # share a mount (rare in K8s; common in docker-compose).
 storage:
@@ -220,14 +220,14 @@ storage:
 # spawn-quack-node.sh consumes `QOD_S3_*` to emit the matching DuckDB
 # `CREATE SECRET quack_s3 (...)` so httpfs can talk to the endpoint.
 #
-# For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/rustfs.yaml.
+# For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
 # For production: point endpoint at your bucket (https://s3.<region>.amazonaws.com
 # for real AWS S3), set useSsl=true, and use an existingSecret rather than the
 # inline accessKey/secretKey.
 s3:
-  endpoint: "http://rustfs:9000"
+  endpoint: "http://seaweedfs:8333"
   region: us-east-1
-  urlStyle: path     # "path" for RustFS/MinIO/R2; "vhost" for real S3
+  urlStyle: path     # "path" for SeaweedFS/MinIO/R2; "vhost" for real S3
   useSsl: false
   # Inline creds (dev / kind only). Prefer existingSecret in production.
   accessKey: "quack"

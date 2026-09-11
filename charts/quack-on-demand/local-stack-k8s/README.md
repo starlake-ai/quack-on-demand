@@ -9,7 +9,7 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 - `helm` 3.12+
 - `docker`
 - `duckdb` CLI on `$PATH` (only required when seeding via `LOAD_TPC`; otherwise skip)
-- ~8 GB free RAM (the manager image + Quack node image + Postgres + RustFS + kind nodes)
+- ~8 GB free RAM (the manager image + Quack node image + Postgres + SeaweedFS + kind nodes)
 
 ## One command
 
@@ -32,8 +32,8 @@ This:
 1. Creates a kind cluster named `qod-test` (reused if it already exists).
 2. Resolves the manager + Quack-node images. With the default `BUILD=0` it reuses local `:local`-tagged images, pulling `starlakeai/quack-on-demand{,-node}:latest-snapshot` from Docker Hub and retagging as `:local` if absent. `BUILD=1` runs `docker build` for both from the source tree first.
 3. Loads both images into the kind cluster.
-4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), RustFS ([`rustfs.yaml`](rustfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) - one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard-k8s.json`](../../../observability/grafana-dashboard-k8s.json) (the Kubernetes variant, which adds the Pool Occupancy, Node Health, and Routing Locality rows on top of the single-node panels) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** - that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
-5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, RustFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
+4. Applies a minimal in-cluster Postgres ([`local-postgres.yaml`](local-postgres.yaml)), SeaweedFS ([`seaweedfs.yaml`](seaweedfs.yaml)), Prometheus ([`prometheus.yaml`](prometheus.yaml)), Grafana ([`grafana.yaml`](grafana.yaml)) and Keycloak ([`keycloak.yaml`](keycloak.yaml)) - one Pod + Service each, ephemeral `emptyDir` storage. The Grafana dashboard ConfigMap is rebuilt from [`observability/grafana-dashboard-k8s.json`](../../../observability/grafana-dashboard-k8s.json) (the Kubernetes variant, which adds the Pool Occupancy, Node Health, and Routing Locality rows on top of the single-node panels) and the Keycloak realm ConfigMap from [`keycloak-realm-qod.json`](keycloak-realm-qod.json) so both repo files stay authoritative. Grafana / Prometheus / Keycloak are configured for sub-path operation (`GF_SERVER_ROOT_URL=/grafana/`, `--web.route-prefix=/prometheus/`, `KC_HTTP_RELATIVE_PATH=/auth`) so they slot in behind the Traefik ingress applied in step 5. **Not production-grade** - that's the point. The chart itself expects an external Postgres + S3-compatible store; these manifests exist only to satisfy the smoke.
+5. `helm install`s the chart pointing at that Postgres for the DuckLake catalog + control plane, SeaweedFS for the parquet `s3://` data path, and the local image, with FlightSQL TLS on (auto-generated self-signed cert) and an inline admin password.
 6. `helm install`s Traefik v3 as a single-replica DaemonSet on the control-plane node, then applies [`ingress.yaml`](ingress.yaml) - one `Ingress` that routes `/grafana`, `/prometheus`, `/auth` and `/` (catch-all → manager) to the right Services. Combined with the kind `extraPortMappings` from [`kind-config.yaml`](kind-config.yaml) (host `:20900` → container `:80`), every HTTP UI in the rig becomes reachable at a single `http://localhost:20900/...` URL.
 7. Waits for the manager pod to be `Ready` and `/health` to return OK.
 8. Verifies the manager spawned the bootstrap Quack node pods (3 by default - one each of WriteOnly / ReadOnly / Dual).
@@ -49,7 +49,7 @@ flowchart LR
     manager["Manager"]
     nodes["Quack nodes"]
     pg["Postgres"]
-    sw["RustFS"]
+    sw["SeaweedFS"]
     obs["Prometheus<br/>+ Grafana"]
     kc["Keycloak<br/>(OIDC)"]
 
@@ -90,7 +90,7 @@ flowchart TB
         nodes["Quack node pods<br/>quack-tpch-tpch1-sales-{1,2,3}<br/>(image: starlakeai/quack-on-demand-node:local)<br/>HTTP :8080 → quack_serve"]
 
         pg["Pod: postgres<br/>(single replica, emptyDir)<br/>databases: qod (control plane)<br/>· tpch_tpch1 (DuckLake catalog)"]
-        sw["Pod: rustfs<br/>(single replica, emptyDir)<br/>S3 API :9000 · bucket qod-ducklake"]
+        sw["Pod: seaweedfs<br/>(single replica, emptyDir)<br/>S3 API :8333 · bucket qod-ducklake"]
         prom["Pod: prometheus<br/>(emptyDir, 7d retention)<br/>scrapes manager :20900/metrics<br/>--web.route-prefix=/prometheus/"]
         graf["Pod: grafana<br/>(emptyDir, anonymous Admin)<br/>UI :3000 · provisioned dashboard<br/>GF_SERVER_SERVE_FROM_SUB_PATH=true"]
         kc["Pod: keycloak<br/>(start-dev, emptyDir)<br/>:8080 · realm qod · admin/admin · reader/reader<br/>KC_HTTP_RELATIVE_PATH=/auth"]
@@ -140,7 +140,7 @@ The pieces, one per row of the diagram:
 
 - **Host port-forwards** are the only way anything outside the cluster talks to the stack. `run-local-stack-k8s.sh` prints the exact commands at the end.
 - **Postgres** holds both the manager's `qodstate_*` control plane and each tenant-db's `__ducklake_*` catalog tables. They live in separate Postgres databases (`qod` vs. `${tenant}_${tenantDb}`) so the control plane never collides with DuckLake metadata.
-- **RustFS** speaks the S3 API and stores the parquet that DuckLake's catalog references. Unlike the SeaweedFS this rig used previously, RustFS does not auto-create buckets, so `rustfs.yaml` ships a one-shot `rustfs-mb` Job that creates `qod-ducklake` before the chart installs. The chart wires `storage.dataPath=s3://qod-ducklake/qod-test`; both the manager and every Quack node use the same URL.
+- **SeaweedFS** speaks the S3 API and stores the parquet that DuckLake's catalog references. The chart wires `storage.dataPath=s3://qod-ducklake/qod-test`; both the manager and every Quack node use the same URL.
 - **Manager** talks to the K8s API via a `Role` (not a `ClusterRole`) scoped to its own namespace, so it can spawn / delete Pods + Services for Quack nodes without touching anything else in the cluster.
 - **Quack node pods** are spawned by the manager (not by Helm). They listen on `:8080`, attach the per-tenant-db DuckLake catalog to their local DuckDB, and serve the manager's per-statement `/quack` HTTP requests.
 
