@@ -112,13 +112,13 @@ fi
 # NUKE is irreversible: the control plane, every tenant-db, and all DuckLake
 # parquet go with it. On a terminal, require typing the project name so a
 # pasted NUKE=1 or a wrong-directory invocation cannot destroy data silently.
-# Non-tty runs (CI, nohup) skip the prompt, so scripted use is unchanged;
-# NUKE_YES=1 is the explicit interactive bypass. Deliberately NOT a password
-# check: NUKE runs with host privileges and must work when the stack is too
+# Non-tty runs (CI, nohup) skip the prompt, so scripted use is unchanged
+# (a script that wants no prompt redirects stdin, e.g. < /dev/null).
+# Deliberately NOT a password check: NUKE runs with host privileges and must work when the stack is too
 # broken to verify anything.
 confirm_nuke() {
   local expected="$1" scope="$2"
-  if [[ "${NUKE_YES:-0}" == "1" || ! -t 0 ]]; then return 0; fi
+  if [[ ! -t 0 ]]; then return 0; fi
   echo "NUKE=1 will irreversibly wipe: $scope"
   printf "Type '%s' to proceed (anything else aborts): " "$expected"
   local answer

@@ -151,8 +151,8 @@ done
 
 # ---- 3. in-cluster Postgres + SeaweedFS ----------------------------------
 # Same confirmation contract as run-docker-compose.sh's NUKE: tty-only,
-# type the target to proceed, NUKE_YES=1 or non-tty skips (CI unchanged).
-if [[ "$NUKE" == "1" && "${NUKE_YES:-0}" != "1" && -t 0 ]]; then
+# type the target to proceed; non-tty skips (CI unchanged).
+if [[ "$NUKE" == "1" && -t 0 ]]; then
   echo "NUKE=1 will delete namespace '$NAMESPACE' (all pods, the in-cluster Postgres and SeaweedFS data)."
   printf "Type '%s' to proceed (anything else aborts): " "$NAMESPACE"
   read -r _nuke_answer

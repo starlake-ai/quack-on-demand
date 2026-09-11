@@ -641,8 +641,8 @@ fi
 # state directories (ducklake/, state/, certs/). Idempotent: missing pieces
 # are skipped silently.
 # Same confirmation contract as run-docker-compose.sh's NUKE: tty-only,
-# type the control-plane db name to proceed, NUKE_YES=1 or non-tty skips.
-if [[ "$NUKE" == "1" && "${NUKE_YES:-0}" != "1" && -t 0 ]]; then
+# type the control-plane db name to proceed; non-tty skips.
+if [[ "$NUKE" == "1" && -t 0 ]]; then
   _nuke_target="${QOD_PG_DBNAME:-qod}"
   echo "NUKE=1 will drop the '${_nuke_target}' control plane, the demo tenant-dbs, and wipe ./ducklake, ./certs, ./state."
   printf "Type '%s' to proceed (anything else aborts): " "$_nuke_target"

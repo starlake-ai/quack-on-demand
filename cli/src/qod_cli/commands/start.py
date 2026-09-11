@@ -47,11 +47,11 @@ def _confirm_nuke(pg: dict) -> None:
     """NUKE is irreversible (drops the control plane and demo tenant-dbs,
     wipes the per-user state dirs). On a terminal, require typing the
     control-plane db name so a pasted NUKE=1 cannot destroy data silently.
-    Non-tty runs skip the prompt (scripted use unchanged); NUKE_YES=1 is
-    the explicit interactive bypass. Deliberately NOT a password check:
+    Non-tty runs skip the prompt (scripted use unchanged; a script that
+    wants no prompt redirects stdin). Deliberately NOT a password check:
     NUKE runs with the invoker's OS privileges and must keep working when
     the stack is too broken to verify credentials against."""
-    if os.environ.get("NUKE_YES") == "1" or not sys.stdin.isatty():
+    if not sys.stdin.isatty():
         return
     expected = pg["dbname"]
     typer.echo(

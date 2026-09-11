@@ -314,7 +314,6 @@ def test_nuke_confirmation_aborts_on_wrong_answer(monkeypatch, capsys):
     from qod_cli.commands import start as start_mod
 
     monkeypatch.setattr(start_mod.sys.stdin, "isatty", lambda: True)
-    monkeypatch.delenv("NUKE_YES", raising=False)
     monkeypatch.setattr(start_mod.typer, "prompt", lambda *a, **k: "wrong")
     destroyed = []
     monkeypatch.setattr(start_mod, "_psql", lambda *a, **k: destroyed.append(a))
@@ -325,19 +324,12 @@ def test_nuke_confirmation_aborts_on_wrong_answer(monkeypatch, capsys):
     assert "aborted" in capsys.readouterr().err
 
 
-def test_nuke_confirmation_bypasses_for_non_tty_and_env(monkeypatch, tmp_path):
+def test_nuke_confirmation_skips_for_non_tty(monkeypatch, tmp_path):
     from qod_cli.commands import start as start_mod
 
     calls = []
     monkeypatch.setattr(start_mod, "_psql", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(start_mod.shutil, "which", lambda n: "/usr/bin/psql")
-    # non-tty: prompt skipped entirely
     monkeypatch.setattr(start_mod.sys.stdin, "isatty", lambda: False)
     start_mod._nuke(tmp_path, {"dbname": "qod", "password": ""})
     assert calls  # drops proceeded without any prompt
-    # tty but NUKE_YES=1: also skipped
-    calls.clear()
-    monkeypatch.setattr(start_mod.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setenv("NUKE_YES", "1")
-    start_mod._nuke(tmp_path, {"dbname": "qod", "password": ""})
-    assert calls
