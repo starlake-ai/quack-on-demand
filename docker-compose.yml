@@ -90,11 +90,13 @@ services:
     # (it must come up on a plain `docker compose up`), and a depends_on
     # toward a profiled service is not honored from a profile-less one -
     # compose would refuse to start seaweedfs for it at all, breaking the
-    # default (no S3) run. Unlike an object store that needs a bucket
-    # pre-created (a one-shot job to race against), SeaweedFS auto-creates
-    # buckets on first PutObject, so there is no ordering wait to add here
-    # at all - the manager's boot-time DuckLake init against s3:// just
-    # works as soon as the seaweedfs container answers.
+    # default (no S3) run. No wait is needed in practice either: the
+    # seaweedfs-init one-shot below is gated on seaweedfs's healthcheck and
+    # finishes in well under a second, while this JVM takes several seconds
+    # to reach its first s3:// touch - the manager has always lost that
+    # race safely (months of pre-RustFS baseline). The init exists because
+    # DuckLake's HeadBucket 404s confusingly on a missing bucket even
+    # though SeaweedFS auto-creates on first PUT - see its header.
     environment:
       # ----- Postgres connection (the service name is the hostname) -----
       QOD_PG_HOST:     postgres

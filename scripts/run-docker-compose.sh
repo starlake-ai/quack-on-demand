@@ -407,10 +407,10 @@ case "$IMAGE_SOURCE" in
     ;;
 esac
 
-# No bucket-bootstrap wait here: SeaweedFS auto-creates buckets on first
-# PutObject, so there is no one-shot job to race against (unlike an object
-# store that needs the bucket pre-created) - see the comment on the quack
-# service in docker-compose.yml.
+# No bucket-bootstrap wait here: seaweedfs-init is gated on the seaweedfs
+# healthcheck and completes long before the manager's first s3:// touch
+# (the JVM boot has always lost that race safely - months of baseline).
+# See the comment on the quack service in docker-compose.yml.
 
 # ---- Wait for manager ----
 echo -n "waiting for manager REST on :20900 "
