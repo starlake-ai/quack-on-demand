@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.3 (unreleased)
+## 0.8.3
 
 - **Manager creates the control-plane database at startup.** The boot
   preflight now classifies the initial connect failure: when the server is
@@ -16,6 +16,16 @@
   0.8.2 RustFS replacement is rolled back); the wrapper-script hardening
   from that work is retained (env precedence, data-path-derived seeding,
   port handling).
+- **`qod sql --file` runs a SQL script fail-fast.** Statements split on
+  top-level semicolons with full lexical awareness (strings, quoted
+  identifiers, comments, dollar-quoting), executed in order; the first
+  error aborts with exit 1 naming the statement and its line. `-` reads
+  stdin.
+- **`NUKE=1` asks for typed confirmation on a terminal.** All four launch
+  surfaces (compose wrapper, `run-jar.sh`, the kind rig, `qod start`) now
+  require typing the destruction target's name before wiping; non-tty runs
+  skip the prompt, so scripts and CI are unchanged. There is deliberately
+  no bypass env var.
 
 ## 0.8.2
 
