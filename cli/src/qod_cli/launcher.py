@@ -179,6 +179,45 @@ def latest_release_version() -> str:
     return resp.json()["tag_name"].lstrip("v")
 
 
+def _version_tuple(v: str) -> tuple[int | None, ...]:
+    """Dot-split into ints; a non-numeric part (e.g. "dev0") fails safe to None
+    rather than raising, so a comparison against it can be caught and treated as
+    "no hint" instead of crashing."""
+    parts: list[int | None] = []
+    for p in v.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(None)
+    return tuple(parts)
+
+
+def newer_release_hint(current: str, timeout_s: float = 2.0) -> str | None:
+    """One-line hint when PyPI's latest `qod` release is newer than `current`.
+
+    Purely decorative - an unpinned `uvx qod` freezes on the first version it
+    ever resolved, and this makes that trap self-announcing without turning a
+    routine `qod serve`/`qod start` into a network dependency. Returns None on
+    ANY failure (offline, timeout, malformed response) and whenever `current`
+    is a dev build (".dev0", never released to PyPI) or already current, so the
+    caller can echo-or-skip with no further error handling.
+    """
+    if current.endswith(".dev0"):
+        return None
+    try:
+        resp = httpx.get("https://pypi.org/pypi/qod/json", timeout=timeout_s)
+        resp.raise_for_status()
+        latest = resp.json()["info"]["version"]
+        if _version_tuple(latest) <= _version_tuple(current):
+            return None
+    except Exception:
+        return None
+    return (
+        f"note: qod {latest} is available (you have {current}); "
+        "uvx users: uvx qod@latest"
+    )
+
+
 def _download(url: str, dest: Path, label: str) -> str:
     """Stream `url` to `dest`, returning the sha256 of what was written."""
     digest = hashlib.sha256()

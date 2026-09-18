@@ -26,3 +26,14 @@ class NodeLockdownSpec extends AnyFlatSpec with Matchers:
     NodeLockdown.sql("az://b/d", enabled = true) should include("disabled_filesystems")
     NodeLockdown.sql("./ducklake/x", enabled = true) should not include "disabled_filesystems"
   }
+
+  it should "disable the local filesystem for the qod serve scheme aliases too" in {
+    NodeLockdown.sql("r2://b/d", enabled = true) should include(
+      "SET disabled_filesystems = 'LocalFileSystem';"
+    )
+    NodeLockdown.sql("s3a://b/d", enabled = true) should include("disabled_filesystems")
+    NodeLockdown.sql("gcs://b/d", enabled = true) should include("disabled_filesystems")
+    NodeLockdown.sql("azure://b/d", enabled = true) should include("disabled_filesystems")
+    NodeLockdown.sql("abfss://b/d", enabled = true) should include("disabled_filesystems")
+    NodeLockdown.sql("/var/local/data", enabled = true) should not include "disabled_filesystems"
+  }

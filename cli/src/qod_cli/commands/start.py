@@ -172,6 +172,16 @@ def start(
     Ctrl-C tears the manager and its nodes down gracefully (same as qod stop).
 
     No Postgres and just want to serve local data? Use qod serve."""
+    try:
+        from .. import __version__
+        from ..launcher import newer_release_hint
+
+        hint = newer_release_hint(__version__)
+        if hint:
+            typer.echo(hint, err=True)
+    except Exception:
+        pass  # purely decorative; must never block a start
+
     if demo:
         from .demo import run_demo
 

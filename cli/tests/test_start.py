@@ -337,6 +337,26 @@ def test_start_demo_still_works_and_points_at_serve(runner, wired, monkeypatch):
     assert "qod serve --demo" in result.output  # the deprecation pointer
 
 
+def test_start_echoes_a_staleness_hint_when_present(runner, wired, monkeypatch):
+    monkeypatch.setattr(launcher, "newer_release_hint", lambda current: f"note: newer than {current}")
+
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 0, result.output
+    assert "note: newer than" in result.output
+
+
+def test_start_stays_silent_without_a_staleness_hint(runner, wired, monkeypatch):
+    monkeypatch.setattr(launcher, "newer_release_hint", lambda current: None)
+
+    from qod_cli.main import app
+
+    result = runner.invoke(app, ["start", "--jar", str(wired["jar"])])
+    assert result.exit_code == 0, result.output
+    assert "note:" not in result.output
+
+
 def test_nuke_confirmation_skips_for_non_tty(monkeypatch, tmp_path):
     from qod_cli.commands import start as start_mod
 

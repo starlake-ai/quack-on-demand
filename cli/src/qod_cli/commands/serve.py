@@ -35,6 +35,7 @@ from ..serve_provision import (
     ensure_database,
     ensure_pool,
     ensure_tenant,
+    wait_node_routable,
     wait_ready,
 )
 from ..serve_target import TargetError, composed_db_name
@@ -164,6 +165,29 @@ def _object_store(
     if scheme_family == "s3":
         _warn_if_no_credentials(out, "s3")
     return out
+
+
+def _credential_tail_note(target: str | None, tables: list[str]) -> str | None:
+    """One stderr note when a --table view's glob lives under a different
+    object-store scheme family than the anchor (including a local/bare anchor
+    with remote --table globs). _object_store scopes its CREATE SECRET to the
+    anchor's own family, so a mismatched view gets no secret of its own and
+    falls back to the engine's ambient credential chain - worth flagging, not
+    worth refusing over."""
+    anchor_family = _scheme_family(target)
+    mismatched: set[str] = set()
+    for item in tables:
+        _, _, glob = item.partition("=")
+        family = _scheme_family(glob.strip())
+        if family is not None and family != anchor_family:
+            mismatched.add(family)
+    if not mismatched:
+        return None
+    return (
+        f"note: --table view(s) use a different object-store scheme than the anchor "
+        f"(anchor: {anchor_family or 'local'}, --table: {', '.join(sorted(mismatched))}); "
+        "those views get no scoped secret and rely on the engine's ambient credential chain"
+    )
 
 
 def _banner(
@@ -304,6 +328,11 @@ def _provision(
         ensure_database(client, tenant, target)
         db_full = composed_db_name(tenant, target.name)
         ensure_pool(client, tenant, db_full, pool, size)
+        # On a RESTART the pool row exists but a respawned node may still be
+        # seconds from healthy; wait for one before printing connect strings
+        # that would otherwise briefly fail. Never fails provisioning over it.
+        if not wait_node_routable(client, tenant, db_full, pool):
+            echo("note: node still warming; the first query may briefly fail")
         edge = client.request("GET", "/api/config/client") or {}
         edge_host = edge.get("flightSqlHost") or ""
         if edge_host in ("", "0.0.0.0"):
@@ -425,6 +454,16 @@ def serve(
 
     Running against your own Postgres instead? Use qod start.
     """
+    try:
+        from .. import __version__
+        from ..launcher import newer_release_hint
+
+        hint = newer_release_hint(__version__)
+        if hint:
+            typer.echo(hint, err=True)
+    except Exception:
+        pass  # purely decorative; must never block a serve
+
     if demo:
         if target is not None:
             typer.echo(
@@ -458,6 +497,10 @@ def serve(
     except TargetError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
+
+    tail_note = _credential_tail_note(target, list(table))
+    if tail_note:
+        typer.echo(tail_note, err=True)
 
     # Mirrors Names.normalizeTenantDbName's refusal: DuckDB cannot attach a catalog
     # under the name of an existing one. Caught here so the failure costs no JVM boot.

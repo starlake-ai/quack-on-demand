@@ -155,6 +155,44 @@ def ensure_database(client: RestClient, tenant: str, target: ServeTarget) -> boo
     return True
 
 
+def wait_node_routable(
+    client: RestClient,
+    tenant: str,
+    db_full: str,
+    pool: str,
+    timeout_s: float = 60.0,
+    interval_s: float = 1.0,
+    sleep=time.sleep,
+    now=time.monotonic,
+) -> bool:
+    """Poll /api/pool/list until the (tenant, tenantDb, pool) row has at least one
+    healthy node, or `timeout_s` elapses.
+
+    On a fresh create the pool's node is usually up by the time this runs, but on
+    a RESTART the pool row already exists while its respawned node may still be
+    seconds from passing the health probe - printing the banner's connect strings
+    before that moment means the first query briefly fails. An ApiError mid-poll
+    (a transient hiccup, not a real failure) is swallowed and retried until the
+    deadline, same posture as `wait_ready` above. `sleep`/`now` are injected so
+    tests never wall-clock.
+    """
+    deadline = now() + timeout_s
+    while now() < deadline:
+        try:
+            existing = client.request("GET", "/api/pool/list") or {}
+            for row in existing.get("pools", []):
+                if (row.get("tenant"), row.get("tenantDb"), row.get("pool")) != (
+                    tenant, db_full, pool,
+                ):
+                    continue
+                if any(n.get("healthy") for n in row.get("nodes", [])):
+                    return True
+        except ApiError:
+            pass
+        sleep(interval_s)
+    return False
+
+
 def ensure_pool(client: RestClient, tenant: str, db_full: str, pool: str, size: int) -> bool:
     """True when created, False when it already existed.
 

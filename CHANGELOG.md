@@ -13,6 +13,16 @@
   restore instead of a connection per tenant-db), and the resolution that does happen is bounded
   by a 15s timeout, degrading to the existing WARN-and-fallback path instead of hanging. Fixes
   #101.
+- `qod stop` now sweeps an orphaned embedded control-plane postmaster left behind by
+  an abrupt JVM death (an orphan case mostly seen on Windows), `qod serve` waits for
+  a routable node before printing its connect-string banner on a restart instead of
+  handing out strings that briefly fail, both `qod serve` and `qod start` print a
+  non-blocking one-line nudge when a newer release is on PyPI, a lockdown-enabled
+  node now disables local filesystem access for the s3a/r2/gcs/azure/abfss dataPath
+  scheme aliases (not just their s3/gs/az canonical forms), and `qod serve` notes
+  when a `--table` view's glob scheme differs from the target's own, since such a
+  view gets no scoped secret and falls back to the engine's ambient credential
+  chain. (#100)
 
 ## 0.9.2
 

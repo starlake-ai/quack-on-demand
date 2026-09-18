@@ -49,6 +49,28 @@ def _invoke(runner, wired, *args):
     return runner.invoke(app, ["serve", *args, "--jar", str(wired["jar"])])
 
 
+def test_serve_echoes_a_staleness_hint_when_present(runner, wired, tmp_path, monkeypatch):
+    from qod_cli import launcher
+
+    monkeypatch.setattr(launcher, "newer_release_hint", lambda current: f"note: newer than {current}")
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert "note: newer than" in result.output
+
+
+def test_serve_stays_silent_without_a_staleness_hint(runner, wired, tmp_path, monkeypatch):
+    from qod_cli import launcher
+
+    monkeypatch.setattr(launcher, "newer_release_hint", lambda current: None)
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert "note:" not in result.output
+
+
 def test_serve_sets_the_embedded_control_plane_env(runner, wired, tmp_path):
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
@@ -259,11 +281,8 @@ def test_serve_s3_target_drops_a_region_only_map_from_ambient_env(runner, wired,
     # scoped CREATE SECRET server-side with KEY_ID ''/SECRET '', which OUTRANKS
     # DuckDB's ambient credential chain for exactly the served prefix - the empty-
     # credential trap F1 exists to prevent. AWS_REGION alone must not survive.
-    # Explicitly clear the key/secret vars too: conftest's isolated_env only strips
-    # QOD_*, and a real AWS_ACCESS_KEY_ID in the running shell would otherwise leak
-    # into this test and give it the wrong (accidentally correct) answer.
-    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
-    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    # conftest's isolated_env strips AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY too, so
+    # a real key in the running shell cannot leak into this test.
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
     result = _invoke(runner, wired, "s3://bucket/sales/")
     assert result.exit_code == 0, result.output
@@ -335,6 +354,37 @@ def test_serve_gcs_alias_normalizes_end_to_end(runner, wired):
     assert wired["provision"]["target"].data_path.startswith("gs://")
 
 
+def test_serve_credential_tail_note_for_local_anchor_with_remote_table(runner, wired, tmp_path):
+    d = tmp_path / "sales"
+    d.mkdir()
+    result = _invoke(
+        runner, wired, str(d), "--table", "orders=s3://bucket/orders/**/*.parquet",
+    )
+    assert result.exit_code == 0, result.output
+    assert "different object-store scheme" in result.output
+    assert "anchor: local" in result.output
+    assert "s3" in result.output
+
+
+def test_serve_credential_tail_note_names_the_mismatch_for_a_remote_anchor(runner, wired):
+    result = _invoke(
+        runner, wired, "s3://bucket/sales/",
+        "--table", "orders=gs://other-bucket/orders/**/*.parquet",
+    )
+    assert result.exit_code == 0, result.output
+    assert "anchor: s3" in result.output
+    assert "gs" in result.output
+
+
+def test_serve_no_credential_tail_note_when_table_matches_the_anchor_scheme(runner, wired):
+    result = _invoke(
+        runner, wired, "s3://bucket/sales/",
+        "--table", "orders=s3://bucket/orders/**/*.parquet",
+    )
+    assert result.exit_code == 0, result.output
+    assert "different object-store scheme" not in result.output
+
+
 def test_serve_kind_override_reaches_resolution(runner, wired):
     _invoke(runner, wired, "s3://bucket/lake/", "--kind", "ducklake")
     target = wired["provision"]["target"]
@@ -373,8 +423,18 @@ def test_provisioning_logs_in_and_ensures_everything(respx_mock, tmp_path):
         return_value=httpx.Response(200, json={"tenantDbs": []})
     )
     respx_mock.post(f"{BASE}/api/database/create").mock(return_value=httpx.Response(200, json={}))
+    # First call is ensure_pool's own list-before-create check (must stay empty so
+    # it creates); every call after is wait_node_routable's poll, which needs a
+    # healthy node on the first one so the test does not really sleep out its
+    # 60s default timeout.
     respx_mock.get(f"{BASE}/api/pool/list").mock(
-        return_value=httpx.Response(200, json={"pools": []})
+        side_effect=[
+            httpx.Response(200, json={"pools": []}),
+            httpx.Response(200, json={"pools": [
+                {"tenant": "default", "tenantDb": "default_sales", "pool": "bi",
+                 "nodes": [{"healthy": True}]}
+            ]}),
+        ]
     )
     respx_mock.post(f"{BASE}/api/pool/create").mock(return_value=httpx.Response(200, json={}))
     respx_mock.get(f"{BASE}/api/config/client").mock(
@@ -600,8 +660,16 @@ def test_provisioning_substitutes_a_null_flight_sql_host(respx_mock, tmp_path):
         return_value=httpx.Response(200, json={"tenantDbs": []})
     )
     respx_mock.post(f"{BASE}/api/database/create").mock(return_value=httpx.Response(200, json={}))
+    # See test_provisioning_logs_in_and_ensures_everything for why this is a
+    # two-step side_effect rather than a single return_value.
     respx_mock.get(f"{BASE}/api/pool/list").mock(
-        return_value=httpx.Response(200, json={"pools": []})
+        side_effect=[
+            httpx.Response(200, json={"pools": []}),
+            httpx.Response(200, json={"pools": [
+                {"tenant": "default", "tenantDb": "default_sales", "pool": "bi",
+                 "nodes": [{"healthy": True}]}
+            ]}),
+        ]
     )
     respx_mock.post(f"{BASE}/api/pool/create").mock(return_value=httpx.Response(200, json={}))
     respx_mock.get(f"{BASE}/api/config/client").mock(

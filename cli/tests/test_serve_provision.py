@@ -8,6 +8,7 @@ from qod_cli.serve_provision import (
     ensure_database,
     ensure_pool,
     ensure_tenant,
+    wait_node_routable,
     wait_ready,
 )
 from qod_cli.serve_target import ServeTarget
@@ -153,3 +154,53 @@ def test_ensure_pool_is_a_noop_when_present(client, respx_mock):
     create = respx_mock.post(f"{BASE}/api/pool/create")
     assert ensure_pool(client, "default", "default_sales", "bi", 1) is False
     assert not create.called
+
+
+def _pool_list_response(healthy: bool, tenant="default", tenant_db="default_sales", pool="bi"):
+    return httpx.Response(
+        200,
+        json={
+            "pools": [
+                {
+                    "tenant": tenant,
+                    "tenantDb": tenant_db,
+                    "pool": pool,
+                    "nodes": [{"healthy": healthy}],
+                }
+            ]
+        },
+    )
+
+
+def test_wait_node_routable_true_once_a_node_is_healthy(client, respx_mock):
+    route = respx_mock.get(f"{BASE}/api/pool/list")
+    route.side_effect = [_pool_list_response(False), _pool_list_response(True)]
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
+    result = wait_node_routable(
+        client, "default", "default_sales", "bi", timeout_s=10, interval_s=0,
+        sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+    assert result is True
+    assert route.call_count == 2
+
+
+def test_wait_node_routable_false_at_deadline_when_never_healthy(client, respx_mock):
+    respx_mock.get(f"{BASE}/api/pool/list").mock(return_value=_pool_list_response(False))
+    ticks = iter([0.0, 1.0, 2.0, 99.0])
+    result = wait_node_routable(
+        client, "default", "default_sales", "bi", timeout_s=5, interval_s=0,
+        sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+    assert result is False
+
+
+def test_wait_node_routable_keeps_polling_through_an_api_error(client, respx_mock):
+    route = respx_mock.get(f"{BASE}/api/pool/list")
+    route.side_effect = [httpx.Response(500), _pool_list_response(True)]
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
+    result = wait_node_routable(
+        client, "default", "default_sales", "bi", timeout_s=10, interval_s=0,
+        sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+    assert result is True
+    assert route.call_count == 2
