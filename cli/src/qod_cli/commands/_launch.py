@@ -16,7 +16,22 @@ from .._manager_version import MANAGER_VERSION
 
 def _exec(cmd: list[str], env: dict) -> None:
     if sys.platform == "win32":
-        raise typer.Exit(subprocess.call(cmd, env=env))
+        try:
+            code = subprocess.call(cmd, env=env)
+        except KeyboardInterrupt:
+            # The shared Windows console delivers Ctrl-C to the child too, so by
+            # the time this fires the manager already got the same signal; the
+            # sweep reaps whatever survived it (nodes, embedded postmaster - the
+            # sweep from part A handles the latter).
+            typer.echo("interrupted; running the stop sweep...", err=True)
+            try:
+                from .stop import perform_stop
+
+                perform_stop()
+            except Exception:
+                pass  # a sweep failure must not mask the exit
+            raise typer.Exit(130)
+        raise typer.Exit(code)
     raise typer.Exit(_run_supervised(cmd, env))
 
 

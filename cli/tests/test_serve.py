@@ -447,11 +447,12 @@ def test_provisioning_logs_in_and_ensures_everything(respx_mock, tmp_path):
     f.write_bytes(b"")
     target = resolve(str(f), data_root=tmp_path)
     lines = []
-    _provision(
+    ok = _provision(
         manager_url=BASE, tenant="default", target=target, pool="bi", size=1,
         password="pw", profile="default", generated=True, ready_timeout=5,
         pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
     )
+    assert ok is True
     banner = "\n".join(lines)
     assert "jdbc:arrow-flight-sql://localhost:31338/" in banner
     assert "tenant=default" in banner and "pool=bi" in banner
@@ -478,11 +479,12 @@ def test_provisioning_reports_and_keeps_the_manager_on_failure(respx_mock, tmp_p
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     lines = []
-    _provision(
+    ok = _provision(
         manager_url=BASE, tenant="default", target=resolve(str(f), data_root=tmp_path),
         pool="bi", size=1, password="pw", profile="default", generated=True,
         ready_timeout=5, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
     )
+    assert ok is False
     out = "\n".join(lines)
     assert "list tenants" in out
     assert "still running" in out
@@ -640,6 +642,95 @@ def test_serve_demo_refuses_a_target(runner, wired):
     assert result.exit_code == 1
     assert "--demo" in result.output and "TARGET" in result.output
     assert "cmd" not in wired
+
+
+def test_serve_attaches_to_a_running_manager(runner, wired, respx_mock, tmp_path, monkeypatch):
+    # B1: with a manager already answering /ready, serve must not boot a second
+    # JVM - it attaches and provisions inline instead.
+    from qod_cli.commands import serve as serve_cmd
+    from qod_cli.config import save_start_env
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    save_start_env({"QOD_ADMIN_PASSWORD": "stored-pw"})
+    captured = {}
+    monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: captured.update(kw) or True)
+
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert "cmd" not in wired
+    assert "provision" not in wired  # _spawn_provisioning (the thread path) never runs
+    assert captured["attached"] is True
+    assert captured["password"] == "stored-pw"
+    assert captured["manager_url"] == BASE
+    assert captured["tenant"] == "default"
+    assert captured["target"].name == "sales"
+
+
+def test_serve_attach_without_any_password_errors_cleanly(
+    runner, wired, respx_mock, tmp_path, monkeypatch
+):
+    from qod_cli.commands import serve as serve_cmd
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    called = []
+    monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: called.append(kw) or True)
+
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 1
+    assert "QOD_ADMIN_PASSWORD" in result.output
+    assert "qod setup" in result.output or "qod login" in result.output
+    assert called == []
+    assert "cmd" not in wired
+
+
+def test_serve_demo_refuses_when_a_manager_is_already_running(
+    runner, wired, respx_mock, monkeypatch
+):
+    from qod_cli.commands import serve as serve_cmd
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    called = []
+    monkeypatch.setattr(
+        serve_cmd, "run_demo", lambda *a, **kw: called.append(1), raising=False
+    )
+    result = _invoke(runner, wired, "--demo")
+    assert result.exit_code == 1
+    assert "qod stop" in result.output
+    assert called == []
+
+
+def test_serve_boots_normally_when_the_ready_probe_errors(runner, wired, respx_mock, tmp_path):
+    # Guards the probe's failure posture: any exception from the GET (connection
+    # refused, timeout, ...) must mean "nothing is running" and fall through to
+    # the ordinary boot path, not abort serve.
+    respx_mock.get(f"{BASE}/ready").mock(side_effect=httpx.ConnectError("refused"))
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert "cmd" in wired
+
+
+def test_banner_attached_render(respx_mock, tmp_path):
+    from qod_cli.commands.serve import _banner
+
+    banner = _banner(
+        tenant="default", db="sales", pool="bi", size=1, password="secret", generated=False,
+        edge_host="localhost", edge_port=31338, manager_url=BASE,
+        pg_port=25432, pg_data_dir="/x/pg", description="DuckDB file /abs/sales.duckdb",
+        attached=True,
+    )
+    banner = unstyle(banner)
+    assert "provisioned into the running gateway" in banner
+    assert BASE in banner
+    assert "gateway already running; stop it with: qod stop" in banner
+    assert "embedded postgres" not in banner
+    assert "pg data" not in banner
+    assert "Ctrl-C" not in banner
 
 
 def test_provisioning_substitutes_a_null_flight_sql_host(respx_mock, tmp_path):

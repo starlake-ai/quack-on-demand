@@ -25,6 +25,7 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
 import typer
 
 from .. import launcher
@@ -63,6 +64,19 @@ def _resolve_admin_password() -> tuple[str, bool]:
     if stored:
         return stored, False
     return secrets.token_urlsafe(12), True
+
+
+def _manager_running(manager_url: str) -> bool:
+    """True when something already answers GET /ready at MANAGER_URL - attach
+    to it instead of booting a second JVM. Mirrors status.py's `_get_json`
+    posture: any exception (connection refused, timeout, DNS) means nothing is
+    there yet, not a reason to abort serve. The response's status code does not
+    matter here (a 503 mid-boot still means "something is listening")."""
+    try:
+        httpx.get(f"{manager_url}/ready", timeout=2.0)
+        return True
+    except Exception:
+        return False
 
 
 def _scheme_family(target: str | None) -> str | None:
@@ -193,7 +207,7 @@ def _credential_tail_note(target: str | None, tables: list[str]) -> str | None:
 def _banner(
     *, tenant: str, db: str, pool: str, size: int, password: str, generated: bool,
     edge_host: str, edge_port: int, manager_url: str, pg_port: int, pg_data_dir: str,
-    description: str,
+    description: str, attached: bool = False,
 ) -> str:
     """The connect snippet. The PLAINTEXT password appears only on the run that
     generated it: reprinting a stored secret on every boot would put it in every
@@ -204,7 +218,13 @@ def _banner(
     The connect lines (JDBC/ADBC/ODBC/UI) and the one-time plaintext password
     line are styled (bold, colored) so they stand out for copy-pasting; click
     auto-strips the ANSI codes when the destination isn't a terminal, so piped
-    output and CI logs stay plain text."""
+    output and CI logs stay plain text.
+
+    ATTACHED (B1, #100): this run provisioned into an already-running manager
+    rather than booting its own. The embedded-postgres lines make no sense there
+    - that manager's control plane might be external and this process never
+    touched it - so the header and tail change; everything else (credentials,
+    connect strings) is identical either way."""
     from ..config import config_path
 
     # The seeded admin is a SUPERUSER row (tenant IS NULL): the FlightSQL edge picks
@@ -239,20 +259,32 @@ def _banner(
     # The manager's own boot box ends with a bare "====" ruler; this title makes
     # the provisioning summary below it a labeled section instead of loose lines.
     ruler = "=" * 78
-    lines = [
-        "",
-        ruler,
-        " qod serve: your gateway is ready",
-        ruler,
-        f"  control plane : embedded postgres on localhost:{pg_port}",
-        f"  pg data       : {pg_data_dir}/pgdata",
-        "                  relocate with --pg-data-dir <dir> or QOD_PG_EMBEDDED_DATA_DIR",
-        "                  (a new dir starts a fresh control plane; move the old dir to keep "
-        "your tenants)",
-        f"  serving       : {description}",
-        f"  tenant/db/pool: {tenant} / {db} / {pool}  ({size} dual node)",
-        typer.style(f"  admin user    : {_ADMIN_USER}", fg=typer.colors.YELLOW),
-    ]
+    if attached:
+        lines = [
+            "",
+            ruler,
+            " qod serve: provisioned into the running gateway",
+            ruler,
+            f"  manager       : {manager_url}",
+            f"  serving       : {description}",
+            f"  tenant/db/pool: {tenant} / {db} / {pool}  ({size} dual node)",
+            typer.style(f"  admin user    : {_ADMIN_USER}", fg=typer.colors.YELLOW),
+        ]
+    else:
+        lines = [
+            "",
+            ruler,
+            " qod serve: your gateway is ready",
+            ruler,
+            f"  control plane : embedded postgres on localhost:{pg_port}",
+            f"  pg data       : {pg_data_dir}/pgdata",
+            "                  relocate with --pg-data-dir <dir> or QOD_PG_EMBEDDED_DATA_DIR",
+            "                  (a new dir starts a fresh control plane; move the old dir to keep "
+            "your tenants)",
+            f"  serving       : {description}",
+            f"  tenant/db/pool: {tenant} / {db} / {pool}  ({size} dual node)",
+            typer.style(f"  admin user    : {_ADMIN_USER}", fg=typer.colors.YELLOW),
+        ]
     if generated:
         # Bold+yellow so the one-time plaintext doesn't blend into the rest of the
         # scrollback. typer.style() only wraps the whole string (ANSI codes go at
@@ -295,7 +327,7 @@ def _banner(
         typer.style(f"  ODBC {odbc}", fg="cyan", bold=True),
         typer.style(f"  UI   {manager_url.rstrip('/')}/ui/", fg="cyan", bold=True),
         "",
-        "  Ctrl-C to stop.",
+        "  gateway already running; stop it with: qod stop" if attached else "  Ctrl-C to stop.",
         "",
     ]
     return "\n".join(lines)
@@ -304,15 +336,18 @@ def _banner(
 def _provision(
     *, manager_url: str, tenant: str, target, pool: str, size: int, password: str,
     profile: str, generated: bool, ready_timeout: float, pg_port: int, pg_data_dir: str,
-    echo,
-) -> None:
+    echo, attached: bool = False,
+) -> bool:
     """Wait for the manager, log in, ensure tenant/database/pool, persist the
-    session, print the banner.
+    session, print the banner. Returns True once the banner has printed, False
+    on any failure arm.
 
     Never raises: this runs on a background thread whose exception would be
     invisible, and the manager must stay up either way so the user can read the
     relayed log and re-run. Failures are reported with the equivalent manual
-    command.
+    command. The background-thread caller (_spawn_provisioning) ignores the
+    return value; attach mode (B1, #100) runs this inline in the foreground and
+    needs it to decide its own exit code.
     """
     settings = Settings(manager_url=manager_url)
     client = RestClient(settings)
@@ -363,20 +398,24 @@ def _provision(
                 tenant=tenant, db=db_full, pool=pool, size=size, password=password,
                 generated=generated, edge_host=edge_host, edge_port=edge_port,
                 manager_url=manager_url, pg_port=pg_port, pg_data_dir=pg_data_dir,
-                description=target.description,
+                description=target.description, attached=attached,
             )
         )
+        return True
     except ProvisionError as exc:
         echo(f"\nqod serve: {exc.step} failed: {exc.detail}")
         if exc.manual:
             echo(f"  finish by hand: {exc.manual}")
         echo("  the manager is still running; re-run qod serve to resume, or Ctrl-C to stop.")
+        return False
     except ApiError as exc:
         echo(f"\nqod serve: provisioning failed: {exc}")
         echo("  the manager is still running; re-run qod serve to resume, or Ctrl-C to stop.")
+        return False
     except Exception as exc:  # noqa: BLE001 - never raises, see the docstring above.
         echo(f"\nqod serve: provisioning failed unexpectedly: {exc!r}")
         echo("  the manager is still running; re-run qod serve to resume, or Ctrl-C to stop.")
+        return False
 
 
 def _spawn_provisioning(**kwargs) -> None:
@@ -464,11 +503,23 @@ def serve(
     except Exception:
         pass  # purely decorative; must never block a serve
 
+    manager_url = ctx.obj.settings.manager_url
+
     if demo:
         if target is not None:
             typer.echo(
                 "error: qod serve --demo takes no TARGET (the demo seeds its own sample "
                 "data); drop --demo to serve your own data.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if _manager_running(manager_url):
+            # The demo is ephemeral and deliberately insecure; attaching it to
+            # someone else's already-running (possibly persistent) manager would
+            # mix that posture into a gateway that was never meant to have it.
+            typer.echo(
+                f"error: a manager is already running at {manager_url}; stop it first "
+                "(qod stop) before running the demo",
                 err=True,
             )
             raise typer.Exit(1)
@@ -523,6 +574,42 @@ def serve(
             err=True,
         )
         raise typer.Exit(1)
+
+    if _manager_running(manager_url):
+        # Attach mode (B1, #100): a manager is already up, so provision into it
+        # in the foreground instead of booting a second JVM. A fresh password
+        # cannot possibly match an already-running manager, so this path never
+        # generates one - only a real env var or an earlier `qod serve`'s stored
+        # value will do.
+        password = os.environ.get("QOD_ADMIN_PASSWORD") or load_start_env().get(
+            "QOD_ADMIN_PASSWORD"
+        )
+        if not password:
+            typer.echo(
+                f"error: a manager is already running at {manager_url}, but no admin "
+                "password is available to attach with; export QOD_ADMIN_PASSWORD or run "
+                "qod setup / qod login",
+                err=True,
+            )
+            raise typer.Exit(1)
+        ok = _provision(
+            manager_url=manager_url,
+            tenant=tenant,
+            target=resolved,
+            pool=pool,
+            size=size,
+            password=password,
+            profile=ctx.obj.profile,
+            generated=False,
+            ready_timeout=ready_timeout,
+            pg_port=0,
+            pg_data_dir="",
+            echo=lambda line: typer.echo(line, err=True),
+            attached=True,
+        )
+        if not ok:
+            raise typer.Exit(1)
+        return
 
     java = resolve_java()
     jar_path = jar.resolve() if jar is not None else resolve_jar(version)
@@ -597,7 +684,7 @@ def serve(
     os.chdir(state_dir)
 
     _spawn_provisioning(
-        manager_url=ctx.obj.settings.manager_url,
+        manager_url=manager_url,
         tenant=tenant,
         target=resolved,
         pool=pool,

@@ -156,3 +156,43 @@ def test_default_teardown_is_qod_stop(monkeypatch):
     )
     assert called.is_set()
     assert code == 130
+
+
+def test_exec_win32_interrupt_runs_stop_sweep(monkeypatch):
+    # B2: on win32, _exec runs subprocess.call directly (no session/relay
+    # machinery). The shared Windows console delivers Ctrl-C to the child too,
+    # so a KeyboardInterrupt here must still trigger the stop sweep to reap
+    # whatever survived (nodes, embedded postmaster).
+    import typer
+
+    from qod_cli.commands import stop as stop_cmd
+
+    monkeypatch.setattr(_launch.sys, "platform", "win32")
+
+    def raise_interrupt(cmd, env=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_launch.subprocess, "call", raise_interrupt)
+    called = []
+    monkeypatch.setattr(stop_cmd, "perform_stop", lambda: called.append(1))
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _launch._exec(["fake"], {})
+    assert exc_info.value.exit_code == 130
+    assert called == [1]
+
+
+def test_exec_win32_non_interrupt_returns_the_call_code_without_sweeping(monkeypatch):
+    import typer
+
+    from qod_cli.commands import stop as stop_cmd
+
+    monkeypatch.setattr(_launch.sys, "platform", "win32")
+    monkeypatch.setattr(_launch.subprocess, "call", lambda cmd, env=None: 7)
+    called = []
+    monkeypatch.setattr(stop_cmd, "perform_stop", lambda: called.append(1))
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _launch._exec(["fake"], {})
+    assert exc_info.value.exit_code == 7
+    assert called == []

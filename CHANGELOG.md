@@ -22,7 +22,15 @@
   scheme aliases (not just their s3/gs/az canonical forms), and `qod serve` notes
   when a `--table` view's glob scheme differs from the target's own, since such a
   view gets no scoped secret and falls back to the engine's ambient credential
-  chain. (#100)
+  chain. `qod serve <target>` now provisions into an already-running manager
+  instead of failing partway through a second JVM boot: it attaches in the
+  foreground using the stored or exported admin password (never generating a
+  fresh one, since that could not match a manager already up), or refuses with a
+  clear message when no password is available; `qod serve --demo` refuses outright
+  when a manager is already running, since the demo's insecure posture must never
+  land on someone else's gateway. On Windows, an interrupted `qod serve`/`qod
+  start` now runs the stop sweep before exiting, instead of leaving the shared
+  console's Ctrl-C delivery to the child process as the only cleanup. (#100)
 
 ## 0.9.2
 
