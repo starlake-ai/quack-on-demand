@@ -328,7 +328,7 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
     TenantDb.validate(td, fullDefaults) shouldBe None
   }
 
-  it should "name only keys missing from BOTH the request and the (non-empty) defaults" in {
+  it should "name only keys missing from BOTH the request and the non-blank defaults" in {
     val td =
       TenantDb(
         "td-1",
@@ -338,7 +338,7 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
         Map("dbName" -> "acme_tpch1"),
         "/tmp/d"
       )
-    val err = TenantDb.validate(td, fullDefaults.updated("pgPassword", "")).get
+    val err = TenantDb.validate(td, fullDefaults.updated("pgPassword", " \t")).get
     err should include("pgPassword")
     err should not include "pgHost"
   }

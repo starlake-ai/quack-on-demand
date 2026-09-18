@@ -161,6 +161,12 @@ object TenantDb {
     case TenantDbKind.DuckDbFile => DuckDbFileRequiredKeys
     case TenantDbKind.InMemory   => Set.empty
 
+  /** Metastore keys whose manager defaults can satisfy a sparse DuckLake row. Whitespace-only
+    * values are configuration noise, not usable credentials.
+    */
+  def defaultedMetastoreKeys(defaults: Map[String, String]): Set[String] =
+    defaults.collect { case (key, value) if value.trim.nonEmpty => key }.toSet
+
   /** Returns Some(error) if the value violates its per-kind contract. Enforces required-key
     * presence AND injection safety; use on the REST createTenantDb path where the metastore is
     * supplied inline. `defaults` is the manager's `quack-on-demand.defaultMetastore` map: a
@@ -173,7 +179,7 @@ object TenantDb {
   def validate(td: TenantDb, defaults: Map[String, String] = Map.empty): Option[String] =
     td.kind match {
       case TenantDbKind.DuckLake =>
-        val defaulted = defaults.collect { case (k, v) if v.nonEmpty => k }.toSet
+        val defaulted = defaultedMetastoreKeys(defaults)
         val missing   = requiredMetastoreKeys(td.kind) -- td.metastore.keySet -- defaulted
         if missing.nonEmpty then
           Some(s"kind=ducklake requires metastore keys ${missing.mkString(", ")}")

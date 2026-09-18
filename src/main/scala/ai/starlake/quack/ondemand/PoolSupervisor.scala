@@ -125,7 +125,8 @@ final class PoolSupervisor(
       * the tenant-db's objectStore is filled with, and the `retainDays` window [[deleteTenantDb]]
       * stamps on the tombstone row.
       */
-    managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None
+    managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None,
+    duckLakeInitializer: Map[String, String] => Unit = DuckLakeInitializer.initBlocking
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -1249,7 +1250,7 @@ final class PoolSupervisor(
                                 // Pre-init the ducklake_* metadata tables so the first pool nodes
                                 // don't race on `CREATE TABLE __ducklake_metadata`.
                                 try
-                                  DuckLakeInitializer.initBlocking(
+                                  duckLakeInitializer(
                                     (defaultMetastore ++ effectiveMeta)
                                       .updated("dataPath", effectiveDataPath)
                                   )
@@ -1379,7 +1380,8 @@ final class PoolSupervisor(
     * when node-affecting fields (metastore, objectStore, initSql) changed. Restart is all-at-once
     * via restartNode's path; per-node failures are collected, not thrown (reconcile heals).
     * Response-redacted keys ([[TenantDb.SecretKeys]]) are preserved when omitted; an empty value
-    * removes the key.
+    * removes the key. For DuckLake, clearing a required key such as `pgPassword` reverts that key
+    * to the manager default at runtime.
     */
   def updateTenantDb(
       tenantName: String,
@@ -1405,7 +1407,7 @@ final class PoolSupervisor(
             // has no default-merge contract on create, so it keeps the strict guard.
             val defaultedKeys =
               if merged.kind == TenantDbKind.DuckLake then
-                defaultMetastore.collect { case (k, v) if v.nonEmpty => k }.toSet
+                TenantDb.defaultedMetastoreKeys(defaultMetastore)
               else Set.empty[String]
             val droppedRequired =
               (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --

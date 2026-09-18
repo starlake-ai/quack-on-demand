@@ -907,6 +907,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     td.metastore("schemaName") shouldBe "main"
 
   private val sparseDefaults = Map(
+    // Port 1 fails the DuckLake pre-init TCP connect immediately when a test does not inject it.
     "pgHost"     -> "localhost",
     "pgPort"     -> "1",
     "pgUser"     -> "postgres",
@@ -965,7 +966,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       new CapturingBackend,
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
-      defaultMetastore = sparseDefaults.updated("pgPassword", "")
+      defaultMetastore = sparseDefaults.updated("pgPassword", " ")
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     val out = sup
@@ -975,6 +976,34 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val msg = out.swap.toOption.get.message
     msg should include("pgPassword")
     msg should not include "pgHost"
+  }
+
+  it should "pass manager defaults merged with the sparse row to DuckLakeInitializer" in {
+    val captured = scala.collection.mutable.ListBuffer.empty[Map[String, String]]
+    val sup = new PoolSupervisor(
+      new CapturingBackend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = sparseDefaults,
+      duckLakeInitializer = captured += _
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map("pgHost" -> "tenant-host"),
+        "/data/acme_prod"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    captured.toList shouldBe List(
+      sparseDefaults
+        .updated("pgHost", "tenant-host")
+        .updated("dbName", "acme_prod")
+        .updated("dataPath", "/data/acme_prod")
+    )
   }
 
   "metastoreDefaults" should "expose the raw configured defaults" in {
@@ -2175,6 +2204,25 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     out.swap.toOption.get.message should include("drops required")
   }
 
+  it should "keep rejecting a duckdb-file patch that drops dbName even with manager defaults" in {
+    val sup = sparseFixture()
+    sup
+      .createTenantDb(
+        "acme",
+        "file",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_file", "schemaName" -> "main"),
+        "/tmp/acme_file.duckdb"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val out = sup.updateTenantDb("acme", "acme_file", TenantDbPatch(
+      metastore = Some(Map("schemaName" -> "s2"))
+    )).unsafeRunSync()
+    out.isLeft shouldBe true
+    out.swap.toOption.get.message should include("dbName")
+  }
+
   it should "let a ducklake patch drop a pg override, reverting to the manager default" in {
     val sup = sparseFixture()
     sup
@@ -2198,6 +2246,28 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.isRight shouldBe true
     sup.effectiveMetastoreFor("acme", "acme_prod")("pgHost") shouldBe "localhost"
+  }
+
+  it should "accept an explicit empty ducklake pgPassword and resolve the manager default" in {
+    val sup = sparseFixture()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map("pgPassword" -> "tenant-secret"),
+        "/data/acme_prod"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val out = sup
+      .updateTenantDb("acme", "acme_prod", TenantDbPatch(
+        metastore = Some(Map("dbName" -> "acme_prod", "pgPassword" -> ""))
+      ))
+      .unsafeRunSync()
+    out.isRight shouldBe true
+    out.toOption.get.td.metastore.contains("pgPassword") shouldBe false
+    sup.effectiveMetastoreFor("acme", "acme_prod")("pgPassword") shouldBe "pw"
   }
 
   it should "succeed when a patch drops only a non-required custom key" in {

@@ -179,6 +179,12 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
     req.asJson.hcursor.get[Boolean]("purgeManagedData") shouldBe Right(true)
     decode[TenantDbOpRequest](req.asJson.noSpaces) shouldBe Right(req)
 
+  "MetastoreDefaultsResponse" should "encode exactly the four non-secret defaults" in:
+    val resp = MetastoreDefaultsResponse("localhost", "5432", "postgres", "main")
+    resp.asJson.asObject.get.keys.toSet shouldBe
+      Set("pgHost", "pgPort", "pgUser", "schemaName")
+    decode[MetastoreDefaultsResponse]("{}") shouldBe Right(MetastoreDefaultsResponse())
+
   // ----- Auth --------------------------------------------------------------
 
   "LoginResponse" should "default tenant/superuser/manageableTenants when absent" in:

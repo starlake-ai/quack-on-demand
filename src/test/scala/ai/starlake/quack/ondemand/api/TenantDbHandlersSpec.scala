@@ -483,6 +483,16 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.metastoreDefaults(None)((_: String) => None).unsafeRunSync()
     out shouldBe Right(MetastoreDefaultsResponse("localhost", "5432", "postgres", "main"))
 
+  it should "fall back to empty strings when no defaults are configured" in:
+    val sup = new PoolSupervisor(
+      new StubQuackBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = Map.empty
+    )
+    new TenantDbHandlers(sup).metastoreDefaults(None)((_: String) => None).unsafeRunSync() shouldBe
+      Right(MetastoreDefaultsResponse())
+
   "TenantDbHandlers.createTenantDb" should
     "accept a sparse ducklake metastore when the supervisor has defaults" in:
     val sup = new PoolSupervisor(
