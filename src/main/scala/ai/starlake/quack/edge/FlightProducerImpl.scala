@@ -8,7 +8,7 @@ import org.apache.arrow.flight.sql.NoOpFlightSqlProducer
 import org.apache.arrow.flight.sql.FlightSqlProducer.Schemas
 import org.apache.arrow.flight.sql.impl.FlightSql
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
-import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
 import java.nio.charset.StandardCharsets
@@ -80,7 +80,8 @@ final class FlightProducerImpl(
       poolKey: ai.starlake.quack.model.PoolKey,
       effectiveSet: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet],
       preferredNode: Option[String],
-      prepareDurationMs: Option[Long]
+      prepareDurationMs: Option[Long],
+      datasetSchema: Schema
   )
 
   /** Zero-field schema: the "dispatch through executeUpdate" marker, and the `parameter_schema`
@@ -213,6 +214,67 @@ final class FlightProducerImpl(
       .withDescription(s"internal error (errorId=$errorId)")
       .toRuntimeException()
 
+  /** #106 signature 1: a stamped write's COMMIT (see the `adapter.StampedCommitArrowReader` doc)
+    * fires from INSIDE `streamArrow`'s `loadNextBatch()` loop, after the statement's own result has
+    * already been streamed to the client. When that COMMIT loses a genuine DuckLake
+    * optimistic-concurrency race, the exception used to fall into the generic [[internalError]]
+    * bucket: a scary opaque "internal error" for what is, underneath, an ordinary concurrent-write
+    * conflict. Reproduced empirically 2026-09-18 by hammering concurrent `CREATE OR REPLACE TABLE`
+    * DDL against one ducklake-backed node: `Invalid Input Error: Failed to commit: Failed to commit
+    * DuckLake transaction. Failed to load DuckLake - table with id N references schema id M that
+    * does not exist`. DuckLake gives no typed exception across the wire (it comes back as a plain
+    * [[ai.starlake.quack.edge.adapter.QuackWireError.Permanent]] message string), so this matches
+    * on text. This does not fix the underlying race -- retrying a DDL/DML statement safely is a
+    * separate, larger design question (see the #106 report) -- it only stops mis-classifying an
+    * expected, retryable condition as an unexplained crash.
+    */
+  private[edge] def commitConflictOrInternal(context: String, t: Throwable): Throwable =
+    val msg = Option(t.getMessage).getOrElse("")
+    if msg.contains("Failed to commit") && msg.contains("DuckLake transaction") then
+      logger.warn(
+        s"$context: DuckLake commit conflict (concurrent write), client should retry: $msg"
+      )
+      CallStatus.UNAVAILABLE
+        .withDescription(
+          "concurrent write conflict committing the transaction; retry the statement"
+        )
+        .toRuntimeException()
+    else internalError(context, t)
+
+  /** #106 signature 2: DuckDB (verified against 1.5.x) does NOT stream every non-result statement
+    * as the single-row `Count BIGINT` [[countSchema]] predicts. It splits:
+    *   - `Count: BIGINT` for CREATE TABLE (AS), CREATE OR REPLACE TABLE, INSERT, UPDATE, MERGE,
+    *     DELETE, CREATE INDEX, TRUNCATE
+    *   - `Success: BOOLEAN` for BEGIN, COMMIT (txn control), VACUUM, ANALYZE, DROP, ALTER, SET
+    *
+    * The split does not track the classifier's Read/Write/Ddl buckets (CREATE INDEX -> Count but
+    * DROP INDEX -> Success), so predicting it per statement kind is a trap, not a fix -- this
+    * coerces the ACTUAL stream instead, at the one place both the literal and prepared paths funnel
+    * through ([[streamArrow]]). Triggers on the SCHEMA shape alone (single column named `Success`,
+    * type BOOLEAN), not on row count: verified live against a real BEGIN over the native transport
+    * that the row count backing that schema can be 0, not 1 (DuckDB reports zero materialized rows
+    * for a txn-control statement even though the advertised column is `Success: BOOLEAN`) -- gating
+    * on `rowCount == 1` silently never fired for that real case. A real SELECT, the admin dialect's
+    * own `(status, detail)` substitution, and any other multi-column or differently-named result
+    * all pass through untouched. The coerced row's Count is always 0 -- these statements have no
+    * meaningful row count, and 0 documents "ran, produced no count" rather than inventing a number.
+    */
+  private[edge] def coerceSuccessToCount(root: VectorSchemaRoot): VectorSchemaRoot =
+    val fields         = root.getSchema.getFields
+    val isSuccessShape =
+      fields.size() == 1 &&
+        fields.get(0).getName == "Success" &&
+        fields.get(0).getType.isInstanceOf[ArrowType.Bool]
+    if !isSuccessShape then root
+    else
+      val coerced = VectorSchemaRoot.create(countSchema, allocator)
+      val vec     = coerced.getVector("Count").asInstanceOf[BigIntVector]
+      vec.allocateNew(1)
+      vec.set(0, 0L)
+      vec.setValueCount(1)
+      coerced.setRowCount(1)
+      coerced
+
   /** Resolve a prepared handle into an executable plan, enforcing two invariants: the calling peer
     * must be the handle's creator (a leaked handle cannot be replayed), and the [[EffectiveSet]] is
     * read live from [[ConnectionContext]] (mid-session revocation is honored; an expired session
@@ -250,7 +312,8 @@ final class FlightProducerImpl(
                 poolKey = p.poolKey,
                 effectiveSet = e.effectiveSet,
                 preferredNode = p.preferredNode,
-                prepareDurationMs = p.prepareDurationMs
+                prepareDurationMs = p.prepareDurationMs,
+                datasetSchema = p.datasetSchema
               )
             )
           case _ =>
@@ -428,10 +491,14 @@ final class FlightProducerImpl(
           .unsafeToFuture()
           .onComplete {
             case scala.util.Success(Right(result)) =>
-              try streamArrow(result.rows, listener)
+              // p.datasetSchema is exactly what Prepare advertised (cached, not recomputed): the
+              // SkipExecute branch of createPreparedStatement sets it to countSchema (or
+              // adminStatusSchema for a claimed admin mutation), same rule as the literal path.
+              val advertisedWasCount = p.datasetSchema == countSchema
+              try streamArrow(result.rows, listener, advertisedWasCount)
               catch
                 case t: Throwable =>
-                  listener.error(internalError("streaming Arrow batches", t))
+                  listener.error(commitConflictOrInternal("streaming Arrow batches", t))
               finally result.close()
             case scala.util.Success(Left(f)) =>
               listener.error(toFlightException(f))
@@ -1340,10 +1407,18 @@ final class FlightProducerImpl(
           case scala.util.Failure(t) =>
             listener.error(internalError("router.execute", t))
           case scala.util.Success(Right(result)) =>
-            try streamArrow(result.rows, listener)
+            // Mirrors getFlightInfoStatement's own decision (probeStatementSchema falls back to
+            // countSchema exactly when PrepareStrategy chose SkipExecute and no admin dialect
+            // claimed the statement) WITHOUT re-running a probe: SkipExecute means nothing was
+            // executed there either way, so recomputing the pure classification is free and safe.
+            val kind               = router.classifier.classify(sql)
+            val advertisedWasCount =
+              PrepareStrategy.choose(sql, kind) == PrepareStrategy.SkipExecute
+                && !ai.starlake.quack.edge.admin.AdminSqlParser.claims(sql)
+            try streamArrow(result.rows, listener, advertisedWasCount)
             catch
               case t: Throwable =>
-                listener.error(internalError("streaming Arrow batches", t))
+                listener.error(commitConflictOrInternal("streaming Arrow batches", t))
             finally result.close()
           case scala.util.Success(Left(f)) =>
             logger.warn(s"router.execute Left: $f")
@@ -1355,20 +1430,40 @@ final class FlightProducerImpl(
   /** Stream batches from `reader` to the Flight `listener`. Gated on !isCancelled(): clients
     * legitimately abandon streams mid-flight, and pumping batches into a cancelled gRPC stream
     * wastes node reads and spams netty warnings.
+    *
+    * `advertisedWasCount` is true when the caller advertised [[countSchema]] for this statement
+    * (see [[coerceSuccessToCount]]'s doc for why); when the node's first batch turns out to be the
+    * single-row `Success: BOOLEAN` shape instead, the coerced Count row is streamed in its place
+    * and any further node batches are drained unread (there should be none for a single-row
+    * result).
     */
   private[edge] def streamArrow(
       reader: org.apache.arrow.vector.ipc.ArrowReader,
-      listener: FlightProducer.ServerStreamListener
+      listener: FlightProducer.ServerStreamListener,
+      advertisedWasCount: Boolean = false
   ): Unit =
     val root: VectorSchemaRoot = reader.getVectorSchemaRoot
-    listener.start(root)
-    var hasMore = reader.loadNextBatch()
-    if !hasMore then
-      // Empty result set: emit a zero-row batch so the client receives the
-      // schema even if there's no data.
-      root.setRowCount(0)
-      listener.putNext()
-    while hasMore && !listener.isCancelled() do
-      listener.putNext()
-      hasMore = reader.loadNextBatch()
-    listener.completed()
+    var hasMore                = reader.loadNextBatch()
+    // Schema is known independently of hasMore (a Success:BOOLEAN result can report zero
+    // materialized rows - see coerceSuccessToCount's doc), so the coercion check does not gate on
+    // hasMore; it only matters for the untouched pass-through branch below.
+    val toStream: VectorSchemaRoot =
+      if advertisedWasCount then coerceSuccessToCount(root) else root
+    if toStream ne root then
+      try
+        listener.start(toStream)
+        listener.putNext()
+        while reader.loadNextBatch() && !listener.isCancelled() do ()
+        listener.completed()
+      finally toStream.close()
+    else
+      listener.start(root)
+      if !hasMore then
+        // Empty result set: emit a zero-row batch so the client receives the
+        // schema even if there's no data.
+        root.setRowCount(0)
+        listener.putNext()
+      while hasMore && !listener.isCancelled() do
+        listener.putNext()
+        hasMore = reader.loadNextBatch()
+      listener.completed()
