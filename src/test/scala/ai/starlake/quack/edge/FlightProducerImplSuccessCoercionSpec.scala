@@ -162,6 +162,54 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     def onError(t: Throwable): Unit                     = ()
     def onCompleted(): Unit                             = ()
 
+  /** Throws on the very first `loadNextBatch()` call - simulates a stamped write's deferred COMMIT
+    * (see [[ai.starlake.quack.edge.adapter.StampedCommitArrowReader]]) losing a DuckLake race
+    * before any real batch is produced. Wires `streamArrow`'s catch -> `commitConflictOrInternal`
+    * without needing to first simulate a successful batch.
+    */
+  private final class ThrowingArrowReader(
+      allocator: org.apache.arrow.memory.BufferAllocator,
+      t: Throwable
+  ) extends org.apache.arrow.vector.ipc.ArrowReader(allocator):
+    private val root = VectorSchemaRoot.create(
+      new org.apache.arrow.vector.types.pojo.Schema(java.util.Collections.emptyList()),
+      allocator
+    )
+    override def loadNextBatch(): Boolean                = throw t
+    override def getVectorSchemaRoot(): VectorSchemaRoot = root
+    override def getDictionaryVectors()
+        : java.util.Map[java.lang.Long, org.apache.arrow.vector.dictionary.Dictionary] =
+      java.util.Collections.emptyMap()
+    override def bytesRead(): Long                                                 = 0L
+    override def close(closeReadSource: Boolean): Unit                             = root.close()
+    override protected def readSchema(): org.apache.arrow.vector.types.pojo.Schema = root.getSchema
+    override protected def closeReadSource(): Unit                                 = ()
+
+  /** Delegates to `underlying` exactly like
+    * [[ai.starlake.quack.edge.adapter.StampedCommitArrowReader]] does, but instead of firing a
+    * COMMIT on exhaustion it just records that exhaustion was reached - pins that the coerced
+    * branch in `streamArrow` still drains the real reader to completion (that drain is what fires
+    * the deferred COMMIT in production).
+    */
+  private final class DrainTrackingArrowReader(
+      allocator: org.apache.arrow.memory.BufferAllocator,
+      underlying: org.apache.arrow.vector.ipc.ArrowReader
+  ) extends org.apache.arrow.vector.ipc.ArrowReader(allocator):
+    @volatile var drainedToExhaustion: Boolean = false
+    override def loadNextBatch(): Boolean      =
+      val more = underlying.loadNextBatch()
+      if !more then drainedToExhaustion = true
+      more
+    override def getVectorSchemaRoot(): VectorSchemaRoot = underlying.getVectorSchemaRoot
+    override def getDictionaryVectors()
+        : java.util.Map[java.lang.Long, org.apache.arrow.vector.dictionary.Dictionary] =
+      underlying.getDictionaryVectors
+    override def bytesRead(): Long                     = underlying.bytesRead()
+    override def close(closeReadSource: Boolean): Unit = underlying.close(closeReadSource)
+    override protected def readSchema(): org.apache.arrow.vector.types.pojo.Schema =
+      underlying.getVectorSchemaRoot.getSchema
+    override protected def closeReadSource(): Unit = ()
+
   // ---- coerceSuccessToCount: pure, direct ----
 
   "coerceSuccessToCount" should "coerce a single-row Success:BOOLEAN root into Count:int64 = 0" in:
@@ -229,7 +277,23 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
 
   // ---- commitConflictOrInternal: pure, direct ----
 
-  "commitConflictOrInternal" should "classify a DuckLake commit-conflict message as a retryable UNAVAILABLE" in:
+  "commitConflictOrInternal" should "classify a message containing DuckLake's known conflict marker as a retryable UNAVAILABLE" in:
+    val (producer, _) = setupProducer(_ => IO.pure(TestArrow.okResponse()))
+    // Reuses the same "contains conflict" heuristic already pinned by
+    // CatalogRestoreHandlers.isConflict against a live DuckLake optimistic-concurrency probe.
+    val t = QuackWireError.Permanent(
+      "Invalid Input Error: Failed to commit: Failed to commit DuckLake transaction.\n" +
+        "Transaction conflict: catalog was modified by a concurrent transaction"
+    )
+    val ex = producer.commitConflictOrInternal("streaming Arrow batches", t)
+    ex shouldBe a[FlightRuntimeException]
+    ex.asInstanceOf[FlightRuntimeException].status().code() shouldBe FlightStatusCode.UNAVAILABLE
+    ex.getMessage should include("retry the statement")
+
+  it should "fail CLOSED to INTERNAL for DuckLake's generic (non-conflict) commit-failure wrapper" in:
+    // This is the #106 report's own exemplar: reproduced by hammering concurrent DDL, it left the
+    // pool PERSISTENTLY corrupted - i.e. not something a client retry would ever resolve, and it
+    // does not contain "conflict". Must NOT be laundered into a retryable UNAVAILABLE (Important 1).
     val (producer, _) = setupProducer(_ => IO.pure(TestArrow.okResponse()))
     val t             = QuackWireError.Permanent(
       "Invalid Input Error: Failed to commit: Failed to commit DuckLake transaction.\n" +
@@ -237,7 +301,18 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     )
     val ex = producer.commitConflictOrInternal("streaming Arrow batches", t)
     ex shouldBe a[FlightRuntimeException]
-    ex.asInstanceOf[FlightRuntimeException].status().code() shouldBe FlightStatusCode.UNAVAILABLE
+    ex.asInstanceOf[FlightRuntimeException].status().code() shouldBe FlightStatusCode.INTERNAL
+    ex.getMessage should include("internal error")
+
+  it should "fail CLOSED to INTERNAL for a non-conflict permanent commit failure (disk full)" in:
+    val (producer, _) = setupProducer(_ => IO.pure(TestArrow.okResponse()))
+    val t             = QuackWireError.Permanent(
+      "Invalid Input Error: Failed to commit: Failed to commit DuckLake transaction.\n" +
+        "IO Error: No space left on device"
+    )
+    val ex = producer.commitConflictOrInternal("streaming Arrow batches", t)
+    ex shouldBe a[FlightRuntimeException]
+    ex.asInstanceOf[FlightRuntimeException].status().code() shouldBe FlightStatusCode.INTERNAL
 
   it should "fall back to the opaque internal error for anything else" in:
     val (producer, _) = setupProducer(_ => IO.pure(TestArrow.okResponse()))
@@ -326,31 +401,113 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
 
   // ---- edge-level: the prepared-statement DoGet path ----
 
-  "getStreamPreparedStatement" should
-    "coerce a DDL-advertised prepared statement's Success:BOOLEAN reply to Count:int64 = 0" in:
-      val (producer, peer) = setupProducer { _ =>
-        IO.pure(QuackResponse.Ok(TestArrow.readerFor("SELECT true AS \"Success\""), 5L, () => ()))
-      }
-      val prepReq = FlightSql.ActionCreatePreparedStatementRequest
-        .newBuilder()
-        .setQuery("ALTER TABLE t RENAME TO t2")
-        .build()
-      val prepListener = new RecordingResultListener
-      producer.createPreparedStatement(prepReq, fakeContext(peer), prepListener)
-      val prepResult = com.google.protobuf.Any
-        .parseFrom(prepListener.ref.get().getBody)
-        .unpack(classOf[FlightSql.ActionCreatePreparedStatementResult])
-      val handle = prepResult.getPreparedStatementHandle
+  // Important 3(a): wires commitConflictOrInternal INTO streamArrow's catch, not just the pure
+  // function. Reverting the streamArrow call sites back to plain internalError would leave this
+  // (and only this) case red while every other test in the file stays green.
+  it should "surface UNAVAILABLE when the node reader's loadNextBatch throws a conflict message" in:
+    val conflictMsg = "Invalid Input Error: Failed to commit: Failed to commit DuckLake " +
+      "transaction.\nTransaction conflict: catalog was modified by a concurrent transaction"
+    val (producer, peer) = setupProducer { _ =>
+      IO.pure(
+        QuackResponse.Ok(
+          new ThrowingArrowReader(TestArrow.sharedAllocator, QuackWireError.Permanent(conflictMsg)),
+          5L,
+          () => ()
+        )
+      )
+    }
+    val ticket = FlightSql.TicketStatementQuery
+      .newBuilder()
+      .setStatementHandle(
+        com.google.protobuf.ByteString.copyFromUtf8("CREATE OR REPLACE TABLE t AS SELECT 1")
+      )
+      .build()
+    val listener = new CapturingListener
+    producer.getStreamStatement(ticket, fakeContext(peer), listener)
+    listener.awaitTerminal()
+    listener.onErrorRef.get() should not be null
+    listener.onErrorRef.get().asInstanceOf[FlightRuntimeException].status().code() shouldBe
+      FlightStatusCode.UNAVAILABLE
 
-      val cmd = FlightSql.CommandPreparedStatementQuery
-        .newBuilder()
-        .setPreparedStatementHandle(handle)
-        .build()
-      val listener = new CapturingListener
-      producer.getStreamPreparedStatement(cmd, fakeContext(peer), listener)
-      listener.awaitTerminal()
-      listener.onErrorRef.get() shouldBe null
-      listener.schema.getFields.size() shouldBe 1
-      listener.schema.getFields.get(0).getName shouldBe "Count"
-      listener.countValue shouldBe 0L
-      listener.putNextCalls shouldBe 1
+  // Important 3(b): the coerced branch must still drain the real reader to exhaustion - that drain
+  // is what fires StampedCommitArrowReader's deferred COMMIT in production. Dropping the drain
+  // loop (e.g. "optimizing" it away since the coerced row is synthetic) would silently stop
+  // committing stamped writes; this pins the drain independently of any log/message assertion.
+  it should "drain the underlying reader to exhaustion on the coerced branch" in:
+    val tracked = new java.util.concurrent.atomic.AtomicReference[DrainTrackingArrowReader](null)
+    val (producer, peer) = setupProducer { _ =>
+      val wrapped = new DrainTrackingArrowReader(
+        TestArrow.sharedAllocator,
+        TestArrow.readerFor("SELECT true AS \"Success\"")
+      )
+      tracked.set(wrapped)
+      IO.pure(QuackResponse.Ok(wrapped, 5L, () => ()))
+    }
+    val ticket = FlightSql.TicketStatementQuery
+      .newBuilder()
+      .setStatementHandle(com.google.protobuf.ByteString.copyFromUtf8("BEGIN"))
+      .build()
+    val listener = new CapturingListener
+    producer.getStreamStatement(ticket, fakeContext(peer), listener)
+    listener.awaitTerminal()
+    listener.onErrorRef.get() shouldBe null
+    listener.countValue shouldBe 0L
+    tracked.get().drainedToExhaustion shouldBe true
+
+  // ---- edge-level: the prepared-statement DoGet path ----
+
+  "getStreamPreparedStatement" should "coerce a DDL-advertised prepared statement's Success:BOOLEAN reply to Count:int64 = 0" in:
+    val (producer, peer) = setupProducer { _ =>
+      IO.pure(QuackResponse.Ok(TestArrow.readerFor("SELECT true AS \"Success\""), 5L, () => ()))
+    }
+    val prepReq = FlightSql.ActionCreatePreparedStatementRequest
+      .newBuilder()
+      .setQuery("ALTER TABLE t RENAME TO t2")
+      .build()
+    val prepListener = new RecordingResultListener
+    producer.createPreparedStatement(prepReq, fakeContext(peer), prepListener)
+    val prepResult = com.google.protobuf.Any
+      .parseFrom(prepListener.ref.get().getBody)
+      .unpack(classOf[FlightSql.ActionCreatePreparedStatementResult])
+    val handle = prepResult.getPreparedStatementHandle
+
+    val cmd = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val listener = new CapturingListener
+    producer.getStreamPreparedStatement(cmd, fakeContext(peer), listener)
+    listener.awaitTerminal()
+    listener.onErrorRef.get() shouldBe null
+    listener.schema.getFields.size() shouldBe 1
+    listener.schema.getFields.get(0).getName shouldBe "Count"
+    listener.countValue shouldBe 0L
+    listener.putNextCalls shouldBe 1
+
+  // Prepared-path passthrough negative (only the literal path had one before this round).
+  it should "leave an ordinary Count:int64 prepared DML reply untouched" in:
+    val (producer, peer) = setupProducer { _ =>
+      IO.pure(
+        QuackResponse.Ok(TestArrow.readerFor("SELECT CAST(3 AS BIGINT) AS \"Count\""), 5L, () => ())
+      )
+    }
+    val prepReq = FlightSql.ActionCreatePreparedStatementRequest
+      .newBuilder()
+      .setQuery("DELETE FROM t")
+      .build()
+    val prepListener = new RecordingResultListener
+    producer.createPreparedStatement(prepReq, fakeContext(peer), prepListener)
+    val prepResult = com.google.protobuf.Any
+      .parseFrom(prepListener.ref.get().getBody)
+      .unpack(classOf[FlightSql.ActionCreatePreparedStatementResult])
+    val handle = prepResult.getPreparedStatementHandle
+
+    val cmd = FlightSql.CommandPreparedStatementQuery
+      .newBuilder()
+      .setPreparedStatementHandle(handle)
+      .build()
+    val listener = new CapturingListener
+    producer.getStreamPreparedStatement(cmd, fakeContext(peer), listener)
+    listener.awaitTerminal()
+    listener.onErrorRef.get() shouldBe null
+    listener.countValue shouldBe 3L
