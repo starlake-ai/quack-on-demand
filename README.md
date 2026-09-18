@@ -106,6 +106,8 @@ so `qod serve ./other.duckdb` extends the same gateway rather than replacing it.
 
 Unlike `--demo`, this keeps the normal secure posture: TLS on, database auth on,
 ACL on, and a random admin password generated on the first run and printed once.
+If a gateway is already running locally, `qod serve` provisions straight into it
+instead of booting a second one; `qod stop` still stops it.
 
 An existing `.duckdb` file is attached read-write and served by a single node.
 Parquet and CSV targets become views (`read_parquet` / `read_csv`), so nothing is

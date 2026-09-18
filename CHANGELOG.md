@@ -13,24 +13,37 @@
   restore instead of a connection per tenant-db), and the resolution that does happen is bounded
   by a 15s timeout, degrading to the existing WARN-and-fallback path instead of hanging. Fixes
   #101.
-- `qod stop` now sweeps an orphaned embedded control-plane postmaster left behind by
-  an abrupt JVM death (an orphan case mostly seen on Windows), `qod serve` waits for
-  a routable node before printing its connect-string banner on a restart instead of
-  handing out strings that briefly fail, both `qod serve` and `qod start` print a
-  non-blocking one-line nudge when a newer release is on PyPI, a lockdown-enabled
-  node now disables local filesystem access for the s3a/r2/gcs/azure/abfss dataPath
-  scheme aliases (not just their s3/gs/az canonical forms), and `qod serve` notes
-  when a `--table` view's glob scheme differs from the target's own, since such a
-  view gets no scoped secret and falls back to the engine's ambient credential
-  chain. `qod serve <target>` now provisions into an already-running manager
+- **`qod stop` sweeps an orphaned embedded control-plane postmaster** left behind by
+  an abrupt JVM death (an orphan case mostly seen on Windows). The pid is checked
+  twice before anything is signaled: a pid of 0 or negative is refused outright
+  (those have process-group-wide meanings to `os.kill`, never a single targeted
+  process), and the pid must still identify as a `postgres`/`postgres.exe` process
+  (`ps -p <pid> -o comm=` on POSIX, `tasklist` on win32) before it is terminated,
+  since the pid in a stale pidfile can be recycled by an unrelated process.
+- **`qod serve` waits for a routable node** before printing its connect-string
+  banner on a restart, instead of handing out strings that briefly fail while a
+  respawned node is still warming up.
+- **`qod serve`/`qod start` print a non-blocking one-line nudge** when a newer
+  release is on PyPI.
+- **Lockdown now covers the `qod serve` scheme aliases.** A lockdown-enabled node
+  disables local filesystem access for the s3a/r2/gcs/azure/abfss dataPath scheme
+  aliases, not just their s3/gs/az canonical forms.
+- **`qod serve` notes a `--table` view's mismatched object-store scheme.** When a
+  view's glob lives under a different scheme family than the target's own, it gets
+  no scoped secret and falls back to the engine's ambient credential chain - now
+  flagged instead of silent.
+- **`qod serve <target>` provisions into an already-running LOOPBACK manager**
   instead of failing partway through a second JVM boot: it attaches in the
   foreground using the stored or exported admin password (never generating a
   fresh one, since that could not match a manager already up), or refuses with a
-  clear message when no password is available; `qod serve --demo` refuses outright
-  when a manager is already running, since the demo's insecure posture must never
-  land on someone else's gateway. On Windows, an interrupted `qod serve`/`qod
-  start` now runs the stop sweep before exiting, instead of leaving the shared
-  console's Ctrl-C delivery to the child process as the only cleanup. (#100)
+  clear message when no password is available. A manager running at a
+  non-loopback URL is refused outright rather than attached to, since that is
+  almost certainly a `qod login` profile against a remote deployment. `qod serve
+  --demo` refuses outright when a manager is already running, since the demo's
+  insecure posture must never land on someone else's gateway.
+- **On Windows, an interrupted `qod serve`/`qod start` runs the stop sweep**
+  before exiting, instead of leaving the shared console's Ctrl-C delivery to the
+  child process as the only cleanup. (#100)
 
 ## 0.9.2
 

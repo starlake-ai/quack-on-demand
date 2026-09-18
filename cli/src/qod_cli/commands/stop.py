@@ -11,10 +11,16 @@ QOD_PG_EMBEDDED): a JVM that dies abruptly (the pre-0.9.2 native-load crash is
 the field case that surfaced this) leaves that process running with no port of
 its own the discovery above would ever find, and the next `qod serve` then
 refuses with the live-pid guard until a manual kill. The POSIX manager/node
-stop above normally reaps it as part of the JVM's own shutdown; this sweep
-only fires in the orphan case, which is primarily a Windows scenario.
+stop above usually reaps it as part of the JVM's own shutdown, but not always:
+`_stop_manager_and_nodes` returns as soon as the ports are free, which can
+precede the embedded postmaster's own exit, so this sweep can also fire a
+SIGTERM (and, after 5s, SIGKILL) on a normal stop against a postmaster that is
+already shutting down on its own. That is recoverable (crash-safe WAL replay
+on the next start) and mostly a Windows concern in practice, but it is not
+limited to the orphan case.
 """
 
+import csv
 import os
 import signal
 import subprocess
@@ -60,11 +66,18 @@ def _embedded_pgdata_dir() -> Path:
 
 
 def _read_postmaster_pid(pgdata: Path) -> int | None:
-    """pid from line 1 of postmaster.pid; None on a missing or garbled file."""
+    """pid from line 1 of postmaster.pid; None on a missing or garbled file, or
+    on a pid <= 0. 0 and negative pids are not garbage to guard against out of
+    caution - `os.kill` gives them special, dangerous meanings: 0 signals every
+    process in the caller's own process group (the shell job running this CLI),
+    and a negative pid signals every process in THAT process group ("all
+    processes the caller may signal" for -1). Neither is ever a real, single
+    postmaster pid."""
     try:
-        return int(pgdata.joinpath("postmaster.pid").read_text().splitlines()[0])
+        pid = int(pgdata.joinpath("postmaster.pid").read_text().splitlines()[0])
     except (OSError, IndexError, ValueError):
         return None
+    return pid if pid > 0 else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -81,6 +94,44 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, just not ours to signal
+
+
+def _process_name(pid: int) -> str | None:
+    """The command/image name currently owning `pid`, or None when the lookup
+    itself fails for any reason (no such pid, permission denied, the probe tool
+    missing) - fail-safe: an unknown name must never be treated as a match, so
+    a failed lookup means "not a postmaster", not "assume it is"."""
+    try:
+        if sys.platform == "win32":
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                capture_output=True, text=True,
+            )
+            rows = list(csv.reader(proc.stdout.splitlines()))
+            for row in rows[1:]:  # row[0] is the header line ("Image Name", "PID", ...)
+                if len(row) >= 2 and row[1] == str(pid):
+                    return row[0]
+            return None
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            return None
+        name = proc.stdout.strip()
+        return name or None
+    except Exception:
+        return None
+
+
+def _is_postmaster_name(name: str | None) -> bool:
+    """True when `name` (from `_process_name`) is a postgres server binary.
+    Accepts an exact match or a basename match (some `ps` builds report the
+    full path)."""
+    if name is None:
+        return False
+    if sys.platform == "win32":
+        return name.strip().strip('"').lower() == "postgres.exe"
+    return name.strip().rsplit("/", 1)[-1] == "postgres"
 
 
 def _terminate_pid(pid: int, is_alive=_pid_alive, sleep=time.sleep) -> None:
@@ -104,17 +155,36 @@ def _terminate_pid(pid: int, is_alive=_pid_alive, sleep=time.sleep) -> None:
         pass
 
 
-def sweep_orphaned_embedded_postgres(is_alive=None, terminate=None, echo=None) -> None:
+def sweep_orphaned_embedded_postgres(
+    is_alive=None, process_name=None, terminate=None, echo=None
+) -> None:
     """Kill an orphaned embedded-control-plane postmaster left behind by an
-    abrupt JVM death. `is_alive` and `terminate` are injectable so tests never
-    touch a real process; None (the default used by `perform_stop`) resolves the
-    current module-level implementation at call time, so monkeypatching
-    `_pid_alive` / `_terminate_pid` on the module still takes effect."""
+    abrupt JVM death. `is_alive`, `process_name`, and `terminate` are
+    injectable so tests never touch a real process; None (the default used by
+    `perform_stop`) resolves the current module-level implementation at call
+    time, so monkeypatching `_pid_alive` / `_process_name` / `_terminate_pid`
+    on the module still takes effect.
+
+    The pid in postmaster.pid can be recycled - that is the feature's own
+    premise, since an abrupt JVM death is what leaves the file behind - so
+    "some process has this pid" (`is_alive`) is not enough; this also checks
+    that the process is still actually a postgres server before ever signaling
+    it. A failed or exception-raising identity lookup is treated the same as a
+    mismatch: never kill a pid whose identity could not be verified.
+    """
     is_alive = is_alive if is_alive is not None else _pid_alive
+    process_name = process_name if process_name is not None else _process_name
     terminate = terminate if terminate is not None else _terminate_pid
     echo = echo if echo is not None else typer.echo
     pid = _read_postmaster_pid(_embedded_pgdata_dir())
     if pid is None or not is_alive(pid):
+        return
+    try:
+        name = process_name(pid)
+    except Exception:
+        name = None
+    if not _is_postmaster_name(name):
+        echo(f"pid {pid} from postmaster.pid is now {name or 'unknown'}; not touching it")
         return
     echo(f"stopping orphaned embedded postgres (pid {pid})")
     terminate(pid)

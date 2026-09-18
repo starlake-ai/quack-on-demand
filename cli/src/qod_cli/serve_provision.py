@@ -189,6 +189,12 @@ def wait_node_routable(
                     return True
         except ApiError:
             pass
+        # Re-check the deadline before sleeping a full interval: without this,
+        # a poll that comes back not-yet-healthy right before the deadline
+        # still sleeps the whole interval before the loop condition notices,
+        # overshooting by up to interval_s.
+        if now() >= deadline:
+            break
         sleep(interval_s)
     return False
 

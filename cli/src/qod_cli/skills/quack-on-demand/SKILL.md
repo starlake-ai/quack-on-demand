@@ -134,7 +134,10 @@ qod serve s3://bucket/wh/ --table orders=s3://bucket/wh/orders/**/*.parquet
 
 Every step is ensure-semantics (create only what is missing, never delete), so
 re-running is safe and adds a second database beside the first rather than
-replacing it. Credentials for a remote prefix come from `--access-key-id` /
+replacing it. If a manager is already running locally (loopback only), `qod
+serve` provisions straight into it instead of booting a second JVM; a manager
+at a non-loopback URL is refused rather than attached to. Credentials for a
+remote prefix come from `--access-key-id` /
 `--secret-access-key`, plus `--region` and (s3 only) `--endpoint` (flag-only,
 no env fallback); for an `s3://`/`s3a://`/`r2://` prefix these fall back to
 the ambient `AWS_*` environment, while a `gs://` (`gcs://` alias) or `az://`

@@ -31,6 +31,9 @@ object NodeLockdown:
   // must disable the local filesystem exactly like its canonical form does. r2 is listed here
   // (unlike the edge LockdownScreen's RemoteSchemes, which exempts it as a read-only
   // federation URL form) because `qod serve r2://...` writes it straight into dataPath.
+  // `gcs://` never actually reaches a dataPath this way - serve_target._resolve_remote
+  // normalizes it to `gs://` client-side before it is ever sent - so it is kept here only
+  // as defense-in-depth against a dataPath set some other way (manifest import, REST).
   private val ObjectStoreSchemes =
     List("s3://", "s3a://", "r2://", "gs://", "gcs://", "az://", "azure://", "abfss://")
 

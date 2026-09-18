@@ -447,10 +447,17 @@ def test_provisioning_logs_in_and_ensures_everything(respx_mock, tmp_path):
     f.write_bytes(b"")
     target = resolve(str(f), data_root=tmp_path)
     lines = []
+    # M6: a no-op sleep + a finite tick clock, so a future extra /api/pool/list
+    # call (one more than the two-step side_effect above provides) raises
+    # StopIteration immediately instead of really sleeping out the 60s default
+    # node_timeout - see test_serve_provision.py's wait_node_routable tests
+    # for why exactly 4 ticks matches this 2-call poll.
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
     ok = _provision(
         manager_url=BASE, tenant="default", target=target, pool="bi", size=1,
         password="pw", profile="default", generated=True, ready_timeout=5,
         pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        node_timeout=10, node_sleep=lambda _s: None, node_now=lambda: next(ticks),
     )
     assert ok is True
     banner = "\n".join(lines)
@@ -687,6 +694,33 @@ def test_serve_attach_without_any_password_errors_cleanly(
     assert "cmd" not in wired
 
 
+def test_serve_refuses_to_attach_to_a_non_loopback_manager(
+    runner, wired, respx_mock, tmp_path, monkeypatch
+):
+    # M7: a manager already running at a REMOTE (non-loopback) URL is almost
+    # certainly a `qod login` profile against someone else's deployment;
+    # attaching would quietly create rows there with a local dataPath the
+    # remote nodes cannot read. Refuse outright - no attach, no local boot.
+    from qod_cli.commands import serve as serve_cmd
+    from qod_cli.config import save_start_env
+
+    remote = "http://example.com:20900"
+    monkeypatch.setenv("QOD_MANAGER_URL", remote)
+    respx_mock.get(f"{remote}/ready").mock(return_value=httpx.Response(200, json={}))
+    save_start_env({"QOD_ADMIN_PASSWORD": "stored-pw"})
+    called = []
+    monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: called.append(kw) or True)
+
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 1
+    assert remote in result.output
+    assert "loopback" in result.output
+    assert called == []
+    assert "cmd" not in wired
+
+
 def test_serve_demo_refuses_when_a_manager_is_already_running(
     runner, wired, respx_mock, monkeypatch
 ):
@@ -713,6 +747,28 @@ def test_serve_boots_normally_when_the_ready_probe_errors(runner, wired, respx_m
     result = _invoke(runner, wired, str(f))
     assert result.exit_code == 0, result.output
     assert "cmd" in wired
+
+
+def test_manager_running_probe_uses_a_per_phase_bounded_timeout(monkeypatch):
+    # M14: the docstring promises a bounded probe; pin that httpx.Timeout(2.0,
+    # connect=1.0) - not a bare float, and not left to httpx's own default -
+    # is what actually reaches httpx.get.
+    from qod_cli.commands import serve as serve_cmd
+
+    captured = {}
+
+    def fake_get(url, timeout=None):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(serve_cmd.httpx, "get", fake_get)
+    assert serve_cmd._manager_running(BASE) is True
+    assert captured["url"] == f"{BASE}/ready"
+    timeout = captured["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 1.0
+    assert timeout.read == timeout.write == timeout.pool == 2.0
 
 
 def test_banner_attached_render(respx_mock, tmp_path):
@@ -772,10 +828,14 @@ def test_provisioning_substitutes_a_null_flight_sql_host(respx_mock, tmp_path):
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     lines = []
+    # See test_provisioning_logs_in_and_ensures_everything for why this is a
+    # no-op sleep + finite tick clock rather than the real ones.
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
     _provision(
         manager_url=BASE, tenant="default", target=resolve(str(f), data_root=tmp_path),
         pool="bi", size=1, password="pw", profile="default", generated=True,
         ready_timeout=5, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        node_timeout=10, node_sleep=lambda _s: None, node_now=lambda: next(ticks),
     )
     banner = "\n".join(lines)
     assert "jdbc:arrow-flight-sql://localhost:31338/" in banner

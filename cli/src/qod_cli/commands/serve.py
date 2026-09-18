@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -71,12 +72,24 @@ def _manager_running(manager_url: str) -> bool:
     to it instead of booting a second JVM. Mirrors status.py's `_get_json`
     posture: any exception (connection refused, timeout, DNS) means nothing is
     there yet, not a reason to abort serve. The response's status code does not
-    matter here (a 503 mid-boot still means "something is listening")."""
+    matter here (a 503 mid-boot still means "something is listening").
+
+    `httpx.Timeout(2.0, connect=1.0)` bounds every phase (connect/read/write/
+    pool) individually rather than the call overall - a bare `timeout=2.0`
+    does the same thing, but spelling it out makes the per-phase nature
+    explicit rather than implying a 2s wall-clock cap."""
     try:
-        httpx.get(f"{manager_url}/ready", timeout=2.0)
+        httpx.get(f"{manager_url}/ready", timeout=httpx.Timeout(2.0, connect=1.0))
         return True
     except Exception:
         return False
+
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _is_loopback(manager_url: str) -> bool:
+    return (urlparse(manager_url).hostname or "").lower() in _LOOPBACK_HOSTS
 
 
 def _scheme_family(target: str | None) -> str | None:
@@ -336,7 +349,8 @@ def _banner(
 def _provision(
     *, manager_url: str, tenant: str, target, pool: str, size: int, password: str,
     profile: str, generated: bool, ready_timeout: float, pg_port: int, pg_data_dir: str,
-    echo, attached: bool = False,
+    echo, attached: bool = False, node_timeout: float = 60.0,
+    node_sleep=time.sleep, node_now=time.monotonic,
 ) -> bool:
     """Wait for the manager, log in, ensure tenant/database/pool, persist the
     session, print the banner. Returns True once the banner has printed, False
@@ -348,6 +362,12 @@ def _provision(
     command. The background-thread caller (_spawn_provisioning) ignores the
     return value; attach mode (B1, #100) runs this inline in the foreground and
     needs it to decide its own exit code.
+
+    `node_timeout`/`node_sleep`/`node_now` thread through to
+    `wait_node_routable` (real `time.sleep`/`time.monotonic` by default, same
+    as every call site today); tests inject a no-op sleep and a finite tick
+    clock so an unexpected extra `/api/pool/list` call raises `StopIteration`
+    immediately instead of really sleeping out a 60s timeout.
     """
     settings = Settings(manager_url=manager_url)
     client = RestClient(settings)
@@ -366,7 +386,10 @@ def _provision(
         # On a RESTART the pool row exists but a respawned node may still be
         # seconds from healthy; wait for one before printing connect strings
         # that would otherwise briefly fail. Never fails provisioning over it.
-        if not wait_node_routable(client, tenant, db_full, pool):
+        if not wait_node_routable(
+            client, tenant, db_full, pool,
+            timeout_s=node_timeout, sleep=node_sleep, now=node_now,
+        ):
             echo("note: node still warming; the first query may briefly fail")
         edge = client.request("GET", "/api/config/client") or {}
         edge_host = edge.get("flightSqlHost") or ""
@@ -489,7 +512,9 @@ def serve(
     is missing, so `qod serve ./other.duckdb` adds a second database beside the
     first. Ctrl-C tears the manager and its nodes down gracefully. With --demo,
     runs the self-contained throwaway demo (sample data, insecure by design)
-    instead.
+    instead. If a manager is already running at the configured URL (loopback
+    only), serve provisions straight into it instead of booting a second JVM;
+    `qod stop` still stops it.
 
     Running against your own Postgres instead? Use qod start.
     """
@@ -576,15 +601,29 @@ def serve(
         raise typer.Exit(1)
 
     if _manager_running(manager_url):
+        if not _is_loopback(manager_url):
+            # M7: serve only ever provisions into a LOCAL gateway - a manager
+            # running at a remote (non-loopback) URL is almost certainly a
+            # `qod login` profile against someone else's deployment, and
+            # attaching would quietly create tenant/db/pool rows there with a
+            # local filesystem dataPath its nodes cannot read, using whatever
+            # QOD_ADMIN_PASSWORD happens to be set locally. Refuse outright;
+            # point at the admin flows that are meant for a remote manager.
+            typer.echo(
+                f"error: a manager is already running at {manager_url}, but qod serve only "
+                "provisions into a local (loopback) gateway; for a remote manager, use "
+                "the admin flows instead: qod login, then qod tenant/database/pool create",
+                err=True,
+            )
+            raise typer.Exit(1)
         # Attach mode (B1, #100): a manager is already up, so provision into it
         # in the foreground instead of booting a second JVM. A fresh password
         # cannot possibly match an already-running manager, so this path never
         # generates one - only a real env var or an earlier `qod serve`'s stored
-        # value will do.
-        password = os.environ.get("QOD_ADMIN_PASSWORD") or load_start_env().get(
-            "QOD_ADMIN_PASSWORD"
-        )
-        if not password:
+        # value will do. Reuses _resolve_admin_password so the env-then-stored
+        # precedence has exactly one implementation.
+        password, generated = _resolve_admin_password()
+        if generated:
             typer.echo(
                 f"error: a manager is already running at {manager_url}, but no admin "
                 "password is available to attach with; export QOD_ADMIN_PASSWORD or run "

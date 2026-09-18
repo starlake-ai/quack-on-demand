@@ -14,20 +14,31 @@ from .. import launcher
 from .._manager_version import MANAGER_VERSION
 
 
+def _is_win32() -> bool:
+    return sys.platform == "win32"
+
+
 def _exec(cmd: list[str], env: dict) -> None:
-    if sys.platform == "win32":
+    if _is_win32():
         try:
             code = subprocess.call(cmd, env=env)
         except KeyboardInterrupt:
             # The shared Windows console delivers Ctrl-C to the child too, so by
             # the time this fires the manager already got the same signal; the
-            # sweep reaps whatever survived it (nodes, embedded postmaster - the
-            # sweep from part A handles the latter).
+            # sweep reaps whatever survived it (nodes, embedded postmaster).
+            # `perform_stop` is called for its manager/node teardown, but its
+            # first half is POSIX-only (lsof, pgrep) and raises immediately on
+            # Windows, so the orphan sweep is also called explicitly here
+            # rather than relied on via perform_stop's `finally` - that would
+            # still work today, but only as a side effect of an implementation
+            # detail. The explicit call is idempotent: a pid already reaped by
+            # perform_stop's own sweep is simply not alive the second time.
             typer.echo("interrupted; running the stop sweep...", err=True)
             try:
-                from .stop import perform_stop
+                from .stop import perform_stop, sweep_orphaned_embedded_postgres
 
                 perform_stop()
+                sweep_orphaned_embedded_postgres()
             except Exception:
                 pass  # a sweep failure must not mask the exit
             raise typer.Exit(130)
