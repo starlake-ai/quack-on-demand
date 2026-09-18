@@ -93,9 +93,10 @@ final class FlightProducerImpl(
   private val emptySchemaBytes: ByteString =
     serializeSchema(emptySchema)
 
-  /** DuckDB streams every non-result statement (DML / DDL / txn control) as a single-row
-    * `Count BIGINT`. Both FlightInfo paths must advertise THIS schema, not an empty one: ADBC
-    * enforces FlightInfo.schema == DoGet stream schema.
+  /** DuckDB streams SOME non-result statements as a single-row `Count BIGINT` -- but not all of
+    * them; see [[coerceSuccessToCount]]'s doc for the disproven "every non-result statement"
+    * premise and the actual split. Both FlightInfo paths must advertise THIS schema, not an empty
+    * one, for the ones this DOES apply to: ADBC enforces FlightInfo.schema == DoGet stream schema.
     */
   private val countSchema: Schema =
     new Schema(
@@ -219,24 +220,48 @@ final class FlightProducerImpl(
     * already been streamed to the client. When that COMMIT loses a genuine DuckLake
     * optimistic-concurrency race, the exception used to fall into the generic [[internalError]]
     * bucket: a scary opaque "internal error" for what is, underneath, an ordinary concurrent-write
-    * conflict. Reproduced empirically 2026-09-18 by hammering concurrent `CREATE OR REPLACE TABLE`
-    * DDL against one ducklake-backed node: `Invalid Input Error: Failed to commit: Failed to commit
-    * DuckLake transaction. Failed to load DuckLake - table with id N references schema id M that
-    * does not exist`. DuckLake gives no typed exception across the wire (it comes back as a plain
+    * conflict.
+    *
+    * The matcher below recognizes ONLY DuckLake's known-transient
+    * write-write/concurrent-modification signature -- reusing the exact heuristic already pinned
+    * against a live DuckLake probe by
+    * [[ai.starlake.quack.ondemand.api.CatalogRestoreHandlers.isConflict]] (`docs/superpowers/plans/
+    * 2026-07-17-restore-rollback.md`, `docs/duckdb-pin-bump-checklist.md` #7): DuckLake's
+    * optimistic-concurrency loser message contains the word "conflict". It does NOT match
+    * DuckLake's generic commit-failure wrapper (`Failed to commit: Failed to commit DuckLake
+    * transaction. <cause>`), which DuckLake emits for EVERY failure during commit regardless of
+    * cause. The exemplar reproduced empirically 2026-09-18 by hammering concurrent
+    * `CREATE OR REPLACE TABLE` DDL against one ducklake-backed node -- `Invalid Input Error: Failed
+    * to commit: Failed to commit DuckLake transaction. Failed to load DuckLake - table with id N
+    * references schema id M that does not exist` -- does NOT contain "conflict" and is deliberately
+    * NOT matched here: that hammering left the pool PERSISTENTLY corrupted (see the #106 report),
+    * i.e. that exact signature was not something a client retry would ever resolve. Matching the
+    * generic wrapper text alone would launder permanent failures (disk full, a corrupted catalog,
+    * revoked write credentials) into an unbounded client retry loop, so this fails CLOSED toward
+    * [[internalError]] -- only the narrower conflict marker earns a retryable UNAVAILABLE. DuckLake
+    * gives no typed exception across the wire (it comes back as a plain
     * [[ai.starlake.quack.edge.adapter.QuackWireError.Permanent]] message string), so this matches
-    * on text. This does not fix the underlying race -- retrying a DDL/DML statement safely is a
-    * separate, larger design question (see the #106 report) -- it only stops mis-classifying an
-    * expected, retryable condition as an unexplained crash.
+    * on text, same as the precedent it reuses.
+    *
+    * This does not fix the underlying race -- retrying a DDL/DML statement safely is a separate,
+    * larger design question (see the #106 report) -- it only stops mis-classifying a
+    * known-transient condition as an unexplained crash. Always logged at ERROR with a fresh
+    * correlation id (same shape as [[internalError]]'s), even when reclassified to UNAVAILABLE: a
+    * reclassified conflict is still an operator-relevant event, and this used to log at WARN,
+    * invisible under the manager's default ERROR log level.
     */
   private[edge] def commitConflictOrInternal(context: String, t: Throwable): Throwable =
     val msg = Option(t.getMessage).getOrElse("")
-    if msg.contains("Failed to commit") && msg.contains("DuckLake transaction") then
-      logger.warn(
-        s"$context: DuckLake commit conflict (concurrent write), client should retry: $msg"
+    if msg.toLowerCase.contains("conflict") then
+      val errorId = java.util.UUID.randomUUID().toString.take(8)
+      logger.error(
+        s"$context: DuckLake write conflict [errorId=$errorId], client should retry: $msg",
+        t
       )
       CallStatus.UNAVAILABLE
         .withDescription(
-          "concurrent write conflict committing the transaction; retry the statement"
+          s"concurrent write conflict committing the transaction (errorId=$errorId); " +
+            "retry the statement"
         )
         .toRuntimeException()
     else internalError(context, t)
@@ -246,6 +271,14 @@ final class FlightProducerImpl(
     *   - `Count: BIGINT` for CREATE TABLE (AS), CREATE OR REPLACE TABLE, INSERT, UPDATE, MERGE,
     *     DELETE, CREATE INDEX, TRUNCATE
     *   - `Success: BOOLEAN` for BEGIN, COMMIT (txn control), VACUUM, ANALYZE, DROP, ALTER, SET
+    *
+    * Of that second bucket, only BEGIN/COMMIT/ROLLBACK/DROP/ALTER (`StatementKind.SkipExecute`
+    * territory -- see [[PrepareStrategy.choose]]) actually reach this coercion: the edge advertises
+    * `countSchema` for those WITHOUT probing, so a real `Success: BOOLEAN` reply drifts from what
+    * was promised. VACUUM/ANALYZE/SET classify as `StatementKind.Other` -> `FullExecute`, meaning
+    * the edge probes and advertises their REAL schema up front, so advertised and actual always
+    * agree for them and coercion never triggers -- they are DuckDB facts, not statements this code
+    * path handles.
     *
     * The split does not track the classifier's Read/Write/Ddl buckets (CREATE INDEX -> Count but
     * DROP INDEX -> Success), so predicting it per statement kind is a trap, not a fix -- this
@@ -258,6 +291,12 @@ final class FlightProducerImpl(
     * own `(status, detail)` substitution, and any other multi-column or differently-named result
     * all pass through untouched. The coerced row's Count is always 0 -- these statements have no
     * meaningful row count, and 0 documents "ran, produced no count" rather than inventing a number.
+    *
+    * This shape is assumed impossible for a genuine SELECT/RETURNING result (nothing in DML/DDL
+    * should legitimately return real rows under a single nullable `Success: BOOLEAN` column), but
+    * if it ever is -- e.g. `INSERT ... RETURNING <bool> AS "Success"` -- those rows are silently
+    * replaced by the synthetic `Count=0` row; [[streamArrow]] logs a WARN when that happens so the
+    * otherwise-silent data loss is at least auditable.
     */
   private[edge] def coerceSuccessToCount(root: VectorSchemaRoot): VectorSchemaRoot =
     val fields         = root.getSchema.getFields
@@ -1450,10 +1489,23 @@ final class FlightProducerImpl(
     val toStream: VectorSchemaRoot =
       if advertisedWasCount then coerceSuccessToCount(root) else root
     if toStream ne root then
+      // Minor-risk audit trail (see coerceSuccessToCount's doc): this shape is assumed impossible
+      // for a genuine result carrying real rows, but if it ever isn't, warn instead of silently
+      // discarding data. firstBatchRows is read BEFORE the drain loop refills the same root.
+      val firstBatchRows = root.getRowCount
       try
         listener.start(toStream)
-        listener.putNext()
-        while reader.loadNextBatch() && !listener.isCancelled() do ()
+        if !listener.isCancelled() then listener.putNext()
+        var laterBatchHadRows = false
+        while reader.loadNextBatch() && !listener.isCancelled() do
+          if root.getRowCount > 0 then laterBatchHadRows = true
+        if firstBatchRows > 1 || laterBatchHadRows then
+          logger.warn(
+            "coerceSuccessToCount discarded a Success:BOOLEAN result carrying real row data " +
+              s"(firstBatchRows=$firstBatchRows, laterBatchHadRows=$laterBatchHadRows) - a " +
+              "statement legitimately returning rows under this exact shape would silently lose " +
+              "them; see coerceSuccessToCount's doc"
+          )
         listener.completed()
       finally toStream.close()
     else

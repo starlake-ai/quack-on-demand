@@ -4,19 +4,25 @@
 
 - **FlightSQL edge no longer mis-surfaces two DDL/DML edge cases as opaque or drifted errors.**
   DuckDB (1.5.x) does not stream every non-result statement as the single-row `Count BIGINT`
-  the edge advertises: BEGIN, COMMIT, DROP, ALTER, VACUUM, ANALYZE and SET stream a single-row
-  `Success: BOOLEAN` instead (a split that does not track the classifier's Read/Write/Ddl
-  buckets - CREATE INDEX streams Count but DROP INDEX streams Success). This tripped ADBC's
+  the edge advertises: BEGIN, COMMIT, DROP and ALTER stream a single-row `Success: BOOLEAN`
+  instead (a split that does not track the classifier's Read/Write/Ddl buckets - CREATE INDEX
+  streams Count but DROP INDEX streams Success; VACUUM/ANALYZE/SET share the DuckDB-level split
+  but are always probed and advertised correctly, so they never drift). This tripped ADBC's
   advertised-vs-actual schema check (`FlightSQL endpoint returned inconsistent schema`) and, on
   a stamped ducklake write whose result had already streamed, could crash the DoGet stream
   entirely after the first batch. Both are now handled at the one place literal and prepared
   statements funnel through: a `Success: BOOLEAN` result (any row count - DuckDB can report zero
   materialized rows for the shape) is coerced to the advertised `Count: int64 = 0` before
-  streaming; separately, a stamped write's COMMIT epilogue losing a genuine DuckLake
-  write-write conflict is now classified as a retryable `UNAVAILABLE` ("concurrent write
-  conflict committing the transaction; retry the statement") instead of an opaque internal
-  error with a fresh errorId. Neither statement kind ever carried a meaningful row count and
-  the underlying DuckLake write race itself is not retried by the manager. Fixes #106.
+  streaming, with a WARN if that ever discards real row data (believed impossible for DML/DDL).
+  Separately, a stamped write's COMMIT epilogue losing a genuine DuckLake write-write conflict
+  (the same "contains conflict" marker `CatalogRestoreHandlers.isConflict` already relies on) is
+  now classified as a retryable `UNAVAILABLE` ("concurrent write conflict committing the
+  transaction; retry the statement") instead of an opaque internal error - but only for that
+  known-transient signature: any other commit-time failure (disk full, a corrupted catalog,
+  revoked write credentials) still fails closed to the errorId'd internal error, now always
+  logged at ERROR with its own correlation id so an operator sees it even at the manager's
+  default quiet log level. Neither statement kind ever carried a meaningful row count and the
+  underlying DuckLake write race itself is not retried by the manager. Fixes #106.
 - **Federation store connections now carry connect/socket timeouts, and restore() no longer
   resolves the federation blob for tenant-dbs that have no federated sources.**
   `FederatedSourceStore` opened a fresh JDBC connection per call with no `socketTimeout`, so a
