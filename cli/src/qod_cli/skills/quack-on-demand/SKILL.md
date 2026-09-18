@@ -313,6 +313,35 @@ MCP troubleshooting:
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
+### Administering over MCP
+
+An agent holding an admin PAT (or the static `QOD_API_KEY`) can drive the entire
+control plane through `POST /mcp`, not just data tools - the same surface as the
+admin REST API, gated by the same server-side guards (superuser checks, tenant scope,
+self/floor guards, mutation gates, audit). Tool families, one line each:
+
+- **Identity** - tenants, users, groups, roles, memberships
+- **Access** - role table permissions, column/row policies, pool permissions
+- **Pools & nodes** - pool create/scale/suspend/resume/stop/delete, pool settings
+  (resources, pod template, lockdown, autoscale, disabled), node restart/quarantine/
+  max-concurrent, active statements + kill
+- **Databases** - tenant-db create/update/delete, metastore defaults
+- **Maintenance & tags** - maintenance policies, maintenance runs, tag create/delete/
+  protect-unprotect (toggles both ways)
+- **Time travel** - restore/undrop, list recoverable snapshots
+- **Federation** - federated sources and secrets (returns a `federation_disabled`
+  error if federation isn't wired on this manager)
+- **Manifest** - export/import the control-plane YAML manifest
+- **PATs** - create/list/revoke/delete, self-scoped: a token only manages its own
+  subtree, never a sibling or its owner's other tokens
+- **Telemetry** - statement history, usage trends/report, server config, audit search
+
+Tenant inference: a tenant-scoped PAT acts in its own tenant automatically (omit
+`tenant` from tool arguments). Superuser credentials (a superuser PAT or the static
+key) are cross-tenant and must pass `tenant` explicitly on every tool call that needs
+one. Exception: `create_user` always requires an explicit `tenant` -- omitting it
+attempts SUPERUSER creation, which only superuser credentials may do.
+
 ### Account lockout and self-service password reset
 
 Lockout is opt-in and off by default. Turning it on requires SMTP to be configured first - boot refuses to start otherwise (the error names `QOD_SMTP_HOST`), because a locked-out user with no mail path would have no way back in.
