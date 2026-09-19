@@ -691,10 +691,12 @@ object Main extends IOApp with LazyLogging:
       killStatements = ids => activeStmtHandlers.killByPats(ids),
       broadcastKill = ids =>
         if haOn then
-          store.notifyListeners(
-            ai.starlake.quack.ondemand.api.PatKillBroadcast.Channel,
-            ai.starlake.quack.ondemand.api.PatKillBroadcast.encode(ids)
-          )
+          ai.starlake.quack.ondemand.api.PatKillBroadcast
+            .encodeBatches(ids)
+            .foreach(payload =>
+              store
+                .notifyListeners(ai.starlake.quack.ondemand.api.PatKillBroadcast.Channel, payload)
+            )
     )
     val historyHandlers    = new StatementHistoryHandlers(stmtHistory, sup)
     val auditHandlers      = new ai.starlake.quack.ondemand.api.AuditHandlers(telemetryStore)

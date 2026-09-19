@@ -58,6 +58,16 @@ class KillBroadcastSpec extends AnyFlatSpec with Matchers:
     registry.list() shouldBe Nil
     history.snapshot(10).map(_.status) shouldBe List("killed")
 
+  "PatKillBroadcast.encodeBatches" should "split large pat sets into decodable NOTIFY-sized payloads" in:
+    val ids      = (1 to 101).map(i => f"pat-$i%032d").toSet
+    val payloads = PatKillBroadcast.encodeBatches(ids)
+    payloads should have size 2
+    payloads.foreach(p => p.getBytes("UTF-8").length should be < 8000)
+    val decoded  = payloads.flatMap { p =>
+      io.circe.parser.decode[PatKillBroadcast](p).toOption.map(_.patIds).getOrElse(Nil)
+    }
+    decoded.toSet shouldBe ids
+
   it should "ignore malformed payloads and unknown pat ids" in:
     val registry = new ActiveStatementRegistry()
     val h        = freshHandlers(registry, new StatementHistoryStore())
