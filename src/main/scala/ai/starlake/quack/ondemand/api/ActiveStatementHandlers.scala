@@ -39,9 +39,16 @@ final case class PatKillBroadcast(patIds: List[String])
 object PatKillBroadcast:
   given Codec[PatKillBroadcast] = deriveCodec
   val Channel                   = "qod_pat_kill"
+  private val BatchSize         = 100
 
   def encode(patIds: Set[String]): String =
     PatKillBroadcast(patIds.toList.sorted).asJson.noSpaces
+
+  def encodeBatches(patIds: Set[String]): List[String] =
+    patIds.toList.sorted
+      .grouped(BatchSize)
+      .map(batch => encode(batch.toSet))
+      .toList
 
 final class ActiveStatementHandlers(
     registry: ActiveStatementRegistry,
