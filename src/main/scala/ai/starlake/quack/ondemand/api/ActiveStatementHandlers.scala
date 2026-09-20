@@ -39,7 +39,12 @@ final case class PatKillBroadcast(patIds: List[String])
 object PatKillBroadcast:
   given Codec[PatKillBroadcast] = deriveCodec
   val Channel                   = "qod_pat_kill"
-  private val BatchSize         = 100
+
+  /** Ids per NOTIFY payload. Postgres caps a NOTIFY payload at 8000 bytes; a pat id is fixed-width
+    * (`pat-` + 32 hex = 36 bytes, ~39 with JSON quoting and comma), so 100 ids encode to about 4
+    * KB, half the cap. Raise only after redoing that arithmetic.
+    */
+  private val BatchSize = 100
 
   def encode(patIds: Set[String]): String =
     PatKillBroadcast(patIds.toList.sorted).asJson.noSpaces

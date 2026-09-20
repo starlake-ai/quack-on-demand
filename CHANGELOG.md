@@ -56,6 +56,12 @@
   logged at ERROR with its own correlation id so an operator sees it even at the manager's
   default quiet log level. Neither statement kind ever carried a meaningful row count and the
   underlying DuckLake write race itself is not retried by the manager. Fixes #106.
+- **HA: PAT kill broadcasts are chunked.** Revoking a token cascades the kill of its running
+  statements to the other replicas over the `qod_pat_kill` NOTIFY channel. Postgres caps a
+  NOTIFY payload at 8000 bytes, so a large revocation cascade (roughly 190+ ids) used to be
+  dropped with a WARN and the remote statements ran on to their own timeouts. The id set is now
+  sent in batches of 100 (about 4 KB each), one NOTIFY per batch; receiver and payload schema are
+  unchanged. Refs #86 (item 1).
 - **Federation store connections now carry connect/socket timeouts, and restore() no longer
   resolves the federation blob for tenant-dbs that have no federated sources.**
   `FederatedSourceStore` opened a fresh JDBC connection per call with no `socketTimeout`, so a
