@@ -20,12 +20,14 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
 
   private def builderWith(
       sources: List[FederatedSource],
-      secrets: Map[String, List[FederatedSecret]]
+      secrets: Map[String, List[FederatedSecret]],
+      catalogAliasOf: String => IO[Option[String]] = _ => IO.pure(None)
   ): FederationBlobBuilder =
     new FederationBlobBuilder(
       loadEnabled = _ => IO.pure(sources.filterNot(_.disabled)),
       loadSecrets = id => IO.pure(secrets.getOrElse(id, Nil)),
-      resolver = resolver
+      resolver = resolver,
+      catalogAliasOf = catalogAliasOf
     )
 
   "FederationBlobBuilder.build" should "return None when no enabled sources" in {
@@ -256,5 +258,40 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     val other = src("sales_lake", "ATTACH 'x' AS {{alias}};")
     val out   = builderWith(List(ice, other), iceSecrets(ice)).buildOne(ice).unsafeRunSync()
     out should include("-- BEGIN federation: sales_lake")
+  }
+
+  // ---------- tenant-db's own catalog alias reservation ----------
+  // `IcebergRestConfig.validated`'s contract says callers should reserve the tenant-db's own
+  // DuckDB catalog alias in addition to sibling federated aliases -- a manifest import can carry
+  // an iceberg source aliased the same as its own tenant-db, which never goes through
+  // `FederatedSourceHandlers.toSource`'s REST/MCP-time check.
+
+  it should "raise, naming the alias, when an iceberg source's alias collides with its own tenant-db's catalog alias" in {
+    val ice = iceSrc(alias = "sales")
+    val err = intercept[RuntimeException](
+      builderWith(List(ice), iceSecrets(ice), catalogAliasOf = _ => IO.pure(Some("sales")))
+        .build("td-1")
+        .unsafeRunSync()
+    )
+    err.getMessage should include("sales")
+  }
+
+  it should "raise on a tenant-db-alias collision that differs only by case" in {
+    val ice = iceSrc(alias = "sales")
+    intercept[RuntimeException](
+      builderWith(List(ice), iceSecrets(ice), catalogAliasOf = _ => IO.pure(Some("SALES")))
+        .build("td-1")
+        .unsafeRunSync()
+    )
+  }
+
+  it should "still build when the iceberg alias differs from the tenant-db's own catalog alias" in {
+    val ice  = iceSrc(alias = "sales_lake")
+    val blob =
+      builderWith(List(ice), iceSecrets(ice), catalogAliasOf = _ => IO.pure(Some("sales")))
+        .build("td-1")
+        .unsafeRunSync()
+        .value
+    blob should include("-- BEGIN federation: sales_lake")
   }
 }

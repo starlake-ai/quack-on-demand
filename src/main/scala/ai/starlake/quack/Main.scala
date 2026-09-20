@@ -369,13 +369,29 @@ object Main extends IOApp with LazyLogging:
       val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
       Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
 
+    // Declared here (rather than just above catalogReaders below) so federationBlobOf can also
+    // close over it: both need the supervisor's tenant-db resolution but are themselves inputs to
+    // the supervisor's constructor. Empty reference, filled right after the supervisor is built;
+    // get() only runs at request time, never during construction.
+    val supRef = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
+
     val federationBlobOf: String => IO[Option[String]] =
       manifestFedStore match
         case Some(federatedStore) =>
           val builder = new FederationBlobBuilder(
             loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
             loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
-            resolver = secretResolver
+            resolver = secretResolver,
+            // The tenant-db's own DuckDB catalog alias, reserved so an iceberg source can't claim
+            // the name its own tenant-db is ATTACHed under. Mirrors attachedCatalogsOf's
+            // resolution below. Null-safe before supRef is filled (construction order) and never
+            // throws: a lookup failure just means one fewer reserved alias, not a broken blob.
+            catalogAliasOf = tdId =>
+              IO.delay(
+                Option(supRef.get())
+                  .flatMap(_.getTenantDbById(tdId))
+                  .map(td => TenantDb.catalogAlias(td.metastore, td.name))
+              )
           )
           tdId => builder.build(tdId)
         case None =>
@@ -385,7 +401,6 @@ object Main extends IOApp with LazyLogging:
     // Construction cycle with `sup`: readers need the supervisor's metastore
     // resolution, the supervisor's hooks need evict. Broken via supRef, filled
     // right after the supervisor is built; get() only runs at request time.
-    val supRef           = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
     val catalogReaderCfg =
       com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.catalogReader")
     val catalogReaders: CatalogReaders = new CatalogReaders(

@@ -388,10 +388,17 @@ final class PoolSupervisor(
             val bound = e match
               case _: java.util.concurrent.TimeoutException => s" (bound: $blobResolveTimeout)"
               case _                                        => ""
-            logger.warn(
+            // ERROR, not WARN: the default logback root level is ERROR (see logback.xml), so a
+            // WARN here is silently swallowed on every install that hasn't raised the level. This
+            // failure fails the WHOLE tenant-db's blob (assemble composes all its sources with
+            // traverse), not just the one bad source, so every pool of this tenant-db respawned
+            // from this state loses EVERY federation alias, not only the offending one, until the
+            // cause is fixed and the state re-saved.
+            logger.error(
               s"restore: federation blob resolution failed for tenant-db '${td.name}'$bound: " +
-                s"${e.getMessage}; nodes respawned from this state will lack federation " +
-                "aliases until it is re-saved"
+                s"${e.getMessage}; ALL federation aliases for this tenant-db are lost on every " +
+                "node respawned from this state (one bad source fails the whole blob), until " +
+                "the cause is fixed and the state re-saved"
             )
           }
           attempt
@@ -1013,6 +1020,11 @@ final class PoolSupervisor(
   /** Lookup by surrogate id (`qodstate_tenant.id`). The `tenants` map is keyed by id: a direct hit.
     */
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
+
+  /** Lookup by surrogate id (`qodstate_tenant_db.id`). The `tenantDbs` map is keyed by id: a direct
+    * hit.
+    */
+  def getTenantDbById(id: String): Option[TenantDb] = tenantDbs.get(id)
 
   def listPoolsOfTenant(name: String): List[String] =
     pools.values.filter(_.key.tenant == name.toLowerCase(Locale.ROOT)).map(_.key.pool).toList.sorted

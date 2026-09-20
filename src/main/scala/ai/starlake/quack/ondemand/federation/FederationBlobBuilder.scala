@@ -34,7 +34,8 @@ import cats.syntax.all.*
 final class FederationBlobBuilder(
     loadEnabled: String => IO[List[FederatedSource]],
     loadSecrets: String => IO[List[FederatedSecret]],
-    resolver: SecretResolver
+    resolver: SecretResolver,
+    catalogAliasOf: String => IO[Option[String]] = _ => IO.pure(None)
 ) {
 
   private val PlaceholderRegex = """\{\{[^}]*\}\}""".r
@@ -57,13 +58,20 @@ final class FederationBlobBuilder(
 
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
     sources <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
-    blobs   <- sources.traverse { src =>
+    // Resolved once per blob (not per source): the tenant-db's own DuckDB catalog alias, if this
+    // tenant-db is known to the caller. Reserved alongside the sibling aliases below so an
+    // iceberg source can't claim the name the tenant-db itself is ATTACHed under -- e.g. a
+    // manifest-imported source aliased the same as its own tenant-db, which never goes through
+    // `FederatedSourceHandlers.toSource`'s REST/MCP-time check.
+    ownAlias <- catalogAliasOf(tenantDbId).map(_.map(_.toLowerCase))
+    blobs    <- sources.traverse { src =>
       // Every OTHER source's alias (by id, NOT by alias equality -- two rows can already share an
       // alias, which is exactly the case this is meant to catch), lowercased since `validated`
       // compares case-insensitively. Passed as `extraReserved` so an iceberg source can't claim a
-      // DuckDB catalog name a sibling in this same tenant-db already holds -- see `bodyTemplate`.
+      // DuckDB catalog name a sibling in this same tenant-db already holds, or the tenant-db's own
+      // catalog alias -- see `bodyTemplate`.
       val siblingAliases = sources.filterNot(_.id == src.id).map(_.alias.toLowerCase).toSet
-      renderOne(src, redactSecrets, siblingAliases)
+      renderOne(src, redactSecrets, siblingAliases ++ ownAlias)
     }
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
 
@@ -87,15 +95,25 @@ final class FederationBlobBuilder(
     * bring a node up with the catalog missing, which is exactly the failure the attach verifier
     * exists to make visible.
     *
-    * `siblingAliases` reserves every OTHER enabled source's alias in the same tenant-db (default
-    * empty for [[buildOne]], which re-issues one already-stored source whose sibling collision was
-    * already settled when that row was created). `FederatedSourceHandlers.toSource` runs the same
-    * check at REST/MCP write time, but `ManifestImporter` builds `FederatedSource` rows directly
-    * and calls `upsertSource` without going through that handler, so this is the one choke point
-    * every write path reaches. It also turns a silent failure loud: without it, a colliding ATTACH
-    * fails on the node but the piped DuckDB CLI does not bail, so the node comes up healthy with a
+    * `siblingAliases` reserves every OTHER enabled source's alias in the same tenant-db, PLUS (via
+    * `assemble`'s `catalogAliasOf`) the tenant-db's own DuckDB catalog alias; default empty for
+    * [[buildOne]], which re-issues one already-stored source whose collisions were already settled
+    * when that row was created. `FederatedSourceHandlers.toSource` runs the same check at REST/MCP
+    * write time, but `ManifestImporter` builds `FederatedSource` rows directly and calls
+    * `upsertSource` without going through that handler, so this is the layer that check reaches for
+    * every write path -- for `IcebergRest` sources only. Only the `IcebergRest` arm below calls
+    * `IcebergRestConfig.validated`; two colliding `Sql` sources (or a `Sql` source colliding with
+    * the tenant-db's own alias) are never checked here, since a `Sql` source's setup SQL is
+    * operator-written and unparsed.
+    *
+    * On an actual collision this raises rather than degrading: without it, a colliding ATTACH fails
+    * on the node but the piped DuckDB CLI does not bail, so the node comes up healthy with a
     * half-applied catalog set and the operator only sees `Catalog "x" does not exist` at query
-    * time, with no pointer back to the cause.
+    * time, with no pointer back to the cause. The raise is only as loud as its caller makes it,
+    * though: `PoolSupervisor.createPool` propagates it to the REST/CLI caller, but
+    * `PoolSupervisor.restore()` (`resolvedBlobFor`) catches it, falls back to the tenant-db's
+    * previous blob (or `""`), and logs -- degrading that tenant-db's WHOLE federation blob, not
+    * just the offending source.
     */
   private def bodyTemplate(src: FederatedSource, siblingAliases: Set[String]): IO[String] =
     src.sourceType match
