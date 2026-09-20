@@ -68,14 +68,18 @@ class FederatedSourceStore(
   def upsertSource(s: FederatedSource): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_federated_source
-        |  (id, tenant_db_id, alias, setup_sql, description, disabled)
-        |VALUES (?, ?, ?, ?, ?, ?)
+        |  (id, tenant_db_id, alias, setup_sql, description, disabled,
+        |   source_type, config, read_only)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_db_id = EXCLUDED.tenant_db_id,
         |  alias        = EXCLUDED.alias,
         |  setup_sql    = EXCLUDED.setup_sql,
         |  description  = EXCLUDED.description,
-        |  disabled     = EXCLUDED.disabled""".stripMargin
+        |  disabled     = EXCLUDED.disabled,
+        |  source_type  = EXCLUDED.source_type,
+        |  config       = EXCLUDED.config,
+        |  read_only    = EXCLUDED.read_only""".stripMargin
     )
     try
       ps.setString(1, s.id)
@@ -84,6 +88,9 @@ class FederatedSourceStore(
       ps.setString(4, s.setupSql)
       ps.setString(5, s.description.orNull)
       ps.setBoolean(6, s.disabled)
+      ps.setString(7, s.sourceType.wire)
+      ps.setString(8, s.config.orNull)
+      ps.setBoolean(9, s.readOnly)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -98,7 +105,8 @@ class FederatedSourceStore(
 
   def getSource(tenantDbId: String, alias: String): Option[FederatedSource] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
+        |       source_type, config, read_only
         |FROM qodstate_federated_source WHERE tenant_db_id = ? AND alias = ?""".stripMargin
     )
     try
@@ -114,7 +122,8 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
+        |       source_type, config, read_only
         |FROM qodstate_federated_source WHERE tenant_db_id = ? ORDER BY alias""".stripMargin
     )
   }
@@ -123,7 +132,8 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
+        |       source_type, config, read_only
         |FROM qodstate_federated_source
         |WHERE tenant_db_id = ? AND disabled = false ORDER BY alias""".stripMargin
     )
@@ -222,10 +232,15 @@ class FederatedSourceStore(
       id = rs.getString("id"),
       tenantDbId = rs.getString("tenant_db_id"),
       alias = rs.getString("alias"),
-      setupSql = rs.getString("setup_sql"),
+      // Nullable since 0038: a typed source carries no operator SQL.
+      setupSql = Option(rs.getString("setup_sql")).getOrElse(""),
       description = Option(rs.getString("description")),
       disabled = rs.getBoolean("disabled"),
-      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
+      sourceType = ai.starlake.quack.model.FederatedSourceType
+        .fromWireOrSql(rs.getString("source_type")),
+      config = Option(rs.getString("config")),
+      readOnly = rs.getBoolean("read_only")
     )
 
   private def readSecret(rs: ResultSet): FederatedSecret =

@@ -1,0 +1,31 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0038-federated-source-iceberg
+      author: quack-on-demand
+      changes:
+        # Typed external catalogs (Iceberg REST) alongside the original free-form
+        # setup_sql sources. `source_type` discriminates; `config` holds the typed
+        # JSON, which carries {{secret.NAME}} placeholders only and never resolved
+        # values, so it needs no redaction; `read_only` is the per-catalog write
+        # kill switch.
+        #
+        # read_only defaults to FALSE, not TRUE. Every pre-existing row is a
+        # free-form Postgres / S3 / DuckDB federation source whose writes are
+        # governed by the ACL graph alone; defaulting them closed would silently
+        # break writes through those aliases on upgrade. The Iceberg creation path
+        # in FederatedSourceHandlers is what defaults a NEW iceberg_rest source to
+        # read-only, which is where "an external catalog is one QoD does not own"
+        # actually belongs.
+        - addColumn:
+            tableName: qodstate_federated_source
+            columns:
+              - column: { name: source_type, type: VARCHAR(32), defaultValue: "sql", constraints: { nullable: false } }
+              - column: { name: config,      type: TEXT }
+              - column: { name: read_only,   type: BOOLEAN, defaultValueBoolean: false, constraints: { nullable: false } }
+        # A typed source carries no operator SQL. The "exactly one of setup_sql /
+        # config" invariant lives in FederatedSource.validate so a violation
+        # surfaces as a 400 naming the field, not as a constraint violation.
+        - dropNotNullConstraint:
+            tableName: qodstate_federated_source
+            columnName: setup_sql
+            columnDataType: TEXT

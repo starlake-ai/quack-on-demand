@@ -145,3 +145,89 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
     intercept[IllegalArgumentException] {
       FederatedSecret("bad", "src", "PWD", Some("v"), Some("e:r"))
     }
+
+  it should "round-trip an iceberg_rest source with config and readOnly" in withStores { (fs, cp) =>
+    val tdId = seedTd(cp)
+    val src  = FederatedSource(
+      id = "fs-ice",
+      tenantDbId = tdId,
+      alias = "sales_lake",
+      setupSql = "",
+      sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
+      config = Some("""{"warehouse":"sales","authType":"oauth2"}"""),
+      readOnly = true
+    )
+    fs.upsertSource(src)
+    val got = fs.getSource(tdId, "sales_lake").value
+    got.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.IcebergRest
+    got.config shouldBe Some("""{"warehouse":"sales","authType":"oauth2"}""")
+    got.readOnly shouldBe true
+    got.setupSql shouldBe ""
+  }
+
+  it should "default an existing-style sql source to sql, no config, writable" in withStores {
+    (fs, cp) =>
+      val tdId = seedTd(cp)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-sql",
+          tenantDbId = tdId,
+          alias = "pg_src",
+          setupSql = "ATTACH '' AS {{alias}} (TYPE postgres);"
+        )
+      )
+      val got = fs.getSource(tdId, "pg_src").value
+      got.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.Sql
+      got.config shouldBe None
+      got.readOnly shouldBe false
+  }
+
+  it should "update the new columns on a second upsert of the same id" in withStores { (fs, cp) =>
+    val tdId = seedTd(cp)
+    val base = FederatedSource(
+      id = "fs-flip",
+      tenantDbId = tdId,
+      alias = "lake",
+      sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
+      config = Some("""{"warehouse":"a"}"""),
+      readOnly = true
+    )
+    fs.upsertSource(base)
+    fs.upsertSource(base.copy(config = Some("""{"warehouse":"b"}"""), readOnly = false))
+    val got = fs.getSource(tdId, "lake").value
+    got.config shouldBe Some("""{"warehouse":"b"}""")
+    got.readOnly shouldBe false
+  }
+
+  "FederatedSource.validate" should "require setupSql for a sql source" in {
+    FederatedSource(id = "a", tenantDbId = "t", alias = "x").validate
+      .exists(_.contains("setupSql")) shouldBe true
+  }
+
+  it should "require config for an iceberg_rest source" in {
+    FederatedSource(
+      id = "a",
+      tenantDbId = "t",
+      alias = "x",
+      sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest
+    ).validate.exists(_.contains("config")) shouldBe true
+  }
+
+  it should "refuse a source carrying both setupSql and config" in {
+    FederatedSource(
+      id = "a",
+      tenantDbId = "t",
+      alias = "x",
+      setupSql = "ATTACH ...",
+      config = Some("{}")
+    ).validate.exists(_.contains("exactly one")) shouldBe true
+  }
+
+  it should "accept a well-formed sql source" in {
+    FederatedSource(
+      id = "a",
+      tenantDbId = "t",
+      alias = "x",
+      setupSql = "ATTACH ..."
+    ).validate shouldBe empty
+  }
