@@ -1,6 +1,9 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.{
+  Branch,
+  BranchMerge,
+  BranchStatus,
   MaintenancePolicy,
   MaintenanceRun,
   Pool,
@@ -256,7 +259,7 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
   def getRolePermission(id: String): Option[RolePermission] = rolePermissions.get(id)
 
   // ---------------- RBAC: groups ----------------
-  private val groups                                = TrieMap.empty[String, RbacGroup]
+  private val groups = TrieMap.empty[String, RbacGroup]
   // Mirror Postgres: upsertGroup's column list omits external_id, so a SCIM-set
   // externalId survives a name/description upsert.
   def upsertGroup(g: RbacGroup): Unit =
@@ -430,6 +433,90 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag] =
     snapshotTags.get((tenant, tenantDb, name))
+
+  // ---------------- Branches (Epic 1) ----------------
+  private val branches     = TrieMap.empty[String, Branch]
+  private val branchMerges = TrieMap.empty[String, BranchMerge]
+  private val branchSeq    = new AtomicLong(0L)
+
+  private def newestFirst(bs: Iterable[Branch]): List[Branch] =
+    bs.toList.sortBy(b => (b.createdAt.map(-_.toEpochMilli).getOrElse(0L), b.id))
+
+  def createBranch(b: Branch): Either[String, Branch] = branches.synchronized {
+    val clash = branches.values.exists(o =>
+      o.parentDbId == b.parentDbId && o.name == b.name && o.status.isLive
+    )
+    if clash then Left("duplicate")
+    else
+      // Strictly increasing createdAt so newest-first ordering is deterministic.
+      val ts        = Instant.now().plusMillis(branchSeq.incrementAndGet())
+      val populated = b.copy(createdAt = b.createdAt.orElse(Some(ts)), updatedAt = Some(ts))
+      branches.put(b.id, populated)
+      Right(populated)
+  }
+
+  def getBranch(id: String): Option[Branch] = branches.get(id)
+
+  def findBranch(parentDbId: String, name: String, liveOnly: Boolean): Option[Branch] =
+    newestFirst(
+      branches.values.filter(b =>
+        b.parentDbId == parentDbId && b.name == name && (!liveOnly || b.status.isLive)
+      )
+    ).headOption
+
+  def listBranches(parentDbId: String, statuses: Set[BranchStatus]): List[Branch] =
+    newestFirst(
+      branches.values.filter(b =>
+        b.parentDbId == parentDbId && (statuses.isEmpty || statuses.contains(b.status))
+      )
+    )
+
+  def listTenantBranches(tenant: String, statuses: Set[BranchStatus]): List[Branch] =
+    newestFirst(
+      branches.values.filter(b =>
+        b.tenant == tenant && (statuses.isEmpty || statuses.contains(b.status))
+      )
+    )
+
+  def updateBranch(b: Branch): Option[Branch] =
+    branches.updateWith(b.id)(
+      _.map(
+        _.copy(
+          status = b.status,
+          expiresAt = b.expiresAt,
+          purgedAt = b.purgedAt,
+          updatedAt = Some(Instant.now())
+        )
+      )
+    )
+
+  def createBranchMerge(m: BranchMerge): BranchMerge =
+    val ts        = Instant.now().plusMillis(branchSeq.incrementAndGet())
+    val populated = m.copy(createdAt = m.createdAt.orElse(Some(ts)))
+    branchMerges.put(m.id, populated)
+    populated
+
+  def getBranchMerge(id: String): Option[BranchMerge] = branchMerges.get(id)
+
+  def listBranchMerges(branchId: String): List[BranchMerge] =
+    branchMerges.values
+      .filter(_.branchId == branchId)
+      .toList
+      .sortBy(m => (m.createdAt.map(-_.toEpochMilli).getOrElse(0L), m.id))
+
+  def updateBranchMerge(m: BranchMerge): Option[BranchMerge] =
+    branchMerges.updateWith(m.id)(
+      _.map(
+        _.copy(
+          status = m.status,
+          approver = m.approver,
+          mainSnapshotAfter = m.mainSnapshotAfter,
+          tagName = m.tagName,
+          error = m.error,
+          decidedAt = m.decidedAt
+        )
+      )
+    )
 
   // ---------------- Maintenance (EPIC Spec 09) ----------------
   private val maintenancePolicies = TrieMap.empty[String, MaintenancePolicy]

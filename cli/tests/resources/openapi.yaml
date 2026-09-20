@@ -994,6 +994,308 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}:
+    get:
+      description: One branch (live or terminal) with its merge history.
+      operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranch
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: branch
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchDetailResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}/changes:
+    get:
+      description: 'The branch''s change set since its fork: touched tables classified
+        as created, dropped, recreated, modified or altered (with insert/delete/update
+        counts unless counts=false), the conflicts against main, and the changes v1
+        cannot merge. `mergeable` is the fast-forward verdict.'
+      operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchChanges
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: branch
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: counts
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchChangesResponse'
+        '400':
+          description: 'Invalid value for: query parameter counts, Invalid value for:
+            header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}/diff:
+    get:
+      description: 'Row-level diff of one table between the branch''s fork snapshot
+        and its head: the same paginated change feed as the catalog data-diff (keyset
+        cursor, changeType filter).'
+      operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchDiff
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: branch
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: changeType
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataDiffResponse'
+        '400':
+          description: 'Invalid value for: query parameter schema, Invalid value for:
+            query parameter table, Invalid value for: query parameter limit, Invalid
+            value for: query parameter cursor, Invalid value for: query parameter
+            changeType, Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/tenant/{tenant}/database/{tenantDb}/branches/{branch}/schema-diff:
+    get:
+      description: Column-level diff of one table between the branch's fork snapshot
+        and its head.
+      operationId: getApiBranchTenantTenantDatabaseTenantdbBranchesBranchSchema-diff
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: branch
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaDiffResponse'
+        '400':
+          description: 'Invalid value for: query parameter schema, Invalid value for:
+            query parameter table, Invalid value for: header X-API-Key, Invalid value
+            for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/tenant/{tenant}/database/{tenantDb}/branches:
+    get:
+      description: List the live branches of a tenant-db (open or proposed); includeTerminal=true
+        also returns merged, discarded and expired history rows.
+      operationId: getApiBranchTenantTenantDatabaseTenantdbBranches
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: includeTerminal
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchListResponse'
+        '400':
+          description: 'Invalid value for: query parameter includeTerminal, Invalid
+            value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/catalog/tenant/{tenant}/database/{tenantDb}/recoverable:
     get:
       description: Recently dropped tables of a DuckLake tenant-db that are still
@@ -3730,6 +4032,183 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/create:
+    post:
+      description: 'Create a writable branch of a DuckLake tenant-db: a zero-copy
+        clone of the catalog at the current head, served by its own pool. Target it
+        with the FlightSQL `branch` connection header or the MCP `branch` argument.
+        409 duplicate / branch_limit / fork_snapshot_unsupported (v1 forks at head
+        only); 400 invalid_name / branch_of_branch_unsupported; 403 acl_denied when
+        the caller cannot connect to the parent.'
+      operationId: postApiBranchCreate
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BranchCreateRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchEntry'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/discard:
+    post:
+      description: 'Discard a live branch (owner or tenant admin): its pool, catalog
+        and branch-only files are freed; the row stays as history.'
+      operationId: postApiBranchDiscard
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BranchOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchEntry'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/merge:
+    post:
+      description: 'Fast-forward merge a proposed branch onto main in one stamped
+        snapshot, tag it, and tear the branch down. Human-gated: the approver must
+        differ from the proposer (403 self_merge_forbidden) and no MCP tool exposes
+        it. 409 merge_conflict lists the tables main changed since the fork; 409 concurrent_write
+        on an expectedMainSnapshot mismatch or a lost commit race (retry); 422 merge_unsupported
+        for schema changes, views and macros; 502 merge_failed.'
+      operationId: postApiBranchMerge
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BranchMergeRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchMergeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/branch/propose:
+    post:
+      description: 'Propose the branch for merge: records a merge request with the
+        change set and the conflicts computed now. A branch with conflicts can be
+        proposed; merge refuses it. 409 already_proposed.'
+      operationId: postApiBranchPropose
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BranchOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchProposeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/catalog/restore:
     post:
       description: 'Restore a live table to a prior snapshot as a NEW forward snapshot
@@ -5949,6 +6428,264 @@ components:
           type: string
         ssoProviderName:
           type: string
+    BranchChangesResponse:
+      title: BranchChangesResponse
+      type: object
+      required:
+      - branch
+      - forkSnapshot
+      - headSnapshot
+      - mainSnapshot
+      - mergeable
+      properties:
+        branch:
+          type: string
+        forkSnapshot:
+          type: integer
+          format: int64
+        headSnapshot:
+          type: integer
+          format: int64
+        mainSnapshot:
+          type: integer
+          format: int64
+        tables:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchTableChange'
+        conflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchConflictEntry'
+        unsupported:
+          type: array
+          items:
+            type: string
+        mergeable:
+          type: boolean
+    BranchConflictEntry:
+      title: BranchConflictEntry
+      type: object
+      required:
+      - schema
+      - table
+      - reason
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        reason:
+          type: string
+    BranchCreateRequest:
+      title: BranchCreateRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - name
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        name:
+          type: string
+        ttlHours:
+          type: integer
+          format: int32
+        fromSnapshot:
+          type: integer
+          format: int64
+    BranchDetailResponse:
+      title: BranchDetailResponse
+      type: object
+      required:
+      - branch
+      properties:
+        branch:
+          $ref: '#/components/schemas/BranchEntry'
+        merges:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchMergeEntry'
+    BranchEntry:
+      title: BranchEntry
+      type: object
+      required:
+      - id
+      - tenant
+      - database
+      - name
+      - status
+      - forkSnapshot
+      - owner
+      - pool
+      - catalogDb
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        database:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        forkSnapshot:
+          type: integer
+          format: int64
+        owner:
+          type: string
+        pool:
+          type: string
+        catalogDb:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    BranchListResponse:
+      title: BranchListResponse
+      type: object
+      properties:
+        branches:
+          type: array
+          items:
+            $ref: '#/components/schemas/BranchEntry'
+    BranchMergeEntry:
+      title: BranchMergeEntry
+      type: object
+      required:
+      - id
+      - status
+      - proposer
+      - mainSnapshotAtPropose
+      - summary
+      - conflicts
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        proposer:
+          type: string
+        approver:
+          type: string
+        mainSnapshotAtPropose:
+          type: integer
+          format: int64
+        mainSnapshotAfter:
+          type: integer
+          format: int64
+        tagName:
+          type: string
+        error:
+          type: string
+        summary: {}
+        conflicts: {}
+        createdAt:
+          type: string
+          format: date-time
+        decidedAt:
+          type: string
+          format: date-time
+    BranchMergeRequest:
+      title: BranchMergeRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - branch
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        branch:
+          type: string
+        expectedMainSnapshot:
+          type: integer
+          format: int64
+    BranchMergeResponse:
+      title: BranchMergeResponse
+      type: object
+      required:
+      - branch
+      - merge
+      - changes
+      properties:
+        branch:
+          $ref: '#/components/schemas/BranchEntry'
+        merge:
+          $ref: '#/components/schemas/BranchMergeEntry'
+        changes:
+          $ref: '#/components/schemas/BranchChangesResponse'
+    BranchOpRequest:
+      title: BranchOpRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - branch
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        branch:
+          type: string
+    BranchProposeResponse:
+      title: BranchProposeResponse
+      type: object
+      required:
+      - branch
+      - merge
+      - changes
+      properties:
+        branch:
+          $ref: '#/components/schemas/BranchEntry'
+        merge:
+          $ref: '#/components/schemas/BranchMergeEntry'
+        changes:
+          $ref: '#/components/schemas/BranchChangesResponse'
+    BranchTableChange:
+      title: BranchTableChange
+      type: object
+      required:
+      - schema
+      - table
+      - kind
+      - inserted
+      - deleted
+      - updated
+      - mergeable
+      properties:
+        schema:
+          type: string
+        table:
+          type: string
+        kind:
+          type: string
+        inserted:
+          type: integer
+          format: int64
+        deleted:
+          type: integer
+          format: int64
+        updated:
+          type: integer
+          format: int64
+        mergeable:
+          type: boolean
+        reason:
+          type: string
     CatalogColumnEntry:
       title: CatalogColumnEntry
       type: object
@@ -7187,6 +7924,7 @@ components:
       required:
       - name
       - dropAdmin
+      - branchOnly
       properties:
         name:
           type: string
@@ -7223,6 +7961,8 @@ components:
         maxRows:
           type: integer
           format: int32
+        branchOnly:
+          type: boolean
     PatCreateResponse:
       title: PatCreateResponse
       type: object
@@ -7313,6 +8053,7 @@ components:
       type: object
       required:
       - dropAdmin
+      - branchOnly
       properties:
         roles:
           type: array
@@ -7344,6 +8085,8 @@ components:
         maxRows:
           type: integer
           format: int32
+        branchOnly:
+          type: boolean
     PoolCohortDto:
       title: PoolCohortDto
       type: object

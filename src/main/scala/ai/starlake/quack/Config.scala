@@ -549,6 +549,7 @@ final case class ManagerConfig(
     routing: RoutingConfig = RoutingConfig(),
     autoscale: AutoscaleConfig = AutoscaleConfig(),
     hibernation: HibernationConfig = HibernationConfig(),
+    branching: BranchingConfig = BranchingConfig(),
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
@@ -711,6 +712,52 @@ final case class HibernationConfig(
     Option.when(defaultIdleMinutes > 0)(
       scala.concurrent.duration.DurationInt(math.max(5, defaultIdleMinutes)).minutes
     )
+
+/** Writable branches of DuckLake tenant-dbs (Epic 1): a branch is a cloned catalog served by its
+  * own one-node pool; agents write there, a human reviews the change set and fast-forward merges.
+  * `enabled = false` refuses every branch endpoint and tool and starts no expiry sweep.
+  */
+final case class BranchingConfig(
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_ENABLED",
+      description = "Global kill switch for branching (endpoints, MCP tools, expiry sweep)."
+    )
+    enabled: Boolean = true,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_DEFAULT_TTL_HOURS",
+      description =
+        "Default time-to-live of a branch in hours when the creator sets none; an expired branch " +
+          "is discarded by the leader's sweep. 0 = branches never expire by default."
+    )
+    defaultTtlHours: Int = 168,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_SWEEP_SEC",
+      description = "Expiry sweep interval in seconds; clamped to a 60s floor."
+    )
+    sweepSec: Int = 300,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_MAX_PER_DATABASE",
+      description = "Maximum live (open or proposed) branches per tenant-db."
+    )
+    maxPerDatabase: Int = 20,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_MERGE_TIMEOUT_SEC",
+      description =
+        "Bounded wait for the merge transaction on the ephemeral merge node before the request " +
+          "fails; the commit is probed afterwards so a late commit is still recorded."
+    )
+    mergeTimeoutSec: Int = 600,
+    @field @ConfigField(
+      envVar = "QOD_BRANCH_NODE_READY_TIMEOUT_SEC",
+      description = "How long to wait for the ephemeral merge node to accept connections."
+    )
+    nodeReadyTimeoutSec: Int = 120
+):
+  require(defaultTtlHours >= 0, "branching: defaultTtlHours must be >= 0")
+  require(maxPerDatabase >= 1, "branching: maxPerDatabase must be >= 1")
+  require(mergeTimeoutSec >= 1, "branching: mergeTimeoutSec must be >= 1")
+  def sweepInterval: scala.concurrent.duration.FiniteDuration =
+    scala.concurrent.duration.DurationInt(math.max(60, sweepSec)).seconds
 
 /** Persistent embedded Postgres for the control plane: the zero-prerequisite single-node mode
   * `qod serve` launches. Distinct from the ephemeral demo instance

@@ -9,7 +9,7 @@ import ai.starlake.quack.edge.sql.{
   StatementValidator,
   ValidationContext
 }
-import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind}
+import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
@@ -259,7 +259,7 @@ final class FlightSqlRouter(
     val isWrite = kind == StatementKind.Dml || kind == StatementKind.Ddl
     if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
     else
-      poolMeta.get("dbName").filter(_.nonEmpty).map { db =>
+      Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty).map { db =>
         val author   = s"tenant:$tenant/user:$user"
         val stripped = SqlCommentStripper.stripComments(sql)
         val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase
@@ -370,9 +370,10 @@ final class FlightSqlRouter(
     val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
 
     def perKindDb: Option[String] = kindWire match
-      case "ducklake" | "duckdb-file" => poolMeta.get("dbName").filter(_.nonEmpty)
-      case "memory"                   => Some("memory")
-      case _                          => None
+      case "ducklake" | "duckdb-file" =>
+        Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty)
+      case "memory" => Some("memory")
+      case _        => None
 
     def perKindSchema: Option[String] = kindWire match
       case "ducklake" | "duckdb-file" => poolMeta.get("schemaName").filter(_.nonEmpty)
@@ -798,15 +799,17 @@ final class FlightSqlRouter(
       trimmed.startsWith("BEGIN") || trimmed.startsWith("COMMIT") ||
       trimmed.startsWith("ROLLBACK") || trimmed.startsWith("ATTACH") ||
       trimmed.startsWith("DETACH")
+    // The alias is `catalogAlias` when set (branch catalogs attach under their parent's alias),
+    // else `dbName`: see TenantDb.catalogAlias.
     state.map(_.metastore) match
       case Some(meta) if !skip =>
-        meta.get("dbName").filter(_.nonEmpty) match
+        Option(TenantDb.catalogAlias(meta)).filter(_.nonEmpty) match
           case Some(db) =>
             val schema = meta.get("schemaName").filter(_.nonEmpty).getOrElse("main")
             s"USE $db.$schema; $sql"
           case None => sql
       case Some(meta) if trimmed.startsWith("USE ") =>
-        FlightSqlRouter.qualifyBareUse(meta.get("dbName").filter(_.nonEmpty), sql)
+        FlightSqlRouter.qualifyBareUse(Option(TenantDb.catalogAlias(meta)).filter(_.nonEmpty), sql)
       case _ => sql
 
   /** Resolve the routing snapshot, waking a suspended (never a disabled) pool first: fire

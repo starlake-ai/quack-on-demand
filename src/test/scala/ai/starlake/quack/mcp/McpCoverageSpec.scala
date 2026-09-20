@@ -50,6 +50,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/auth/pat/delete"              -> "delete_pat",
     "POST /api/auth/pat/list"                -> "list_pats",
     "POST /api/auth/pat/revoke"              -> "revoke_pat",
+    "POST /api/branch/create"                -> "create_branch",
+    "POST /api/branch/discard"               -> "discard",
+    "POST /api/branch/propose"               -> "propose_merge",
     "POST /api/catalog/restore"              -> "restore_snapshot",
     "POST /api/catalog/tag/create"           -> "create_tag",
     "POST /api/catalog/tag/delete"           -> "delete_tag",
@@ -125,6 +128,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/auth/sso/",
     "POST /api/auth/oidc/",
     "POST /api/auth/sql-token/",
+    // Branch merge is human-gated by design (Epic 1): the approver must be a different
+    // principal than the proposing agent, and no agent tool may perform it.
+    "POST /api/branch/merge",
     "POST /api/scim/", // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
@@ -363,8 +369,12 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
           s"${ai.starlake.quack.ondemand.state.testkit.TestPostgres.pgPort}; skipping"
       )
     withPlatformTools { platformTools =>
+      // Branch tools only touch their handlers inside `run`, so a null handler is enough to
+      // enumerate the registered names.
+      val branchTools             = new McpBranchTools(null, noScope)
       val registered: Set[String] =
-        (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools)
+        (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools ++
+          branchTools.tools)
           .map(_.name)
           .toSet
       val referenced = covered.map(_._2).toSet

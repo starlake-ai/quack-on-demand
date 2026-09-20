@@ -59,6 +59,23 @@ final case class DroppedTableEntry(
     recoverable: Boolean
 )
 
+/** One `ducklake_table` row: a table version under a stable `tableId`, live from `begin`
+  * (inclusive) until `end` (exclusive; None = still live). A rename inserts a new version under the
+  * same id.
+  */
+final case class TableVersion(
+    tableId: Long,
+    schema: String,
+    name: String,
+    begin: Long,
+    end: Option[Long]
+):
+  /** Visible at snapshot `n` the way the engine sees it. */
+  def visibleAt(n: Long): Boolean = begin <= n && end.forall(_ > n)
+
+  /** Resolves for its own drop entry too (`end >= n`), the lookup `affectedTables` needs. */
+  def coversChangeAt(n: Long): Boolean = begin <= n && end.forall(_ >= n)
+
 /** Reads schemas / tables / columns / data files out of the DuckLake metadata tables. The metadata
   * schema is fixed by DuckLake itself (`ducklake_schema`, `ducklake_table`, `ducklake_column`,
   * `ducklake_data_file`) and lives in the same Postgres DB the catalog is attached to.
@@ -66,7 +83,9 @@ final case class DroppedTableEntry(
   * `meta` is the resolved per-tenant map produced by `PoolSupervisor.metastoreFor(...)` - same
   * shape the rest of the stack uses.
   */
-class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLogging:
+class DuckLakeCatalogReader(private val ds: HikariDataSource)
+    extends LazyLogging
+    with ai.starlake.quack.ondemand.branch.ChangeSource:
 
   def listSchemas(): List[CatalogSchemaEntry] =
     val sql =
@@ -566,13 +585,56 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource) extends LazyLoggin
         entries.filter(_.affectedTables.exists(t => t.schema == schema && t.name == tblName))
     filtered.take(limit)
 
-  private case class TableVersion(
-      tableId: Long,
-      schema: String,
-      name: String,
-      begin: Long,
-      end: Option[Long]
-  )
+  /** Every `ducklake_table` row (all versions of every table, live or dropped), the raw material
+    * for name<->id resolution at any snapshot. Small: one row per table version.
+    */
+  def tableVersions(): List[TableVersion] =
+    query(
+      """SELECT t.table_id,
+        |       sch.schema_name,
+        |       t.table_name,
+        |       t.begin_snapshot,
+        |       t.end_snapshot
+        |  FROM ducklake_table t
+        |  JOIN ducklake_schema sch ON sch.schema_id = t.schema_id""".stripMargin
+    ) { rs =>
+      TableVersion(
+        rs.getLong("table_id"),
+        rs.getString("schema_name"),
+        rs.getString("table_name"),
+        rs.getLong("begin_snapshot"),
+        Option(rs.getObject("end_snapshot")).map(_ => rs.getLong("end_snapshot"))
+      )
+    }
+
+  /** `(snapshot_id, changes_made)` for every snapshot strictly after `fork`, ascending. The raw
+    * verb string is returned unparsed; `ai.starlake.quack.ondemand.branch.BranchChanges` owns the
+    * classification (branch change sets and merge conflicts, Epic 1).
+    */
+  def snapshotChangesSince(fork: Long): List[(Long, String)] =
+    query(
+      """SELECT s.snapshot_id, coalesce(c.changes_made, '') AS changes_made
+        |  FROM ducklake_snapshot s
+        |  LEFT JOIN ducklake_snapshot_changes c ON c.snapshot_id = s.snapshot_id
+        | WHERE s.snapshot_id > ?
+        | ORDER BY s.snapshot_id""".stripMargin,
+      fork
+    )(rs => (rs.getLong("snapshot_id"), rs.getString("changes_made")))
+
+  /** The newest snapshot stamped with exactly `commitMessage` (branch merges embed their merge id
+    * in the message, so this locates the merge snapshot without racing other writers).
+    */
+  def snapshotByCommitMessage(commitMessage: String): Option[Long] =
+    query(
+      "SELECT max(snapshot_id) AS m FROM ducklake_snapshot_changes WHERE commit_message = ?",
+      commitMessage
+    )(rs => Option(rs.getObject("m")).map(_ => rs.getLong("m"))).headOption.flatten
+
+  /** Public alias of the rename-proof column listing keyed by `table_id` (see
+    * `columnsAtByTableId`), for callers that already hold a table id.
+    */
+  def columnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry] =
+    columnsAtByTableId(tableId, snapshotId)
 
   /** Verbs in changes_made whose payload references a table. */
   private val TableChangeVerbs = Set(

@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import ai.starlake.quack.MaintenanceConfig
 import ai.starlake.quack.edge.adapter.{QuackHttpAdapter, QuackResponse}
-import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.model.{PoolKey, TenantDb}
 import ai.starlake.quack.observability.metrics.MaintenanceMetrics
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.{DuckLakeCatalogReader, PinnedSetResolver}
@@ -112,7 +112,7 @@ final class MaintenanceWiring(
       totalBytesOf = (t, td) => catalogReader(t, td).totalDataFileBytes(),
       effectivePolicyOf = (t, td, s, tb) =>
         PolicyMath.effective(store.listMaintenancePolicies(t, td), s, tb),
-      catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+      catalogAlias = (t, td) => TenantDb.catalogAlias(sup.effectiveMetastoreFor(t, td), td),
       audit = audit,
       metrics = metrics
     )

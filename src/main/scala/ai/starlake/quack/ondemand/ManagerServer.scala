@@ -73,6 +73,8 @@ final class ManagerServer(
     // Postgres) leaves the three /api/auth/pat routes unmounted; Main always wires
     // it since the store lives in the same control-plane database.
     pat: Option[PatHandlers] = None,
+    // Branches (Epic 1). None (tests / branching disabled) leaves the routes unmounted.
+    branches: Option[BranchHandlers] = None,
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /
     // callers without Postgres) keeps the guard session-and-static-key only.
@@ -439,6 +441,45 @@ final class ManagerServer(
       RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
         h.restore(req, token)(scopeOfToken)
       }
+    }
+
+    // Branches (Epic 1). Session-gated per request via TenantScopeCheck inside the handler.
+    val branchEndpoints: List[ServerEndpoint[Any, IO]] = branches.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        BranchEndpoints.createEndpoint.serverLogic { case (req, token) =>
+          h.create(req, token)(scopeOfToken)
+        },
+        BranchEndpoints.listEndpoint.serverLogic {
+          case (tenant, tenantDb, includeTerminal, token) =>
+            h.list(tenant, tenantDb, includeTerminal, token)(scopeOfToken)
+        },
+        BranchEndpoints.getEndpoint.serverLogic { case (tenant, tenantDb, branch, token) =>
+          h.get(tenant, tenantDb, branch, token)(scopeOfToken)
+        },
+        BranchEndpoints.changesEndpoint.serverLogic {
+          case (tenant, tenantDb, branch, counts, token) =>
+            h.changes(tenant, tenantDb, branch, counts, token)(scopeOfToken)
+        },
+        BranchEndpoints.diffEndpoint.serverLogic {
+          case (tenant, tenantDb, branch, schema, table, limit, cursor, changeType, token) =>
+            h.diff(tenant, tenantDb, branch, schema, table, limit, cursor, changeType, token)(
+              scopeOfToken
+            )
+        },
+        BranchEndpoints.schemaDiffEndpoint.serverLogic {
+          case (tenant, tenantDb, branch, schema, table, token) =>
+            h.schemaDiff(tenant, tenantDb, branch, schema, table, token)(scopeOfToken)
+        },
+        BranchEndpoints.proposeEndpoint.serverLogic { case (req, token) =>
+          h.propose(req, token)(scopeOfToken)
+        },
+        BranchEndpoints.mergeEndpoint.serverLogic { case (req, token) =>
+          h.merge(req, token)(scopeOfToken)
+        },
+        BranchEndpoints.discardEndpoint.serverLogic { case (req, token) =>
+          h.discard(req, token)(scopeOfToken)
+        }
+      )
     }
 
     // Per-table history timeline (EPIC Spec 01). Session-gated per request via
@@ -869,7 +910,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

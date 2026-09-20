@@ -372,7 +372,11 @@ final class McpPlatformTools(
       "verb_ceiling"    -> strProp("Cap table verbs: RO | RW | DDL | ALL."),
       "drop_admin"      -> boolProp("Strip admin from the child token."),
       "stmt_timeout_ms" -> intProp("Per-statement timeout for the child."),
-      "max_rows"        -> intProp("Row cap for the child.")
+      "max_rows"        -> intProp("Row cap for the child."),
+      "branch_only"     -> boolProp(
+        "Writes (INSERT/UPDATE/DELETE/DDL) admitted only on a branch, never on the live " +
+          "database; reads unchanged. Inherited by every child token."
+      )
     ),
     adminOnly = true,
     run = (principal, args) =>
@@ -403,7 +407,8 @@ final class McpPlatformTools(
                     verbCeiling = str(args, "verb_ceiling"),
                     dropAdmin = bool(args, "drop_admin").getOrElse(false),
                     stmtTimeoutMs = int(args, "stmt_timeout_ms"),
-                    maxRows = int(args, "max_rows")
+                    maxRows = int(args, "max_rows"),
+                    branchOnly = bool(args, "branch_only").getOrElse(false)
                   )
                 )
                 .map(res => bridge(res).map(_.asJson))

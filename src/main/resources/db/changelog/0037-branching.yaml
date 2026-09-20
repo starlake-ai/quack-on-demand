@@ -1,0 +1,87 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0037-tenant-db-branch-of
+      author: quack-on-demand
+      changes:
+        # Parent tenant-db id when this row is a branch catalog (Epic 1). NULL for every
+        # ordinary tenant-db. Branch rows are excluded from maintenance scheduling and from
+        # database/delete; their lifecycle is driven through qodstate_branch.
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: branch_of
+                  type: TEXT
+  - changeSet:
+      id: 0037-pat-branch-only
+      author: quack-on-demand
+      changes:
+        # TokenRestriction.branchOnly: writes admitted only on a branch (Epic 1). Narrowing
+        # rule: a parent's true cannot be lowered by a child.
+        - addColumn:
+            tableName: qodstate_pat
+            columns:
+              - column:
+                  name: branch_only
+                  type: BOOLEAN
+                  defaultValueBoolean: false
+                  constraints: { nullable: false }
+  - changeSet:
+      id: 0037-qodstate-branch
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_branch
+            columns:
+              - column: { name: id,             type: VARCHAR(64), constraints: { primaryKey: true, nullable: false } }
+              - column: { name: tenant,         type: TEXT,        constraints: { nullable: false } }
+              - column: { name: parent_db_id,   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: parent_db_name, type: TEXT,        constraints: { nullable: false } }
+              - column: { name: name,           type: VARCHAR(48), constraints: { nullable: false } }
+              - column: { name: tenant_db_id,   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: tenant_db_name, type: TEXT,        constraints: { nullable: false } }
+              - column: { name: pool_name,      type: TEXT,        constraints: { nullable: false } }
+              - column: { name: data_path,      type: TEXT,        constraints: { nullable: false } }
+              - column: { name: fork_snapshot,  type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: owner_user,     type: TEXT,        constraints: { nullable: false } }
+              - column: { name: status,         type: TEXT,        constraints: { nullable: false } }
+              - column: { name: expires_at,     type: TIMESTAMP WITH TIME ZONE }
+              - column: { name: created_at,     type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: NOW(), constraints: { nullable: false } }
+              - column: { name: updated_at,     type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: NOW(), constraints: { nullable: false } }
+              - column: { name: purged_at,      type: TIMESTAMP WITH TIME ZONE }
+        - createIndex:
+            indexName: idx_qodstate_branch_parent
+            tableName: qodstate_branch
+            columns:
+              - column: { name: parent_db_id }
+        # One live branch per (parent, name); terminal rows keep the name free for reuse.
+        - sql:
+            sql: >-
+              CREATE UNIQUE INDEX uq_qodstate_branch_live_name
+              ON qodstate_branch (parent_db_id, name)
+              WHERE status IN ('open', 'proposed')
+  - changeSet:
+      id: 0037-qodstate-branch-merge
+      author: quack-on-demand
+      changes:
+        - createTable:
+            tableName: qodstate_branch_merge
+            columns:
+              - column: { name: id,                       type: VARCHAR(64), constraints: { primaryKey: true, nullable: false } }
+              - column: { name: branch_id,                type: VARCHAR(64), constraints: { nullable: false } }
+              - column: { name: proposer,                 type: TEXT,        constraints: { nullable: false } }
+              - column: { name: approver,                 type: TEXT }
+              - column: { name: status,                   type: TEXT,        constraints: { nullable: false } }
+              - column: { name: summary_json,             type: TEXT,        constraints: { nullable: false } }
+              - column: { name: conflicts_json,           type: TEXT,        constraints: { nullable: false } }
+              - column: { name: main_snapshot_at_propose, type: BIGINT,      constraints: { nullable: false } }
+              - column: { name: main_snapshot_after,      type: BIGINT }
+              - column: { name: tag_name,                 type: TEXT }
+              - column: { name: error,                    type: TEXT }
+              - column: { name: created_at,               type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: NOW(), constraints: { nullable: false } }
+              - column: { name: decided_at,               type: TIMESTAMP WITH TIME ZONE }
+        - createIndex:
+            indexName: idx_qodstate_branch_merge_branch
+            tableName: qodstate_branch_merge
+            columns:
+              - column: { name: branch_id }

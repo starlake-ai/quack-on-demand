@@ -37,6 +37,7 @@ ENV_VARS = {
     "edge_tls_verify": "QOD_TLS_VERIFY",
     "tenant": "QOD_TENANT",
     "pool": "QOD_POOL",
+    "branch": "QOD_BRANCH",
     "sql_user": "QOD_USER",
     "sql_password": "QOD_PASSWORD",
     "superuser": "QOD_SUPERUSER",
@@ -54,6 +55,8 @@ class Settings:
     edge_tls_verify: bool = False
     tenant: str = ""
     pool: str = ""
+    # Branch targeting for `qod sql` (Epic 1): sent as the FlightSQL `branch` header when set.
+    branch: str = ""
     sql_user: str = ""
     sql_password: str = ""
     superuser: bool = False

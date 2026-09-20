@@ -25,7 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "respx>=0.21", "pyyaml>=6.0"]
+# click is imported directly by tests/test_serve.py; typer >= 0.27 no longer depends on it.
+dev = ["pytest>=8.0", "respx>=0.21", "pyyaml>=6.0", "click>=8.0"]
 
 [project.scripts]
 qod = "qod_cli.main:main"

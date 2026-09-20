@@ -1,6 +1,9 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.{
+  Branch,
+  BranchMerge,
+  BranchStatus,
   MaintenancePolicy,
   MaintenanceRun,
   Pool,
@@ -337,6 +340,40 @@ trait ControlPlaneStore:
   def listSnapshotTags(tenant: String, tenantDb: String): List[SnapshotTag]
 
   def findSnapshotTag(tenant: String, tenantDb: String, name: String): Option[SnapshotTag]
+
+  // ---- branches (Epic 1) ----
+
+  /** Insert a branch; Left("duplicate") when a LIVE branch of the same parent already carries the
+    * name (terminal rows keep the name free).
+    */
+  def createBranch(b: Branch): Either[String, Branch]
+
+  def getBranch(id: String): Option[Branch]
+
+  /** Live or terminal branch by parent tenant-db id and name. With `liveOnly`, terminal rows are
+    * ignored (the normal lookup for every user-facing operation).
+    */
+  def findBranch(parentDbId: String, name: String, liveOnly: Boolean = true): Option[Branch]
+
+  /** Every branch row of a parent, newest first; `statuses` narrows (empty = all). */
+  def listBranches(parentDbId: String, statuses: Set[BranchStatus] = Set.empty): List[Branch]
+
+  /** Every branch row of a tenant (all parents), newest first. */
+  def listTenantBranches(tenant: String, statuses: Set[BranchStatus] = Set.empty): List[Branch]
+
+  /** Replace the mutable columns (status, expiresAt, purgedAt, updatedAt = now). */
+  def updateBranch(b: Branch): Option[Branch]
+
+  def createBranchMerge(m: BranchMerge): BranchMerge
+
+  def getBranchMerge(id: String): Option[BranchMerge]
+
+  /** Merge rows of a branch, newest first. */
+  def listBranchMerges(branchId: String): List[BranchMerge]
+
+  /** Replace the mutable columns (status, approver, mainSnapshotAfter, tagName, error, decidedAt).
+    */
+  def updateBranchMerge(m: BranchMerge): Option[BranchMerge]
 
   // ----- Maintenance (EPIC Spec 09) -----
 

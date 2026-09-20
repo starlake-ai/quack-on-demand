@@ -1227,6 +1227,72 @@ oldest daily bucket still retained.
 |---|---|---|
 | `QOD_USAGE_RETENTION_DAYS` | `400` | Delete daily rollup buckets older than N days (hourly purge); `0` = keep forever |
 
+## Branches (an agent proposes, a human merges)
+
+A branch is a writable, zero-copy clone of a DuckLake database at its current
+head: the branch reads the parent's Parquet files in place and writes its own
+files under a sibling prefix, served by its own one-node pool. Reads and writes
+on a branch never touch the live database. Grants, row and column policies
+written against the parent apply unchanged on the branch (same catalog name).
+Branch names: lowercase letter first, then letters, digits, `_` or `-`, at most
+48 characters. Only DuckLake databases can be branched, and never a branch.
+
+```bash
+# 1. Create a branch of acme's tpch1 database (expires after 24h; omit for the server default,
+#    0 = never). Anyone who can connect to a pool of the database may branch it.
+qod branch create --tenant acme --db acme_tpch1 --name feature-x --ttl-hours 24
+
+# 2. Work on the branch. The FlightSQL `branch` connection header (or `qod sql --branch`)
+#    routes the session to the branch's pool; authorization still runs against --pool.
+qod sql --tenant acme --pool bi --branch feature-x \
+  "UPDATE tpch1.nation SET n_comment = 'reviewed' WHERE n_nationkey = 3"
+
+# 3. Review: touched tables (created / dropped / recreated / modified / altered), row counts,
+#    conflicts against main, and the merge verdict; then the row-level diff of one table.
+qod branch changes --tenant acme --db acme_tpch1 --branch feature-x
+qod branch diff --tenant acme --db acme_tpch1 --branch feature-x --schema tpch1 --table nation
+
+# 4. Propose. Records a merge request with the change set as of now.
+qod branch propose --tenant acme --db acme_tpch1 --branch feature-x
+
+# 5. Merge, as a DIFFERENT principal than the proposer (403 self_merge_forbidden otherwise).
+#    Fast-forward only: 409 merge_conflict lists the tables main changed since the fork.
+#    On success main gains ONE snapshot stamped with proposer and approver, a tag
+#    `merge-<branch>-<id8>`, and the branch is torn down.
+qod --profile reviewer branch merge --tenant acme --db acme_tpch1 --branch feature-x
+
+# Or discard (owner or a tenant admin). Expired branches are discarded by the manager.
+qod branch discard --tenant acme --db acme_tpch1 --branch feature-x
+qod branch list --tenant acme --db acme_tpch1 --all
+```
+
+The admin console has the same lifecycle on the tenant page, "Branches" tab:
+create, list (live or all), expand a branch for its change set, per-table row
+diffs and merge history, then propose, merge or discard.
+
+Agents over MCP get the same lifecycle as data-tier tools: `create_branch`,
+`list_branches`, `branch_changes`, `diff`, `propose_merge`, `discard`, and a
+`branch` argument on `run_sql`, `list_tables` and `describe_table`. There is
+deliberately no merge tool. To make "agents never write main" a hard rule,
+mint the agent's token with `qod auth pat create --name agent --branch-only`:
+INSERT / UPDATE / DELETE / DDL on the live database are then refused with
+`write_requires_branch`, reads are unchanged, and every child token inherits
+the flag.
+
+Merge limits in v1: column changes (add / drop / retype), views, macros and
+schema-level DDL on the branch are refused with `422 merge_unsupported`; use a
+fresh branch for data changes and apply DDL on main. A merge that loses a
+DuckLake commit race answers `409 concurrent_write` and reopens the branch:
+re-propose and retry. `qod branch create --from-snapshot` is reserved (v1 forks
+at head only).
+
+Safety rules the manager enforces: the fork snapshot of every live branch is
+pinned against maintenance expiry on the parent, branch catalogs are never
+maintained, and `database delete` refuses a database with live branches
+(`409`). Knobs: `QOD_BRANCH_ENABLED`, `QOD_BRANCH_DEFAULT_TTL_HOURS` (168),
+`QOD_BRANCH_MAX_PER_DATABASE` (20), `QOD_BRANCH_SWEEP_SEC` (300),
+`QOD_BRANCH_MERGE_TIMEOUT_SEC` (600).
+
 ## Ad-hoc queries (qod sql)
 
 `qod sql` runs SQL against the FlightSQL edge and prints a terminal table

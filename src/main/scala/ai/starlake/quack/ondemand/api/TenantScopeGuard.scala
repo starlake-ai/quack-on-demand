@@ -19,6 +19,7 @@ object TenantScopeGuard:
   // contain '/', so the regex is sufficient.
   private val PoolStatus       = "^/api/pool/([^/]+)/[^/]+/[^/]+/status".r
   private val CatalogTenant    = "^/api/catalog/tenant/([^/]+)/".r
+  private val BranchTenant     = "^/api/branch/tenant/([^/]+)/".r
   private val FederatedTenants = "^/api/tenants/([^/]+)/tenant-dbs/".r
   private val Scim             = "^/api/scim/v2/([^/]+)(?:/|$)".r
 
@@ -43,6 +44,7 @@ object TenantScopeGuard:
       .findFirstMatchIn(path)
       .map(_.group(1))
       .orElse(CatalogTenant.findFirstMatchIn(path).map(_.group(1)))
+      .orElse(BranchTenant.findFirstMatchIn(path).map(_.group(1)))
       .orElse(FederatedTenants.findFirstMatchIn(path).map(_.group(1)))
       .orElse(Scim.findFirstMatchIn(path).map(_.group(1)))
       .orElse(

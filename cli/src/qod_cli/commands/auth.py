@@ -134,6 +134,7 @@ VERB_CEILINGS = ("RO", "RW", "DDL", "ALL")
         "dropAdmin": "--drop-admin",
         "stmtTimeoutMs": "--stmt-timeout-ms",
         "maxRows": "--max-rows",
+        "branchOnly": "--branch-only",
     },
 )
 def create(
@@ -166,6 +167,11 @@ def create(
         None, "--stmt-timeout-ms", help="Per-statement timeout for this token, in milliseconds."
     ),
     max_rows: int = typer.Option(None, "--max-rows", help="Row cap for this token's queries."),
+    branch_only: bool = typer.Option(
+        False,
+        "--branch-only",
+        help="Writes (INSERT/UPDATE/DELETE/DDL) only on a branch, never on the live database.",
+    ),
 ):
     """Create a PAT. The token is printed ONCE; store it now.
 
@@ -173,6 +179,8 @@ def create(
     unrestricted on that axis, not empty.
     """
     body = {"name": name, "expiresAt": expires_at, "dropAdmin": drop_admin}
+    if branch_only:
+        body["branchOnly"] = True
     if role:
         body["roles"] = list(role)
     if database:

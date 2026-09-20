@@ -560,7 +560,9 @@ final case class PatCreateRequest(
     verbCeiling: Option[String] = None,
     dropAdmin: Boolean = false,
     stmtTimeoutMs: Option[Int] = None,
-    maxRows: Option[Int] = None
+    maxRows: Option[Int] = None,
+    // Epic 1: writes only on branches (reads unchanged). Inherited by every child token.
+    branchOnly: Boolean = false
 )
 
 /** The ONLY response that ever carries the raw `token`: it is stored hashed, so a caller that loses
@@ -585,7 +587,8 @@ final case class PatScope(
     verbCeiling: Option[String] = None,
     dropAdmin: Boolean = false,
     stmtTimeoutMs: Option[Int] = None,
-    maxRows: Option[Int] = None
+    maxRows: Option[Int] = None,
+    branchOnly: Boolean = false
 )
 
 /** Listing row: metadata only, deliberately without the raw token or its hash. `revoked` collapses
@@ -1232,6 +1235,103 @@ final case class SchemaDiffResponse(
     nullabilityChanged: List[SchemaDiffNullability]
 )
 
+// ---------- Branches (Epic 1) ----------
+
+/** `fromSnapshot` is reserved: v1 forks at the parent head and refuses any other value with 409
+  * `fork_snapshot_unsupported`. `ttlHours` 0 = never expires; absent = the manager default.
+  */
+final case class BranchCreateRequest(
+    tenant: String,
+    tenantDb: String,
+    name: String,
+    ttlHours: Option[Int] = None,
+    fromSnapshot: Option[Long] = None
+)
+
+final case class BranchOpRequest(tenant: String, tenantDb: String, branch: String)
+
+/** `expectedMainSnapshot`: refuse with 409 `concurrent_write` when main moved past it. */
+final case class BranchMergeRequest(
+    tenant: String,
+    tenantDb: String,
+    branch: String,
+    expectedMainSnapshot: Option[Long] = None
+)
+
+/** `database` is the PARENT tenant-db; `catalogDb` the branch's own catalog database and `pool` its
+  * pool (both internal names, surfaced for operators).
+  */
+final case class BranchEntry(
+    id: String,
+    tenant: String,
+    database: String,
+    name: String,
+    status: String,
+    forkSnapshot: Long,
+    owner: String,
+    pool: String,
+    catalogDb: String,
+    expiresAt: Option[java.time.Instant] = None,
+    createdAt: Option[java.time.Instant] = None,
+    updatedAt: Option[java.time.Instant] = None
+)
+
+final case class BranchListResponse(branches: List[BranchEntry])
+
+final case class BranchMergeEntry(
+    id: String,
+    status: String,
+    proposer: String,
+    approver: Option[String] = None,
+    mainSnapshotAtPropose: Long,
+    mainSnapshotAfter: Option[Long] = None,
+    tagName: Option[String] = None,
+    error: Option[String] = None,
+    summary: Json,
+    conflicts: Json,
+    createdAt: Option[java.time.Instant] = None,
+    decidedAt: Option[java.time.Instant] = None
+)
+
+final case class BranchDetailResponse(branch: BranchEntry, merges: List[BranchMergeEntry])
+
+/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed. */
+final case class BranchTableChange(
+    schema: String,
+    table: String,
+    kind: String,
+    inserted: Long = 0L,
+    deleted: Long = 0L,
+    updated: Long = 0L,
+    mergeable: Boolean = true,
+    reason: Option[String] = None
+)
+
+final case class BranchConflictEntry(schema: String, table: String, reason: String)
+
+final case class BranchChangesResponse(
+    branch: String,
+    forkSnapshot: Long,
+    headSnapshot: Long,
+    mainSnapshot: Long,
+    tables: List[BranchTableChange],
+    conflicts: List[BranchConflictEntry],
+    unsupported: List[String],
+    mergeable: Boolean
+)
+
+final case class BranchProposeResponse(
+    branch: BranchEntry,
+    merge: BranchMergeEntry,
+    changes: BranchChangesResponse
+)
+
+final case class BranchMergeResponse(
+    branch: BranchEntry,
+    merge: BranchMergeEntry,
+    changes: BranchChangesResponse
+)
+
 object Dtos:
   // Absent optional wire fields fall back to the case-class defaults: plain
   // deriveCodec is strict (it rejects a missing field even when the case class
@@ -1492,3 +1592,17 @@ object Dtos:
   given Codec[SchemaDiffColumnType]  = deriveCodec
   given Codec[SchemaDiffNullability] = deriveCodec
   given Codec[SchemaDiffResponse]    = deriveCodec
+
+  // Branches (Epic 1)
+  given Codec[BranchCreateRequest]   = ConfiguredCodec.derived
+  given Codec[BranchOpRequest]       = ConfiguredCodec.derived
+  given Codec[BranchMergeRequest]    = ConfiguredCodec.derived
+  given Codec[BranchEntry]           = ConfiguredCodec.derived
+  given Codec[BranchListResponse]    = ConfiguredCodec.derived
+  given Codec[BranchMergeEntry]      = ConfiguredCodec.derived
+  given Codec[BranchDetailResponse]  = ConfiguredCodec.derived
+  given Codec[BranchTableChange]     = ConfiguredCodec.derived
+  given Codec[BranchConflictEntry]   = ConfiguredCodec.derived
+  given Codec[BranchChangesResponse] = ConfiguredCodec.derived
+  given Codec[BranchProposeResponse] = ConfiguredCodec.derived
+  given Codec[BranchMergeResponse]   = ConfiguredCodec.derived

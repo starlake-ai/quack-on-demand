@@ -23,7 +23,7 @@ import ai.starlake.quack.boot.{
 }
 import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
-import ai.starlake.quack.model.Names
+import ai.starlake.quack.model.{Names, TenantDb}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -92,6 +92,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
+  given ProductHint[BranchingConfig]           = ProductHint[BranchingConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[EmbeddedPostgresConfig]    = ProductHint[EmbeddedPostgresConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
@@ -743,7 +744,7 @@ object Main extends IOApp with LazyLogging:
           if schemaInited.containsKey(n.nodeId) then None
           else
             sup.get(n.poolKey).flatMap { st =>
-              st.metastore.get("dbName").filter(_.nonEmpty).map { db =>
+              Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty).map { db =>
                 val schema = st.metastore
                   .get("schemaName")
                   .filter(_.nonEmpty)
@@ -896,9 +897,8 @@ object Main extends IOApp with LazyLogging:
         }
         cached.getOrElse {
           val builtins = Set("memory", "system", "temp")
-          val dbName   = sup
-            .effectiveMetastoreFor(key.tenant, key.tenantDb)
-            .getOrElse("dbName", key.tenantDb)
+          val dbName   =
+            TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
           val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
             case (Some(td), Some(fedStore)) =>
               fedStore.listSources(td.id).map(_.alias).toSet
@@ -913,7 +913,7 @@ object Main extends IOApp with LazyLogging:
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
         val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
         ai.starlake.acl.model.Config.forDuckDB(
-          Some(ms.getOrElse("dbName", key.tenantDb)),
+          Some(TenantDb.catalogAlias(ms, key.tenantDb)),
           Some(ms.getOrElse("schemaName", "main")),
           attachedCatalogsOf(key)
         )
@@ -982,6 +982,12 @@ object Main extends IOApp with LazyLogging:
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
       // RuntimeException: IO.attempt routes that, but treats raw Errors as fatal.
+      // Branch targeting seam for the edge (Epic 1). The branch service is built later in this
+      // block (it needs the preview executor); the edge only consults the holder at handshake
+      // time, long after boot has bound it.
+      var branchLookup
+          : (String, String, String) => Either[String, ai.starlake.quack.model.PoolKey] =
+        (_, _, b) => Left(s"branch '$b' not found (branching not yet wired)")
       val edgeIO: IO[FlightEdgeServer] = IO.delay {
         try
           val srv = new FlightEdgeServer(
@@ -1024,7 +1030,9 @@ object Main extends IOApp with LazyLogging:
                 jwtRoles,
                 jwtGroups,
                 superuserAdmissible
-              )
+              ),
+            // Branch targeting (Epic 1): the `branch` connection header.
+            lookupBranch = (tenant, parentDb, branch) => branchLookup(tenant, parentDb, branch)
           )
           srv.start()
           srv
@@ -1127,11 +1135,49 @@ object Main extends IOApp with LazyLogging:
             // argument and letting the caller pick one for it. `allowsPool` is `pools.forall(_
             // .contains(pool))`, so `TokenRestriction.Unrestricted` (every superuser call site,
             // and any token that never set the axis) always passes here.
-            if !caller.restriction.allowsPool(poolKey.pool) then
+            // A branch pool (Epic 1) is never named on the axis: it inherits the axis from
+            // the pools of its parent tenant-db (any allowed parent pool admits the branch).
+            val poolAllowed =
+              if caller.restriction.allowsPool(poolKey.pool) then true
+              else if ai.starlake.quack.ondemand.branch.BranchNames.isBranchPool(poolKey.pool) then
+                sup
+                  .findTenantDb(poolKey.tenant, poolKey.tenantDb)
+                  .flatMap(_.branchOf)
+                  .exists { parentId =>
+                    sup
+                      .list()
+                      .map(_.key)
+                      .filter(k =>
+                        k.tenant == poolKey.tenant && sup
+                          .findTenantDb(k.tenant, k.tenantDb)
+                          .exists(_.id == parentId)
+                      )
+                      .exists(k => caller.restriction.allowsPool(k.pool))
+                  }
+              else false
+            // branchOnly (Epic 1): writes are admitted only on a branch pool. Classified here on
+            // the raw statement, the same classifier the router applies downstream.
+            val writeOnMain =
+              caller.restriction.branchOnly &&
+                !ai.starlake.quack.ondemand.branch.BranchNames.isBranchPool(poolKey.pool) && {
+                  val k = classifier.classify(sql)
+                  k == ai.starlake.quack.model.StatementKind.Dml ||
+                  k == ai.starlake.quack.model.StatementKind.Ddl
+                }
+            if !poolAllowed then
               IO.pure(
                 Left(
                   ai.starlake.quack.edge.RouterFailure
                     .AccessDenied(s"pool '${poolKey.pool}' is not permitted for this token")
+                )
+              )
+            else if writeOnMain then
+              IO.pure(
+                Left(
+                  ai.starlake.quack.edge.RouterFailure.AccessDenied(
+                    "access denied: write_requires_branch: this token may only write on a branch " +
+                      "(create_branch, then pass branch=<name>)"
+                  )
                 )
               )
             else if isSuperuser then
@@ -1223,7 +1269,7 @@ object Main extends IOApp with LazyLogging:
           previewExecutor,
           catalogReader,
           mgrCfg.catalog,
-          catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+          catalogAlias = (t, td) => TenantDb.catalogAlias(sup.effectiveMetastoreFor(t, td), td),
           audit = auditRecorder
         )
       )
@@ -1248,10 +1294,66 @@ object Main extends IOApp with LazyLogging:
           catalogReader,
           mgrCfg.catalog,
           sessionTokens.get,
-          catalogAlias = (t, td) => sup.effectiveMetastoreFor(t, td).getOrElse("dbName", td),
+          catalogAlias = (t, td) => TenantDb.catalogAlias(sup.effectiveMetastoreFor(t, td), td),
           audit = auditRecorder
         )
       )
+
+      // Branches (Epic 1): the lifecycle service and its REST handlers. The actor resolver
+      // accepts a session JWT (UI / CLI login), a PAT (the MCP data tools curry the bearer as
+      // apiKey) or nothing (the static key, already admitted by the perimeter guard).
+      val branchActorOf: Option[String] => ai.starlake.quack.ondemand.branch.BranchActor = token =>
+        token.flatMap(sessionTokens.get) match
+          case Some(s) =>
+            ai.starlake.quack.ondemand.branch.BranchActor(
+              s.profile.username,
+              isAdmin = s.scope.superuser || s.scope.manageableTenants.nonEmpty
+            )
+          case None =>
+            token.flatMap(patAuthenticator.resolve) match
+              case Some(p) =>
+                ai.starlake.quack.ondemand.branch.BranchActor(p.user.username, isAdmin = p.isAdmin)
+              case None =>
+                ai.starlake.quack.ondemand.branch.BranchActor(
+                  ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.SuperuserIdentity,
+                  isAdmin = true
+                )
+      lazy val branchService: ai.starlake.quack.ondemand.branch.BranchService =
+        new ai.starlake.quack.ondemand.branch.BranchService(
+          cfg = mgrCfg.branching,
+          sup = sup,
+          store = store,
+          resolveReader = catalogReader,
+          cloneCatalog = (meta, parentDb, branchDb, path) =>
+            ai.starlake.quack.ondemand.branch.BranchCloner(meta).clone(parentDb, branchDb, path),
+          mergeExecutor =
+            ai.starlake.quack.boot.BranchWiring.mergeExecutor(mgrCfg.branching, backend, adapter),
+          counter = ai.starlake.quack.boot.BranchWiring.changeCounter(
+            previewExecutor,
+            b => branchService.poolKeyOf(b),
+            scala.concurrent.duration.DurationInt(mgrCfg.catalog.previewTimeoutSec).seconds
+          ),
+          purgeFiles = ai.starlake.quack.boot.BranchWiring.purgeFiles,
+          audit = auditRecorder,
+          events = moduleEventBus.sink
+        )
+      branchLookup = (tenant, parentDb, branch) =>
+        branchService
+          .resolveTarget(tenant.toLowerCase, parentDb, branch)
+          .left
+          .map(_.message)
+          .map(_._2)
+      val branchHandlers: Option[ai.starlake.quack.ondemand.api.BranchHandlers] =
+        previewHandlers.map { ph =>
+          new ai.starlake.quack.ondemand.api.BranchHandlers(
+            sup,
+            branchService,
+            ph,
+            sessionTokens.get,
+            branchActorOf,
+            audit = auditRecorder
+          )
+        }
 
       // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
       // instances REST uses. Auth is PAT or the static key only; the run_sql path goes
@@ -1279,8 +1381,16 @@ object Main extends IOApp with LazyLogging:
               tagH,
               tenantDbs,
               profileHandlers,
-              mcpScopeOf
+              mcpScopeOf,
+              branchTarget = (tenant, database, branch) =>
+                branchService
+                  .resolveTarget(tenant, database, branch)
+                  .left
+                  .map(_.message)
+                  .map { case (b, key) => (b.tenantDbName, key) }
             )
+            val branchTools =
+              branchHandlers.map(bh => new ai.starlake.quack.mcp.McpBranchTools(bh, mcpScopeOf))
             val adminTools = new ai.starlake.quack.mcp.McpAdminTools(
               pools,
               nodes,
@@ -1321,8 +1431,8 @@ object Main extends IOApp with LazyLogging:
               mgrCfg.mcp,
               mgrCfg.apiKey.filter(_.nonEmpty),
               patAuthenticator.resolve,
-              dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
-                accessTools.tools ++ platformTools.tools,
+              dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
+                identityTools.tools ++ accessTools.tools ++ platformTools.tools,
               serverVersion = "dev"
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
@@ -1375,6 +1485,7 @@ object Main extends IOApp with LazyLogging:
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
+        branches = branchHandlers,
         patAuth = Some(patAuthenticator),
         scim = Some(
           new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)
@@ -1628,6 +1739,13 @@ object Main extends IOApp with LazyLogging:
                 )
                 val managedPurgeFiber = managedStoreWiring.fiber
 
+                // Branch TTL expiry sweep (Epic 1), leader-only, inert when branching is off.
+                val branchExpiryFiber = ai.starlake.quack.boot.BranchWiring.expiryFiber(
+                  mgrCfg.branching,
+                  branchService,
+                  () => coordinator.forall(_.isLeader)
+                )
+
                 // Leader elector + LISTEN dispatch loop. No-op fiber when HA off.
                 val coordinatorFiber = coordinator match
                   case Some(c) => c.loop.start
@@ -1698,20 +1816,23 @@ object Main extends IOApp with LazyLogging:
                                   autoscaleFiber.flatMap { asFiber =>
                                     hibernationFiber.flatMap { hbFiber =>
                                       managedPurgeFiber.flatMap { mpFiber =>
-                                        moduleDispatcherFibers.flatMap { modDispFibers =>
-                                          moduleSingletonFibers.flatMap { modSingFibers =>
-                                            IO.never[Unit]
-                                              .guarantee(
-                                                fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
-                                                  hrFiber.cancel *> jFiber.cancel *>
-                                                  pFiber.cancel *>
-                                                  rlFiber.cancel *> msFiber.cancel *>
-                                                  mdFiber.cancel *> asFiber.cancel *>
-                                                  hbFiber.cancel *> mpFiber.cancel *>
-                                                  modDispFibers.traverse_(_.cancel) *>
-                                                  modSingFibers.traverse_(_.cancel) *>
-                                                  gracefulShutdown
-                                              )
+                                        branchExpiryFiber.flatMap { beFiber =>
+                                          moduleDispatcherFibers.flatMap { modDispFibers =>
+                                            moduleSingletonFibers.flatMap { modSingFibers =>
+                                              IO.never[Unit]
+                                                .guarantee(
+                                                  fiber.cancel *> rcFiber.cancel *> coFiber.cancel *>
+                                                    hrFiber.cancel *> jFiber.cancel *>
+                                                    pFiber.cancel *>
+                                                    rlFiber.cancel *> msFiber.cancel *>
+                                                    mdFiber.cancel *> asFiber.cancel *>
+                                                    hbFiber.cancel *> mpFiber.cancel *>
+                                                    beFiber.cancel *>
+                                                    modDispFibers.traverse_(_.cancel) *>
+                                                    modSingFibers.traverse_(_.cancel) *>
+                                                    gracefulShutdown
+                                                )
+                                            }
                                           }
                                         }
                                       }

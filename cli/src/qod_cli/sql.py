@@ -44,6 +44,10 @@ class SqlClient:
         }
         if settings.superuser:
             db_kwargs[hdr + "superuser"] = "true"
+        if getattr(settings, "branch", ""):
+            # Branch targeting (Epic 1): authorization runs against the parent pool above; the
+            # session is bound to the branch's own pool.
+            db_kwargs[hdr + "branch"] = settings.branch
         if settings.edge_tls and not settings.edge_tls_verify:
             db_kwargs[DatabaseOptions.TLS_SKIP_VERIFY.value] = "true"
         conn = flight_sql.connect(uri=uri, db_kwargs=db_kwargs, autocommit=True)

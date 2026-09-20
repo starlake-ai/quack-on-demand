@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
-import ai.starlake.quack.model.{Names, Tenant}
+import ai.starlake.quack.model.{Names, PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.flight.*
@@ -47,7 +47,13 @@ final class FlightEdgeServer(
     authorize: (String, String, String, Set[String], Set[String], Boolean) => Either[
       String,
       AuthorizedHandshake
-    ]
+    ],
+    // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
+    // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
+    // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
+    // unknown / not live, surfaced as UNAUTHENTICATED; the default refuses every branch header.
+    lookupBranch: (String, String, String) => Either[String, PoolKey] = (_, _, b) =>
+      Left(s"branch '$b' not found (branching unavailable)")
 ) extends LazyLogging:
 
   private val allocator            = new RootAllocator()
@@ -147,6 +153,13 @@ final class FlightEdgeServer(
         // (pool names are unique per tenant).
         val poolHdr   = Option(headers.get("pool"))
         val tenantHdr = Option(headers.get("tenant"))
+        // `branch=<name>` (or `x-qod-branch`) targets a writable branch of the pool's tenant-db
+        // (Epic 1): authorization still runs against the named parent pool; only the routing
+        // target is swapped for the branch's own pool after the gates passed.
+        val branchHdr = Option(headers.get("branch"))
+          .orElse(Option(headers.get("x-qod-branch")))
+          .map(_.trim)
+          .filter(_.nonEmpty)
         // `superuser=true` picks the system realm regardless of the `tenant`
         // header. The tenant/pool headers still drive query routing -- a system
         // superuser can target a tenant's pool while authenticating against the
@@ -191,7 +204,16 @@ final class FlightEdgeServer(
             // credential error instead of a downstream "no pool bound"
             // surprise.
             if authHeader.isEmpty then authResult(s"anonymous-${UUID.randomUUID()}")
-            else handshake(bearer, basicPair, basicUsername, poolHdr, tenantHdr, superuserHdr)
+            else
+              handshake(
+                bearer,
+                basicPair,
+                basicUsername,
+                poolHdr,
+                tenantHdr,
+                superuserHdr,
+                branchHdr
+              )
 
       /** Mint a new session peerId. Runs the configured auth chain when one exists; otherwise
         * trusts the client. On success we resolve tenant/pool via TenantSelector and bind the
@@ -203,7 +225,8 @@ final class FlightEdgeServer(
           basicUsername: Option[String],
           poolHdr: Option[String],
           tenantHdr: Option[String],
-          superuser: Boolean
+          superuser: Boolean,
+          branchHdr: Option[String]
       ): CallHeaderAuthenticator.AuthResult =
         // Pre-resolve the target (tenant, tenantDb, pool) from the headers
         // + basic username BEFORE authenticating. The Basic provider chain
@@ -349,12 +372,25 @@ final class FlightEdgeServer(
                       .withDescription(s"permission denied: $err")
                       .toRuntimeException()
                   case Right(auth) =>
-                    val peerId = UUID.randomUUID().toString
-                    val connId = UUID.randomUUID().toString
-                    val _      = profileOpt // role/groups from JWT no longer threaded
+                    val peerId    = UUID.randomUUID().toString
+                    val connId    = UUID.randomUUID().toString
+                    val _         = profileOpt // role/groups from JWT no longer threaded
+                    val targetKey = branchHdr match
+                      case None         => resolved.poolKey
+                      case Some(branch) =>
+                        lookupBranch(
+                          resolved.poolKey.tenant,
+                          resolved.poolKey.tenantDb,
+                          branch
+                        ) match
+                          case Right(key) => key
+                          case Left(err)  =>
+                            throw CallStatus.UNAUTHENTICATED
+                              .withDescription(s"branch_not_found: $err")
+                              .toRuntimeException()
                     ConnectionContext.bind(
                       peer = peerId,
-                      key = resolved.poolKey,
+                      key = targetKey,
                       connectionId = connId,
                       user = resolved.user,
                       effectiveSet = Some(auth.effectiveSet),

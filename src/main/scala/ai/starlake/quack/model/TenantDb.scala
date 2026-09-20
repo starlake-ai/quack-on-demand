@@ -19,7 +19,12 @@ final case class TenantDb(
     // pools of this database, BEFORE the pool's own initSql and the federation
     // blob. Engine defaults live here: SET temp_directory, SET memory_limit,
     // INSTALL/LOAD. Edits take effect on the next node spawn.
-    initSql: String = ""
+    initSql: String = "",
+    // Parent tenant-db id when this row is a branch catalog (Epic 1); None for every ordinary
+    // tenant-db. Branch rows attach on their nodes under the PARENT's catalog alias (metastore
+    // key `catalogAlias`), are excluded from maintenance scheduling, and are torn down through
+    // the branch lifecycle rather than database/delete.
+    branchOf: Option[String] = None
 )
 
 object TenantDb {
@@ -35,6 +40,24 @@ object TenantDb {
     */
   val SecretKeys: Set[String] =
     Set("pgPassword", "s3_secret_access_key", "azure_account_key", "gcs_hmac_secret")
+
+  /** Optional metastore key naming the DuckDB catalog alias the node ATTACHes the database under.
+    * Absent (every ordinary tenant-db), the alias is `dbName`. Branch catalogs set it to their
+    * parent's alias so grants, policies and user SQL written against the parent apply unchanged.
+    */
+  val CatalogAliasKey: String = "catalogAlias"
+
+  /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
+    * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author
+    * stamp, attached-catalog set, health probe, maintenance alias) must go through here so the
+    * branch indirection cannot be missed.
+    */
+  def catalogAlias(metastore: Map[String, String], fallback: String = ""): String =
+    metastore
+      .get(CatalogAliasKey)
+      .filter(_.nonEmpty)
+      .orElse(metastore.get("dbName").filter(_.nonEmpty))
+      .getOrElse(fallback)
 
   private val DuckLakeRequiredKeys: Set[String] =
     Set("pgHost", "pgPort", "pgUser", "pgPassword", "dbName", "schemaName")
@@ -142,9 +165,19 @@ object TenantDb {
     * where the required metastore keys are supplied later from the default metastore (e.g. config
     * import), so it does NOT enforce key presence.
     */
+  private def catalogAliasError(metastore: Map[String, String]): Option[String] =
+    metastore.get(CatalogAliasKey) match
+      case Some(a) if !Names.isValid(a) =>
+        Some(
+          s"invalid catalogAlias '$a': must follow Postgres identifier rules " +
+            "(1..63 chars, start with a letter or underscore, only letters, digits, underscore)"
+        )
+      case _ => None
+
   def validateSafety(td: TenantDb): Option[String] =
     schemaNameError(td.metastore)
       .orElse(dbNameError(td.metastore))
+      .orElse(catalogAliasError(td.metastore))
       .orElse(connParamError(td.metastore, "pgHost"))
       .orElse(connParamError(td.metastore, "pgUser"))
       .orElse(connParamError(td.metastore, "pgPassword"))
