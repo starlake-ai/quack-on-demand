@@ -111,6 +111,52 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     oauth2.validate("sales_lake", IcebergRestConfig.ReservedAliases) shouldBe empty
   }
 
+  it should "reject a clientId containing '{{'" in {
+    val errs = oauth2.copy(clientId = Some("{{secret.CID}}extra")).validate("sales_lake", Set.empty)
+    errs.exists(_.contains("clientId")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "reject an oauth2ServerUri containing '{{'" in {
+    val errs = oauth2
+      .copy(oauth2ServerUri = Some("https://idp.example.com/{{secret.HOST}}"))
+      .validate("sales_lake", Set.empty)
+    errs.exists(_.contains("oauth2ServerUri")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "reject an oauth2Scope containing a malformed '{{'" in {
+    val errs =
+      oauth2.copy(oauth2Scope = Some("{{secret.SCOPE}}extra")).validate("sales_lake", Set.empty)
+    errs.exists(_.contains("oauth2Scope")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "reject an oauth2GrantType containing a malformed '{{'" in {
+    val errs = oauth2
+      .copy(oauth2GrantType = Some("{{secret.GRANT}}extra"))
+      .validate("sales_lake", Set.empty)
+    errs.exists(_.contains("oauth2GrantType")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "accept a well-formed {{secret.NAME}} placeholder for clientId" in {
+    oauth2.copy(clientId = Some("{{secret.CID}}")).validate("sales_lake", Set.empty) shouldBe empty
+  }
+
+  it should "refuse stray oauth2ServerUri / oauth2Scope / oauth2GrantType for authType token" in {
+    val cfg = oauth2.copy(
+      authType = Some(IcebergAuthType.Token),
+      clientId = None,
+      clientSecret = None,
+      token = Some("{{secret.BEARER}}")
+    )
+    val errs = cfg.validate("sales_lake", Set.empty)
+    errs.exists(_.contains("oauth2ServerUri")) shouldBe true
+    errs.exists(_.contains("oauth2Scope")) shouldBe true
+    errs.exists(_.contains("oauth2GrantType")) shouldBe true
+  }
+
   it should "reject a literal token value" in {
     val cfg = oauth2.copy(
       authType = Some(IcebergAuthType.Token),
@@ -194,6 +240,36 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     r.isLeft shouldBe true
     r.left.toOption.get should include("nope")
   }
+
+  "validated" should "lowercase the alias" in {
+    val r = IcebergRestConfig.validated(oauth2, "Sales_Lake")
+    r.isRight shouldBe true
+    r.toOption.get.alias shouldBe "sales_lake"
+  }
+
+  it should "reject a 64-char alias with a message naming the 63-char bound" in {
+    val tooLong = "a" * 64
+    val r       = IcebergRestConfig.validated(oauth2, tooLong)
+    r.isLeft shouldBe true
+    r.left.toOption.get.exists(_.contains("63")) shouldBe true
+  }
+
+  it should "reject a reserved alias" in {
+    val r = IcebergRestConfig.validated(oauth2, "memory")
+    r.isLeft shouldBe true
+    r.left.toOption.get.exists(_.contains("reserved")) shouldBe true
+  }
+
+  it should "carry every error at once for an invalid config" in {
+    val r = IcebergRestConfig.validated(oauth2.copy(warehouse = "", uri = ""), "sales_lake")
+    r.isLeft shouldBe true
+    val errs = r.left.toOption.get
+    errs.exists(_.contains("warehouse")) shouldBe true
+    errs.exists(_.contains("uri")) shouldBe true
+  }
+
+  // ValidatedIcebergConfig's constructor is `private[iceberg]`: outside this package it cannot be
+  // constructed directly, only obtained through `IcebergRestConfig.validated`.
 
   "the wire shape" should "encode authType as its lowercase wire string" in {
     val cfg = IcebergRestConfig(uri = "u", warehouse = "w", authType = Some(IcebergAuthType.OAuth2))

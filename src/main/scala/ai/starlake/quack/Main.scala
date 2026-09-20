@@ -936,7 +936,7 @@ object Main extends IOApp with LazyLogging:
           case (at, set) if now - at < 60000L => set
         }
         cached.getOrElse {
-          val builtins = Set("memory", "system", "temp")
+          val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
           val dbName   =
             TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
           val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match

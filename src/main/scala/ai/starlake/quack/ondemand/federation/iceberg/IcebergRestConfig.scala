@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.federation.iceberg
 
+import ai.starlake.quack.model.Names
 import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.syntax.*
 import io.circe.{Codec, Decoder, Encoder}
@@ -72,9 +73,9 @@ final case class IcebergRestConfig(
   def validate(alias: String, reservedAliases: Set[String]): List[String] =
     val errs = List.newBuilder[String]
 
-    if !IcebergRestConfig.AliasPattern.matches(alias) then
-      errs += s"alias '$alias' must be a plain SQL identifier (letters, digits, underscore; " +
-        "not starting with a digit)"
+    if !Names.isValid(alias) then
+      errs += s"alias '$alias' must be a plain SQL identifier of 1..${Names.MaxLength} chars " +
+        "(letters, digits, underscore; not starting with a digit)"
     if (reservedAliases ++ IcebergRestConfig.ReservedAliases).exists(_.equalsIgnoreCase(alias)) then
       errs += s"alias '$alias' is reserved"
 
@@ -86,6 +87,15 @@ final case class IcebergRestConfig(
     if warehouse.contains("{{") then
       errs += "warehouse must not contain '{{': it would be read as a secret placeholder and " +
         "fail the whole tenant-db federation blob"
+    // Unlike uri / warehouse (never placeholder-eligible, any '{{' is a mistake), clientId and the
+    // oauth2 free-form fields MAY legitimately carry a well-formed {{secret.NAME}} placeholder
+    // (FederationBlobBuilder substitutes it wherever it appears, not only in clientSecret/token).
+    // What must be caught is a MALFORMED brace - one that would not resolve and so would fail the
+    // whole tenant-db federation blob.
+    errs ++= IcebergRestConfig.strayBraceErrors("clientId", clientId)
+    errs ++= IcebergRestConfig.strayBraceErrors("oauth2ServerUri", oauth2ServerUri)
+    errs ++= IcebergRestConfig.strayBraceErrors("oauth2Scope", oauth2Scope)
+    errs ++= IcebergRestConfig.strayBraceErrors("oauth2GrantType", oauth2GrantType)
 
     if authType.isDefined == endpointType.isDefined then
       errs += "set exactly one of authType / endpointType (DuckDB refuses AUTHORIZATION_TYPE " +
@@ -109,6 +119,11 @@ final case class IcebergRestConfig(
         if !IcebergRestConfig.isSet(token) then errs += "token is required for authType 'token'"
         if IcebergRestConfig.isSet(clientId) || IcebergRestConfig.isSet(clientSecret) then
           errs += "clientId / clientSecret are not accepted for authType 'token'"
+        if IcebergRestConfig.isSet(oauth2ServerUri) || IcebergRestConfig.isSet(oauth2Scope) ||
+          IcebergRestConfig.isSet(oauth2GrantType)
+        then
+          errs += "oauth2ServerUri / oauth2Scope / oauth2GrantType are not accepted for " +
+            "authType 'token'"
       case Some(other) =>
         if credentialFieldsSet then
           errs += s"authType '${other.wire}' takes no clientId, clientSecret, oauth2 or token fields"
@@ -121,11 +136,16 @@ final case class IcebergRestConfig(
 
     errs.result()
 
+/** An [[IcebergRestConfig]] that has passed [[IcebergRestConfig.validated]], carrying its alias
+  * already NORMALIZED (lowercase, via Names.normalizeOrError). The constructor is private to the
+  * package so the only way to obtain one is through `validated`; `IcebergSetupSql.render` accepts
+  * nothing else. That is what turns render's former comment-only precondition into a type.
+  */
+final case class ValidatedIcebergConfig private[iceberg] (config: IcebergRestConfig, alias: String)
+
 object IcebergRestConfig:
   /** DuckDB's built-in catalogs. An alias colliding with one of these would shadow it. */
-  val ReservedAliases: Set[String] = Set("memory", "system", "temp")
-
-  private val AliasPattern = "[A-Za-z_][A-Za-z0-9_]*".r
+  val ReservedAliases: Set[String] = ai.starlake.quack.model.DuckDbCatalogs.Builtins
 
   private[iceberg] def isSet(o: Option[String]): Boolean = o.exists(_.trim.nonEmpty)
 
@@ -143,6 +163,22 @@ object IcebergRestConfig:
         )
       case None => Nil
 
+  /** `fieldName`, when set to a value containing '{{', must be a WELL-FORMED `{{secret.NAME}}`
+    * placeholder - anything else (a stray or malformed brace) would pass through
+    * [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]] unresolved and fail the whole
+    * tenant-db federation blob. Unlike [[placeholderErrors]], a literal value with no brace at all
+    * is fine here - these fields, unlike clientSecret / token, are not required to be placeholders.
+    */
+  private[iceberg] def strayBraceErrors(fieldName: String, value: Option[String]): List[String] =
+    value.filter(_.contains("{{")) match
+      case Some(v) if SecretPlaceholder.matches(v.trim) => Nil
+      case Some(_)                                      =>
+        List(
+          s"$fieldName must not contain '{{': it would be read as a secret placeholder and " +
+            "fail the whole tenant-db federation blob"
+        )
+      case None => Nil
+
   // Absent optional wire fields fall back to the case-class defaults: plain deriveCodec is strict
   // (it rejects a missing field even when the case class has a default), which would break every
   // stored row the day an eleventh field is added. ConfiguredCodec derives against the case class
@@ -153,3 +189,16 @@ object IcebergRestConfig:
 
   def fromJson(s: String): Either[String, IcebergRestConfig] =
     io.circe.parser.decode[IcebergRestConfig](s).left.map(_.getMessage)
+
+  /** Normalize the alias (Names rule: lowercase, 1..63 chars, identifier pattern), run every
+    * validation rule against the normalized alias, and wrap. Left carries every error at once.
+    */
+  def validated(
+      cfg: IcebergRestConfig,
+      alias: String
+  ): Either[List[String], ValidatedIcebergConfig] =
+    Names.normalizeOrError(alias, "alias") match
+      case Left(err)   => Left(List(err))
+      case Right(norm) =>
+        val errs = cfg.validate(norm, ReservedAliases)
+        if errs.isEmpty then Right(ValidatedIcebergConfig(cfg, norm)) else Left(errs)

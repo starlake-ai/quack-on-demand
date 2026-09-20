@@ -53,12 +53,18 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
     )
     "td-1"
 
+  // Set by withStores right before it runs the test body, so a test that needs to hit the
+  // throwaway database directly (e.g. with the psql helper, for a raw-SQL row) can find it
+  // without widening every other test's two-arg callback.
+  private var currentDbName: String = ""
+
   private def withStores(test: (FederatedSourceStore, PostgresControlPlaneStore) => Unit): Unit =
     if !pgReachable then
       cancel(
         s"local Postgres not reachable at $pgHost:$pgPort (SL_TEST_PG_* envs); skipping"
       )
     val dbName = s"qodfs_test_${System.nanoTime()}"
+    currentDbName = dbName
     psql("postgres", s"""CREATE DATABASE "$dbName"""")
     try
       new LiquibaseRunner(dbUrl(dbName), pgUser, pgPass).run()
@@ -66,6 +72,12 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
       val fs = new FederatedSourceStore(dbUrl(dbName), pgUser, pgPass)
       test(fs, cp)
     finally Try(psql("postgres", s"""DROP DATABASE IF EXISTS "$dbName" WITH (FORCE)"""))
+
+  /** DuckDB-style single-quote escaping for a raw psql -c literal - mirrors
+    * `ai.starlake.quack.model.SqlLiterals.duckdbLiteral`, kept local so this spec doesn't need a
+    * main-source dependency just for one test's raw INSERT.
+    */
+  private def sqlLit(v: String): String = "'" + v.replace("'", "''") + "'"
 
   "FederatedSourceStore" should "round-trip a source with a value-backed secret" in withStores {
     (fs, cp) =>
@@ -146,28 +158,34 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
       FederatedSecret("bad", "src", "PWD", Some("v"), Some("e:r"))
     }
 
-  it should "round-trip an iceberg_rest source with config and readOnly" in withStores { (fs, cp) =>
-    val tdId = seedTd(cp)
-    val src  = FederatedSource(
-      id = "fs-ice",
-      tenantDbId = tdId,
-      alias = "sales_lake",
-      setupSql = "",
-      sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
-      config = Some("""{"warehouse":"sales","authType":"oauth2"}"""),
-      readOnly = true
-    )
-    fs.upsertSource(src)
-    val got = fs.getSource(tdId, "sales_lake").value
-    got.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.IcebergRest
-    got.config shouldBe Some("""{"warehouse":"sales","authType":"oauth2"}""")
-    got.readOnly shouldBe true
-    got.setupSql shouldBe ""
-  }
-
-  it should "default an existing-style sql source to sql, no config, writable" in withStores {
-    (fs, cp) =>
+  // One bootstrap (one CREATE DATABASE + Liquibase run + DROP via withStores) covers all four
+  // of: an iceberg_rest round-trip, the nine-column upsert's model defaults for a sql source, a
+  // second upsert flipping the new columns, and - the one case in this suite that would catch
+  // `DEFAULT true` slipping back into 0038's read_only column - a genuine pre-0038-shaped row
+  // inserted via raw SQL naming only the six original columns.
+  it should "round-trip iceberg/sql sources, flip columns on re-upsert, and default a raw " +
+    "pre-0038 row" in withStores { (fs, cp) =>
       val tdId = seedTd(cp)
+
+      val ice = FederatedSource(
+        id = "fs-ice",
+        tenantDbId = tdId,
+        alias = "sales_lake",
+        setupSql = "",
+        sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
+        config = Some("""{"warehouse":"sales","authType":"oauth2"}"""),
+        readOnly = true
+      )
+      fs.upsertSource(ice)
+      val gotIce = fs.getSource(tdId, "sales_lake").value
+      gotIce.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.IcebergRest
+      gotIce.config shouldBe Some("""{"warehouse":"sales","authType":"oauth2"}""")
+      gotIce.readOnly shouldBe true
+      gotIce.setupSql shouldBe ""
+
+      // Round-trips model defaults through the nine-column upsert: upsertSource binds
+      // source_type / config / read_only explicitly, so this does NOT exercise the 0038 column
+      // DEFAULTs - see the raw-SQL case below for that.
       fs.upsertSource(
         FederatedSource(
           id = "fs-sql",
@@ -176,28 +194,43 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
           setupSql = "ATTACH '' AS {{alias}} (TYPE postgres);"
         )
       )
-      val got = fs.getSource(tdId, "pg_src").value
-      got.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.Sql
-      got.config shouldBe None
-      got.readOnly shouldBe false
-  }
+      val gotSql = fs.getSource(tdId, "pg_src").value
+      gotSql.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.Sql
+      gotSql.config shouldBe None
+      gotSql.readOnly shouldBe false
 
-  it should "update the new columns on a second upsert of the same id" in withStores { (fs, cp) =>
-    val tdId = seedTd(cp)
-    val base = FederatedSource(
-      id = "fs-flip",
-      tenantDbId = tdId,
-      alias = "lake",
-      sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
-      config = Some("""{"warehouse":"a"}"""),
-      readOnly = true
-    )
-    fs.upsertSource(base)
-    fs.upsertSource(base.copy(config = Some("""{"warehouse":"b"}"""), readOnly = false))
-    val got = fs.getSource(tdId, "lake").value
-    got.config shouldBe Some("""{"warehouse":"b"}""")
-    got.readOnly shouldBe false
-  }
+      val base = FederatedSource(
+        id = "fs-flip",
+        tenantDbId = tdId,
+        alias = "lake",
+        sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
+        config = Some("""{"warehouse":"a"}"""),
+        readOnly = true
+      )
+      fs.upsertSource(base)
+      fs.upsertSource(base.copy(config = Some("""{"warehouse":"b"}"""), readOnly = false))
+      val gotFlip = fs.getSource(tdId, "lake").value
+      gotFlip.config shouldBe Some("""{"warehouse":"b"}""")
+      gotFlip.readOnly shouldBe false
+
+      // The genuine pre-0038 upgrade-path case: a row inserted naming ONLY the six columns that
+      // existed before 0038 (id, tenant_db_id, alias, setup_sql, description, disabled), read
+      // back through the normal getSource path. This is the only test that would catch
+      // `DEFAULT true` slipping back into 0038's read_only column, which would silently make
+      // every existing federation source read-only on upgrade.
+      val legacySetupSql = "ATTACH '' AS {{alias}} (TYPE postgres);"
+      psql(
+        currentDbName,
+        "INSERT INTO qodstate_federated_source " +
+          "(id, tenant_db_id, alias, setup_sql, description, disabled) VALUES " +
+          s"('fs-legacy', '$tdId', 'legacy_src', ${sqlLit(legacySetupSql)}, NULL, false)"
+      )
+      val gotLegacy = fs.getSource(tdId, "legacy_src").value
+      gotLegacy.sourceType shouldBe ai.starlake.quack.model.FederatedSourceType.Sql
+      gotLegacy.config shouldBe None
+      gotLegacy.readOnly shouldBe false
+      gotLegacy.setupSql shouldBe legacySetupSql
+    }
 
   "FederatedSource.validate" should "require setupSql for a sql source" in {
     FederatedSource(id = "a", tenantDbId = "t", alias = "x").validate

@@ -1,5 +1,7 @@
 package ai.starlake.quack.ondemand.federation.iceberg
 
+import ai.starlake.quack.model.SqlLiterals.{duckdbIdent as ident, duckdbLiteral as lit}
+
 /** Authors the `INSTALL` + `CREATE SECRET` + `ATTACH` block for one Iceberg REST catalog, single
   * source of truth in the same spirit as `NodeLockdown` and `ObjectStoreSecret`.
   *
@@ -19,22 +21,23 @@ package ai.starlake.quack.ondemand.federation.iceberg
   */
 object IcebergSetupSql:
 
-  private def lit(v: String): String   = "'" + v.replace("'", "''") + "'"
-  private def ident(v: String): String = "\"" + v.replace("\"", "\"\"") + "\""
-
-  /** Per-alias secret name. The alias is validated as a plain identifier upstream
-    * ([[IcebergRestConfig.validate]]), so lowercasing yields a safe, collision-free slug.
+  /** Per-alias secret name. The alias arrives already normalized (lowercase, via
+    * [[IcebergRestConfig.validated]]), so no lowercasing happens here - doing it here used to let
+    * "Sales" and "sales" mint the same secret name without either alias being rejected.
     */
-  def secretName(alias: String): String = "qod_ice_" + alias.toLowerCase
+  def secretName(alias: String): String = "qod_ice_" + alias
 
-  /** Precondition: callers MUST run `cfg.validate(alias, reservedAliases)` first and check it comes
-    * back empty. `render` is a pure total function over `cfg` - it never validates its input, so an
-    * unvalidated config can render, for example, an ATTACH carrying both `ENDPOINT_TYPE` and
-    * `AUTHORIZATION_TYPE`, which DuckDB refuses at ATTACH time. Because this SQL runs inside a
-    * node's startup script, that failure takes down the whole node's init, not just this one
-    * catalog.
+  /** Precondition: `v` must come from [[IcebergRestConfig.validated]], which the
+    * `ValidatedIcebergConfig` type enforces - there is no other way to construct one. `render` is a
+    * pure total function over `v.config` - it never re-validates, so this only holds because
+    * `validated` already ran every rule. Skipping it (impossible through this API) could render,
+    * for example, an ATTACH carrying both `ENDPOINT_TYPE` and `AUTHORIZATION_TYPE`, which DuckDB
+    * refuses at ATTACH time. Because this SQL runs inside a node's startup script, that failure
+    * takes down the whole node's init, not just this one catalog.
     */
-  def render(cfg: IcebergRestConfig, alias: String): String =
+  def render(v: ValidatedIcebergConfig): String =
+    val cfg    = v.config
+    val alias  = v.alias
     val secret = secretBlock(cfg, alias)
     val opts   = attachOptions(cfg, alias, secret.nonEmpty)
     "INSTALL iceberg; LOAD iceberg;\n" +
