@@ -63,10 +63,15 @@ class KillBroadcastSpec extends AnyFlatSpec with Matchers:
     val payloads = PatKillBroadcast.encodeBatches(ids)
     payloads should have size 2
     payloads.foreach(p => p.getBytes("UTF-8").length should be < 8000)
-    val decoded  = payloads.flatMap { p =>
+    val decoded = payloads.flatMap { p =>
       io.circe.parser.decode[PatKillBroadcast](p).toOption.map(_.patIds).getOrElse(Nil)
     }
     decoded.toSet shouldBe ids
+
+  it should "keep exactly 100 ids in a single payload and send nothing for an empty set" in:
+    val ids = (1 to 100).map(i => f"pat-$i%032d").toSet
+    PatKillBroadcast.encodeBatches(ids) should have size 1
+    PatKillBroadcast.encodeBatches(Set.empty) shouldBe Nil
 
   it should "ignore malformed payloads and unknown pat ids" in:
     val registry = new ActiveStatementRegistry()
