@@ -14,12 +14,19 @@ import java.time.Instant
   *
   * `readOnly` is persisted here; enforcement at the edge is
   * [[ai.starlake.quack.edge.sql.CatalogWriteScreen]], a defence-in-depth screen wired into
-  * `FlightSqlRouter` (the ACL graph remains the primary gate). That screen only looks at statements
-  * classified as a write (Dml/Ddl): it denies a write whose target fully qualifies to this catalog,
-  * and also denies a write it cannot fully resolve while any catalog is read-only, since an
-  * unresolved write could be hiding one against this catalog; it never denies a read. The REST
-  * create path defaults a new `iceberg_rest` source to true (Task 5). This field defaults to false
-  * so pre-0038 sources keep their behaviour.
+  * `FlightSqlRouter` (the ACL graph remains the primary gate). That screen parses every statement
+  * it cannot positively prove is read-side and denies a write it resolves against this catalog, or
+  * cannot fully resolve at all -- it does NOT trust a "classified as not a write" verdict as proof
+  * that a statement is a read; see `CatalogWriteScreen`'s scaladoc for the exact per-statement
+  * rule. The consequence an operator needs to know before flipping this flag: while ANY source on
+  * the pool is read-only, every write on the WHOLE pool must be fully parseable and fully qualified
+  * or it is refused, including writes against OTHER attached catalogs and including statements
+  * `SqlParser` has no arm for at all (`ATTACH`/`DETACH`/`CREATE SECRET`/`COPY`/`GRANT`); a two-part
+  * write such as `INSERT INTO some_other_db.orders` is refused too, because the parser cannot tell
+  * a catalog head from a schema head there. This screen guarantees no resolvable write reaches this
+  * catalog; it is not parity with `PostgresAclValidator` and it makes no promise beyond writes. The
+  * REST create path defaults a new `iceberg_rest` source to true (Task 5). This field defaults to
+  * false so pre-0038 sources keep their behaviour.
   */
 final case class FederatedSource(
     id: String,

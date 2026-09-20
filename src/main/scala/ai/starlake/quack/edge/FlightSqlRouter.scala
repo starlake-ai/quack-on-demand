@@ -490,9 +490,10 @@ final class FlightSqlRouter(
 
     // Per-catalog read-only screen. Runs AFTER the ACL gate so a principal that lacks the grant
     // is refused for the honest reason first, and BEFORE the CLS/RLS rewriters so a denied write
-    // never reaches a rewrite. Inert (and unparsed) when the pool has no read-only catalog, and
-    // never denies a statement whose `kind` (computed once above) isn't Dml/Ddl -- see
-    // CatalogWriteScreen's scaladoc for why reads are out of scope for this screen.
+    // never reaches a rewrite. Inert (and unparsed) when the pool has no read-only catalog. The
+    // screen re-splits and re-classifies `sql` itself per statement -- it does NOT reuse the
+    // whole-submission `kind` computed above, which describes only the first statement of a batch
+    // -- see CatalogWriteScreen's scaladoc for the exact rule.
     val catalogDenial: Either[RouterFailure, Unit] = aclCheck.flatMap { _ =>
       val readOnly = readOnlyCatalogsOf(poolKey)
       if readOnly.isEmpty then Right(())
@@ -502,7 +503,7 @@ final class FlightSqlRouter(
           ctx.defaultSchema,
           ctx.attachedCatalogs
         )
-        CatalogWriteScreen.screen(sql, kind, readOnly, parserCfg) match
+        CatalogWriteScreen.screen(sql, classifier.classify, readOnly, parserCfg) match
           case None         => Right(())
           case Some(reason) =>
             maybeRecord(

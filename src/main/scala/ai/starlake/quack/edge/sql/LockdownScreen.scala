@@ -169,8 +169,11 @@ object LockdownScreen:
 
   /** Splits the input on top-level semicolons: semicolons inside single-quoted strings,
     * double-quoted identifiers, line comments, or (nested) block comments do not split.
+    *
+    * `private[sql]`, not `private`, so `CatalogWriteScreen` can reuse the same quote- and
+    * comment-aware splitter to judge a batch statement by statement instead of by its first token.
     */
-  private def splitStatements(sql: String): List[String] =
+  private[sql] def splitStatements(sql: String): List[String] =
     val out        = ListBuffer.empty[String]
     val buf        = new StringBuilder
     var i          = 0
