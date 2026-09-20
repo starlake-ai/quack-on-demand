@@ -226,7 +226,7 @@ class DtosWireContractSpec extends AnyFlatSpec with Matchers:
 
   "FederatedSourceCreateRequest" should "default description/disabled when absent" in:
     decode[FederatedSourceCreateRequest]("""{"alias":"pg","setupSql":"ATTACH ..."}""") shouldBe
-      Right(FederatedSourceCreateRequest("pg", "ATTACH ..."))
+      Right(FederatedSourceCreateRequest("pg", Some("ATTACH ...")))
 
   // ----- Maintenance -------------------------------------------------------
 

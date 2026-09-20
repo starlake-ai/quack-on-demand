@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{NodePlacement, NodeToleration, PoolCohort, RoleDistribution}
+import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import io.circe.{Codec, Decoder, Encoder, Json}
 import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.generic.semiauto.deriveCodec
@@ -424,18 +425,32 @@ final case class UpdateTenantDbResponse(
 
 final case class FederatedSourceCreateRequest(
     alias: String,
-    setupSql: String,
+    // `sql` sources only. Optional since the iceberg_rest type carries `config` instead;
+    // supplying both is a 400.
+    setupSql: Option[String] = None,
     description: Option[String] = None,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    // "sql" (default) or "iceberg_rest".
+    sourceType: Option[String] = None,
+    // iceberg_rest only. Credential fields carry {{secret.NAME}} placeholders, never values,
+    // so this object is safe to echo back on the response.
+    config: Option[IcebergRestConfig] = None,
+    // Omitted means: false for a sql source, true for an iceberg_rest source.
+    readOnly: Option[Boolean] = None
 )
 
 final case class FederatedSourceResponse(
     id: String,
     tenantDbId: String,
     alias: String,
-    setupSql: String,
+    setupSql: Option[String] = None,
     description: Option[String] = None,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    sourceType: String = "sql",
+    config: Option[IcebergRestConfig] = None,
+    readOnly: Boolean = false,
+    // Live attach state aggregated across the pool's nodes; filled in Task 8.
+    attachStatus: Option[String] = None
 )
 
 final case class FederatedSourceListResponse(sources: List[FederatedSourceResponse])

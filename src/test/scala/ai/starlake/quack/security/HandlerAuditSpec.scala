@@ -169,7 +169,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
       h.createSource(
         SecurityFixtures.TenantName,
         SecurityFixtures.TenantDbName,
-        FederatedSourceCreateRequest(alias = "ext-s3", setupSql = "ATTACH ...", None, false),
+        FederatedSourceCreateRequest(alias = "ext_s3", setupSql = Some("ATTACH ..."), None, false),
         Some("any-static-key")
       ).unsafeRunSync()
       store.events should not be empty
@@ -179,7 +179,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
       e.outcome shouldBe "ok"
       e.actor shouldBe "static-key"
       e.tenant shouldBe Some(SecurityFixtures.TenantId)
-      e.target shouldBe Some("ext-s3")
+      e.target shouldBe Some("ext_s3")
     }
 
   // ---------------------------------------------------------------------------

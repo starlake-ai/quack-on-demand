@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import Dtos.given
+import EndpointSchemas.given
 import Endpoints.authToken
 import sttp.tapir._
 import sttp.tapir.generic.auto._

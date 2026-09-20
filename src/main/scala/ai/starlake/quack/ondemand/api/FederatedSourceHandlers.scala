@@ -1,7 +1,8 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -15,13 +16,18 @@ import sttp.model.StatusCode
   *   resolves (tenantName, tenantDbName) to the surrogate tenantDbId, or None if not found
   * @param tenantIdResolver
   *   resolves a tenant name / display-name to its surrogate tenant id for audit attribution
+  * @param catalogAliasOf
+  *   resolves a tenantDbId to the tenant-db's own DuckDB catalog alias, or None if not found. Fed
+  *   into `extraReserved` so an iceberg_rest source cannot be aliased onto the tenant-db's own
+  *   attached name.
   */
 final class FederatedSourceHandlers(
     fedStore: FederatedSourceOps,
     resolver: (String, String) => Option[String],
     tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop,
-    scopeOf: String => Option[SessionScope] = _ => None
+    scopeOf: String => Option[SessionScope] = _ => None,
+    catalogAliasOf: String => Option[String] = _ => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -49,10 +55,99 @@ final class FederatedSourceHandlers(
       id = s.id,
       tenantDbId = s.tenantDbId,
       alias = s.alias,
-      setupSql = s.setupSql,
+      setupSql = Option(s.setupSql).filter(_.nonEmpty),
       description = s.description,
-      disabled = s.disabled
+      disabled = s.disabled,
+      sourceType = s.sourceType.wire,
+      config = s.config.flatMap(j => IcebergRestConfig.fromJson(j).toOption),
+      readOnly = s.readOnly
     )
+
+  /** Turn the request's loose wire fields into a validated [[FederatedSource]], or the 400 that
+    * explains why not. Validation happens HERE rather than at node spawn because a bad federated
+    * source fails the whole node's init SQL, taking the pool's other catalogs down with it.
+    */
+  private def toSource(
+      id: String,
+      tenantDbId: String,
+      req: FederatedSourceCreateRequest,
+      existing: Option[FederatedSource]
+  ): Either[(StatusCode, ErrorResponse), FederatedSource] =
+    val badRequest = (msg: String) =>
+      (StatusCode.BadRequest, ErrorResponse("invalid_federated_source", msg))
+
+    val typeOrError = req.sourceType.map(_.trim).filter(_.nonEmpty) match
+      case None     => Right(FederatedSourceType.Sql)
+      case Some(wr) =>
+        FederatedSourceType
+          .fromWire(wr)
+          .toRight(
+            badRequest(s"unknown sourceType '$wr' (expected one of: sql, iceberg_rest)")
+          )
+
+    // OWNER DECISION (session audit): EVERY federated alias, sql or iceberg_rest, is normalized
+    // through Names.normalizeOrError at write time - lowercase, 1..63 chars, identifier pattern -
+    // the same rule tenant, tenant-db and pool names already get. DuckDB treats catalog aliases
+    // and secret names case-insensitively, so "Sales" and "sales" were two valid rows whose second
+    // ATTACH failed at node spawn; normalizing here closes that for new rows. This CHANGES existing
+    // behaviour for sql sources (a mixed-case alias is now stored lowercase, an over-length one is
+    // a 400); the ACL parser already lowercases canonical refs, so grants are unaffected.
+    val aliasOrError = ai.starlake.quack.model.Names
+      .normalizeOrError(req.alias, "alias")
+      .left
+      .map(badRequest)
+
+    typeOrError.flatMap { sourceType =>
+      aliasOrError.flatMap { alias =>
+        // An alias already claimed by a source of a DIFFERENT sourceType is a collision, not an
+        // update: silently flipping "sql" <-> "iceberg_rest" through this upsert would replace
+        // operator-written setupSql with a rendered config (or vice versa) with no chance to
+        // review the change. A same-type re-POST (config/setupSql edit) still upserts in place.
+        existing.filter(_.sourceType != sourceType) match
+          case Some(clash) =>
+            Left(
+              badRequest(
+                s"alias '$alias' already exists as a '${clash.sourceType.wire}' source; " +
+                  s"delete it before creating a '${sourceType.wire}' source with the same alias " +
+                  "(reserved)"
+              )
+            )
+          case None =>
+            val source = FederatedSource(
+              id = id,
+              tenantDbId = tenantDbId,
+              alias = alias,
+              setupSql = req.setupSql.getOrElse(""),
+              description = req.description,
+              disabled = req.disabled,
+              sourceType = sourceType,
+              config = req.config.map(_.toJson),
+              // An external catalog is one QoD does not own, so a new iceberg_rest source is
+              // read-only until an operator says otherwise. A sql source keeps today's behaviour,
+              // where writes are governed by the ACL graph alone.
+              readOnly = req.readOnly.getOrElse(sourceType == FederatedSourceType.IcebergRest)
+            )
+
+            val shapeErrors  = source.validate
+            val configErrors = (sourceType, req.config) match
+              case (FederatedSourceType.IcebergRest, Some(cfg)) =>
+                // `validated` is the same gate the blob builder uses before render, so a config
+                // the handler accepts is one the node will attach.
+                // Reserve the tenant-db's own DuckDB catalog alias and every sibling federated
+                // alias. Without these, `ATTACH 'x' AS "<tenant-db alias>"` reaches the node,
+                // DuckDB answers "database with name ... already exists", and because the piped
+                // CLI does not bail the node comes up with a half-applied federation blob and no
+                // loud signal. This is the last point at which the operator can simply be told.
+                val reserved =
+                  catalogAliasOf(tenantDbId).toSet ++
+                    fedStore.listSources(tenantDbId).filterNot(_.alias == alias).map(_.alias).toSet
+                IcebergRestConfig.validated(cfg, alias, reserved).left.getOrElse(Nil)
+              case _ => Nil
+
+            val all = shapeErrors ++ configErrors
+            if all.isEmpty then Right(source) else Left(badRequest(all.mkString("; ")))
+      }
+    }
 
   /** True when a RESOLVED session is present and it is not a superuser. Mirrors
     * [[SuperuserCheck.reject]]: static-key and open-mode callers (no resolvable scope) are admitted
@@ -85,30 +180,28 @@ final class FederatedSourceHandlers(
           resolveTenantDbId(tenantName, tenantDbName) match
             case Left(e)           => Left(e)
             case Right(tenantDbId) =>
-              // Try an upsert by alias: if one already exists reuse its id.
-              val existing = fedStore.getSource(tenantDbId, req.alias)
+              // Upsert by NORMALIZED alias, so "Sales_Lake" and "sales_lake" resolve to the same
+              // row rather than minting a second one the unique constraint (case-sensitive) admits.
+              val lookupAlias = ai.starlake.quack.model.Names
+                .normalizeOrError(req.alias, "alias")
+                .getOrElse(req.alias)
+              val existing = fedStore.getSource(tenantDbId, lookupAlias)
               val id       =
                 existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fs"))
-              val source = FederatedSource(
-                id = id,
-                tenantDbId = tenantDbId,
-                alias = req.alias,
-                setupSql = req.setupSql,
-                description = req.description,
-                disabled = req.disabled
-              )
-              fedStore.upsertSource(source)
-              // NEVER include setupSql in detail (may contain connection strings).
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.FederationSourceUpsert,
-                "ok",
-                tenant = tenantIdResolver(tenantName),
-                target = Some(req.alias)
-              )
-              // The upsert wrote every field of `source`; no re-fetch needed.
-              Right(toSourceResponse(source))
+              toSource(id, tenantDbId, req, existing) match
+                case Left(e)       => Left(e)
+                case Right(source) =>
+                  fedStore.upsertSource(source)
+                  // NEVER include setupSql or config in the audit detail.
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    AuditActions.FederationSourceUpsert,
+                    "ok",
+                    tenant = tenantIdResolver(tenantName),
+                    target = Some(req.alias)
+                  )
+                  Right(toSourceResponse(source))
     }
 
   def listSources(tenantName: String, tenantDbName: String): Out[FederatedSourceListResponse] =
@@ -217,6 +310,17 @@ final class FederatedSourceHandlers(
                         StatusCode.BadRequest -> ErrorResponse(
                           "invalid",
                           "one of value or externalRef must be provided"
+                        )
+                      )
+                    // A blank inline value renders `ATTACH ''` (or `CREATE SECRET ... (VALUE '')`)
+                    // into the node's piped init script; DuckDB refuses it, and because the piped
+                    // CLI does not bail, the node comes up healthy with the catalog silently
+                    // missing. `externalRef`-backed secrets resolve elsewhere and are unaffected.
+                    case (Some(v), _) if v.trim.isEmpty =>
+                      Left(
+                        StatusCode.BadRequest -> ErrorResponse(
+                          "invalid",
+                          s"secret '${req.name}' has a blank value"
                         )
                       )
                     // An externalRef secret directs the manager to resolve a value

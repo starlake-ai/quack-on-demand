@@ -2,6 +2,11 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.federation.iceberg.{
+  IcebergAuthType,
+  IcebergEndpointType,
+  IcebergRestConfig
+}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.state.{
   FederatedSourceStore,
@@ -9,19 +14,23 @@ import ai.starlake.quack.ondemand.state.{
   PostgresControlPlaneStore
 }
 import cats.effect.unsafe.implicits.global
-import org.scalatest.OptionValues
+import org.scalatest.{EitherValues, OptionValues}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import sttp.model.StatusCode
 
 import scala.util.Try
 
-class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionValues:
+class FederatedSourceHandlersSpec
+    extends AnyFlatSpec
+    with Matchers
+    with OptionValues
+    with EitherValues:
 
   TestPostgres.dropStrayTestDatabases("qodh")
 
-  /** Yields the store + (tenantName, tenantDbName) => tenantDbId resolver over a
-    * freshly-migrated throwaway Postgres, so a test can build a handler with a
-    * custom `scopeOf`.
+  /** Yields the store + (tenantName, tenantDbName) => tenantDbId resolver over a freshly-migrated
+    * throwaway Postgres, so a test can build a handler with a custom `scopeOf`.
     */
   private def withEnv(
       test: (FederatedSourceStore, (String, String) => Option[String], String) => Unit
@@ -71,14 +80,14 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
         .createSource(
           "acme",
           "acme_prod",
-          FederatedSourceCreateRequest(alias = "fedpg", setupSql = "INSTALL postgres;"),
+          FederatedSourceCreateRequest(alias = "fedpg", setupSql = Some("INSTALL postgres;")),
           None
         )
         .unsafeRunSync()
       created.isRight shouldBe true
       val r = created.toOption.value
       r.alias shouldBe "fedpg"
-      r.setupSql shouldBe "INSTALL postgres;"
+      r.setupSql shouldBe Some("INSTALL postgres;")
 
       val got = h.getSource("acme", "acme_prod", "fedpg").unsafeRunSync()
       got.isRight shouldBe true
@@ -90,19 +99,19 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
     h.createSource(
       "acme",
       "acme_prod",
-      FederatedSourceCreateRequest(alias = "dup", setupSql = "v1"),
+      FederatedSourceCreateRequest(alias = "dup", setupSql = Some("v1")),
       None
     ).unsafeRunSync()
     val second = h
       .createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "dup", setupSql = "v2"),
+        FederatedSourceCreateRequest(alias = "dup", setupSql = Some("v2")),
         None
       )
       .unsafeRunSync()
     second.isRight shouldBe true
-    second.toOption.value.setupSql shouldBe "v2"
+    second.toOption.value.setupSql shouldBe Some("v2")
 
     val list = h.listSources("acme", "acme_prod").unsafeRunSync().toOption.value
     list.sources.count(_.alias == "dup") shouldBe 1
@@ -114,7 +123,7 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       h.createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "src1", setupSql = "..."),
+        FederatedSourceCreateRequest(alias = "src1", setupSql = Some("...")),
         None
       ).unsafeRunSync()
 
@@ -142,7 +151,7 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
       h.createSource(
         "acme",
         "acme_prod",
-        FederatedSourceCreateRequest(alias = "todel", setupSql = "..."),
+        FederatedSourceCreateRequest(alias = "todel", setupSql = Some("...")),
         None
       ).unsafeRunSync()
       val del = h.deleteSource("acme", "acme_prod", "todel", None).unsafeRunSync()
@@ -172,8 +181,8 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
   // resolves from the MANAGER's own trust domain at spawn), while a superuser
   // and a value-backed tenant secret both stay allowed.
 
-  private val AdminTok = "admin-token"
-  private val SuperTok = "super-token"
+  private val AdminTok                               = "admin-token"
+  private val SuperTok                               = "super-token"
   private val scopes: String => Option[SessionScope] = {
     case `AdminTok` => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
     case `SuperTok` => Some(SessionScope.Superuser)
@@ -187,9 +196,10 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
     h.createSource(
       "acme",
       "acme_prod",
-      FederatedSourceCreateRequest(alias = "fedpg", setupSql = "INSTALL postgres;"),
+      FederatedSourceCreateRequest(alias = "fedpg", setupSql = Some("INSTALL postgres;")),
       Some(AdminTok)
-    ).unsafeRunSync().isRight shouldBe true
+    ).unsafeRunSync()
+      .isRight shouldBe true
     h
 
   "FederatedSourceHandlers.upsertSecret" should
@@ -201,7 +211,10 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
           "acme",
           "acme_prod",
           "fedpg",
-          FederatedSecretUpsertRequest(name = "X", externalRef = Some("env:QOD_SESSION_JWT_SECRET")),
+          FederatedSecretUpsertRequest(
+            name = "X",
+            externalRef = Some("env:QOD_SESSION_JWT_SECRET")
+          ),
           Some(AdminTok)
         )
         .unsafeRunSync()
@@ -262,3 +275,211 @@ class FederatedSourceHandlersSpec extends AnyFlatSpec with Matchers with OptionV
         .unsafeRunSync()
       r.isRight shouldBe true
     }
+
+  it should "reject a blank inline value with a 400 naming the secret" in withHandlers { (h, _) =>
+    h.createSource(
+      "acme",
+      "acme_prod",
+      FederatedSourceCreateRequest(alias = "blanksec", setupSql = Some("...")),
+      None
+    ).unsafeRunSync()
+    val r = h
+      .upsertSecret(
+        "acme",
+        "acme_prod",
+        "blanksec",
+        FederatedSecretUpsertRequest(name = "PG_PASSWORD", value = Some("   ")),
+        None
+      )
+      .unsafeRunSync()
+    r.isLeft shouldBe true
+    val (code, err) = r.swap.toOption.value
+    code.code shouldBe 400
+    err.message should include("PG_PASSWORD")
+
+    val list = h.listSecrets("acme", "acme_prod", "blanksec").unsafeRunSync().toOption.value
+    list.secrets shouldBe empty
+  }
+
+  // --- Typed iceberg_rest sources on the REST surface ------------------------
+
+  private def iceReq(
+      alias: String = "sales_lake",
+      cfg: IcebergRestConfig = IcebergRestConfig(
+        uri = "https://catalog.example.com/api/catalog",
+        warehouse = "sales",
+        authType = Some(IcebergAuthType.OAuth2),
+        clientId = Some("{{secret.CID}}"),
+        clientSecret = Some("{{secret.CSEC}}")
+      ),
+      readOnly: Option[Boolean] = None
+  ) = FederatedSourceCreateRequest(
+    alias = alias,
+    sourceType = Some("iceberg_rest"),
+    config = Some(cfg),
+    readOnly = readOnly
+  )
+
+  "createSource" should "accept a typed iceberg source and default it to read-only" in withHandlers {
+    (h, _) =>
+      val res = h.createSource("acme", "acme_prod", iceReq(), None).unsafeRunSync()
+      val out = res.toOption.value
+      out.sourceType shouldBe "iceberg_rest"
+      out.readOnly shouldBe true
+      out.config.value.warehouse shouldBe "sales"
+      out.setupSql shouldBe None
+  }
+
+  it should "honour an explicit readOnly=false on an iceberg source" in withHandlers { (h, _) =>
+    val res = h
+      .createSource("acme", "acme_prod", iceReq(readOnly = Some(false)), None)
+      .unsafeRunSync()
+    res.toOption.value.readOnly shouldBe false
+  }
+
+  it should "keep a sql source writable by default" in withHandlers { (h, _) =>
+    val req = FederatedSourceCreateRequest(alias = "pg_src", setupSql = Some("ATTACH 'x';"))
+    val out = h.createSource("acme", "acme_prod", req, None).unsafeRunSync().toOption.value
+    out.sourceType shouldBe "sql"
+    out.readOnly shouldBe false
+  }
+
+  it should "400 on an unknown sourceType" in withHandlers { (h, _) =>
+    val req         = iceReq().copy(sourceType = Some("hive_metastore"))
+    val (code, err) = h.createSource("acme", "acme_prod", req, None).unsafeRunSync().left.value
+    code shouldBe StatusCode.BadRequest
+    err.message should include("hive_metastore")
+  }
+
+  it should "400 on an iceberg source with no config" in withHandlers { (h, _) =>
+    val req         = iceReq().copy(config = None)
+    val (code, err) = h.createSource("acme", "acme_prod", req, None).unsafeRunSync().left.value
+    code shouldBe StatusCode.BadRequest
+    err.message should include("config")
+  }
+
+  it should "400 on an iceberg source carrying setupSql as well" in withHandlers { (h, _) =>
+    val req       = iceReq().copy(setupSql = Some("ATTACH 'x';"))
+    val (code, _) = h.createSource("acme", "acme_prod", req, None).unsafeRunSync().left.value
+    code shouldBe StatusCode.BadRequest
+  }
+
+  it should "400 naming the DuckDB rule when authType and endpointType are both set" in withHandlers {
+    (h, _) =>
+      val cfg = IcebergRestConfig(
+        uri = "https://c",
+        warehouse = "w",
+        authType = Some(IcebergAuthType.OAuth2),
+        endpointType = Some(IcebergEndpointType.Glue),
+        clientId = Some("a"),
+        clientSecret = Some("b")
+      )
+      val (code, err) = h
+        .createSource("acme", "acme_prod", iceReq(cfg = cfg), None)
+        .unsafeRunSync()
+        .left
+        .value
+      code shouldBe StatusCode.BadRequest
+      err.message should include("exactly one")
+  }
+
+  it should "400 on an alias that collides with the tenant-db's own catalog alias" in
+    withEnv { (fs, resolver, _) =>
+      val h = new FederatedSourceHandlers(
+        fedStore = fs,
+        resolver = resolver,
+        catalogAliasOf = _ => Some("acme_db")
+      )
+      val (code, err) = h
+        .createSource("acme", "acme_prod", iceReq(alias = "acme_db"), None)
+        .unsafeRunSync()
+        .left
+        .value
+      code shouldBe StatusCode.BadRequest
+      err.message should include("reserved")
+    }
+
+  it should "400 on an alias that collides with a sibling federated source" in withHandlers {
+    (h, _) =>
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(alias = "pg_src", setupSql = Some("ATTACH 'x';")),
+        None
+      ).unsafeRunSync()
+      val (code, _) = h
+        .createSource("acme", "acme_prod", iceReq(alias = "pg_src"), None)
+        .unsafeRunSync()
+        .left
+        .value
+      code shouldBe StatusCode.BadRequest
+  }
+
+  it should "400 on an alias that collides with a DuckDB builtin" in withHandlers { (h, _) =>
+    val (code, err) = h
+      .createSource("acme", "acme_prod", iceReq(alias = "memory"), None)
+      .unsafeRunSync()
+      .left
+      .value
+    code shouldBe StatusCode.BadRequest
+    err.message should include("reserved")
+  }
+
+  it should "400 on an alias that is not a plain identifier" in withHandlers { (h, _) =>
+    val (code, _) = h
+      .createSource("acme", "acme_prod", iceReq(alias = "sales-lake"), None)
+      .unsafeRunSync()
+      .left
+      .value
+    code shouldBe StatusCode.BadRequest
+  }
+
+  "createSource" should "normalize a mixed-case alias to lowercase for every source type" in
+    withHandlers { (h, _) =>
+      val ice = h
+        .createSource("acme", "acme_prod", iceReq(alias = "Sales_Lake"), None)
+        .unsafeRunSync()
+        .toOption
+        .value
+      ice.alias shouldBe "sales_lake"
+      val sql = h
+        .createSource(
+          "acme",
+          "acme_prod",
+          FederatedSourceCreateRequest(alias = "PG_Src", setupSql = Some("ATTACH 'x';")),
+          None
+        )
+        .unsafeRunSync()
+        .toOption
+        .value
+      sql.alias shouldBe "pg_src"
+    }
+
+  it should "400 on an over-length alias, naming the 63-char bound" in withHandlers { (h, _) =>
+    val (code, err) = h
+      .createSource("acme", "acme_prod", iceReq(alias = "a" * 64), None)
+      .unsafeRunSync()
+      .left
+      .value
+    code shouldBe StatusCode.BadRequest
+    err.message should include("63")
+  }
+
+  it should "upsert onto the existing row when only the alias case differs" in withHandlers {
+    (h, _) =>
+      h.createSource("acme", "acme_prod", iceReq(alias = "sales_lake"), None).unsafeRunSync()
+      h.createSource("acme", "acme_prod", iceReq(alias = "SALES_LAKE"), None).unsafeRunSync()
+      h.listSources("acme", "acme_prod")
+        .unsafeRunSync()
+        .toOption
+        .value
+        .sources
+        .count(_.alias == "sales_lake") shouldBe 1
+  }
+
+  "listSources" should "return the typed config it stored" in withHandlers { (h, _) =>
+    h.createSource("acme", "acme_prod", iceReq(), None).unsafeRunSync()
+    val out = h.listSources("acme", "acme_prod").unsafeRunSync().toOption.value
+    out.sources.find(_.alias == "sales_lake").value.config.value.authType shouldBe
+      Some(IcebergAuthType.OAuth2)
+  }

@@ -35,3 +35,11 @@ object EndpointSchemas:
   given Schema[UsageDayEntry]            = Schema.derived
   given Schema[UsageGroupEntry]          = Schema.derived
   given Schema[UsageResponse]            = Schema.derived
+
+  // Scala 3 enums carry no auto-derivable Schema; both are string-valued on the wire.
+  given Schema[ai.starlake.quack.ondemand.federation.iceberg.IcebergAuthType]     = Schema.string
+  given Schema[ai.starlake.quack.ondemand.federation.iceberg.IcebergEndpointType] = Schema.string
+  given Schema[ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig]   = Schema.derived
+  given Schema[FederatedSourceCreateRequest]                                      = Schema.derived
+  given Schema[FederatedSourceResponse]                                           = Schema.derived
+  given Schema[FederatedSourceListResponse]                                       = Schema.derived

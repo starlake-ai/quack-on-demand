@@ -235,7 +235,7 @@ final class McpPlatformTools(
             database,
             FederatedSourceCreateRequest(
               alias = alias,
-              setupSql = setupSql,
+              setupSql = Some(setupSql),
               description = str(args, "description"),
               disabled = bool(args, "disabled").getOrElse(false)
             ),

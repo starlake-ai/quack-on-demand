@@ -1184,13 +1184,20 @@ object Main extends IOApp with LazyLogging:
           sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
         val tenantIdResolver: String => Option[String] = tenantName =>
           sup.getTenant(tenantName).map(_.id)
+        // Mirrors attachedCatalogsOf's dbName resolution: the tenant-db's own DuckDB catalog
+        // alias, reserved so a new iceberg_rest source cannot be aliased onto it.
+        val catalogAliasOf: String => Option[String] = tenantDbId =>
+          sup.getTenantDbById(tenantDbId).map { td =>
+            TenantDb.catalogAlias(sup.effectiveMetastoreFor(td.tenantId, td.name), td.name)
+          }
         Some(
           new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
             fedHandlersStore,
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            scopeOf = t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+            scopeOf = t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t)),
+            catalogAliasOf = catalogAliasOf
           )
         )
 
