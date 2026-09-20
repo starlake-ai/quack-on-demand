@@ -39,40 +39,63 @@ object IcebergSetupSql:
     val cfg    = v.config
     val alias  = v.alias
     val secret = secretBlock(cfg, alias)
-    val opts   = attachOptions(cfg, alias, secret.nonEmpty)
+    val opts   = attachOptions(cfg, alias, needsSecret(cfg))
     "INSTALL iceberg; LOAD iceberg;\n" +
       secret +
-      s"ATTACH ${lit(cfg.warehouse)} AS ${ident(alias)} (\n  " +
+      s"ATTACH ${lit(cfg.warehouse.trim)} AS ${ident(alias)} (\n  " +
       opts.mkString(",\n  ") +
       "\n);"
 
-  private def secretBlock(cfg: IcebergRestConfig, alias: String): String =
-    val params = cfg.authType match
-      case Some(IcebergAuthType.OAuth2) =>
-        List(
-          Some("TYPE ICEBERG"),
-          cfg.clientId.filter(_.trim.nonEmpty).map(v => s"CLIENT_ID ${lit(v)}"),
-          cfg.clientSecret.filter(_.trim.nonEmpty).map(v => s"CLIENT_SECRET ${lit(v)}"),
-          cfg.oauth2ServerUri.filter(_.trim.nonEmpty).map(v => s"OAUTH2_SERVER_URI ${lit(v)}"),
-          cfg.oauth2Scope.filter(_.trim.nonEmpty).map(v => s"OAUTH2_SCOPE ${lit(v)}"),
-          cfg.oauth2GrantType.filter(_.trim.nonEmpty).map(v => s"OAUTH2_GRANT_TYPE ${lit(v)}"),
-          // DuckDB derives the oauth2 server URI fallback (<endpoint>/v1/oauth/tokens) from the
-          // SECRET's own ENDPOINT, not from the ATTACH's ENDPOINT option: with authType=oauth2
-          // and no explicit oauth2ServerUri, omitting this makes ATTACH fail before any network
-          // call ("no 'oauth2_server_uri' was provided, and no 'endpoint' was provided to fall
-          // back on"). Kept oauth2-only: a Token secret does no exchange, so ENDPOINT here would
-          // be inert, and the ATTACH already carries its own ENDPOINT for catalog operations.
-          Option.when(cfg.uri.trim.nonEmpty)(s"ENDPOINT ${lit(cfg.uri.trim)}")
-        ).flatten
-      case Some(IcebergAuthType.Token) =>
-        List(
-          Some("TYPE ICEBERG"),
-          cfg.token.filter(_.trim.nonEmpty).map(v => s"TOKEN ${lit(v)}")
-        ).flatten
-      case _ => Nil
+  /** Whether `authType` requires a `CREATE SECRET` block: oauth2 and token both carry their
+    * credential on the ICEBERG secret (see the class scaladoc); none / sigv4 / any endpointType
+    * need none. Drives both the ATTACH's `SECRET` option and whether [[secretBlock]] emits
+    * anything, so the two can never disagree about whether a secret exists.
+    */
+  private def needsSecret(cfg: IcebergRestConfig): Boolean =
+    cfg.authType.exists(t => t == IcebergAuthType.OAuth2 || t == IcebergAuthType.Token)
 
-    if params.isEmpty then ""
+  /** `NAME '<trimmed value>'`, or `None` when `value` is unset or blank after trimming. Trimming
+    * here - not just at the `isSet`/`filter` check upstream - matters because
+    * [[IcebergRestConfig.validate]] itself trims before matching the `{{secret.NAME}}` pattern, so
+    * e.g. `clientSecret = " {{secret.CSEC}} "` passes validation; without trimming again here the
+    * padding would land inside the SQL literal (and, once substituted, inside the resolved
+    * credential).
+    */
+  private def opt(name: String, value: Option[String]): Option[String] =
+    value.map(_.trim).filter(_.nonEmpty).map(v => s"$name ${lit(v)}")
+
+  /** The oauth2-server-endpoint fallback DuckDB reads off the SECRET (see [[secretBlock]]'s
+    * comment) and the ATTACH's own `ENDPOINT` are textually identical but SEMANTICALLY DISTINCT -
+    * DuckDB reads one for the oauth2 token exchange and the other for catalog operations - so both
+    * call sites keep their own emission even though they share this computation.
+    */
+  private def endpointOpt(cfg: IcebergRestConfig): Option[String] =
+    Option.when(cfg.uri.trim.nonEmpty)(s"ENDPOINT ${lit(cfg.uri.trim)}")
+
+  private def secretBlock(cfg: IcebergRestConfig, alias: String): String =
+    if !needsSecret(cfg) then ""
     else
+      val params = cfg.authType match
+        case Some(IcebergAuthType.OAuth2) =>
+          List(
+            Some("TYPE ICEBERG"),
+            opt("CLIENT_ID", cfg.clientId),
+            opt("CLIENT_SECRET", cfg.clientSecret),
+            opt("OAUTH2_SERVER_URI", cfg.oauth2ServerUri),
+            opt("OAUTH2_SCOPE", cfg.oauth2Scope),
+            opt("OAUTH2_GRANT_TYPE", cfg.oauth2GrantType),
+            // DuckDB derives the oauth2 server URI fallback (<endpoint>/v1/oauth/tokens) from the
+            // SECRET's own ENDPOINT, not from the ATTACH's ENDPOINT option: with authType=oauth2
+            // and no explicit oauth2ServerUri, omitting this makes ATTACH fail before any network
+            // call ("no 'oauth2_server_uri' was provided, and no 'endpoint' was provided to fall
+            // back on"). Kept oauth2-only: a Token secret does no exchange, so ENDPOINT here would
+            // be inert, and the ATTACH already carries its own ENDPOINT for catalog operations.
+            endpointOpt(cfg)
+          ).flatten
+        case Some(IcebergAuthType.Token) =>
+          List(Some("TYPE ICEBERG"), opt("TOKEN", cfg.token)).flatten
+        case _ => Nil
+
       s"CREATE OR REPLACE SECRET ${ident(secretName(alias))} (\n  " +
         params.mkString(",\n  ") +
         "\n);\n"
@@ -85,7 +108,7 @@ object IcebergSetupSql:
     List(
       Some("TYPE ICEBERG"),
       Option.when(hasSecret)(s"SECRET ${ident(secretName(alias))}"),
-      Option.when(cfg.uri.trim.nonEmpty)(s"ENDPOINT ${lit(cfg.uri.trim)}"),
+      endpointOpt(cfg),
       cfg.endpointType.map(t => s"ENDPOINT_TYPE ${lit(t.wire)}"),
       cfg.authType.collect {
         case IcebergAuthType.NoAuth => s"AUTHORIZATION_TYPE ${lit(IcebergAuthType.NoAuth.wire)}"

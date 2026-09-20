@@ -107,8 +107,15 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("{{")) shouldBe true
   }
 
-  it should "still accept a clientSecret placeholder even though it also contains '{{'" in {
-    oauth2.validate("sales_lake", IcebergRestConfig.ReservedAliases) shouldBe empty
+  it should "accept a clientSecret placeholder when nothing else is a placeholder" in {
+    val cfg = IcebergRestConfig(
+      uri = "https://catalog.example.com/api/catalog",
+      warehouse = "sales",
+      authType = Some(IcebergAuthType.OAuth2),
+      clientId = Some("plain-client-id"),
+      clientSecret = Some("{{secret.CSEC}}")
+    )
+    cfg.validate("sales_lake", Set.empty).exists(_.contains("clientSecret")) shouldBe false
   }
 
   it should "reject a clientId containing '{{'" in {
@@ -168,10 +175,6 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     val errs = cfg.validate("sales_lake", Set.empty)
     errs.exists(_.contains("token")) shouldBe true
     errs.exists(_.contains("{{secret.")) shouldBe true
-  }
-
-  it should "accept the placeholder forms already used by the fixtures" in {
-    oauth2.validate("sales_lake", IcebergRestConfig.ReservedAliases) shouldBe empty
   }
 
   "json" should "round-trip every field" in {

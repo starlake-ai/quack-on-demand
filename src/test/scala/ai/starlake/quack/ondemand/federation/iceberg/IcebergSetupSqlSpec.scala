@@ -143,6 +143,18 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
     IcebergSetupSql.render(v(cfg, "lake")) should include("""ATTACH 'o''brien'""")
   }
 
+  it should "render a padded clientSecret without the padding it was validated with" in {
+    val cfg = oauth2.copy(clientSecret = Some(" {{secret.CSEC}} "))
+    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"))
+    sql should include("""CLIENT_SECRET '{{secret.CSEC}}'""")
+    sql should not include "' {{secret.CSEC}} '"
+  }
+
+  it should "trim a padded warehouse before it lands on the ATTACH" in {
+    val cfg = oauth2.copy(warehouse = " sales ")
+    IcebergSetupSql.render(v(cfg, "sales_lake")) should include("""ATTACH 'sales' AS""")
+  }
+
   it should "leave secret placeholders untouched so the blob builder can substitute them" in {
     val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"))
     sql should include("{{secret.CID}}")

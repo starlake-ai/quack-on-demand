@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
 
 import java.sql.{Connection, DriverManager, ResultSet}
 import scala.collection.mutable.ListBuffer
@@ -54,6 +54,13 @@ class FederatedSourceStore(
 
   Class.forName("org.postgresql.Driver")
 
+  // Single source of truth for the ten `FederatedSource` columns: getSource / listSources /
+  // listEnabledSources each SELECT this exact list, and readSource reads them back by label - a
+  // column missed in only one of the three previously would fail at runtime on that path alone.
+  private val SourceColumns =
+    "id, tenant_db_id, alias, setup_sql, description, disabled, created_at, " +
+      "source_type, config, read_only"
+
   // Bounded once at construction: every caller of withConn (handlers, blob builder loads via
   // listEnabledSources/listSecrets, tenantDbIdsWithSources) benefits without a per-call cost.
   private val boundedUrl = FederatedSourceStore.withTimeouts(jdbcUrl)
@@ -105,8 +112,7 @@ class FederatedSourceStore(
 
   def getSource(tenantDbId: String, alias: String): Option[FederatedSource] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
-        |       source_type, config, read_only
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source WHERE tenant_db_id = ? AND alias = ?""".stripMargin
     )
     try
@@ -122,8 +128,7 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
-        |       source_type, config, read_only
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source WHERE tenant_db_id = ? ORDER BY alias""".stripMargin
     )
   }
@@ -132,8 +137,7 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at,
-        |       source_type, config, read_only
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source
         |WHERE tenant_db_id = ? AND disabled = false ORDER BY alias""".stripMargin
     )
@@ -237,8 +241,7 @@ class FederatedSourceStore(
       description = Option(rs.getString("description")),
       disabled = rs.getBoolean("disabled"),
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
-      sourceType = ai.starlake.quack.model.FederatedSourceType
-        .fromWireOrSql(rs.getString("source_type")),
+      sourceType = FederatedSourceType.fromWireOrSql(rs.getString("source_type")),
       config = Option(rs.getString("config")),
       readOnly = rs.getBoolean("read_only")
     )
