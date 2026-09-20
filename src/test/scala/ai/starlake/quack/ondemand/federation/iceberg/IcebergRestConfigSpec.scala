@@ -90,6 +90,27 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("{{secret.")) shouldBe true
   }
 
+  it should "reject a uri containing '{{'" in {
+    val errs = oauth2
+      .copy(uri = "https://catalog.example.com/{{secret.HOST}}")
+      .validate(
+        "sales_lake",
+        Set.empty
+      )
+    errs.exists(_.contains("uri")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "reject a warehouse containing '{{'" in {
+    val errs = oauth2.copy(warehouse = "{{secret.WAREHOUSE}}").validate("sales_lake", Set.empty)
+    errs.exists(_.contains("warehouse")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "still accept a clientSecret placeholder even though it also contains '{{'" in {
+    oauth2.validate("sales_lake", IcebergRestConfig.ReservedAliases) shouldBe empty
+  }
+
   it should "reject a literal token value" in {
     val cfg = oauth2.copy(
       authType = Some(IcebergAuthType.Token),

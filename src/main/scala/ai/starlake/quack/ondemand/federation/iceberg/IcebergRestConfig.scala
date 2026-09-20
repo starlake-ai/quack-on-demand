@@ -80,6 +80,13 @@ final case class IcebergRestConfig(
 
     if warehouse.trim.isEmpty then errs += "warehouse is required"
 
+    if uri.contains("{{") then
+      errs += "uri must not contain '{{': it would be read as a secret placeholder and fail " +
+        "the whole tenant-db federation blob"
+    if warehouse.contains("{{") then
+      errs += "warehouse must not contain '{{': it would be read as a secret placeholder and " +
+        "fail the whole tenant-db federation blob"
+
     if authType.isDefined == endpointType.isDefined then
       errs += "set exactly one of authType / endpointType (DuckDB refuses AUTHORIZATION_TYPE " +
         "combined with ENDPOINT_TYPE)"

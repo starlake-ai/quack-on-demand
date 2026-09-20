@@ -13,8 +13,9 @@ package ai.starlake.quack.ondemand.federation.iceberg
   *     satisfies without performing an exchange.
   *   - `none` and `sigv4` need no secret at all, only the `AUTHORIZATION_TYPE` option.
   *   - `glue` and `s3_tables` are `ENDPOINT_TYPE` values and select their own signing. DuckDB
-  *     refuses `ENDPOINT_TYPE` combined with `AUTHORIZATION_TYPE`, which is why the config type
-  *     permits exactly one of the two.
+  *     refuses `ENDPOINT_TYPE` combined with `AUTHORIZATION_TYPE`, which is why
+  *     [[IcebergRestConfig.validate]] permits exactly one of the two - the config type itself does
+  *     not enforce this, see the precondition on [[render]].
   */
 object IcebergSetupSql:
 
@@ -26,6 +27,13 @@ object IcebergSetupSql:
     */
   def secretName(alias: String): String = "qod_ice_" + alias.toLowerCase
 
+  /** Precondition: callers MUST run `cfg.validate(alias, reservedAliases)` first and check it comes
+    * back empty. `render` is a pure total function over `cfg` - it never validates its input, so an
+    * unvalidated config can render, for example, an ATTACH carrying both `ENDPOINT_TYPE` and
+    * `AUTHORIZATION_TYPE`, which DuckDB refuses at ATTACH time. Because this SQL runs inside a
+    * node's startup script, that failure takes down the whole node's init, not just this one
+    * catalog.
+    */
   def render(cfg: IcebergRestConfig, alias: String): String =
     val secret = secretBlock(cfg, alias)
     val opts   = attachOptions(cfg, alias, secret.nonEmpty)
