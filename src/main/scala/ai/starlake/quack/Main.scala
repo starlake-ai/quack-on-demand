@@ -369,6 +369,10 @@ object Main extends IOApp with LazyLogging:
       val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
       Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
 
+    // Best-effort: reports (never fails boot on) a federated alias the naming rule now rejects,
+    // so an operator learns about it on restart rather than on their next edit attempt.
+    manifestFedStore.foreach(BootPreflight.checkFederatedAliases)
+
     // Declared here (rather than just above catalogReaders below) so federationBlobOf can also
     // close over it: both need the supervisor's tenant-db resolution but are themselves inputs to
     // the supervisor's constructor. Empty reference, filled right after the supervisor is built;
