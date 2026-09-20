@@ -16,17 +16,24 @@ import java.time.Instant
   * [[ai.starlake.quack.edge.sql.CatalogWriteScreen]], a defence-in-depth screen wired into
   * `FlightSqlRouter` (the ACL graph remains the primary gate). That screen parses every statement
   * it cannot positively prove is read-side and denies a write it resolves against this catalog, or
-  * cannot fully resolve at all -- it does NOT trust a "classified as not a write" verdict as proof
-  * that a statement is a read; see `CatalogWriteScreen`'s scaladoc for the exact per-statement
-  * rule. The consequence an operator needs to know before flipping this flag: while ANY source on
-  * the pool is read-only, every write on the WHOLE pool must be fully parseable and fully qualified
-  * or it is refused, including writes against OTHER attached catalogs and including statements
-  * `SqlParser` has no arm for at all (`ATTACH`/`DETACH`/`CREATE SECRET`/`COPY`/`GRANT`); a two-part
-  * write such as `INSERT INTO some_other_db.orders` is refused too, because the parser cannot tell
-  * a catalog head from a schema head there. This screen guarantees no resolvable write reaches this
-  * catalog; it is not parity with `PostgresAclValidator` and it makes no promise beyond writes. The
-  * REST create path defaults a new `iceberg_rest` source to true (Task 5). This field defaults to
-  * false so pre-0038 sources keep their behaviour.
+  * cannot fully resolve at all -- for a statement it can parse on its own, it does NOT trust a
+  * "classified as not a write" verdict as proof that a statement is a read; see
+  * `CatalogWriteScreen`'s scaladoc for the exact per-statement rule, INCLUDING the two places it
+  * deliberately widens past what it can prove rather than parse: a batch the parser cannot split
+  * into one statement per fragment (fails closed on the fragment list instead), a blank parse
+  * snippet (always treated as a write), and `PREPARE`/`EXECUTE` (always treated as a write,
+  * regardless of what they run). The consequence an operator needs to know before flipping this
+  * flag: while ANY source on the pool is read-only, every write on the WHOLE pool must be fully
+  * parseable and fully qualified or it is refused, including writes against OTHER attached catalogs
+  * and including statements `SqlParser` has no arm for at all (`ATTACH`/`DETACH`/
+  * `CREATE SECRET`/`COPY`/`GRANT`); a two-part write such as `INSERT INTO some_other_db.orders` is
+  * refused too, because the parser cannot tell a catalog head from a schema head there. This screen
+  * is not parity with `PostgresAclValidator` and it makes no promise beyond writes -- and even
+  * within writes it promises only that a write this screen can resolve, or can prove write-shaped
+  * by one of the rules above, is denied; it is not a guarantee that every conceivable way of
+  * driving a write past this catalog has been enumerated. The REST create path defaults a new
+  * `iceberg_rest` source to true (Task 5). This field defaults to false so pre-0038 sources keep
+  * their behaviour.
   */
 final case class FederatedSource(
     id: String,

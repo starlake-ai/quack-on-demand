@@ -179,6 +179,62 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
 
   // --- N4 robustness: the screen must not depend on the classifier's tunable dml/ddl buckets ---
 
+  // --- P1: a whole-submission parse throw must not collapse the batch to first-token
+  // classification. `SqlParser.extract` collapses a submission jsqlparser cannot split into a
+  // single ParseError whose snippet is the ENTIRE submission; judging that snippet with
+  // isWriteShaped would classify the whole batch by its first token, exactly what N1 closed for
+  // the non-throwing case. ---
+
+  it should "deny a batch that throws at the whole-submission level with a write fragment (START TRANSACTION)" in {
+    // Regression witness: `START TRANSACTION` classifies Begin, so a first-token read of the
+    // collapsed ParseError's snippet ("START TRANSACTION; INSERT ...; COMMIT") also classifies
+    // Begin and is not write-shaped -- reverting the fragment-list fallback to trusting that
+    // collapsed snippet makes this None.
+    val r = screen("START TRANSACTION; INSERT INTO sales_lake.main.orders VALUES (1); COMMIT")
+    r.value should include("read-only")
+  }
+
+  it should "deny a batch that throws at the whole-submission level with a write fragment (CHECKPOINT)" in {
+    // Second witness: CHECKPOINT classifies Other, so the collapsed snippet's first token is
+    // equally uninformative.
+    val r = screen("CHECKPOINT; INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "admit a batch that collapses at the whole-submission level but has no write fragment" in {
+    // jsqlparser also swallows BEGIN; <anything>; COMMIT into a single node regardless of what
+    // <anything> is, so this collapses exactly like the two witnesses above -- but none of its
+    // fragments classify Dml/Ddl or PREPARE/EXECUTE, so the fallback must not blanket-deny every
+    // collapsed batch, only ones that actually look like a write.
+    screen("BEGIN; PRAGMA database_list; COMMIT") shouldBe None
+  }
+
+  // --- P2: PREPARE ... AS <write>; EXECUTE composes into an executed write without either
+  // statement classifying Dml/Ddl or resolving through SqlParser. ---
+
+  it should "deny a PREPARE whose body is a write against the read-only catalog" in {
+    val r = screen("PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny the PREPARE/EXECUTE composition that executes a write against the read-only catalog" in {
+    val r = screen(
+      "PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1); EXECUTE p"
+    )
+    r.value should include("read-only")
+  }
+
+  it should "deny a bare EXECUTE while a catalog is read-only" in {
+    // Over-denial is the accepted cost: the screen cannot tell what a bare EXECUTE runs, so it
+    // fails closed on EXECUTE itself rather than only on the paired PREPARE.
+    val r = screen("EXECUTE p")
+    r.value should include("read-only")
+  }
+
+  it should "still admit CALL, which classifies Other like PREPARE/EXECUTE but is not treated as write-shaped" in {
+    screen("CALL some_udf()") shouldBe None
+  }
+
   it should "still deny a resolvable INSERT even when the classifier's dml bucket is emptied" in {
     // Simulates an operator setting QOD_CLASSIFIER_DML to drop INSERT: the classifier now reports
     // Other for this statement. Because SqlParser resolves it to a Write access on sales_lake

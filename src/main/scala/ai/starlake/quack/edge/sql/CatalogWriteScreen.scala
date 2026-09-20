@@ -25,33 +25,84 @@ import com.typesafe.scalalogging.LazyLogging
   *      `Other`), the whole submission is admitted without being parsed. This is the only cheap
   *      path, and it is judged per fragment, not by the first token of the submission: a batch
   *      whose first statement is a `SELECT` and whose second is an `INSERT` into the read-only
-  *      catalog does NOT take this path.
-  *   3. Otherwise the submission is parsed once with `SqlParser.extract`, and each statement in the
-  *      result is judged on its own, using the `StatementKind` of ITS OWN snippet (not the
-  *      submission's):
+  *      catalog does NOT take this path. Note this path DOES trust the classifier's `select` /
+  *      `begin` / `commit` / `rollback` buckets, which are as operator-tunable as any other bucket:
+  *      an operator who moves a write verb into `select` disables the screen for that verb without
+  *      it ever reaching step 3.
+  *   3. Otherwise the submission is parsed once with `SqlParser.extract`. `SqlParser.extract`
+  *      itself has two shapes of failure, and the screen treats them differently:
+  *      - If jsqlparser can split the submission into one node per statement, each result is judged
+  *        on its own, using the `StatementKind` of ITS OWN snippet (not the submission's) -- see
+  *        rule 4 below.
+  *      - If jsqlparser THROWS on the whole submission (e.g. `START TRANSACTION; INSERT ...;
+  *        COMMIT`, `CHECKPOINT; INSERT ...`), `SqlParser.extract`'s outer catch collapses the batch
+  *        into a SINGLE `ParseError` whose snippet is the ENTIRE submission -- there is no
+  *        per-statement snippet to judge. Trusting that collapsed snippet with rule 4 would reduce
+  *        to classifying the whole submission by its first token, which is the exact bypass this
+  *        screen exists to close. Detected by `result.statements.length < fragments.length`: the
+  *        screen falls back to judging the FRAGMENT list instead, and denies the whole submission
+  *        if ANY fragment looks write-shaped (rule 4's own `isWriteShaped`, applied per fragment).
+  *        Otherwise it admits, so a batch that merely happens to collapse (e.g. `BEGIN; PRAGMA
+  *        database_list; COMMIT`, which jsqlparser also swallows into one blank node) is not
+  *        blanket-denied just because it collapsed.
+  *   4. The per-statement rule, for a statement with its own trustworthy snippet:
   *      - a statement that classifies `Dml` or `Ddl` is judged FAIL CLOSED: a parse error on it, a
   *        qualification error on it, an unsupported ref on it, or a resolved `Write`/`Ddl` access
   *        it produces against a read-only catalog, are all denied.
   *      - a statement that classifies anything else (`Select`/`Begin`/`Commit`/`Rollback` reaching
   *        this arm because another fragment in the batch was not read-side, or `Other`) is denied
-  *        ONLY when it produces a RESOLVED `Write`/`Ddl` access against a read-only catalog. A
-  *        parse error, a qualification error, or an unsupported ref on such a statement is ADMITTED
-  *        -- this is what keeps `PRAGMA`, `SHOW ALL TABLES`, and other DuckDB-native syntax the
-  *        parser has no arm for from being denied just because a read-only catalog is attached
-  *        somewhere on the pool.
+  *        ONLY when it produces a RESOLVED `Write`/`Ddl` access against a read-only catalog, OR
+  *        when its own first token is `PREPARE` or `EXECUTE` (see the note on `isWriteShaped`
+  *        below). Any other parse error, a qualification error, or an unsupported ref on such a
+  *        statement is ADMITTED -- this is what keeps `PRAGMA table_info(...)`, `CALL some_udf()`,
+  *        and other DuckDB-native syntax the parser has no arm for from being denied just because a
+  *        read-only catalog is attached somewhere on the pool. (`SHOW ALL TABLES` is a read-side
+  *        example too, but it never reaches this rule: `SHOW` sits in the classifier's `select`
+  *        bucket, so it is admitted at step 2 without being parsed at all.)
   *
-  * The load-bearing consequence of step 3's second bullet: this screen does NOT trust the
-  * classifier's keyword buckets as a security boundary. `StatementClassifier`'s buckets are
-  * operator-tunable (`QOD_CLASSIFIER_*`) and its catch-all `Other` is documented as "treated like a
-  * read by default" for ROUTING purposes -- but a statement the classifier cannot recognize is not
-  * a statement this screen has proven is a read, it is a statement nobody looked at. Every write
-  * this screen can resolve is still checked against the read-only set regardless of how it
-  * classifies; only a write it genuinely cannot resolve, and cannot therefore prove targets the
-  * read-only catalog, is let through. Concretely: emptying the `dml` bucket (or dropping `INSERT`
-  * from it) does not disable this screen for a resolvable `INSERT` -- it still parses, still
-  * resolves a `Write` access, and is still denied. It only widens what counts as unresolvable
-  * fail-open bait, which was already the classifier's `Other` bucket's job before this screen
-  * existed.
+  * The load-bearing consequence of rule 4's second bullet: for a statement that reaches step 3/4
+  * with its OWN snippet, this screen does NOT trust the classifier's `dml`/`ddl` buckets as the
+  * sole security boundary -- see below. It DOES still trust the classifier for the cheap path (step
+  * 2) and for detecting a collapsed batch's write-shaped fragments (step 3's second bullet),
+  * because neither of those has a parsed access set to fall back on; only the parsed, per-statement
+  * path can out-rule the classifier. `StatementClassifier`'s buckets are operator-tunable
+  * (`QOD_CLASSIFIER_*`) and its catch-all `Other` is documented as "treated like a read by default"
+  * for ROUTING purposes -- but a statement the classifier cannot recognize is not a statement this
+  * screen has proven is a read, it is a statement nobody looked at. Every write step 3/4 can
+  * resolve is still checked against the read-only set regardless of how it classifies; only a write
+  * it genuinely cannot resolve, and cannot therefore prove targets the read-only catalog, is let
+  * through. Concretely: emptying the `dml` bucket (or dropping `INSERT` from it) does not disable
+  * this screen for a resolvable `INSERT` -- it still parses, still resolves a `Write` access, and
+  * is still denied. It only widens what counts as unresolvable fail-open bait, which was already
+  * the classifier's `Other` bucket's job before this screen existed.
+  *
+  * `PREPARE ... AS <write>; EXECUTE ...` composes into an executed write while neither statement
+  * classifies `Dml`/`Ddl` (`PREPARE`/`EXECUTE` sit in no `StatementClassifier` bucket) and neither
+  * resolves through `SqlParser` (it has no arm for either node type, so both come back as
+  * `ParseError`). The precise fix -- a `SqlParser` arm that recurses into the prepared statement,
+  * mirroring the existing `ExplainStatement` arm -- is out of this screen's reach. Instead
+  * `isWriteShaped` treats a snippet whose first token is `PREPARE` or `EXECUTE` as write-shaped
+  * unconditionally, the same blunt fail-closed treatment `ATTACH`/`COPY`/`GRANT` already get from
+  * their classifier buckets. Cost: an `EXECUTE` of a genuinely read-only prepared statement is
+  * denied too while any catalog is read-only.
+  *
+  * The blank-snippet rule -- a blank snippet is ALWAYS treated as write-shaped, regardless of what
+  * the statement actually was -- is the other place this screen deliberately widens past what it
+  * can prove, and it applies ONLY on the per-statement path (rule 4), when jsqlparser returned one
+  * node per statement and this particular one's own snippet came back empty. jsqlparser's
+  * `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements` produces for a statement
+  * it cannot parse at all) has an empty `toString`, so a blank snippet is not evidence the
+  * statement was harmless, it is the parser giving up. Most DuckDB-native syntax the parser cannot
+  * handle still comes back non-blank (`SHOW ALL TABLES`, `PRAGMA ...`, and other
+  * `UnsupportedStatement`s all render their original text) or is read-side and never reaches the
+  * parser via step 2, so this rule rarely fires on a genuine read -- e.g.
+  * `INSERT INTO sales_lake.main.orders VALUES (1` (an unbalanced literal, submitted alone) parses
+  * to one blank `UnsupportedStatement` and is denied by this rule alone. It does NOT reach a
+  * submission that collapses into fewer nodes than fragments (step 3's second bullet handles that
+  * case first, over the fragment list, before this rule ever sees a snippet) --
+  * `BEGIN; PRAGMA database_list; COMMIT` also collapses to a single blank node, but because none of
+  * its three fragments classify write-shaped, step 3's fallback admits it without this rule ever
+  * running.
   *
   * This is NOT full parity with `PostgresAclValidator`'s fail-closed conditions: the validator
   * fails closed on every statement it cannot resolve regardless of verb; this screen only on
@@ -99,6 +150,14 @@ object CatalogWriteScreen extends LazyLogging:
         val deniedList = denied.toList.sorted.mkString(", ")
         val result     = SqlParser.extract(sql, config)
 
+        // `PREPARE p AS INSERT ...; EXECUTE p` composes into an executed write without either
+        // statement ever classifying Dml/Ddl or resolving through SqlParser (neither node type has
+        // an arm there) -- see the scaladoc's PREPARE/EXECUTE paragraph. Recognized purely by first
+        // token, independently of the classifier's tunable buckets.
+        def isPrepareOrExecute(snippet: String): Boolean =
+          val head = snippet.trim.takeWhile(c => !c.isWhitespace && c != ';').toUpperCase
+          head == "PREPARE" || head == "EXECUTE"
+
         // jsqlparser's `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements`
         // produces for a statement it cannot parse at all) has an empty `toString`, and
         // `sqlSnippet` is built from `stmt.toString`. A blank snippet is therefore not evidence of
@@ -106,6 +165,7 @@ object CatalogWriteScreen extends LazyLogging:
         // write. Fail closed rather than let an empty string classify as `Other` and be admitted.
         def isWriteShaped(snippet: String): Boolean =
           if snippet.isBlank then true
+          else if isPrepareOrExecute(snippet) then true
           else
             classify(snippet) match
               case StatementKind.Dml | StatementKind.Ddl => true
@@ -144,7 +204,23 @@ object CatalogWriteScreen extends LazyLogging:
                 )
           case StatementResult.ControlFlow(_, _, _) => None
 
-        result.statements.iterator.flatMap(denialFor).nextOption()
+        if result.statements.length < fragments.length then
+          // `SqlParser.extract` collapsed the whole submission into fewer StatementResults than
+          // there are top-level fragments -- jsqlparser threw on the SUBMISSION rather than on one
+          // statement, and `SqlParser.extract`'s outer catch reports that as a SINGLE ParseError
+          // whose snippet is the entire submission text (see the scaladoc's step 3). That collapsed
+          // snippet cannot be handed to `isWriteShaped`: doing so would classify the whole
+          // submission by its first token, exactly the bypass this screen exists to close. Fall
+          // back to the fragment list the splitter already produced above instead, and fail closed
+          // if ANY fragment looks write-shaped on its own.
+          if fragments.exists(isWriteShaped) then
+            Some(
+              "write statement could not be parsed while a read-only catalog " +
+                s"($deniedList) is attached and the submission could not be split into " +
+                "individually verifiable statements"
+            )
+          else None
+        else result.statements.iterator.flatMap(denialFor).nextOption()
 
   /** Human-readable rendering of a qualification failure, matching `PostgresAclValidator`'s wording
     * for the same `DenyReason` so an operator sees one consistent message across both gates.
