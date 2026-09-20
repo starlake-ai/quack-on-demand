@@ -40,7 +40,15 @@ final class McpDataTools(
     tags: TagHandlers,
     tenantDbs: TenantDbHandlers,
     profile: ProfileHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: String => Option[SessionScope],
+    /** Branch targeting (Epic 1): `(tenant, database, branch)` -> `(branch catalog tenant-db name,
+      * branch pool key)`, or a caller-facing reason. The default refuses every `branch` argument,
+      * for callers that do not wire branching.
+      */
+    branchTarget: (String, String, String) => Either[
+      String,
+      (String, ai.starlake.quack.model.PoolKey)
+    ] = (_, _, b) => Left(s"branch '$b' not found (branching unavailable)")
 ):
 
   import McpDataTools._
@@ -132,6 +140,32 @@ final class McpDataTools(
         Left(s"pool '$name' is not permitted for this token")
       case _ => Right(())
 
+  /** Where a statement runs and which tenant-db the catalog reads address: the branch's own pool
+    * and catalog when `branch` is given (the `pool` argument, if any, is still checked against the
+    * token's axis and must serve the parent database), else the parent's.
+    */
+  private def target(
+      tenant: String,
+      database: String,
+      poolArg: Option[String],
+      branchArg: Option[String]
+  ): Either[String, (String, ai.starlake.quack.model.PoolKey)] =
+    branchArg match
+      case None         => poolKeyFor(tenant, database, poolArg).map(k => (database, k))
+      case Some(branch) =>
+        for
+          _ <- poolArg.fold[Either[String, Unit]](Right(()))(p =>
+            poolKeyFor(tenant, database, Some(p)).map(_ => ())
+          )
+          res <- branchTarget(tenant, database, branch)
+        yield res
+
+  private val branchProp: (String, Json) =
+    "branch" -> strProp(
+      "Target a writable branch of the database (see create_branch); reads and writes then " +
+        "never touch the live database."
+    )
+
   private def poolKeyFor(
       tenant: String,
       database: String,
@@ -165,7 +199,8 @@ final class McpDataTools(
       "database" -> strProp("Target database (tenant-db) name."),
       "tenant"   -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
       "pool"     -> strProp("Pool to run on; defaults to a read-capable pool of the database."),
-      "max_rows" -> intProp("Lower the server row cap for this call; it can never raise it.")
+      "max_rows" -> intProp("Lower the server row cap for this call; it can never raise it."),
+      branchProp
     ),
     adminOnly = false,
     run = (principal, args) =>
@@ -175,8 +210,8 @@ final class McpDataTools(
         database <- str(args, "database").toRight("the 'database' argument is required")
         _        <- allowedDatabase(principal, database)
         _        <- allowedPool(principal, str(args, "pool"))
-        poolKey  <- poolKeyFor(tenant, database, str(args, "pool"))
-      yield (poolKey, sql)) match
+        t        <- target(tenant, database, str(args, "pool"), str(args, "branch"))
+      yield (t._2, sql)) match
         case Left(err)             => IO.pure(Left(err))
         case Right((poolKey, sql)) =>
           val caller = callerFor(principal)
@@ -225,14 +260,18 @@ final class McpDataTools(
       required = List("database"),
       props = "database" -> strProp("Database (tenant-db) name."),
       "schema" -> strProp("Only this schema."),
-      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it).")
+      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
+      branchProp
     ),
     adminOnly = false,
     run = (principal, args) =>
       (for
         tenant   <- tenantOf(principal, args)
-        database <- str(args, "database").toRight("the 'database' argument is required")
-        _        <- allowedDatabase(principal, database)
+        parent   <- str(args, "database").toRight("the 'database' argument is required")
+        _        <- allowedDatabase(principal, parent)
+        database <- str(args, "branch") match
+          case None    => Right(parent)
+          case Some(b) => branchTarget(tenant, parent, b).map(_._1)
       yield (tenant, database)) match
         case Left(err)                 => IO.pure(Left(err))
         case Right((tenant, database)) =>
@@ -268,19 +307,25 @@ final class McpDataTools(
       props = "database" -> strProp("Database (tenant-db) name."),
       "schema" -> strProp("Schema name."),
       "table"  -> strProp("Table name."),
-      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it).")
+      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
+      branchProp
     ),
     adminOnly = false,
     run = (principal, args) =>
       (for
-        tenant   <- tenantOf(principal, args)
-        database <- str(args, "database").toRight("the 'database' argument is required")
-        _        <- allowedDatabase(principal, database)
-        schema   <- str(args, "schema").toRight("the 'schema' argument is required")
-        table    <- str(args, "table").toRight("the 'table' argument is required")
-      yield (tenant, database, schema, table)) match
-        case Left(err)                                => IO.pure(Left(err))
-        case Right((tenant, database, schema, table)) =>
+        tenant <- tenantOf(principal, args)
+        parent <- str(args, "database").toRight("the 'database' argument is required")
+        _      <- allowedDatabase(principal, parent)
+        schema <- str(args, "schema").toRight("the 'schema' argument is required")
+        table  <- str(args, "table").toRight("the 'table' argument is required")
+        // Without a branch the schema alone is still an answer when no pool is routable, so
+        // the pool pick stays optional; a branch target resolves both or fails.
+        t <- str(args, "branch") match
+          case None    => Right((parent, poolKeyFor(tenant, parent, None).toOption))
+          case Some(b) => branchTarget(tenant, parent, b).map { case (db, key) => (db, Some(key)) }
+      yield (tenant, t._1, t._2, schema, table)) match
+        case Left(err)                                          => IO.pure(Left(err))
+        case Right((tenant, database, poolKey0, schema, table)) =>
           IO.blocking(
             bridge(
               catalog
@@ -291,11 +336,11 @@ final class McpDataTools(
           ).flatMap {
             case Left(err)     => IO.pure(Left(err))
             case Right(detail) =>
-              poolKeyFor(tenant, database, None) match
-                case Left(_) =>
+              poolKey0 match
+                case None =>
                   // No routable pool: the schema alone is still an answer.
                   IO.pure(Right(Json.obj("table" -> detail.asJson)))
-                case Right(poolKey) =>
+                case Some(poolKey) =>
                   // LIMIT one past the sample cap so `truncated` marks that more rows exist.
                   val sampleSql =
                     s"""SELECT * FROM "$schema"."$table" LIMIT ${SampleRows + 1}"""

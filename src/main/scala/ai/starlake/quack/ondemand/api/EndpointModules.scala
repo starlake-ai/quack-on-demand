@@ -24,5 +24,6 @@ object EndpointModules:
     ScimEndpoints,
     TimeTravelEndpoints,
     UndropEndpoints,
-    RestoreEndpoints
+    RestoreEndpoints,
+    BranchEndpoints
   )

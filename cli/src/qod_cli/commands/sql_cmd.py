@@ -182,6 +182,11 @@ def sql(
     tenant: str = typer.Option(None, "--tenant", help="Override the profile tenant."),
     pool: str = typer.Option(None, "--pool", help="Override the profile pool."),
     superuser: bool = typer.Option(None, "--superuser/--no-superuser"),
+    branch: str = typer.Option(
+        None,
+        "--branch",
+        help="Run on a writable branch of the pool's database (see qod branch create).",
+    ),
 ):
     """Run SQL against the FlightSQL edge."""
     settings = ctx.obj.settings
@@ -189,6 +194,8 @@ def sql(
         settings.tenant = tenant
     if pool is not None:
         settings.pool = pool
+    if branch is not None:
+        settings.branch = branch
     if superuser is not None:
         settings.superuser = superuser
     mode = _mode(ctx, csv_flag)

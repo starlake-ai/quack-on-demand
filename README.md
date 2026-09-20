@@ -193,6 +193,7 @@ Then harden it: **[Production hardening](https://docs.starlake.ai/qod/operating/
 - **One-command serving**: `qod serve <target>` boots a persistent, secured gateway over an existing `.duckdb` file, a directory of parquet/csv, or an object-store prefix - control plane on a bundled embedded Postgres, so there is nothing to install first
 - **Multi-tenant pools** of Quack nodes (`READONLY` / `WRITEONLY` / `DUAL`); the router classifies each statement and picks a compatible least-loaded node
 - **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the control-plane DB: tenant isolation at the Postgres-database boundary, not just row level
+- **Branches for agents and pipelines**: `qod branch create` clones a DuckLake database at its current head without copying data (the branch reads the parent's Parquet in place and writes its own files), served by its own pool. Agents target it with the FlightSQL `branch` connection header or the MCP `branch` argument, review the change set (`qod branch changes` / `diff`, or the tenant page's Branches tab in the admin console), propose a merge, and a *different* human fast-forward merges it into main in one stamped, tagged snapshot. A branch-only personal access token (`--branch-only`) makes writes on the live database impossible for that agent. Maintenance on main never expires a snapshot a live branch was forked from
 - **Single binary** deployment
 
 ### Operability

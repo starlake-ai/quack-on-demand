@@ -98,6 +98,15 @@ object AuditActions:
   val CatalogUndrop = "catalog.undrop"
   // restore is a mutation (routed CREATE OR REPLACE), not a read; audited unconditionally
   val CatalogRestore = "catalog.restore"
+  // branches (Epic 1): every mutation audited unconditionally; the two reads follow the
+  // catalog-read rule (catalog.auditCatalogReads)
+  val BranchCreate      = "branch.create"
+  val BranchPropose     = "branch.propose"
+  val BranchMerge       = "branch.merge"
+  val BranchDiscard     = "branch.discard"
+  val BranchExpire      = "branch.expire"
+  val BranchChangesRead = "branch.changes.read"
+  val BranchDiffRead    = "branch.diff.read"
   // managed maintenance (Spec 09)
   val MaintenanceRun          = "maintenance.run"
   val MaintenancePolicyUpsert = "maintenance.policy.upsert"
@@ -193,6 +202,13 @@ object AuditActions:
     CatalogRecoverableRead,
     CatalogUndrop,
     CatalogRestore,
+    BranchCreate,
+    BranchPropose,
+    BranchMerge,
+    BranchDiscard,
+    BranchExpire,
+    BranchChangesRead,
+    BranchDiffRead,
     MaintenanceRun,
     MaintenancePolicyUpsert,
     MaintenancePolicyDelete,

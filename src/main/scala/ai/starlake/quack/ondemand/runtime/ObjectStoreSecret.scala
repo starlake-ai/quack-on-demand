@@ -19,10 +19,14 @@ object ObjectStoreSecret:
   def sql(objectStore: Map[String, String], dataPath: String): String =
     if objectStore.isEmpty then ""
     else
+      // A branch prefix (`<parent>__br_<id8>/`) scopes to the parent's prefix without its
+      // trailing separator so the same secret covers the parent's Parquet the branch reads in
+      // place AND the branch's own writes; every other path scopes to itself.
+      val scope = ai.starlake.quack.ondemand.branch.BranchNames.secretScope(dataPath)
       scheme(dataPath) match
-        case "s3" | "s3a" | "r2"      => s3Secret(objectStore, dataPath)
-        case "gs"                     => gcsSecret(objectStore, dataPath)
-        case "az" | "azure" | "abfss" => azureSecret(objectStore, dataPath)
+        case "s3" | "s3a" | "r2"      => s3Secret(objectStore, scope)
+        case "gs"                     => gcsSecret(objectStore, scope)
+        case "az" | "azure" | "abfss" => azureSecret(objectStore, scope)
         case _                        => ""
 
   private def s3Secret(m: Map[String, String], scope: String): String =

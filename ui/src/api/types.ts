@@ -1119,3 +1119,97 @@ export interface UsageResponse {
   dataStart: string | null;
   groups: UsageGroupEntry[]; // sorted by engineMs descending
 }
+
+// ----- Branches (Epic 1) ----------------------------------------------------
+
+export interface BranchCreateRequest {
+  tenant: string;
+  tenantDb: string;
+  name: string;
+  ttlHours?: number;
+}
+
+export interface BranchOpRequest {
+  tenant: string;
+  tenantDb: string;
+  branch: string;
+}
+
+export interface BranchMergeRequest extends BranchOpRequest {
+  expectedMainSnapshot?: number;
+}
+
+export interface BranchEntry {
+  id: string;
+  tenant: string;
+  database: string;        // the PARENT tenant-db
+  name: string;
+  status: string;          // open | proposed | merged | discarded | expired
+  forkSnapshot: number;
+  owner: string;
+  pool: string;            // the branch's own pool (__br_<id8>)
+  catalogDb: string;       // the branch's own catalog database
+  expiresAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface BranchListResponse {
+  branches: BranchEntry[];
+}
+
+export interface BranchMergeEntry {
+  id: string;
+  status: string;          // proposed | merged | failed | abandoned
+  proposer: string;
+  approver?: string | null;
+  mainSnapshotAtPropose: number;
+  mainSnapshotAfter?: number | null;
+  tagName?: string | null;
+  error?: string | null;
+  summary: unknown;
+  conflicts: unknown;
+  createdAt?: string | null;
+  decidedAt?: string | null;
+}
+
+export interface BranchDetailResponse {
+  branch: BranchEntry;
+  merges: BranchMergeEntry[];
+}
+
+export interface BranchTableChange {
+  schema: string;
+  table: string;
+  kind: string;            // created | dropped | recreated | modified | altered
+  inserted: number;
+  deleted: number;
+  updated: number;
+  mergeable: boolean;
+  reason?: string | null;
+}
+
+export interface BranchConflictEntry {
+  schema: string;
+  table: string;
+  reason: string;
+}
+
+export interface BranchChangesResponse {
+  branch: string;
+  forkSnapshot: number;
+  headSnapshot: number;
+  mainSnapshot: number;
+  tables: BranchTableChange[];
+  conflicts: BranchConflictEntry[];
+  unsupported: string[];
+  mergeable: boolean;
+}
+
+export interface BranchProposeResponse {
+  branch: BranchEntry;
+  merge: BranchMergeEntry;
+  changes: BranchChangesResponse;
+}
+
+export type BranchMergeResponse = BranchProposeResponse;

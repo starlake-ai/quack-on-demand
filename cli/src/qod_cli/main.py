@@ -98,6 +98,10 @@ from .commands import catalog, tag  # noqa: E402
 app.add_typer(catalog.app, name="catalog")
 app.add_typer(tag.app, name="tag")
 
+from .commands import branch  # noqa: E402
+
+app.add_typer(branch.app, name="branch")
+
 from .commands import federation, maintenance, manifest  # noqa: E402
 
 app.add_typer(maintenance.app, name="maintenance")

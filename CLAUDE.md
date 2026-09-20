@@ -70,6 +70,34 @@ A DuckLake database can be created with `managedStorage: true` (REST `database/c
 
 Every managed create writes a tombstone row in `qodstate_managed_prefix` (Liquibase `0027`); `database/delete` stamps `deleted_at` + `purge_eligible_at` (`+retainDays`, or now with `purgeManagedData: true` / `--purge-managed-data`). `ManagedStoreWiring` (in `boot/`) sweeps due rows every `purgeSweepSec` (60s floor), HA-leader-gated inside `IO.defer`, listing and batch-deleting objects in bounded batches per prefix per tick and stamping `purged_at` when a listing comes back empty; the retained window doubles as the undrop window. The root bucket is created if missing by a boot probe that only ever WARNs. **The managed bucket must have versioning OFF**: on a versioned bucket deletes write delete markers, listings go empty, and the worker stamps a prefix purged while non-current versions keep billing.
 
+### Branches (Epic 1, writable zero-copy clones)
+
+A branch of a DuckLake tenant-db is a separate DuckLake catalog: `BranchCloner`
+(`ondemand/branch/`) copies every `ducklake_*` table into a new Postgres database
+under one REPEATABLE READ transaction, rewrites data/delete file paths to the
+parent's absolute location and points `data_path` at a **sibling** prefix
+`<parent>__br_<id8>/` (never nested: the parent's orphan sweep would delete it).
+The clone is registered as a `qodstate_tenant_db` row with `branch_of` set and
+metastore key `catalogAlias` = the parent's alias, so the branch's own pool
+(`__br_<id8>`, one Dual node) attaches it under the parent's DuckDB name and
+grants, policies and user SQL apply unchanged (`TenantDb.catalogAlias` is the one
+helper every alias-derivation site goes through; the spawn scripts honour
+`catalogAlias`). Rows live in `qodstate_branch` / `qodstate_branch_merge`
+(Liquibase `0037`). `BranchService` owns the lifecycle: create -> propose ->
+merge (fast-forward only, approver != proposer, one `BEGIN ... COMMIT` batch on an
+ephemeral `__merge` node with the branch attached as `qod_branch`, located
+afterwards by its unique commit message, tagged `merge-<branch>-<id8>`, then torn
+down) / discard / TTL expiry (`BranchWiring` sweep, leader-gated). Change sets
+come from `BranchChanges` (pure, over `ducklake_snapshot_changes` verbs; flush
+artifacts are not touches). `PinnedSetResolver` pins every live branch's fork
+snapshot; the maintenance scheduler skips branch rows; `deleteTenantDb` refuses a
+parent with live branches. Targeting: FlightSQL header `branch=<name>` (authorized
+against the named parent pool), MCP `branch` argument, `qod sql --branch`.
+`TokenRestriction.branchOnly` (PAT `--branch-only`, column `branch_only`) refuses
+WRITE/DDL on a non-branch pool in `routedExecutor`. Merge is REST/CLI only (no
+MCP tool, `McpCoverageSpec` exclusion). See
+docs/superpowers/specs/2026-09-20-branching-v1-design.md.
+
 ### Pool suspend/resume (scale-to-zero)
 
 `qodstate_pool.suspended` marks a pool scaled to zero WITH its role

@@ -1,6 +1,10 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.model.{
+  Branch,
+  BranchMerge,
+  BranchMergeStatus,
+  BranchStatus,
   MaintenancePolicy,
   MaintenanceRun,
   NodePlacement,
@@ -183,8 +187,8 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_db
         |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |   kind, default_database, default_schema, init_sql)
-        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?)
+        |   kind, default_database, default_schema, init_sql, branch_of)
+        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id            = EXCLUDED.tenant_id,
         |  name                 = EXCLUDED.name,
@@ -195,7 +199,8 @@ final class PostgresControlPlaneStore(
         |  kind                 = EXCLUDED.kind,
         |  default_database     = EXCLUDED.default_database,
         |  default_schema       = EXCLUDED.default_schema,
-        |  init_sql             = EXCLUDED.init_sql""".stripMargin
+        |  init_sql             = EXCLUDED.init_sql,
+        |  branch_of            = EXCLUDED.branch_of""".stripMargin
     )
     try
       ps.setString(1, t.id)
@@ -209,6 +214,7 @@ final class PostgresControlPlaneStore(
       ps.setString(9, t.defaultDatabase.orNull)
       ps.setString(10, t.defaultSchema.orNull)
       ps.setString(11, t.initSql)
+      setNullable(ps, 12, t.branchOf)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -216,7 +222,7 @@ final class PostgresControlPlaneStore(
   def listTenantDbs(tenantId: String): List[TenantDb] = withConn { c =>
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |       kind, default_database, default_schema, init_sql
+        |       kind, default_database, default_schema, init_sql, branch_of
         |FROM qodstate_tenant_db WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -247,7 +253,8 @@ final class PostgresControlPlaneStore(
       defaultDatabase = Option(rs.getString("default_database")),
       defaultSchema = Option(rs.getString("default_schema")),
       disabled = rs.getBoolean("disabled"),
-      initSql = rs.getString("init_sql")
+      initSql = rs.getString("init_sql"),
+      branchOf = Option(rs.getString("branch_of"))
     )
 
   // ---------------- Pool ----------------
@@ -1472,7 +1479,7 @@ final class PostgresControlPlaneStore(
       ),
       tenantDbs = selectAll(
         c,
-        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql FROM qodstate_tenant_db ORDER BY name",
+        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of FROM qodstate_tenant_db ORDER BY name",
         readTenantDb
       ),
       pools = selectAll(
@@ -1658,6 +1665,250 @@ final class PostgresControlPlaneStore(
         finally rs.close()
       finally ps.close()
     }
+
+  // ---- branches (Epic 1) ----
+
+  private val BranchCols =
+    "id, tenant, parent_db_id, parent_db_name, name, tenant_db_id, tenant_db_name, pool_name, " +
+      "data_path, fork_snapshot, owner_user, status, expires_at, created_at, updated_at, purged_at"
+
+  private def readBranch(rs: ResultSet): Branch =
+    Branch(
+      id = rs.getString("id"),
+      tenant = rs.getString("tenant"),
+      parentDbId = rs.getString("parent_db_id"),
+      parentDbName = rs.getString("parent_db_name"),
+      name = rs.getString("name"),
+      tenantDbId = rs.getString("tenant_db_id"),
+      tenantDbName = rs.getString("tenant_db_name"),
+      poolName = rs.getString("pool_name"),
+      dataPath = rs.getString("data_path"),
+      forkSnapshot = rs.getLong("fork_snapshot"),
+      ownerUser = rs.getString("owner_user"),
+      status = BranchStatus
+        .fromWire(rs.getString("status"))
+        .fold(err => sys.error(s"qodstate_branch.status invalid ($err)"), identity),
+      expiresAt = Option(rs.getTimestamp("expires_at")).map(_.toInstant),
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
+      updatedAt = Option(rs.getTimestamp("updated_at")).map(_.toInstant),
+      purgedAt = Option(rs.getTimestamp("purged_at")).map(_.toInstant)
+    )
+
+  private def setNullableInstant(ps: PreparedStatement, idx: Int, v: Option[Instant]): Unit =
+    v match
+      case Some(i) => ps.setTimestamp(idx, Timestamp.from(i))
+      case None    => ps.setNull(idx, Types.TIMESTAMP_WITH_TIMEZONE)
+
+  private def setNullableLong(ps: PreparedStatement, idx: Int, v: Option[Long]): Unit =
+    v match
+      case Some(l) => ps.setLong(idx, l)
+      case None    => ps.setNull(idx, Types.BIGINT)
+
+  def createBranch(b: Branch): Either[String, Branch] = withConn { c =>
+    // The partial unique index (parent_db_id, name) WHERE status IN (live) fires as a plain
+    // unique violation; ON CONFLICT cannot name a partial index without its predicate, so
+    // detect the duplicate by catching the violation (SQLSTATE 23505).
+    val ps = c.prepareStatement(
+      s"""INSERT INTO qodstate_branch
+         |  (id, tenant, parent_db_id, parent_db_name, name, tenant_db_id, tenant_db_name,
+         |   pool_name, data_path, fork_snapshot, owner_user, status, expires_at)
+         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         |RETURNING $BranchCols""".stripMargin
+    )
+    try
+      ps.setString(1, b.id)
+      ps.setString(2, b.tenant)
+      ps.setString(3, b.parentDbId)
+      ps.setString(4, b.parentDbName)
+      ps.setString(5, b.name)
+      ps.setString(6, b.tenantDbId)
+      ps.setString(7, b.tenantDbName)
+      ps.setString(8, b.poolName)
+      ps.setString(9, b.dataPath)
+      ps.setLong(10, b.forkSnapshot)
+      ps.setString(11, b.ownerUser)
+      ps.setString(12, b.status.wire)
+      setNullableInstant(ps, 13, b.expiresAt)
+      val rs = ps.executeQuery()
+      try
+        if rs.next() then Right(readBranch(rs))
+        else Left("duplicate")
+      finally rs.close()
+    catch case e: java.sql.SQLException if e.getSQLState == "23505" => Left("duplicate")
+    finally ps.close()
+  }
+
+  def getBranch(id: String): Option[Branch] = withConn { c =>
+    val ps = c.prepareStatement(s"SELECT $BranchCols FROM qodstate_branch WHERE id = ?")
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readBranch(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def findBranch(parentDbId: String, name: String, liveOnly: Boolean): Option[Branch] =
+    withConn { c =>
+      val statusPred = if liveOnly then " AND status IN ('open', 'proposed')" else ""
+      val ps         = c.prepareStatement(
+        s"SELECT $BranchCols FROM qodstate_branch WHERE parent_db_id = ? AND name = ?$statusPred " +
+          "ORDER BY created_at DESC LIMIT 1"
+      )
+      try
+        ps.setString(1, parentDbId); ps.setString(2, name)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(readBranch(rs)) else None
+        finally rs.close()
+      finally ps.close()
+    }
+
+  private def statusPredicate(statuses: Set[BranchStatus]): String =
+    if statuses.isEmpty then ""
+    else statuses.toList.map(s => s"'${s.wire}'").sorted.mkString(" AND status IN (", ", ", ")")
+
+  def listBranches(parentDbId: String, statuses: Set[BranchStatus]): List[Branch] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"SELECT $BranchCols FROM qodstate_branch WHERE parent_db_id = ?${statusPredicate(statuses)} " +
+        "ORDER BY created_at DESC, id DESC"
+    )
+    try
+      ps.setString(1, parentDbId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readBranch)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listTenantBranches(tenant: String, statuses: Set[BranchStatus]): List[Branch] = withConn {
+    c =>
+      val ps = c.prepareStatement(
+        s"SELECT $BranchCols FROM qodstate_branch WHERE tenant = ?${statusPredicate(statuses)} " +
+          "ORDER BY created_at DESC, id DESC"
+      )
+      try
+        ps.setString(1, tenant)
+        val rs = ps.executeQuery()
+        try drain(rs)(readBranch)
+        finally rs.close()
+      finally ps.close()
+  }
+
+  def updateBranch(b: Branch): Option[Branch] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""UPDATE qodstate_branch
+         |SET status = ?, expires_at = ?, purged_at = ?, updated_at = NOW()
+         |WHERE id = ?
+         |RETURNING $BranchCols""".stripMargin
+    )
+    try
+      ps.setString(1, b.status.wire)
+      setNullableInstant(ps, 2, b.expiresAt)
+      setNullableInstant(ps, 3, b.purgedAt)
+      ps.setString(4, b.id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readBranch(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  private val BranchMergeCols =
+    "id, branch_id, proposer, approver, status, summary_json, conflicts_json, " +
+      "main_snapshot_at_propose, main_snapshot_after, tag_name, error, created_at, decided_at"
+
+  private def readBranchMerge(rs: ResultSet): BranchMerge =
+    BranchMerge(
+      id = rs.getString("id"),
+      branchId = rs.getString("branch_id"),
+      proposer = rs.getString("proposer"),
+      approver = Option(rs.getString("approver")),
+      status = BranchMergeStatus
+        .fromWire(rs.getString("status"))
+        .fold(err => sys.error(s"qodstate_branch_merge.status invalid ($err)"), identity),
+      summaryJson = rs.getString("summary_json"),
+      conflictsJson = rs.getString("conflicts_json"),
+      mainSnapshotAtPropose = rs.getLong("main_snapshot_at_propose"),
+      mainSnapshotAfter = {
+        val v = rs.getLong("main_snapshot_after"); if rs.wasNull() then None else Some(v)
+      },
+      tagName = Option(rs.getString("tag_name")),
+      error = Option(rs.getString("error")),
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
+      decidedAt = Option(rs.getTimestamp("decided_at")).map(_.toInstant)
+    )
+
+  def createBranchMerge(m: BranchMerge): BranchMerge = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""INSERT INTO qodstate_branch_merge
+         |  (id, branch_id, proposer, approver, status, summary_json, conflicts_json,
+         |   main_snapshot_at_propose, main_snapshot_after, tag_name, error, decided_at)
+         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         |RETURNING $BranchMergeCols""".stripMargin
+    )
+    try
+      ps.setString(1, m.id)
+      ps.setString(2, m.branchId)
+      ps.setString(3, m.proposer)
+      setNullable(ps, 4, m.approver)
+      ps.setString(5, m.status.wire)
+      ps.setString(6, m.summaryJson)
+      ps.setString(7, m.conflictsJson)
+      ps.setLong(8, m.mainSnapshotAtPropose)
+      setNullableLong(ps, 9, m.mainSnapshotAfter)
+      setNullable(ps, 10, m.tagName)
+      setNullable(ps, 11, m.error)
+      setNullableInstant(ps, 12, m.decidedAt)
+      val rs = ps.executeQuery()
+      try
+        rs.next(); readBranchMerge(rs)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def getBranchMerge(id: String): Option[BranchMerge] = withConn { c =>
+    val ps = c.prepareStatement(s"SELECT $BranchMergeCols FROM qodstate_branch_merge WHERE id = ?")
+    try
+      ps.setString(1, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readBranchMerge(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listBranchMerges(branchId: String): List[BranchMerge] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"SELECT $BranchMergeCols FROM qodstate_branch_merge WHERE branch_id = ? " +
+        "ORDER BY created_at DESC, id DESC"
+    )
+    try
+      ps.setString(1, branchId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readBranchMerge)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def updateBranchMerge(m: BranchMerge): Option[BranchMerge] = withConn { c =>
+    val ps = c.prepareStatement(
+      s"""UPDATE qodstate_branch_merge
+         |SET status = ?, approver = ?, main_snapshot_after = ?, tag_name = ?, error = ?,
+         |    decided_at = ?
+         |WHERE id = ?
+         |RETURNING $BranchMergeCols""".stripMargin
+    )
+    try
+      ps.setString(1, m.status.wire)
+      setNullable(ps, 2, m.approver)
+      setNullableLong(ps, 3, m.mainSnapshotAfter)
+      setNullable(ps, 4, m.tagName)
+      setNullable(ps, 5, m.error)
+      setNullableInstant(ps, 6, m.decidedAt)
+      ps.setString(7, m.id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readBranchMerge(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
 
   // ---- maintenance (EPIC Spec 09) ----
 

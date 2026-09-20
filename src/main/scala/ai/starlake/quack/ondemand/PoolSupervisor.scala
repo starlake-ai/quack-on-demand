@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
+  BranchStatus,
   Names,
   NodePlacement,
   NodeSpec,
@@ -11,6 +12,7 @@ import ai.starlake.quack.model.{
   Role,
   RoleDistribution,
   RunningNode,
+  SqlLiterals,
   Tenant,
   TenantDb,
   TenantDbKind
@@ -691,6 +693,84 @@ final class PoolSupervisor(
       )
     }
 
+  // ---------- Branches (Epic 1) ----------
+
+  /** Cross-replica lock, exposed so the branch service can serialize merges per parent db. */
+  def poolLocks: ai.starlake.quack.ondemand.ha.PoolLocker = locks
+
+  /** The Postgres provisioner, exposed so the branch service can create / drop branch databases
+    * next to the parent's.
+    */
+  def databaseAdmin: DbAdmin = dbAdmin
+
+  def defaultMetastoreMap: Map[String, String] = defaultMetastore
+
+  /** Register an already-provisioned branch catalog as a tenant-db row. Unlike [[createTenantDb]]
+    * this neither creates the Postgres database nor runs the DuckLake pre-init: the branch cloner
+    * did both, and the row carries `branchOf` plus the parent's `catalogAlias`. Injection safety is
+    * still validated (the metastore is interpolated into the spawn script).
+    */
+  def registerBranchTenantDb(td: TenantDb): Either[SupervisorError, TenantDb] =
+    withCacheRecovery("registerBranchTenantDb") {
+      require(td.branchOf.nonEmpty, "registerBranchTenantDb: branchOf must be set")
+      TenantDb.validateSafety(td) match
+        case Some(msg) => Left(SupervisorError.InvalidArgument(msg))
+        case None      =>
+          if tenantDbs.values.exists(o => o.tenantId == td.tenantId && o.name == td.name) then
+            Left(SupervisorError.AlreadyExists(s"tenant-db '${td.name}' already exists"))
+          else
+            store.upsertTenantDb(td)
+            tenantDbs.put(td.id, td)
+            publish.topologyChanged()
+            events.emit(ManagerEvent.TenantDbCreated(td.tenantId, td.name))
+            Right(td)
+    }
+
+  /** Whether `(tenant, tenantDb)` names a branch catalog. */
+  def isBranchTenantDb(tenantName: String, tenantDbName: String): Boolean =
+    findTenantDb(tenantName, tenantDbName).exists(_.branchOf.nonEmpty)
+
+  /** Pool ids serving the PARENT of a branch tenant-db (empty for a non-branch), the set a branch
+    * pool inherits its connect permission from.
+    */
+  private def parentPoolIdsOf(tenantId: String, tenantDbName: String): Set[String] =
+    tenantDbs.values
+      .find(td => td.tenantId == tenantId && td.name == tenantDbName)
+      .flatMap(_.branchOf)
+      .map(parentId => poolRows.values.filter(_.tenantDbId == parentId).map(_.id).toSet)
+      .getOrElse(Set.empty)
+
+  /** NodeSpec for the ephemeral merge node (design section 4.5): the parent's maintenance-node
+    * shape (same catalog ATTACH, secrets, lockdown) plus the branch catalog attached read-only as
+    * [[ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias]]. The object-store secret is
+    * scoped to the common parent prefix so it covers the parent's files AND the branch's. Pool
+    * segment `__merge`, never registered in the router.
+    */
+  def mergeNodeSpec(
+      tenantName: String,
+      parentDbName: String,
+      branchDbName: String,
+      branchDataPath: String
+  ): Option[NodeSpec] =
+    maintenanceNodeSpec(tenantName, parentDbName).map { base =>
+      val key   = PoolKey(tenantName, parentDbName, "__merge")
+      val m     = base.metastore
+      val alias = ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias
+      // Same unquoted connection-string shape as spawn-quack-node.sh: every value passed
+      // TenantDb.validateSafety (no quote, semicolon, backslash or newline).
+      val attach =
+        s"ATTACH 'ducklake:postgres:host=${m.getOrElse("pgHost", "localhost")} " +
+          s"port=${m.getOrElse("pgPort", "5432")} dbname=$branchDbName " +
+          s"user=${m.getOrElse("pgUser", "postgres")} password=${m.getOrElse("pgPassword", "")}' " +
+          s"AS $alias (DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY);"
+      base.copy(
+        poolKey = key,
+        nodeId = s"merge-${branchDbName.takeRight(8)}-${System.nanoTime()}",
+        extraSetupSql = PoolSupervisor.joinInitAndBlob(base.extraSetupSql, attach),
+        objectStoreSql = ObjectStoreSecret.sql(base.s3, branchDataPath)
+      )
+    }
+
   private def reconcilePoolUnlockedWith(key: PoolKey, state: PoolState): IO[PoolState] =
     if state.suspended && state.nodes.nonEmpty then
       // Crash-mid-suspend heal: suspendPool persists suspended=true BEFORE draining, so a crash in
@@ -1350,7 +1430,15 @@ final class PoolSupervisor(
                 val activePoolIds =
                   poolRows.values.filter(_.tenantDbId == td.id).map(_.id).toSet ++
                     store.listPools(td.id).map(_.id).toSet
-                if activePoolIds.nonEmpty then
+                val liveBranches = store.listBranches(td.id, BranchStatus.Live)
+                if liveBranches.nonEmpty then
+                  Left(
+                    SupervisorError.Conflict(
+                      s"tenant-db '$tenantDbName' has ${liveBranches.size} live branch(es) " +
+                        s"(${liveBranches.map(_.name).sorted.mkString(", ")}); discard or merge them first"
+                    )
+                  )
+                else if activePoolIds.nonEmpty then
                   Left(
                     SupervisorError.Conflict(
                       s"tenant-db '$tenantDbName' has ${activePoolIds.size} pool(s); stop them first"
@@ -2988,11 +3076,15 @@ final class PoolSupervisor(
                         effectiveSetForUser(user.id, jwtRoles, jwtGroups).getOrElse(
                           ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
                         )
-                    // 4. Pool-access check.
+                    // 4. Pool-access check. A branch pool (Epic 1) is never granted directly:
+                    //    it inherits connect permission from ANY pool of its parent tenant-db.
+                    def grantedOn(pid: String): Boolean =
+                      eff.poolPerms
+                        .exists(p => p.tenantId == tenantRow.id && p.poolId.forall(_ == pid))
                     val poolOk =
-                      user.tenant.isEmpty ||
-                        eff.poolPerms
-                          .exists(p => p.tenantId == tenantRow.id && p.poolId.forall(_ == poolId))
+                      user.tenant.isEmpty || grantedOn(poolId) ||
+                        (ai.starlake.quack.ondemand.branch.BranchNames.isBranchPool(key.pool) &&
+                          parentPoolIdsOf(tenantRow.id, key.tenantDb).exists(grantedOn))
                     if !poolOk then
                       Left(s"user '$username' has no access to pool '${key.tenant}/${key.pool}'")
                     else

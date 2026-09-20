@@ -11,9 +11,13 @@
   env-var keys match the UI form field names verbatim:
 
     pgHost pgPort pgUser pgPassword   (Postgres for DuckLake catalog)
-    dbName                             (Postgres DB + DuckDB catalog)
-    schemaName                         (DuckLake schema under $dbName; default `main`.
-                                        MUST differ from $dbName or 2-part identifiers
+    dbName                             (Postgres DB; also the DuckDB catalog alias unless
+                                        catalogAlias is set)
+    catalogAlias                       (optional DuckDB catalog alias the database is ATTACHed
+                                        under; defaults to $dbName. Branch catalogs set it to
+                                        their parent's alias, see TenantDb.catalogAlias)
+    schemaName                         (DuckLake schema under the alias; default `main`.
+                                        MUST differ from the alias or 2-part identifiers
                                         like "$dbName"."customer" resolve as ambiguous.)
     dataPath                           (DuckLake data files directory)
     kind                               (ducklake | duckdb-file | memory)
@@ -50,6 +54,7 @@ $pgPort     = Env-Or 'pgPort'     '5432'
 $pgUser     = Env-Or 'pgUser'     'postgres'
 $pgPassword = Env-Or 'pgPassword' 'azizam'
 $dbName     = Env-Or 'dbName'     'db1'
+$catalogAlias = Env-Or 'catalogAlias' $dbName
 $schemaName = Env-Or 'schemaName' 'main'
 $dataPath   = Env-Or 'dataPath'   (Join-Path (Get-Location) "ducklake\$dbName")
 
@@ -61,10 +66,10 @@ if ($kind -notin @('ducklake', 'duckdb-file', 'memory')) {
   Write-Error "fatal: unknown kind='$kind' (expected: ducklake | duckdb-file | memory)"; exit 92
 }
 
-if ($schemaName -eq $dbName) {
+if ($schemaName -eq $catalogAlias) {
   Write-Error @"
-ERROR: schemaName ($schemaName) must differ from dbName ($dbName).
-       DuckDB rejects 2-part identifiers like "$dbName".<table> as
+ERROR: schemaName ($schemaName) must differ from the catalog alias ($catalogAlias).
+       DuckDB rejects 2-part identifiers like "$catalogAlias".<table> as
        ambiguous when a catalog and a schema share a name.
 "@
   exit 1
@@ -194,19 +199,19 @@ switch ($kind) {
     if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
     [void]$sb.AppendLine("ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);")
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');")
-    [void]$sb.AppendLine("ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS ""$dbName""")
+    [void]$sb.AppendLine("ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS ""$catalogAlias""")
     [void]$sb.AppendLine("  (DATA_PATH '$dataPath');")
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');")
     [void]$sb.AppendLine("DETACH qod_init_pg;")
-    [void]$sb.AppendLine("USE ""$dbName"";")
+    [void]$sb.AppendLine("USE ""$catalogAlias"";")
     [void]$sb.AppendLine("CREATE SCHEMA IF NOT EXISTS ""$schemaName"";")
-    [void]$sb.AppendLine("USE ""$dbName"".""$schemaName"";")
+    [void]$sb.AppendLine("USE ""$catalogAlias"".""$schemaName"";")
   }
   'duckdb-file' {
-    [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$dbName"";")
-    [void]$sb.AppendLine("USE ""$dbName"";")
+    [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"";")
+    [void]$sb.AppendLine("USE ""$catalogAlias"";")
     [void]$sb.AppendLine("CREATE SCHEMA IF NOT EXISTS ""$schemaName"";")
-    [void]$sb.AppendLine("USE ""$dbName"".""$schemaName"";")
+    [void]$sb.AppendLine("USE ""$catalogAlias"".""$schemaName"";")
   }
   'memory' {
     # nothing; DuckDB's built-in 'memory' catalog is the default

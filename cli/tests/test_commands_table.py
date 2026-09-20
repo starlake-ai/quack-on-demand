@@ -469,6 +469,53 @@ CASES = [
         {"tenant": "acme", "tenantDb": "tpch1", "name": "v1", "isProtected": False},
     ),
     (
+        ["branch", "create", "--tenant", "acme", "--db", "tpch1", "--name", "feature-x", "--ttl-hours", "24"],
+        "POST", "/api/branch/create", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "name": "feature-x", "ttlHours": 24},
+    ),
+    (
+        ["branch", "list", "--tenant", "acme", "--db", "tpch1", "--all"],
+        "GET", "/api/branch/tenant/acme/database/tpch1/branches", {"includeTerminal": "true"}, None,
+    ),
+    (
+        ["branch", "show", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x"],
+        "GET", "/api/branch/tenant/acme/database/tpch1/branches/feature-x", {}, None,
+    ),
+    (
+        ["branch", "changes", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x", "--no-counts"],
+        "GET", "/api/branch/tenant/acme/database/tpch1/branches/feature-x/changes", {"counts": "false"}, None,
+    ),
+    (
+        ["branch", "diff", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x", "--schema", "main", "--table", "orders", "--limit", "5", "--change-type", "insert"],
+        "GET", "/api/branch/tenant/acme/database/tpch1/branches/feature-x/diff",
+        {"schema": "main", "table": "orders", "limit": "5", "changeType": "insert"}, None,
+    ),
+    (
+        ["branch", "schema-diff", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x", "--schema", "main", "--table", "orders"],
+        "GET", "/api/branch/tenant/acme/database/tpch1/branches/feature-x/schema-diff",
+        {"schema": "main", "table": "orders"}, None,
+    ),
+    (
+        ["branch", "propose", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x"],
+        "POST", "/api/branch/propose", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x"},
+    ),
+    (
+        ["branch", "merge", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x", "--expect-main", "512"],
+        "POST", "/api/branch/merge", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x", "expectedMainSnapshot": 512},
+    ),
+    (
+        ["branch", "discard", "--tenant", "acme", "--db", "tpch1", "--branch", "feature-x"],
+        "POST", "/api/branch/discard", {},
+        {"tenant": "acme", "tenantDb": "tpch1", "branch": "feature-x"},
+    ),
+    (
+        ["auth", "pat", "create", "--name", "agent", "--branch-only"],
+        "POST", "/api/auth/pat/create", {},
+        {"name": "agent", "expiresAt": None, "dropAdmin": False, "branchOnly": True},
+    ),
+    (
         ["maintenance", "policy", "--tenant", "acme", "--db", "tpch1"],
         "GET", "/api/maintenance/policy", {"tenant": "acme", "tenantDb": "tpch1"}, None,
     ),

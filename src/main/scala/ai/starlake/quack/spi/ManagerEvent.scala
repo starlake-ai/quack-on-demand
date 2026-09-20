@@ -64,6 +64,24 @@ object ManagerEvent:
     */
   final case class SessionOpened(tenant: String, user: String, via: String) extends ManagerEvent
 
+  /** Branch lifecycle (Epic 1). `tenantDb` is the PARENT tenant-db; `branch` the branch name. */
+  final case class BranchCreated(tenant: String, tenantDb: String, branch: String, owner: String)
+      extends ManagerEvent
+
+  /** `snapshot` is the parent snapshot the merge produced. */
+  final case class BranchMerged(
+      tenant: String,
+      tenantDb: String,
+      branch: String,
+      proposer: String,
+      approver: String,
+      snapshot: Long
+  ) extends ManagerEvent
+
+  /** `reason` is "discard" (explicit), "expired" (TTL sweep) or "merged" (teardown after merge). */
+  final case class BranchDiscarded(tenant: String, tenantDb: String, branch: String, reason: String)
+      extends ManagerEvent
+
 /** Core-side emission interface. Implementations must never block: the routing hot path calls
   * `emit` inline.
   */

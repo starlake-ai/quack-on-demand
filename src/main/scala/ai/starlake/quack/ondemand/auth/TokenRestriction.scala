@@ -16,11 +16,20 @@ final case class TokenRestriction(
     dropAdmin: Boolean,
     stmtTimeoutMs: Option[Int],
     maxRows: Option[Int],
-    expiresAt: Option[Instant]
+    expiresAt: Option[Instant],
+    /** Epic 1: WRITE/DDL statements are admitted only on a branch (never on a live tenant-db);
+      * reads stay as granted. A parent's `true` cannot be lowered by a child. Enforced in the
+      * routed executor (MCP / REST callers); the raw FlightSQL wire has no token concept.
+      */
+    branchOnly: Boolean = false
 ):
   def allowsDatabase(db: String): Boolean = databases.forall(_.contains(db))
-  def allowsPool(pool: String): Boolean   = pools.forall(_.contains(pool))
-  def allowsTool(tool: String): Boolean   = tools.forall(_.contains(tool))
+
+  /** Plain axis membership. A branch pool (`__br_<id8>`) is never named on the axis; the routed
+    * executor resolves it to "any pool of the parent tenant-db" before consulting this.
+    */
+  def allowsPool(pool: String): Boolean = pools.forall(_.contains(pool))
+  def allowsTool(tool: String): Boolean = tools.forall(_.contains(tool))
 
 object TokenRestriction:
 
@@ -105,5 +114,6 @@ object TokenRestriction:
       dropAdmin = parent.dropAdmin || child.dropAdmin,
       stmtTimeoutMs = to,
       maxRows = rows,
-      expiresAt = expiry
+      expiresAt = expiry,
+      branchOnly = parent.branchOnly || child.branchOnly
     )

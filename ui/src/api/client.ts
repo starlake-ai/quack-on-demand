@@ -52,6 +52,16 @@ import type {
   RestoreRequest,
   RestoreResponse,
   SchemaDiffResponse,
+  // Branches
+  BranchCreateRequest,
+  BranchOpRequest,
+  BranchMergeRequest,
+  BranchEntry,
+  BranchListResponse,
+  BranchDetailResponse,
+  BranchChangesResponse,
+  BranchProposeResponse,
+  BranchMergeResponse,
   // Managed maintenance
   MaintenancePolicyUpsertRequest,
   MaintenancePolicyEntry,
@@ -549,4 +559,49 @@ export const api = {
     post<void>('/catalog/tag/delete', req),
   protectCatalogTag: (req: { tenant: string; tenantDb: string; name: string; protected: boolean }) =>
     post<CatalogTagEntry>('/catalog/tag/protect', req),
+
+  // Branches (Epic 1): session-gated; GETs carry tenant/tenantDb in the path.
+  listBranches: (tenant: string, tenantDb: string, includeTerminal = false) =>
+    get<BranchListResponse>(
+      `/branch/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}/branches` +
+        (includeTerminal ? '?includeTerminal=true' : '')
+    ),
+  getBranch: (tenant: string, tenantDb: string, branch: string) =>
+    get<BranchDetailResponse>(
+      `/branch/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/branches/${encodeURIComponent(branch)}`
+    ),
+  branchChanges: (tenant: string, tenantDb: string, branch: string, counts = true) =>
+    get<BranchChangesResponse>(
+      `/branch/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/branches/${encodeURIComponent(branch)}/changes?counts=${counts}`
+    ),
+  branchDiff: (
+    tenant: string, tenantDb: string, branch: string, schema: string, table: string,
+    opts?: { limit?: number; cursor?: string; changeType?: string }
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set('schema', schema);
+    qs.set('table', table);
+    if (opts?.limit != null) qs.set('limit', String(opts.limit));
+    if (opts?.cursor) qs.set('cursor', opts.cursor);
+    if (opts?.changeType) qs.set('changeType', opts.changeType);
+    return get<DataDiffResponse>(
+      `/branch/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/branches/${encodeURIComponent(branch)}/diff?${qs.toString()}`
+    );
+  },
+  branchSchemaDiff: (tenant: string, tenantDb: string, branch: string, schema: string, table: string) => {
+    const qs = new URLSearchParams();
+    qs.set('schema', schema);
+    qs.set('table', table);
+    return get<SchemaDiffResponse>(
+      `/branch/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/branches/${encodeURIComponent(branch)}/schema-diff?${qs.toString()}`
+    );
+  },
+  createBranch: (req: BranchCreateRequest) => post<BranchEntry>('/branch/create', req),
+  proposeBranch: (req: BranchOpRequest) => post<BranchProposeResponse>('/branch/propose', req),
+  mergeBranch: (req: BranchMergeRequest) => post<BranchMergeResponse>('/branch/merge', req),
+  discardBranch: (req: BranchOpRequest) => post<BranchEntry>('/branch/discard', req),
 };

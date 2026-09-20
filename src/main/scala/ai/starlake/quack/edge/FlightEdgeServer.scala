@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.AuthenticationService
-import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.flight.*
@@ -36,7 +36,13 @@ final class FlightEdgeServer(
     authorize: (String, String, String, Set[String], Set[String], Boolean) => Either[
       String,
       AuthorizedHandshake
-    ]
+    ],
+    // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
+    // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
+    // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
+    // unknown / not live, surfaced as UNAUTHENTICATED; the default refuses every branch header.
+    lookupBranch: (String, String, String) => Either[String, PoolKey] = (_, _, b) =>
+      Left(s"branch '$b' not found (branching unavailable)")
 ) extends LazyLogging:
 
   private val allocator            = new RootAllocator()
@@ -136,6 +142,13 @@ final class FlightEdgeServer(
         // (pool names are unique per tenant).
         val poolHdr   = Option(headers.get("pool"))
         val tenantHdr = Option(headers.get("tenant"))
+        // `branch=<name>` (or `x-qod-branch`) targets a writable branch of the pool's tenant-db
+        // (Epic 1): authorization still runs against the named parent pool; only the routing
+        // target is swapped for the branch's own pool after the gates passed.
+        val branchHdr = Option(headers.get("branch"))
+          .orElse(Option(headers.get("x-qod-branch")))
+          .map(_.trim)
+          .filter(_.nonEmpty)
         // `superuser=true` picks the system realm regardless of the `tenant`
         // header. The tenant/pool headers still drive query routing -- a system
         // superuser can target a tenant's pool while authenticating against the
@@ -191,11 +204,20 @@ final class FlightEdgeServer(
                   // from "no access to this pool" without parsing strings.
                   throw CallStatus.UNAUTHORIZED.withDescription(msg).toRuntimeException()
                 case Right(bound) =>
-                  val peerId = UUID.randomUUID().toString
-                  val connId = UUID.randomUUID().toString
+                  val peerId    = UUID.randomUUID().toString
+                  val connId    = UUID.randomUUID().toString
+                  val targetKey = branchHdr match
+                    case None         => bound.poolKey
+                    case Some(branch) =>
+                      lookupBranch(bound.poolKey.tenant, bound.poolKey.tenantDb, branch) match
+                        case Right(key) => key
+                        case Left(err)  =>
+                          throw CallStatus.UNAUTHENTICATED
+                            .withDescription(s"branch_not_found: $err")
+                            .toRuntimeException()
                   ConnectionContext.bind(
                     peer = peerId,
-                    key = bound.poolKey,
+                    key = targetKey,
                     connectionId = connId,
                     user = bound.user,
                     effectiveSet = Some(bound.effectiveSet),

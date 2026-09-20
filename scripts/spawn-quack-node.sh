@@ -10,9 +10,13 @@
 # env-var keys match the UI form field names verbatim:
 #
 #   pgHost pgPort pgUser pgPassword   (Postgres for DuckLake catalog)
-#   dbName                             (Postgres DB + DuckDB catalog)
-#   schemaName                         (DuckLake schema under $dbName; default `main`.
-#                                       MUST differ from $dbName or 2-part identifiers
+#   dbName                             (Postgres DB; also the DuckDB catalog alias unless
+#                                       catalogAlias is set)
+#   catalogAlias                       (optional DuckDB catalog alias the database is ATTACHed
+#                                       under; defaults to $dbName. Branch catalogs set it to
+#                                       their parent's alias, see TenantDb.catalogAlias)
+#   schemaName                         (DuckLake schema under the alias; default `main`.
+#                                       MUST differ from the alias or 2-part identifiers
 #                                       like "$dbName"."customer" resolve as ambiguous.)
 #   dataPath                           (DuckLake data files directory)
 #
@@ -30,6 +34,7 @@ pgPort="${pgPort:-5432}"
 pgUser="${pgUser:-postgres}"
 pgPassword="${pgPassword:-azizam}"
 dbName="${dbName:-db1}"
+catalogAlias="${catalogAlias:-$dbName}"
 schemaName="${schemaName:-main}"
 dataPath="${dataPath:-/Users/hayssams/git/public/quack-on-demand/ducklake/$dbName}"
 
@@ -42,9 +47,9 @@ case "$kind" in
     ;;
 esac
 
-if [[ "$schemaName" == "$dbName" ]]; then
-  echo "ERROR: schemaName ($schemaName) must differ from dbName ($dbName)." >&2
-  echo "       DuckDB rejects 2-part identifiers like \"$dbName\".<table> as" >&2
+if [[ "$schemaName" == "$catalogAlias" ]]; then
+  echo "ERROR: schemaName ($schemaName) must differ from the catalog alias ($catalogAlias)." >&2
+  echo "       DuckDB rejects 2-part identifiers like \"$catalogAlias\".<table> as" >&2
   echo "       ambiguous when a catalog and a schema share a name." >&2
   exit 1
 fi
@@ -282,19 +287,19 @@ case "$kind" in
     INIT_SQL+="$STORAGE_SQL"$'\n'
     INIT_SQL+="ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);"$'\n'
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
-    INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS \"$dbName\""$'\n'
+    INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS \"$catalogAlias\""$'\n'
     INIT_SQL+="  (DATA_PATH '$dataPath');"$'\n'
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
     INIT_SQL+=$'DETACH qod_init_pg;\n'
-    INIT_SQL+="USE \"$dbName\";"$'\n'
+    INIT_SQL+="USE \"$catalogAlias\";"$'\n'
     INIT_SQL+="CREATE SCHEMA IF NOT EXISTS \"$schemaName\";"$'\n'
-    INIT_SQL+="USE \"$dbName\".\"$schemaName\";"$'\n'
+    INIT_SQL+="USE \"$catalogAlias\".\"$schemaName\";"$'\n'
     ;;
   duckdb-file)
-    INIT_SQL+="ATTACH '$dataPath' AS \"$dbName\";"$'\n'
-    INIT_SQL+="USE \"$dbName\";"$'\n'
+    INIT_SQL+="ATTACH '$dataPath' AS \"$catalogAlias\";"$'\n'
+    INIT_SQL+="USE \"$catalogAlias\";"$'\n'
     INIT_SQL+="CREATE SCHEMA IF NOT EXISTS \"$schemaName\";"$'\n'
-    INIT_SQL+="USE \"$dbName\".\"$schemaName\";"$'\n'
+    INIT_SQL+="USE \"$catalogAlias\".\"$schemaName\";"$'\n'
     ;;
   memory)
     : # nothing; DuckDB's built-in 'memory' catalog is the default
