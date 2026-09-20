@@ -967,6 +967,28 @@ object Main extends IOApp with LazyLogging:
           result
         }
 
+      // Per-pool read-only catalog lookup, cached 60s like attachedCatalogsOf. Disabled sources
+      // are included for the same reason: a disabled source's alias stays ATTACHed on running
+      // nodes until the pool recycles, so its read-only flag must keep applying until then.
+      val readOnlyCatalogsCache =
+        new java.util.concurrent.ConcurrentHashMap[
+          ai.starlake.quack.model.PoolKey,
+          (Long, Set[String])
+        ]()
+      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
+        val now    = System.currentTimeMillis()
+        val cached = Option(readOnlyCatalogsCache.get(key)).collect {
+          case (at, set) if now - at < 60000L => set
+        }
+        cached.getOrElse {
+          val result = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+            case (Some(td), Some(fedStore)) =>
+              fedStore.listSources(td.id).filter(_.readOnly).map(_.alias.toLowerCase).toSet
+            case _ => Set.empty[String]
+          readOnlyCatalogsCache.put(key, (now, result))
+          result
+        }
+
       // Mirrors attachedCatalogsOf's metastore resolution so the ACL SQL parser
       // resolves unqualified table refs the same way the validator does.
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
@@ -1005,6 +1027,7 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
+        readOnlyCatalogsOf = readOnlyCatalogsOf,
         // The in-process sinks go FIRST: fanout has no error isolation, so a module
         // sink that throws must not be able to starve the autoscale demand signal or
         // the hibernation activity signal. Invariant: each of poolLoadStats.sink and

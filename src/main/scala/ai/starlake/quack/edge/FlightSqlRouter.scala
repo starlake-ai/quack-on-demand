@@ -5,6 +5,7 @@ import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{
   Allowed,
+  CatalogWriteScreen,
   Denied,
   LockdownScreen,
   StatementValidator,
@@ -63,6 +64,7 @@ final class FlightSqlRouter(
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
     val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
+    val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
@@ -486,6 +488,30 @@ final class FlightSqlRouter(
             Left(RouterFailure.AccessDenied(s"access denied: $reason"))
           case Allowed => Right(())
 
+    // Per-catalog read-only screen. Runs AFTER the ACL gate so a principal that lacks the grant
+    // is refused for the honest reason first, and BEFORE the CLS/RLS rewriters so a denied write
+    // never reaches a rewrite. Inert (and unparsed) when the pool has no read-only catalog.
+    val catalogDenial: Either[RouterFailure, Unit] = aclCheck.flatMap { _ =>
+      val readOnly = readOnlyCatalogsOf(poolKey)
+      if readOnly.isEmpty then Right(())
+      else
+        val parserCfg = ai.starlake.acl.model.Config.forDuckDB(
+          ctx.defaultDatabase,
+          ctx.defaultSchema,
+          ctx.attachedCatalogs
+        )
+        CatalogWriteScreen.screen(sql, readOnly, parserCfg) match
+          case None         => Right(())
+          case Some(reason) =>
+            maybeRecord(
+              nodeId = "-",
+              durationMs = 0,
+              status = "denied",
+              error = Some("read_only_catalog: " + reason)
+            )
+            Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+    }
+
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = ctx.defaultDatabase,
@@ -613,11 +639,11 @@ final class FlightSqlRouter(
               maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
               Left(f)
 
-    // ACL -> CLS -> RLS -> metadata-filter pipeline; every denial arm has already
-    // journaled itself. Bound to resultIO so one flatTap below emits exactly one
-    // StatementExecuted event on every exit path, including the denial arms.
+    // ACL -> catalog read-only screen -> CLS -> RLS -> metadata-filter pipeline; every denial
+    // arm has already journaled itself. Bound to resultIO so one flatTap below emits exactly
+    // one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
-      aclCheck
+      catalogDenial
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)
