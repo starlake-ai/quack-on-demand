@@ -138,9 +138,22 @@ final class FederatedSourceHandlers(
                 // DuckDB answers "database with name ... already exists", and because the piped
                 // CLI does not bail the node comes up with a half-applied federation blob and no
                 // loud signal. This is the last point at which the operator can simply be told.
+                //
+                // Exclude the row being upserted BY ID, not by alias equality: `existing` (like
+                // the createSource lookup that produced it) can be a legacy row whose STORED
+                // alias differs in case from the normalized `alias` here, so `_.alias == alias`
+                // would fail to exclude it and the row would reserve its own alias against
+                // itself, 400ing an upsert that should succeed. Lowercased for the same reason --
+                // `validate` already compares case-insensitively, but the set itself should not
+                // rely on that to stay correct.
+                val selfId   = existing.map(_.id)
                 val reserved =
                   catalogAliasOf(tenantDbId).toSet ++
-                    fedStore.listSources(tenantDbId).filterNot(_.alias == alias).map(_.alias).toSet
+                    fedStore
+                      .listSources(tenantDbId)
+                      .filterNot(s => selfId.contains(s.id))
+                      .map(_.alias.toLowerCase)
+                      .toSet
                 IcebergRestConfig.validated(cfg, alias, reserved).left.getOrElse(Nil)
               case _ => Nil
 

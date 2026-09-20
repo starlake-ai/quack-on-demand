@@ -1,6 +1,12 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{FederatedSource, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{
+  FederatedSource,
+  FederatedSourceType,
+  Tenant,
+  TenantDb,
+  TenantDbKind
+}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.federation.iceberg.{
   IcebergAuthType,
@@ -533,7 +539,7 @@ class FederatedSourceHandlersSpec
       row.id shouldBe "fs-legacy-2"
     }
 
-  it should "400 the sourceType-mismatch guard against a legacy mixed-case row" in
+  it should "400 naming the sourceType clash (not the reserved-alias rule) for a legacy row" in
     withEnv { (fs, resolver, tdId) =>
       val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
       fs.upsertSource(
@@ -550,8 +556,60 @@ class FederatedSourceHandlersSpec
         .left
         .value
       code shouldBe StatusCode.BadRequest
-      err.message should include("sql")
+      // Pins the D-D sourceType-clash message specifically, NOT the sibling-reserved-alias
+      // message ("alias 'sales' is reserved") that a self-reservation bug would produce here:
+      // this row is its own only sibling, so if the reserved set failed to exclude it by id the
+      // config-validation arm would 400 first with the wrong rule (or never reach this one).
+      err.message should include("already exists as a 'sql' source")
+      err.message should include("delete it before creating a 'iceberg_rest' source")
       fs.listSources(tdId).count(_.alias.equalsIgnoreCase("sales")) shouldBe 1
+    }
+
+  it should
+    "upsert a legacy mixed-case iceberg_rest row in place under its own alias " +
+    "(self-reservation by id, not by alias)" in
+    withEnv { (fs, resolver, tdId) =>
+      val h   = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val cfg = IcebergRestConfig(
+        uri = "https://catalog.example.com/api/catalog",
+        warehouse = "sales",
+        authType = Some(IcebergAuthType.OAuth2),
+        clientId = Some("{{secret.CID}}"),
+        clientSecret = Some("{{secret.CSEC}}")
+      )
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-4",
+          tenantDbId = tdId,
+          alias = "Sales_Lake",
+          sourceType = FederatedSourceType.IcebergRest,
+          config = Some(cfg.toJson),
+          readOnly = true
+        )
+      )
+      // Same alias, same case, same sourceType: no D-D clash, so this exercises the
+      // config-validation `reserved` set alone. Before the id-based exclusion, this row was
+      // NOT excluded from its own reserved set (its stored alias "Sales_Lake" != the normalized
+      // "sales_lake"), so `validated` saw its own alias as a collision and 400ed.
+      val res = h
+        .createSource(
+          "acme",
+          "acme_prod",
+          FederatedSourceCreateRequest(
+            alias = "Sales_Lake",
+            sourceType = Some("iceberg_rest"),
+            config = Some(cfg)
+          ),
+          None
+        )
+        .unsafeRunSync()
+      res.isRight shouldBe true
+
+      val sources = fs.listSources(tdId)
+      sources.count(_.alias.equalsIgnoreCase("sales_lake")) shouldBe 1
+      val row = sources.find(_.alias.equalsIgnoreCase("sales_lake")).value
+      row.alias shouldBe "sales_lake"
+      row.id shouldBe "fs-legacy-4"
     }
 
   "listSources" should "return the typed config it stored" in withHandlers { (h, _) =>
