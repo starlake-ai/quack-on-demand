@@ -205,6 +205,12 @@ final case class ClientConfigResponse(
     flightSqlHost: String, // may be "0.0.0.0" - UI should substitute window.location.hostname
     flightSqlPort: Int,
     flightSqlTls: Boolean,
+    // The native Quack front door (DuckDB `ATTACH 'quack:host:port'`). Host follows the same
+    // 0.0.0.0 substitution rule as flightSqlHost; port 0 when the front door is disabled.
+    quackEnabled: Boolean = false,
+    quackHost: String = "",
+    quackPort: Int = 0,
+    quackTls: Boolean = false,
     // True iff any basic / bearer auth provider is configured. When false,
     // the UI skips the login screen entirely (there's no credential
     // backend to validate against; `/api/auth/login` would 503).

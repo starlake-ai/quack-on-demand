@@ -21,7 +21,7 @@ uvx qod@latest serve ./sales.duckdb     # the same gateway over YOUR DuckDB file
 uvx qod@latest serve ./warehouse/       # ...or a directory of parquet / csv
 uvx qod@latest serve s3://bucket/data/  # ...or a remote prefix
 
-# admin UI: http://localhost:20900/ui/ - FlightSQL edge: localhost:31338
+# admin UI: http://localhost:20900/ui/ - FlightSQL edge: localhost:31338 - DuckDB (native Quack): quack:localhost:9494
 # Ctrl-C stops the gateway and its nodes; so does `uvx qod@latest stop` from another terminal
 ```
 
@@ -37,7 +37,26 @@ Client connection strings, printed again by the server at boot (replace `<tenant
 JDBC : jdbc:arrow-flight-sql://localhost:31338/?tenant=<tenant>&pool=<pool>&user=<user>&useEncryption=true&disableCertificateVerification=true
 ADBC : uri=grpc+tls://localhost:31338  (adbc_driver_flightsql; db_kwargs: username, password, plus grpc headers tenant=<tenant>, pool=<pool>)
 ODBC : Driver={Arrow Flight SQL ODBC Driver};Host=localhost;Port=31338;UseEncryption=true;DisableCertificateVerification=true;UID=<user>;PWD=<password>;TENANT=<tenant>;POOL=<pool>
+DuckDB : ATTACH 'quack:localhost:9494' AS qod (TYPE quack, TOKEN 'tenant=<tenant>&pool=<pool>&user=<user>&password=<password>');
 ```
+
+### Hybrid: join your local DuckDB with QoD tables
+
+Any DuckDB that carries the `quack` extension (the CLI, the Python package, an embedded DuckDB) can attach the gateway as a database over DuckDB's own native Quack protocol, no driver in between. The token string is the same set of parameters the JDBC URL takes after `?`. Local tables and gateway tables then join in one query; the gateway applies the user's row and column policies to its side, and a table the user has no grant on is refused with the same `access denied` a FlightSQL client would see.
+
+```sql
+ATTACH 'quack:localhost:9494' AS qod (TYPE quack, TOKEN 'tenant=acme&pool=bi&user=alice&password=demo-alice');
+CREATE TABLE my_segments AS SELECT * FROM read_csv('segments.csv');
+SELECT s.label, count(*) AS customers
+FROM qod.tpch1.customer c JOIN my_segments s ON c.c_mktsegment = s.segment
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- one-shot, no ATTACH
+SELECT * FROM quack_query('quack:localhost:9494', 'SELECT count(*) FROM tpch1.orders',
+  token := 'tenant=acme&pool=bi&user=alice&password=demo-alice');
+```
+
+The DuckDB client speaks plain HTTP to `localhost` and TLS to any other host; the gateway's Quack listener is plain HTTP by default (`QOD_QUACK_TLS_ENABLED=true` turns TLS on, reusing the FlightSQL edge's certificate), so from a remote machine either enable TLS or add `DISABLE_SSL true` to the `ATTACH` options. Superusers add `&superuser=true` to the token, exactly like the JDBC parameter.
 
 ![Admin console - live per-node metrics, statement history, Users page](assets/metrics.jpg)
 
@@ -224,7 +243,7 @@ flowchart LR
     end
 
     subgraph server["Quack on Demand · your infrastructure"]
-        edge["FlightSQL edge :31338<br/>authn + RBAC"]
+        edge["FlightSQL edge :31338<br/>Quack front door :9494<br/>authn + RBAC"]
         node["Quack nodes<br/>DuckDB + DuckLake"]
         store[("Postgres catalog +<br/>object storage<br/>S3 · GCS · FS")]
         edge --> node

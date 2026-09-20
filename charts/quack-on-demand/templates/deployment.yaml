@@ -74,6 +74,9 @@ spec:
             - name: flightsql
               containerPort: 31338
               protocol: TCP
+            - name: quack
+              containerPort: 9494
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "qod.fullname" . }}

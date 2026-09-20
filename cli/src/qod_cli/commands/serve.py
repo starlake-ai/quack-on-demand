@@ -220,7 +220,7 @@ def _credential_tail_note(target: str | None, tables: list[str]) -> str | None:
 def _banner(
     *, tenant: str, db: str, pool: str, size: int, password: str, generated: bool,
     edge_host: str, edge_port: int, manager_url: str, pg_port: int, pg_data_dir: str,
-    description: str, attached: bool = False,
+    description: str, attached: bool = False, quack_port: int = 0,
 ) -> str:
     """The connect snippet. The PLAINTEXT password appears only on the run that
     generated it: reprinting a stored secret on every boot would put it in every
@@ -333,11 +333,21 @@ def _banner(
             fg=typer.colors.YELLOW,
         )
     )
+    # Native Quack front door: the token string is the JDBC query string. Loopback hosts
+    # speak plain HTTP by default on the DuckDB side, which is what a local serve listens on.
+    quack_token = f"tenant={tenant}&pool={pool}&user={_ADMIN_USER}&password=<password>&superuser=true"
+    duckdb = (
+        f"ATTACH 'quack:{edge_host}:{quack_port}' AS qod (TYPE quack, TOKEN '{quack_token}');"
+    )
     lines += [
         "",
         typer.style(f"  JDBC {jdbc}", fg="cyan", bold=True),
         typer.style(f"  ADBC {adbc}", fg="cyan", bold=True),
         typer.style(f"  ODBC {odbc}", fg="cyan", bold=True),
+    ]
+    if quack_port > 0:
+        lines.append(typer.style(f"  DuckDB {duckdb}", fg="cyan", bold=True))
+    lines += [
         typer.style(f"  UI   {manager_url.rstrip('/')}/ui/", fg="cyan", bold=True),
         "",
         "  gateway already running; stop it with: qod stop" if attached else "  Ctrl-C to stop.",
@@ -396,6 +406,8 @@ def _provision(
         if edge_host in ("", "0.0.0.0"):
             edge_host = urlparse(manager_url).hostname or "localhost"
         edge_port = int(edge.get("flightSqlPort", 31338))
+        # 0 when the manager predates the native Quack front door or has it disabled.
+        quack_port = int(edge.get("quackPort") or 0)
         save_profile(
             profile,
             {
@@ -420,6 +432,7 @@ def _provision(
             _banner(
                 tenant=tenant, db=db_full, pool=pool, size=size, password=password,
                 generated=generated, edge_host=edge_host, edge_port=edge_port,
+                quack_port=quack_port,
                 manager_url=manager_url, pg_port=pg_port, pg_data_dir=pg_data_dir,
                 description=target.description, attached=attached,
             )

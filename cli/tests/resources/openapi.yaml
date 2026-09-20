@@ -6213,6 +6213,10 @@ components:
       - flightSqlHost
       - flightSqlPort
       - flightSqlTls
+      - quackEnabled
+      - quackHost
+      - quackPort
+      - quackTls
       - authEnabled
       - placementSupported
       - identitySource
@@ -6225,6 +6229,15 @@ components:
           type: integer
           format: int32
         flightSqlTls:
+          type: boolean
+        quackEnabled:
+          type: boolean
+        quackHost:
+          type: string
+        quackPort:
+          type: integer
+          format: int32
+        quackTls:
           type: boolean
         authEnabled:
           type: boolean

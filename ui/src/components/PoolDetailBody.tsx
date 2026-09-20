@@ -542,6 +542,20 @@ export default function PoolDetailBody({
           `"username": "<user>", "password": "<password>", ` +
           `"adbc.flight.sql.rpc.call_header.tenant": "${tenant}", ` +
           `"adbc.flight.sql.rpc.call_header.pool": "${pool}"${adbcSuperuserKwarg}${tlsKwarg}})`;
+        // Native Quack front door: the token string is the same query string the JDBC URL
+        // takes after `?`. The DuckDB client speaks plain HTTP to loopback hosts and TLS to
+        // every other host, so a plain-HTTP listener on a remote host needs DISABLE_SSL.
+        const quackHost = effectiveHost(cfg.quackHost ?? '');
+        const quackLoopback = quackHost === 'localhost' || quackHost === '127.0.0.1' || quackHost === '::1';
+        const quackToken =
+          `tenant=${encodeURIComponent(tenant)}&pool=${encodeURIComponent(pool)}` +
+          `${isSuperuser ? '&superuser=true' : ''}&user=<user>&password=<password>`;
+        const quackSslOpt = cfg.quackTls || quackLoopback ? '' : ', DISABLE_SSL true';
+        const quackSslArg = cfg.quackTls || quackLoopback ? '' : ', disable_ssl := true';
+        const quackAttach =
+          `ATTACH 'quack:${quackHost}:${cfg.quackPort}' AS qod (TYPE quack, TOKEN '${quackToken}'${quackSslOpt});`;
+        const quackQuery =
+          `SELECT * FROM quack_query('quack:${quackHost}:${cfg.quackPort}', 'SELECT 1', token := '${quackToken}'${quackSslArg});`;
         return (
           <>
             <p style={{ color: '#888', marginTop: 0 }}>
@@ -563,8 +577,22 @@ export default function PoolDetailBody({
                 <tr><th align="left">JDBC</th><td><code>{jdbc}</code></td></tr>
                 <tr><th align="left">ODBC</th><td><code>{odbc}</code></td></tr>
                 <tr><th align="left">ADBC (Python)</th><td><code>{adbcSnippet}</code></td></tr>
+                {cfg.quackEnabled && cfg.quackPort ? (
+                  <>
+                    <tr><th align="left">DuckDB (ATTACH)</th><td><code>{quackAttach}</code></td></tr>
+                    <tr><th align="left">DuckDB (one shot)</th><td><code>{quackQuery}</code></td></tr>
+                  </>
+                ) : null}
               </tbody>
             </table>
+            {cfg.quackEnabled && cfg.quackPort ? (
+              <p style={{ color: '#888' }}>
+                The DuckDB rows use the native Quack protocol front door: any DuckDB with the
+                {' '}<code>quack</code> extension (CLI, Python, embedded) connects directly, joins
+                the attached catalog with its local tables, and gets the same routing, ACL,
+                column and row policies and audit as the FlightSQL edge.
+              </p>
+            ) : null}
             <h4 style={{ marginBottom: 4 }}>Direct node URIs (DuckDB <code>quack</code> extension)</h4>
             <ul style={{ marginTop: 0 }}>
               {data.nodes.map(n => (

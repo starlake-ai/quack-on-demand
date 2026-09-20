@@ -28,6 +28,7 @@ import com.typesafe.scalalogging.LazyLogging
 final class ShutdownCoordinator(
     edge: FlightEdgeServer,
     backend: QuackBackend,
+    quackFrontDoor: Option[ai.starlake.quack.edge.quack.QuackFrontDoorServer] = None,
     coordinator: Option[HaCoordinator],
     eventJournal: EventJournal,
     telemetryStore: TelemetryStore,
@@ -58,6 +59,8 @@ final class ShutdownCoordinator(
             "shutdown hook: graceful shutdown did not finish in time; forcing teardown"
           )
         try edge.stop()
+        catch case _: Throwable => ()
+        try quackFrontDoor.foreach(_.stop())
         catch case _: Throwable => ()
         try backend.cleanup().unsafeRunSync()
         catch case _: Throwable => ()
@@ -118,6 +121,7 @@ final class ShutdownCoordinator(
   def gracefulShutdown: IO[Unit] =
     (IO.delay(logger.info("graceful shutdown: stopping FlightSQL edge")) *>
       IO.delay(edge.stop()) *>
+      IO.delay(quackFrontDoor.foreach(_.stop())) *>
       IO.delay(
         logger.info(
           s"graceful shutdown: awaiting in-flight statements (up to ${drainTimeoutSec}s)"

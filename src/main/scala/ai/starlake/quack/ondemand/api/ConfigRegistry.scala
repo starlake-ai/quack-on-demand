@@ -35,14 +35,16 @@ object ConfigRegistry:
       authCls: Class[?],
       aclCls: Class[?],
       validationCls: Class[?],
-      metricsCls: Class[?]
+      metricsCls: Class[?],
+      quackCls: Class[?] = classOf[ai.starlake.quack.QuackNativeConfig]
   ): List[(String, Class[?])] = List(
     "quack-on-demand"            -> managerCls,
     "quack-on-demand.metrics"    -> metricsCls,
     "quack-flightsql"            -> flightCls,
     "quack-flightsql.auth"       -> authCls,
     "quack-flightsql.validation" -> validationCls,
-    "quack-flightsql.acl"        -> aclCls
+    "quack-flightsql.acl"        -> aclCls,
+    "quack-native"               -> quackCls
   )
 
   /** Build the full registry by reflecting through `roots`. */

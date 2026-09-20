@@ -874,3 +874,51 @@ final case class FlightConfig(
     )
     resumeHoldTimeoutSec: Long
 )
+
+/** The native Quack protocol front door (`quack-native` block): the listener DuckDB clients
+  * `ATTACH 'quack:host:port'` to. Identity, routing, policies and audit are the FlightSQL edge's;
+  * only the wire differs. See docs/superpowers/specs/2026-09-20-native-quack-front-door-design.md.
+  */
+final case class QuackNativeConfig(
+    @field @ConfigField(
+      envVar = "QOD_QUACK_ENABLED",
+      description = "Serve the native Quack protocol front door."
+    )
+    enabled: Boolean,
+    @field @ConfigField(envVar = "QOD_QUACK_HOST", description = "Quack front door bind address.")
+    host: String,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_PORT",
+      description =
+        "Quack front door port (9494 is the protocol's default, so `quack:host` needs no port)."
+    )
+    port: Int,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_TLS_ENABLED",
+      description =
+        "Enable TLS on the Quack front door. Off by default: the DuckDB client only speaks plain HTTP to loopback hosts."
+    )
+    tlsEnabled: Boolean,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_TLS_CERT_CHAIN",
+      description =
+        "Path to the TLS certificate chain PEM (shared with the FlightSQL edge by default)."
+    )
+    tlsCertChain: String,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_TLS_PRIVATE_KEY",
+      description = "Path to the TLS private key PEM (PKCS8)."
+    )
+    tlsPrivateKey: String,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_HEARTBEAT_SEC",
+      description = "Cap on the heartbeat lease a client may request, in seconds."
+    )
+    maxHeartbeatTimeoutSec: Long,
+    @field @ConfigField(
+      envVar = "QOD_QUACK_MAX_BODY_BYTES",
+      description =
+        "Largest request body accepted on /quack, in bytes (appends and streamed inserts)."
+    )
+    maxBodyBytes: Long
+)

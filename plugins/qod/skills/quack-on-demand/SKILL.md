@@ -5,7 +5,7 @@ description: Operate a quack-on-demand FlightSQL gateway - boot/stop the manager
 
 # Quack on Demand
 
-Quack on Demand is a multi-tenant FlightSQL gateway in front of DuckDB Quack + DuckLake. The manager exposes a REST control plane (`/api/...`) and a React admin UI (`/ui/...`) on the same port (default `:20900`), and a FlightSQL edge on a separate port (default `:31338`). Pools of Quack nodes are spawned as local subprocesses or K8s pods.
+Quack on Demand is a multi-tenant FlightSQL gateway in front of DuckDB Quack + DuckLake. The manager exposes a REST control plane (`/api/...`) and a React admin UI (`/ui/...`) on the same port (default `:20900`), a FlightSQL edge on a separate port (default `:31338`), and DuckDB's native Quack protocol on a third port (default `:9494`, for `ATTACH 'quack:host:9494'` from any DuckDB). Pools of Quack nodes are spawned as local subprocesses or K8s pods.
 
 Use this skill when the user wants to:
 - Boot, restart, or stop the manager
@@ -1261,6 +1261,59 @@ FlightSQL prepare-time probe needs a real table - schema-qualify
 (`tpch1.customer`) if you hit "Table … does not exist" at prepare.
 
 Two-part names are only unambiguous when the head is a schema in the pool's default catalog, as in `tpch1.customer` above. When the head instead names an attached catalog (the tenant-db itself, e.g. `acme_tpch`, or a federation alias) under ACL, it's rejected as ambiguous - the engine would bind it catalog-first while the ACL check can't tell which catalog you meant. Write the full three-part form instead: `acme_tpch.tpch1.customer`.
+
+## Connecting from DuckDB (native Quack protocol)
+
+Besides FlightSQL, the manager serves DuckDB's own Quack protocol on a dedicated port
+(default `9494`, env `QOD_QUACK_PORT`; `QOD_QUACK_ENABLED=false` turns the listener off).
+Any DuckDB that carries the `quack` extension (the CLI, the Python package, an embedded
+DuckDB) attaches the gateway as a database, with no driver in between, and joins it with
+its local tables. The token string is the same set of parameters the FlightSQL JDBC URL
+takes after `?`; a superuser adds `&superuser=true`, an OIDC bearer replaces
+`user`/`password` with `token=<jwt>`.
+
+```sql
+-- attach once, then query like any other catalog
+ATTACH 'quack:localhost:9494' AS qod
+  (TYPE quack, TOKEN 'tenant=acme&pool=bi&user=alice&password=<password>');
+SELECT count(*) FROM qod.tpch1.customer WHERE c_mktsegment = 'BUILDING';
+SELECT c.c_name FROM qod.tpch1.customer c JOIN my_local_table l USING (c_custkey);
+INSERT INTO qod.tpch1.staging SELECT * FROM my_local_table;   -- needs a write grant
+
+-- one shot, no ATTACH
+SELECT * FROM quack_query('quack:localhost:9494', 'SELECT count(*) FROM tpch1.orders',
+  token := 'tenant=acme&pool=bi&user=alice&password=<password>');
+```
+
+What applies is exactly what applies to a FlightSQL client: the same handshake gates
+(tenant scope, pool grant), per-statement routing across the pool, the ACL, column masking
+and row filters, metadata filtering, lockdown, author stamping, statement history, audit
+(origin `quack`), kill, and scale-to-zero wake-up. A denied table answers
+`access denied: ...` inside DuckDB's error; a bad token answers `Authentication failed`
+at `ATTACH` time.
+
+Things to know:
+
+- **TLS.** The DuckDB client speaks plain HTTP to `localhost` / `127.0.0.1` and TLS to
+  every other host, and cannot be told to use TLS on loopback. The listener is therefore
+  plain HTTP by default; before exposing it beyond the host either set
+  `QOD_QUACK_TLS_ENABLED=true` (the FlightSQL edge's certificate is reused; the client
+  does not verify self-signed certificates by default) or terminate TLS in front of the
+  port. A remote client talking to a plain-HTTP listener adds `DISABLE_SSL true` to the
+  `ATTACH` options (`disable_ssl := true` on `quack_query`).
+- **Sessions are per manager replica.** Under HA, put a session-sticky balancer in front
+  of the port; a client whose next request lands on another replica gets
+  `Invalid connection id` and must re-attach.
+- **Transactions.** `BEGIN; ...; COMMIT` from a DuckDB client runs on one node connection
+  (unlike FlightSQL, where each statement lands on a fresh node session). Session state
+  outside an explicit transaction (SET, temp tables) does not carry over between
+  statements.
+- **Upstream client limitation** (quack extension `40de7ba`, DuckDB 1.5.4, also against a
+  raw node): a multi-column result larger than the client's inline batch (about 24k rows)
+  fails inside the client with `Attempted to access index 1 within vector of size 1`.
+  Single-column results of any size, and multi-column results that fit inline, work.
+- **Personal access tokens are not accepted** on this wire (same rule as FlightSQL); use
+  a user and password or an OIDC bearer.
 
 ## Hardening (lockdown, pod security, network policy, reader eviction)
 

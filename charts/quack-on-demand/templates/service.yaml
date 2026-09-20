@@ -43,3 +43,30 @@ spec:
       {{- if and (eq .Values.service.flightsql.type "NodePort") .Values.service.flightsql.nodePort }}
       nodePort: {{ .Values.service.flightsql.nodePort }}
       {{- end }}
+{{- if .Values.quack.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qod.fullname" . }}-quack
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+    app.kubernetes.io/component: quack
+  {{- with .Values.service.quack.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.quack.type }}
+  selector:
+    {{- include "qod.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: quack
+      port: {{ .Values.service.quack.port }}
+      targetPort: quack
+      protocol: TCP
+      {{- if and (eq .Values.service.quack.type "NodePort") .Values.service.quack.nodePort }}
+      nodePort: {{ .Values.service.quack.nodePort }}
+      {{- end }}
+{{- end }}

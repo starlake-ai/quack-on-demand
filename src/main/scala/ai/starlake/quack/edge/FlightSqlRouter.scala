@@ -33,6 +33,13 @@ final case class QueryResult(
     durationMs: Long
 )
 
+/** Transport-neutral sibling of [[QueryResult]] returned by [[FlightSqlRouter.executeWith]]:
+  * `value` is whatever the caller's node call produced (an Arrow reader for the Flight edge, raw
+  * response bytes plus the node connection for the native Quack relay). The caller MUST invoke
+  * `close()` once done; it also deregisters the statement from the kill registry.
+  */
+final case class Routed[A](value: A, close: () => Unit, nodeId: String, durationMs: Long)
+
 /** Routing core extracted from the Arrow Flight surface so it can be unit-tested. The Flight
   * producer is a thin shell around `execute`.
   */
@@ -122,7 +129,11 @@ final class FlightSqlRouter(
         * which has no PAT concept). Threaded into both the statement-history row and the paired
         * audit row (denial or write) so the two always agree on who acted.
         */
-      patId: Option[String] = None
+      patId: Option[String] = None,
+      /** Audit origin of the statement: `"flightsql"` for the Arrow edge, `"quack"` for the native
+        * Quack front door. Recorded on the denial and write audit events.
+        */
+      source: String = "flightsql"
   ): Unit =
     // A claim-shaped statement is redacted before it reaches ANY sink below, whether it was
     // ultimately admitted, denied, or (with the dialect off or adminDispatch=false) simply
@@ -183,7 +194,7 @@ final class FlightSqlRouter(
           AuditActions.SqlDenied,
           None,
           "denied",
-          "flightsql",
+          source,
           Map("sql" -> recordedSql.take(500)) ++
             Option
               .when(deniedRefs.nonEmpty)(
@@ -205,7 +216,7 @@ final class FlightSqlRouter(
           if kind == StatementKind.Ddl then AuditActions.SqlDdl else AuditActions.SqlWrite,
           None,
           "ok",
-          "flightsql",
+          source,
           Map("sql" -> recordedSql.take(500), "durationMs" -> durationMs.toString),
           patId
         )
@@ -332,34 +343,60 @@ final class FlightSqlRouter(
             }
           }
       case _ =>
-        routedExecute(
+        executeWith(
           connectionId,
           user,
           poolKey,
           sql,
           effectiveSet,
-          preferredNode,
-          recordExecution,
-          prepareDurationMs,
-          patId
-        )
+          adapterSend,
+          source = "flightsql",
+          preferredNode = preferredNode,
+          recordExecution = recordExecution,
+          prepareDurationMs = prepareDurationMs,
+          patId = patId
+        ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
 
-  private def routedExecute(
+  /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
+    * around. `session` is always None on the outbound wire.
+    */
+  private val adapterSend: FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+    (node, wrappedSql, prelude, recordLoad) =>
+      adapter
+        .send(node, wrappedSql, session = None, recordLoad = recordLoad, stampPrelude = prelude)
+        .map(NodeOutcome.fromQuackResponse)
+
+  /** Run a statement through the whole pipeline (session, lockdown, ACL, protected-write guard,
+    * CLS, RLS, metadata filter, pool resume, pin and placement, kill registry, history and audit,
+    * transient retry) around a caller-supplied node call. This is the transport-neutral core:
+    * [[execute]] passes the Arrow adapter, the native Quack front door passes a relay that opens
+    * its own node connection and returns the node's raw response bytes.
+    *
+    * `send` receives the routed node, the fully rewritten and `USE`-prefixed SQL, the author
+    * stamping prelude when one applies, and whether load should be booked (false for probes). The
+    * admin dialect is NOT dispatched here: it needs an Arrow renderer, so callers that want it go
+    * through [[execute]].
+    *
+    * `source` is the audit origin recorded on denial and write events and on the SessionOpened
+    * module event (`"flightsql"` or `"quack"`).
+    */
+  def executeWith[A](
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       sql: String,
       effectiveSet: Option[EffectiveSet],
-      preferredNode: Option[String],
-      recordExecution: Boolean,
-      prepareDurationMs: Option[Long],
-      patId: Option[String]
-  ): IO[Either[RouterFailure, QueryResult]] =
+      send: FlightSqlRouter.NodeSend[A],
+      source: String = "flightsql",
+      preferredNode: Option[String] = None,
+      recordExecution: Boolean = true,
+      prepareDurationMs: Option[Long] = None,
+      patId: Option[String] = None
+  ): IO[Either[RouterFailure, Routed[A]]] =
     val s = sessions.get(connectionId).getOrElse {
       val opened = sessions.open(connectionId, user, poolKey)
       // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
-      if recordExecution then
-        events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, "flightsql"))
+      if recordExecution then events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, source))
       opened
     }
     val kind = classifier.classify(sql)
@@ -413,7 +450,8 @@ final class FlightSqlRouter(
           deniedRefs,
           realm,
           prepMs,
-          patId
+          patId,
+          source
         )
 
     // Node lockdown, resolved per pool (tri-state: pool override else global default).
@@ -576,7 +614,7 @@ final class FlightSqlRouter(
     // ACL -> CLS -> RLS -> metadata-filter pipeline; every denial arm has already
     // journaled itself. Bound to resultIO so one flatTap below emits exactly one
     // StatementExecuted event on every exit path, including the denial arms.
-    val resultIO: IO[Either[RouterFailure, QueryResult]] =
+    val resultIO: IO[Either[RouterFailure, Routed[A]]] =
       aclCheck
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
@@ -706,16 +744,9 @@ final class FlightSqlRouter(
                             obs.stays,
                             obs.switches
                           )
-                      adapter
-                        .send(
-                          node,
-                          wrappedSql,
-                          session = None,
-                          recordLoad = recordExecution,
-                          stampPrelude = prelude
-                        )
+                      send(node, wrappedSql, prelude, recordExecution)
                         .flatMap {
-                          case QuackResponse.Ok(reader, latency, close) =>
+                          case NodeOutcome.Ok(reader, latency, close) =>
                             // Idempotent close: an admin kill and the Flight producer fire the
                             // same close; the second invocation must be a no-op.
                             val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -728,9 +759,9 @@ final class FlightSqlRouter(
                             }
                             sessions.onStatement(connectionId, kind, nodeId)
                             maybeRecord(nodeId, latency, "ok", None)
-                            IO.pure(Right(QueryResult(reader, closeAndDeregister, nodeId, latency)))
+                            IO.pure(Right(Routed(reader, closeAndDeregister, nodeId, latency)))
 
-                          case QuackResponse.Failed(QuackError.Transient(m), latency) =>
+                          case NodeOutcome.Transient(m, latency) =>
                             stmtId.foreach(registry.deregister)
                             maybeRecord(nodeId, latency, "transient", Some(m))
                             if s.txOpen then
@@ -752,12 +783,13 @@ final class FlightSqlRouter(
                                 kind,
                                 finalSql,
                                 exclude = nodeId,
+                                send = send,
                                 recordLoad = recordExecution,
                                 prelude = prelude,
                                 patId = patId
                               )
 
-                          case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
+                          case NodeOutcome.Permanent(m, latency) =>
                             stmtId.foreach(registry.deregister)
                             maybeRecord(nodeId, latency, "permanent", Some(m))
                             IO.pure(Left(classifyPermanent(m)))
@@ -837,17 +869,18 @@ final class FlightSqlRouter(
           case None       => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
           case Some(snap) => IO.pure(Right(snap))
 
-  private def retryOnce(
+  private def retryOnce[A](
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       kind: StatementKind,
       sql: String,
       exclude: String,
+      send: FlightSqlRouter.NodeSend[A],
       recordLoad: Boolean = true,
       prelude: Option[String] = None,
       patId: Option[String] = None
-  ): IO[Either[RouterFailure, QueryResult]] =
+  ): IO[Either[RouterFailure, Routed[A]]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
       case Some(snapAll) =>
@@ -857,10 +890,9 @@ final class FlightSqlRouter(
             snap.nodes.find(_.nodeId == nodeId) match
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
-                adapter
-                  .send(n, wrapped, None, recordLoad = recordLoad, stampPrelude = prelude)
+                send(n, wrapped, prelude, recordLoad)
                   .map {
-                    case QuackResponse.Ok(reader, latency, close) =>
+                    case NodeOutcome.Ok(reader, latency, close) =>
                       // Mirror the primary path: registered, killable, gated on recordLoad.
                       val stmtId =
                         if recordLoad then
@@ -880,10 +912,10 @@ final class FlightSqlRouter(
                       // Pin the session on the retry node: a BEGIN that retried onto node B
                       // must have its COMMIT land there too, not be re-routed by load.
                       sessions.onStatement(connectionId, kind, nodeId)
-                      Right(QueryResult(reader, closeAndDeregister, nodeId, latency))
-                    case QuackResponse.Failed(QuackError.Transient(m), _) =>
+                      Right(Routed(reader, closeAndDeregister, nodeId, latency))
+                    case NodeOutcome.Transient(m, _) =>
                       Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
-                    case QuackResponse.Failed(QuackError.Permanent(m), _) =>
+                    case NodeOutcome.Permanent(m, _) =>
                       Left(classifyPermanent(s"retry failed: $m"))
                   }
               case None =>
@@ -903,6 +935,16 @@ final class FlightSqlRouter(
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  /** One node call for [[FlightSqlRouter.executeWith]]: `(node, wrappedSql, stampPrelude,
+    * recordLoad) => outcome`. Implementations must book load through
+    * [[ai.starlake.quack.edge.adapter.QuackHttpAdapter.tracked]] (or `send`) so both transports
+    * feed the per-node stats identically.
+    */
+  type NodeSend[A] =
+    (ai.starlake.quack.model.RunningNode, String, Option[String], Boolean) => IO[
+      ai.starlake.quack.edge.adapter.NodeOutcome[A]
+    ]
 
   // A bare one-part USE target: an unquoted identifier or one quoted identifier
   // (quoted may contain anything but a quote, including dots). Two-part

@@ -89,7 +89,9 @@ final class ManagerServer(
     // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
     // static key, never sessions), and the guard's path filter ignores non-/api paths
     // anyway -- mounting it here keeps that invariant explicit.
-    mcpRoutes: Option[HttpRoutes[IO]] = None
+    mcpRoutes: Option[HttpRoutes[IO]] = None,
+    // The native Quack front door's listener config, surfaced to the UI's connection card.
+    quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -843,6 +845,10 @@ final class ManagerServer(
               flightSqlHost = edgeCfg.host,
               flightSqlPort = edgeCfg.port,
               flightSqlTls = edgeCfg.tlsEnabled,
+              quackEnabled = quackCfg.exists(_.enabled),
+              quackHost = quackCfg.map(_.host).getOrElse(""),
+              quackPort = quackCfg.filter(_.enabled).map(_.port).getOrElse(0),
+              quackTls = quackCfg.exists(_.tlsEnabled),
               authEnabled = authEnabled,
               placementSupported = pools.supportsPlacement,
               identitySource =

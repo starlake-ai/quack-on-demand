@@ -16,8 +16,8 @@ object Banner:
 
   /** Probe the control-plane Postgres BEFORE anything else touches it, creating the control-plane
     * database when the server is up but the database is missing (SQLState 3D000), so a fresh
-    * install needs no `psql` in the launcher. Right(()) when the database is reachable (or was
-    * just created) within `timeoutSec`; Left(operator message) on any other failure. Pure of exit
+    * install needs no `psql` in the launcher. Right(()) when the database is reachable (or was just
+    * created) within `timeoutSec`; Left(operator message) on any other failure. Pure of exit
     * decisions so it is unit-testable; Main prints the message and exits on Left.
     */
   def postgresPreflight(meta: Map[String, String], timeoutSec: Int = 5): Either[String, Unit] =
@@ -28,7 +28,9 @@ object Banner:
       .ensureDatabase(meta, timeoutSec = timeoutSec) match
       case Right(created) =>
         if created then
-          println(s"control-plane database '${meta.getOrElse("dbName", "qod")}' did not exist; created it")
+          println(
+            s"control-plane database '${meta.getOrElse("dbName", "qod")}' did not exist; created it"
+          )
         Right(())
       case Left(reason) =>
         Left(
@@ -52,13 +54,27 @@ object Banner:
       restPort: Int,
       flightHost: String,
       flightPort: Int,
-      tlsEnabled: Boolean
+      tlsEnabled: Boolean,
+      /** The native Quack front door `(host, port, tls)` when it is enabled. */
+      quack: Option[(String, Int, Boolean)] = None
   ): String =
     def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
     val rh                 = display(restHost)
     val fh                 = display(flightHost)
-    val scheme             = if tlsEnabled then "grpc+tls" else "grpc"
-    val jdbcTls            =
+    val quackLine          = quack.fold("") { case (h, p, tls) =>
+      s"\n   Quack (DuckDB): quack:${display(h)}:$p  (${if tls then "TLS" else "plain HTTP"})"
+    }
+    val quackStrings = quack.fold("") { case (h, p, tls) =>
+      // The DuckDB client speaks plain HTTP to loopback hosts and TLS to any other host; the
+      // hint tells a remote client how to reach a plain-HTTP listener.
+      val ssl = if tls || display(h) == "localhost" then "" else ", DISABLE_SSL true"
+      s"\n   DuckDB: ATTACH 'quack:${display(h)}:$p' AS qod (TYPE quack, TOKEN 'tenant=<tenant>&pool=<pool>&user=<user>&password=<password>'$ssl);" +
+        s"\n           SELECT * FROM quack_query('quack:${display(h)}:$p', 'SELECT 1', token := 'tenant=<tenant>&pool=<pool>&user=<user>&password=<password>'${
+            if ssl.isEmpty then "" else ", disable_ssl := true"
+          });"
+    }
+    val scheme  = if tlsEnabled then "grpc+tls" else "grpc"
+    val jdbcTls =
       if tlsEnabled then "&useEncryption=true&disableCertificateVerification=true"
       else "&useEncryption=false"
     val version =
@@ -67,9 +83,9 @@ object Banner:
        | Quack on Demand $version is up
        |   control plane : ${jdbcControlPlaneUrl(meta)}
        |   REST API + UI : http://$rh:$restPort  (UI: http://$rh:$restPort/ui)
-       |   FlightSQL     : $scheme://$fh:$flightPort
+       |   FlightSQL     : $scheme://$fh:$flightPort$quackLine
        |
-       | Client connection strings (replace <tenant>, <pool>, <user>):
+       | Client connection strings (replace <tenant>, <pool>, <user>):$quackStrings
        |   JDBC : jdbc:arrow-flight-sql://$fh:$flightPort/?tenant=<tenant>&pool=<pool>&user=<user>$jdbcTls
        |   ADBC : uri=$scheme://$fh:$flightPort  (adbc_driver_flightsql; db_kwargs: username, password, plus grpc headers tenant=<tenant>, pool=<pool>)
        |   ODBC : Driver={Arrow Flight SQL ODBC Driver};Host=$fh;Port=$flightPort;UseEncryption=${

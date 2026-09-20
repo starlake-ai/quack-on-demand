@@ -83,6 +83,15 @@ service:
     # Pin a NodePort (30000-32767) when type=NodePort; empty = let k8s assign.
     nodePort: ""
     annotations: {}
+  # Native Quack protocol front door (plain HTTP, or TLS when quack.tls.enabled):
+  # what a DuckDB client ATTACHes to. Any HTTP Ingress can front it. When
+  # replicaCount > 1 the balancer in front MUST be session-sticky: Quack
+  # sessions are per-replica, like FlightSQL sessions.
+  quack:
+    type: ClusterIP
+    port: 9494
+    nodePort: ""
+    annotations: {}
 
 # --- Ingress (REST/UI only - FlightSQL is gRPC and not handled here) --------
 ingress:
@@ -266,6 +275,15 @@ sessionJwtSecret: ""
 existingSessionJwtSecret: ""
 
 # --- FlightSQL edge auth / TLS ---------------------------------------------
+# Native Quack protocol front door (DuckDB clients). TLS off by default: the
+# DuckDB client only speaks plain HTTP to loopback hosts; remote clients default
+# to TLS, so enable it (the Flight edge's PEM pair is reused) or terminate TLS
+# at an Ingress before exposing the port beyond the cluster.
+quack:
+  enabled: true
+  tls:
+    enabled: false
+
 flightsql:
   tls:
     enabled: true

@@ -180,6 +180,11 @@ export interface ClientConfigResponse {
   flightSqlHost: string;     // "0.0.0.0" / "" -> UI substitutes window.location.hostname
   flightSqlPort: number;
   flightSqlTls: boolean;
+  // Native Quack front door (DuckDB `ATTACH 'quack:host:port'`); port 0 when disabled.
+  quackEnabled?: boolean;
+  quackHost?: string;
+  quackPort?: number;
+  quackTls?: boolean;
   // When false, no auth providers are configured server-side and the UI
   // skips the login screen entirely. The REST API may still require an
   // X-API-Key - that's a separate gate.

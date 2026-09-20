@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Native Quack protocol front door (Epic 5).** Any DuckDB that carries the `quack` extension
+  (the CLI, the Python package, an embedded DuckDB) can now `ATTACH 'quack:<manager>:9494' AS qod
+  (TYPE quack, TOKEN 'tenant=<t>&pool=<p>&user=<u>&password=<pw>')` or call
+  `quack_query('quack:<manager>:9494', ...)` against the manager directly, with no driver in
+  between, and join the attached catalog with its local tables. The token string is the same
+  set of parameters a FlightSQL JDBC URL takes after `?` (`tenant`, `pool`, `user`, `password`,
+  or `token=<OIDC JWT>`, plus `superuser=true` for the system realm). Identity goes through the
+  Flight edge's own handshake (extracted into a shared `EdgeHandshake`), and every statement runs
+  through the same routing pipeline as FlightSQL (`FlightSqlRouter.executeWith`, the pipeline
+  generalized over the node call): ACL, column and row policies, metadata filtering, lockdown,
+  author stamping, retry, statement history, audit (source `quack`), kill and scale-to-zero
+  wake-up all apply unchanged. The manager relays per statement: it parses only the Quack header
+  and the small request messages, opens one raw node connection per statement with the client's
+  own protocol hello, and forwards the node's result bytes to the client untouched, so it never
+  encodes a DuckDB chunk and has no protocol version of its own (both the shipped generation 1
+  extension and the current upstream generation 3 wire are accepted). A generation 1 `INSERT`
+  into an attached table (shipped as an APPEND) is authorized as a write on the named table
+  before any byte reaches a node, and admin-dialect statements are answered by the manager and
+  rendered through a node. New `quack-native` config block (`QOD_QUACK_ENABLED`, `_HOST`,
+  `_PORT` default 9494, `_TLS_ENABLED` default false because the DuckDB client only speaks plain
+  HTTP to loopback hosts, `_TLS_CERT_CHAIN`, `_TLS_PRIVATE_KEY`, `_MAX_HEARTBEAT_SEC`,
+  `_MAX_BODY_BYTES`); the port is exposed in the Dockerfile, docker-compose and the helm chart
+  (`service.quack`, `quack.enabled`, `quack.tls.enabled`); the boot banner, `qod serve`'s connect
+  box and the pool page's connection card print the `ATTACH` string. Sessions are per replica
+  like FlightSQL sessions, so an HA deployment needs a session-sticky balancer in front of the
+  port. Known upstream client limitation (extension `40de7ba`, DuckDB 1.5.4): multi-column
+  results larger than the inline batch (about 24k rows) fail inside the client with
+  `Attempted to access index 1 within vector of size 1`, against a raw node as well; single-column
+  results of any size and multi-column results that fit inline work. Covered by an end-to-end
+  spec that drives the real DuckDB CLI and the `uv`-provisioned Python client through the front
+  door to a real `quack_serve` node. Design note:
+  `docs/superpowers/specs/2026-09-20-native-quack-front-door-design.md`.
+
 - **FlightSQL edge no longer mis-surfaces two DDL/DML edge cases as opaque or drifted errors.**
   DuckDB (1.5.x) does not stream every non-result statement as the single-row `Count BIGINT`
   the edge advertises: BEGIN, COMMIT, DROP and ALTER stream a single-row `Success: BOOLEAN`

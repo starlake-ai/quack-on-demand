@@ -36,20 +36,34 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) 
     onStart *>
       call.flatMap { resp =>
         IO.delay {
-          if recordLoad then
-            val latency = resp match
-              case QuackResponse.Ok(_, l, _)  => l
-              case QuackResponse.Failed(_, l) => l
-            tracker.onFinish(node.nodeId, latency)
-            resp match
-              case QuackResponse.Ok(_, _, _) =>
-                tracker.setHealthy(node.nodeId, true)
-              case QuackResponse.Failed(QuackError.Transient(_), _) =>
-                tracker.setHealthy(node.nodeId, false)
-              case _ => ()
+          if recordLoad then bookkeep(node, NodeOutcome.fromQuackResponse(resp))
           resp
         }
       }
+
+  /** Run any node call with the same load, latency and health bookkeeping as [[send]]. This is what
+    * the native Quack relay wraps its per-statement node connection in, so both transports feed the
+    * per-node dashboard stats identically. `recordLoad=false` skips every side effect, as for
+    * [[send]].
+    */
+  def tracked[A](node: RunningNode, recordLoad: Boolean)(
+      call: IO[NodeOutcome[A]]
+  ): IO[NodeOutcome[A]] =
+    val onStart = if recordLoad then IO.delay(tracker.onStart(node.nodeId)) else IO.unit
+    onStart *>
+      call.flatMap { out =>
+        IO.delay {
+          if recordLoad then bookkeep(node, out)
+          out
+        }
+      }
+
+  private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
+    tracker.onFinish(node.nodeId, out.latency)
+    out match
+      case NodeOutcome.Ok(_, _, _)     => tracker.setHealthy(node.nodeId, true)
+      case NodeOutcome.Transient(_, _) => tracker.setHealthy(node.nodeId, false)
+      case NodeOutcome.Permanent(_, _) => ()
 
   /** Fire-and-forget liveness probe. Performs the same wire round-trip as [[send]] but skips all
     * tracker bookkeeping (inFlight, totalServed, EWMA, p50/p95/p99) so background health checks

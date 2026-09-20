@@ -99,6 +99,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[PatConfig]                 = ProductHint[PatConfig](camelMapping)
   given ProductHint[ManagerConfig]             = ProductHint[ManagerConfig](camelMapping)
   given ProductHint[FlightConfig]              = ProductHint[FlightConfig](camelMapping)
+  given ProductHint[QuackNativeConfig]         = ProductHint[QuackNativeConfig](camelMapping)
   given ProductHint[DatabaseAuthConfig]        = ProductHint[DatabaseAuthConfig](camelMapping)
   given ProductHint[KeycloakAuthConfig]        = ProductHint[KeycloakAuthConfig](camelMapping)
   given ProductHint[GoogleAuthConfig]          = ProductHint[GoogleAuthConfig](camelMapping)
@@ -128,6 +129,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[PatConfig]                = deriveReader[PatConfig]
   given ConfigReader[ManagerConfig]            = deriveReader[ManagerConfig]
   given ConfigReader[FlightConfig]             = deriveReader[FlightConfig]
+  given ConfigReader[QuackNativeConfig]        = deriveReader[QuackNativeConfig]
   given ConfigReader[DatabaseAuthConfig]       = deriveReader[DatabaseAuthConfig]
   given ConfigReader[KeycloakAuthConfig]       = deriveReader[KeycloakAuthConfig]
   given ConfigReader[GoogleAuthConfig]         = deriveReader[GoogleAuthConfig]
@@ -205,6 +207,7 @@ object Main extends IOApp with LazyLogging:
     val source      = ConfigSource.default
     val mgrCfg      = source.at("quack-on-demand").loadOrThrow[ManagerConfig]
     val edgeCfg     = source.at("quack-flightsql").loadOrThrow[FlightConfig]
+    val quackCfg    = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg     = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
     val aclCfg      = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
@@ -217,7 +220,8 @@ object Main extends IOApp with LazyLogging:
         aclCfg,
         metricsCfg,
         lockdownCfg = lockdownCfg,
-        modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover()
+        modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
+        quackCfg = Some(quackCfg)
       )
     }
 
@@ -228,8 +232,14 @@ object Main extends IOApp with LazyLogging:
       aclCfg: AclConfig,
       metricsCfg: MetricsConfig,
       lockdownCfg: NodeLockdownConfig = NodeLockdownConfig(enabled = false),
-      modules: List[ai.starlake.quack.spi.ManagerModule] = Nil
+      modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
+      /** The native Quack front door block; loaded from `quack-native` when the caller does not
+        * pass one (demo and serve overlays set their system properties before this runs).
+        */
+      quackCfg: Option[QuackNativeConfig] = None
   ): IO[ExitCode] =
+    val quackCfgResolved: QuackNativeConfig =
+      quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
     // Unset boot secrets (session JWT secret, static API key) are generated and printed here,
     // BEFORE anything reads them. A no-op under HA, so the gate below still sees the raw empty
     // secret and refuses: per-replica random secrets cannot verify each other's sessions.
@@ -921,6 +931,16 @@ object Main extends IOApp with LazyLogging:
         new ai.starlake.quack.observability.metrics.RoutingInstruments(metricsReg.composite)
       val routingRefsCache = new ai.starlake.quack.route.RoutingRefsCache()
 
+      // Shared by the FlightSQL router and the native Quack front door (SessionOpened events).
+      val routerEvents: ai.starlake.quack.spi.ManagerEventSink = {
+        val sweepsFed = List(
+          Option.when(mgrCfg.autoscale.enabled)(poolLoadStats.sink),
+          Option.when(mgrCfg.hibernation.enabled)(poolActivity.sink)
+        ).flatten
+        if sweepsFed.isEmpty then moduleEventBus.sink
+        else ai.starlake.quack.spi.ManagerEventSink.fanout((sweepsFed :+ moduleEventBus.sink)*)
+      }
+
       val fsRouter = new FlightSqlRouter(
         sup,
         sessions,
@@ -942,14 +962,7 @@ object Main extends IOApp with LazyLogging:
         // poolActivity.sink is ONLY wired when its sweep runs, because that sweep is
         // its sole drainer -- feeding either with its sweep disabled would grow the
         // in-memory map without bound.
-        events = {
-          val sweepsFed = List(
-            Option.when(mgrCfg.autoscale.enabled)(poolLoadStats.sink),
-            Option.when(mgrCfg.hibernation.enabled)(poolActivity.sink)
-          ).flatten
-          if sweepsFed.isEmpty then moduleEventBus.sink
-          else ai.starlake.quack.spi.ManagerEventSink.fanout((sweepsFed :+ moduleEventBus.sink)*)
-        },
+        events = routerEvents,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
         lockdownFor = sup.effectiveLockdown,
@@ -982,6 +995,42 @@ object Main extends IOApp with LazyLogging:
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
       // RuntimeException: IO.attempt routes that, but treats raw Errors as fatal.
+      // Handshake collaborators shared by the FlightSQL edge and the native Quack front door.
+      val lookupPoolForEdge: (String, String) => Either[String, String] = (tenant, pool) =>
+        sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
+          case None      => Left(s"pool '$pool' not found in tenant '$tenant'")
+          case Some(key) =>
+            // Tenant kill switch wins: a disabled tenant reports itself, not
+            // its pool, to avoid leaking pool existence.
+            sup.getTenant(key.tenant) match
+              case Some(t) if t.disabled =>
+                Left(s"tenant '${key.tenant}' is disabled")
+              case _ =>
+                sup.get(key) match
+                  case Some(s) if s.disabled =>
+                    Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
+                  case _ =>
+                    Right(key.tenantDb)
+      // The FlightSQL `tenant` param may be a surrogate id or a display
+      // name; the shapes are disjoint, so the check picks the right index.
+      val resolveTenantForEdge: String => Option[ai.starlake.quack.model.Tenant] = raw =>
+        if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
+        else sup.getTenant(raw)
+      // Handshake authorize; failures bubble up as PERMISSION_DENIED.
+      val authorizeForEdge: (String, String, String, Set[String], Set[String], Boolean) => Either[
+        String,
+        ai.starlake.quack.ondemand.rbac.AuthorizedHandshake
+      ] =
+        (tenant, pool, username, jwtRoles, jwtGroups, superuserAdmissible) =>
+          sup.authorizeHandshake(
+            tenant,
+            pool,
+            username,
+            jwtRoles,
+            jwtGroups,
+            superuserAdmissible
+          )
+
       val edgeIO: IO[FlightEdgeServer] = IO.delay {
         try
           val srv = new FlightEdgeServer(
@@ -995,36 +1044,9 @@ object Main extends IOApp with LazyLogging:
             ),
             fsRouter,
             authService,
-            (tenant, pool) =>
-              sup.findPoolKeyByTenantAndPoolName(tenant, pool) match
-                case None      => Left(s"pool '$pool' not found in tenant '$tenant'")
-                case Some(key) =>
-                  // Tenant kill switch wins: a disabled tenant reports itself, not
-                  // its pool, to avoid leaking pool existence.
-                  sup.getTenant(key.tenant) match
-                    case Some(t) if t.disabled =>
-                      Left(s"tenant '${key.tenant}' is disabled")
-                    case _ =>
-                      sup.get(key) match
-                        case Some(s) if s.disabled =>
-                          Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
-                        case _ =>
-                          Right(key.tenantDb),
-            // The FlightSQL `tenant` param may be a surrogate id or a display
-            // name; the shapes are disjoint, so the check picks the right index.
-            raw =>
-              if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
-              else sup.getTenant(raw),
-            // Handshake authorize; failures bubble up as PERMISSION_DENIED.
-            (tenant, pool, username, jwtRoles, jwtGroups, superuserAdmissible) =>
-              sup.authorizeHandshake(
-                tenant,
-                pool,
-                username,
-                jwtRoles,
-                jwtGroups,
-                superuserAdmissible
-              )
+            lookupPoolForEdge,
+            resolveTenantForEdge,
+            authorizeForEdge
           )
           srv.start()
           srv
@@ -1032,6 +1054,48 @@ object Main extends IOApp with LazyLogging:
           case t: Throwable =>
             throw new RuntimeException(s"FlightSQL edge init failed: ${t.getMessage}", t)
       }
+
+      // Native Quack protocol front door: same handshake collaborators and router as the Flight
+      // edge, its own listener. Built here, started right after the edge below.
+      val quackDoor: Option[ai.starlake.quack.edge.quack.QuackFrontDoorServer] =
+        Option.when(quackCfgResolved.enabled) {
+          val handshake = new ai.starlake.quack.edge.EdgeHandshake(
+            authService,
+            lookupPoolForEdge,
+            resolveTenantForEdge,
+            authorizeForEdge
+          )
+          val quackSessions = new ai.starlake.quack.edge.quack.QuackSessionRegistry(
+            sessionTtlSec = edgeCfg.sessionTtlSec,
+            maxHeartbeatSec = quackCfgResolved.maxHeartbeatTimeoutSec
+          )
+          val transport = new ai.starlake.quack.edge.adapter.QuackProtocol.JdkHttpTransport(
+            java.net.http.HttpClient.newHttpClient()
+          )
+          val door = new ai.starlake.quack.edge.quack.QuackFrontDoor(
+            fsRouter,
+            handshake,
+            quackSessions,
+            transport,
+            routerEvents,
+            Option(getClass.getPackage.getImplementationVersion).getOrElse("dev")
+          )
+          new ai.starlake.quack.edge.quack.QuackFrontDoorServer(
+            quackCfgResolved,
+            door.handle,
+            door.sweep,
+            door.closeAll()
+          )
+        }
+      // A front door bind failure aborts boot exactly like an edge init failure.
+      val dataPlaneIO: IO[FlightEdgeServer] =
+        edgeIO.flatTap(_ =>
+          quackDoor.fold(IO.unit)(d =>
+            d.start().adaptError { case t =>
+              new RuntimeException(s"Quack front door init failed: ${t.getMessage}", t)
+            }
+          )
+        )
 
       val userHandlers =
         new UserHandlers(sup, userStore, audit = auditRecorder, sessionOf = bearerSessionOf)
@@ -1381,7 +1445,8 @@ object Main extends IOApp with LazyLogging:
         ),
         canonicalTenantIdOf = t =>
           ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
-        mcpRoutes = mcpRoutes
+        mcpRoutes = mcpRoutes,
+        quackCfg = Some(quackCfgResolved)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
@@ -1483,9 +1548,10 @@ object Main extends IOApp with LazyLogging:
               s"manager REST on ${mgrCfg.host}:${mgrCfg.port}, " +
                 s"edge FlightSQL on ${edgeCfg.host}:${edgeCfg.port}"
             )
-            edgeIO.attempt.flatMap {
+            dataPlaneIO.attempt.flatMap {
               case Right(edge) =>
                 logger.info("edge FlightSQL started")
+                quackDoor.foreach(_ => logger.info("Quack front door started"))
                 // Stdout banner (default log level is ERROR), once both listeners are up.
                 println(
                   Banner.startup(
@@ -1494,12 +1560,16 @@ object Main extends IOApp with LazyLogging:
                     mgrCfg.port,
                     edgeCfg.host,
                     edgeCfg.port,
-                    edgeCfg.tlsEnabled
+                    edgeCfg.tlsEnabled,
+                    quack = quackDoor.map(_ =>
+                      (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
+                    )
                   )
                 )
                 val shutdownCoordinator = new ai.starlake.quack.boot.ShutdownCoordinator(
                   edge = edge,
                   backend = backend,
+                  quackFrontDoor = quackDoor,
                   coordinator = coordinator,
                   eventJournal = eventJournal,
                   telemetryStore = telemetryStore,
