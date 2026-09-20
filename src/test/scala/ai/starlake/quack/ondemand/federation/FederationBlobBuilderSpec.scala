@@ -216,4 +216,45 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
       "CLIENT_SECRET 'O''Brien'"
     )
   }
+
+  // ---------- sibling alias reservation ----------
+  // FederatedSourceHandlers.toSource enforces this same rule at REST/MCP write time, but
+  // ManifestImporter builds FederatedSource rows directly and never goes through that handler, so
+  // the blob builder is the one choke point every write path reaches. Without it a colliding
+  // ATTACH fails silently on the node (the piped DuckDB CLI does not bail), and the operator only
+  // sees "Catalog does not exist" at query time with no pointer back to the cause.
+
+  it should "raise, naming the alias, when an iceberg source's alias collides with a sibling" in {
+    val ice = iceSrc(alias = "sales_lake")
+    // Distinct id: the `src` fixture derives id from the alias, so a same-alias sibling would
+    // otherwise share `ice`'s id and be filtered out of its own sibling set.
+    val other = src("sales_lake", "ATTACH 'x' AS {{alias}};").copy(id = "other-1")
+    val err   = intercept[RuntimeException](
+      builderWith(List(ice, other), iceSecrets(ice)).build("td-1").unsafeRunSync()
+    )
+    err.getMessage should include("sales_lake")
+  }
+
+  it should "raise on a sibling collision that differs only by case" in {
+    val ice   = iceSrc(alias = "sales_lake")
+    val other = src("SALES_LAKE", "ATTACH 'x' AS {{alias}};")
+    intercept[RuntimeException](
+      builderWith(List(ice, other), iceSecrets(ice)).build("td-1").unsafeRunSync()
+    )
+  }
+
+  it should "still build both blocks when aliases do not collide" in {
+    val ice   = iceSrc(alias = "sales_lake")
+    val other = src("fedpg", "ATTACH 'x' AS {{alias}};")
+    val blob  = builderWith(List(ice, other), iceSecrets(ice)).build("td-1").unsafeRunSync().value
+    blob should include("-- BEGIN federation: sales_lake")
+    blob should include("-- BEGIN federation: fedpg")
+  }
+
+  it should "not reserve any alias in buildOne, since collision is already settled at write time" in {
+    val ice   = iceSrc(alias = "sales_lake")
+    val other = src("sales_lake", "ATTACH 'x' AS {{alias}};")
+    val out   = builderWith(List(ice, other), iceSecrets(ice)).buildOne(ice).unsafeRunSync()
+    out should include("-- BEGIN federation: sales_lake")
+  }
 }

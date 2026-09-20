@@ -57,11 +57,22 @@ final class FederationBlobBuilder(
 
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
     sources <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
-    blobs   <- sources.traverse(renderOne(_, redactSecrets))
+    blobs   <- sources.traverse { src =>
+      // Every OTHER source's alias (by id, NOT by alias equality -- two rows can already share an
+      // alias, which is exactly the case this is meant to catch), lowercased since `validated`
+      // compares case-insensitively. Passed as `extraReserved` so an iceberg source can't claim a
+      // DuckDB catalog name a sibling in this same tenant-db already holds -- see `bodyTemplate`.
+      val siblingAliases = sources.filterNot(_.id == src.id).map(_.alias.toLowerCase).toSet
+      renderOne(src, redactSecrets, siblingAliases)
+    }
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
 
-  private def renderOne(src: FederatedSource, redactSecrets: Boolean): IO[String] = for {
-    template <- bodyTemplate(src)
+  private def renderOne(
+      src: FederatedSource,
+      redactSecrets: Boolean,
+      siblingAliases: Set[String] = Set.empty
+  ): IO[String] = for {
+    template <- bodyTemplate(src, siblingAliases)
     secrets  <- loadSecrets(src.id)
     byName = secrets.map(s => s.name -> s).toMap
     body <- substitute(src, template, byName, redactSecrets)
@@ -75,8 +86,18 @@ final class FederationBlobBuilder(
     * A config that will not parse raises rather than degrading: silently skipping the source would
     * bring a node up with the catalog missing, which is exactly the failure the attach verifier
     * exists to make visible.
+    *
+    * `siblingAliases` reserves every OTHER enabled source's alias in the same tenant-db (default
+    * empty for [[buildOne]], which re-issues one already-stored source whose sibling collision was
+    * already settled when that row was created). `FederatedSourceHandlers.toSource` runs the same
+    * check at REST/MCP write time, but `ManifestImporter` builds `FederatedSource` rows directly
+    * and calls `upsertSource` without going through that handler, so this is the one choke point
+    * every write path reaches. It also turns a silent failure loud: without it, a colliding ATTACH
+    * fails on the node but the piped DuckDB CLI does not bail, so the node comes up healthy with a
+    * half-applied catalog set and the operator only sees `Catalog "x" does not exist` at query
+    * time, with no pointer back to the cause.
     */
-  private def bodyTemplate(src: FederatedSource): IO[String] =
+  private def bodyTemplate(src: FederatedSource, siblingAliases: Set[String]): IO[String] =
     src.sourceType match
       case FederatedSourceType.Sql         => IO.pure(src.setupSql)
       case FederatedSourceType.IcebergRest =>
@@ -95,7 +116,7 @@ final class FederationBlobBuilder(
               // `render` accepts ONLY a ValidatedIcebergConfig (owner decision after the session
               // audit): the illegal state is unrepresentable, so this arm cannot forget to validate.
               case Right(cfg) =>
-                IcebergRestConfig.validated(cfg, src.alias) match
+                IcebergRestConfig.validated(cfg, src.alias, siblingAliases) match
                   case Left(errs) =>
                     IO.raiseError(
                       new RuntimeException(
