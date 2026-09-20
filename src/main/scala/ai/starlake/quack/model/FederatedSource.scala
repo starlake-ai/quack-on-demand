@@ -12,10 +12,14 @@ import java.time.Instant
   *     (`ondemand.federation.iceberg.IcebergRestConfig`) and the SQL is rendered from it. Stored as
   *     text here because `model` is a leaf package.
   *
-  * `readOnly` is persisted here; enforcement at the edge is `ai.starlake.quack.edge.sql.
-  * CatalogWriteScreen`, a defence-in-depth screen wired into `FlightSqlRouter` (the ACL graph
-  * remains the primary gate). The REST create path defaults a new `iceberg_rest` source to true
-  * (Task 5). This field defaults to false so pre-0038 sources keep their behaviour.
+  * `readOnly` is persisted here; enforcement at the edge is
+  * [[ai.starlake.quack.edge.sql.CatalogWriteScreen]], a defence-in-depth screen wired into
+  * `FlightSqlRouter` (the ACL graph remains the primary gate). That screen only looks at statements
+  * classified as a write (Dml/Ddl): it denies a write whose target fully qualifies to this catalog,
+  * and also denies a write it cannot fully resolve while any catalog is read-only, since an
+  * unresolved write could be hiding one against this catalog; it never denies a read. The REST
+  * create path defaults a new `iceberg_rest` source to true (Task 5). This field defaults to false
+  * so pre-0038 sources keep their behaviour.
   */
 final case class FederatedSource(
     id: String,

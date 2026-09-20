@@ -1887,6 +1887,84 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.swap.toOption.map(_.reason).getOrElse("") should not startWith "access denied: lockdown:"
 
+  // ---- per-catalog read-only screen wiring (CatalogWriteScreen via `readOnlyCatalogsOf`) ----
+  // Pinning I1: `readOnlyCatalogsOf` defaults to `_ => Set.empty`, so with no test exercising a
+  // non-empty value here every one of these would still pass with the whole `catalogDenial` block
+  // (FlightSqlRouter.scala) and its `Main` wiring deleted outright.
+
+  it should "deny a fully-qualified write to a read-only catalog and record it distinctly" in:
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      readOnlyCatalogsOf = _ => Set("sales_lake"),
+      attachedCatalogsOf = _ => Set("sales_lake")
+    )
+    val out = router
+      .execute("ro-1", "alice", poolKey, "INSERT INTO sales_lake.main.t VALUES (1)")
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    val latest = router.history.snapshot(1).head
+    latest.status shouldBe "denied"
+    latest.error.get should startWith("read_only_catalog:")
+
+  it should "let an ACL denial win over the read-only screen, with the ACL reason reported" in:
+    // Proves the `catalogDenial = aclCheck.flatMap { ... }` ordering: when the ACL gate itself
+    // denies, the screen must never run, and the reason the caller sees must be the ACL one, not
+    // "read_only_catalog: ...". Reverting either the wiring or the flatMap ordering (e.g. running
+    // the screen independently of aclCheck) would let this statement's read-only reason leak
+    // through, or would report the wrong reason, and this test would fail.
+    val (base, _, _) = setup()
+    val aclValidator = new StatementValidator:
+      def validate(context: ValidationContext): ValidationResult =
+        Denied("acl: no grant on sales_lake.main.t")
+    val router = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      validator = aclValidator,
+      readOnlyCatalogsOf = _ => Set("sales_lake"),
+      attachedCatalogsOf = _ => Set("sales_lake")
+    )
+    val out = router
+      .execute(
+        "ro-2",
+        "alice",
+        poolKey,
+        "INSERT INTO sales_lake.main.t VALUES (1)",
+        effectiveSet = Some(effWithPolicies(Nil))
+      )
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    out.swap.toOption.get.reason should include("acl: no grant on sales_lake.main.t")
+    out.swap.toOption.get.reason should not include "read_only_catalog"
+
+  it should "deny an ambiguous two-part write against a read-only catalog (C1 regression)" in:
+    // `sales_lake.orders` cannot be qualified (AmbiguousCatalogRef, TableQualifier.qualify drops
+    // it from `accesses`); before the C1 fix CatalogWriteScreen only looked at `accesses` and
+    // admitted this by omission. Reverting the qualificationErrors check in CatalogWriteScreen
+    // reproduces that gap and this test fails (isRight becomes true).
+    val (base, _, _) = setup()
+    val router       = new FlightSqlRouter(
+      base.supervisor,
+      base.sessions,
+      base.tracker,
+      base.adapter,
+      stmtInstruments = si,
+      readOnlyCatalogsOf = _ => Set("sales_lake"),
+      attachedCatalogsOf = _ => Set("sales_lake")
+    )
+    val out = router
+      .execute("ro-3", "alice", poolKey, "INSERT INTO sales_lake.orders VALUES (1)")
+      .unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.AccessDenied]
+    out.swap.toOption.get.reason should include("could not be fully resolved")
+
   // ---- cache-aware placement (milestone-2 edge integration) ----
 
   /** Two dual-role nodes on an object-store (or, when overridden, local) dataPath, a
