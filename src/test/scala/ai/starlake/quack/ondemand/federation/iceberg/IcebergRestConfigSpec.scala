@@ -90,6 +90,13 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("{{secret.")) shouldBe true
   }
 
+  it should "reject a clientSecret with a placeholder embedded in a literal" in {
+    // placeholderErrors (clientSecret / token) is unchanged: full-string match, unlike the
+    // embedding-aware strayBraceErrors used by uri/warehouse/clientId/oauth2*.
+    val errs = oauth2.copy(clientSecret = Some("sk-{{secret.X}}")).validate("sales_lake", Set.empty)
+    errs.exists(_.contains("clientSecret")) shouldBe true
+  }
+
   it should "reject a uri containing a stray or malformed '{{'" in {
     val errs = oauth2
       .copy(uri = "https://catalog.example.com/cat{{alog")
@@ -106,6 +113,24 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("uri")) shouldBe false
   }
 
+  it should "accept a uri with a well-formed placeholder embedded among literal text" in {
+    // Regression test: FederationBlobBuilder.substitute resolves {{secret.NAME}} wherever it
+    // appears in the rendered SQL, not only when it is the field's entire value - the validator
+    // must accept exactly what the builder can resolve.
+    val errs = oauth2
+      .copy(uri = "https://host/{{secret.TOKEN}}/api")
+      .validate("sales_lake", Set.empty)
+    errs.exists(_.contains("uri")) shouldBe false
+  }
+
+  it should "reject a uri where one well-formed placeholder does not excuse a second stray brace" in {
+    val errs = oauth2
+      .copy(uri = "https://host/{{secret.OK}}/x{{broken")
+      .validate("sales_lake", Set.empty)
+    errs.exists(_.contains("uri")) shouldBe true
+    errs.exists(_.contains("{{")) shouldBe true
+  }
+
   it should "reject a warehouse containing a stray or malformed '{{'" in {
     val errs = oauth2.copy(warehouse = "ware{{house").validate("sales_lake", Set.empty)
     errs.exists(_.contains("warehouse")) shouldBe true
@@ -114,6 +139,11 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
 
   it should "accept a warehouse containing a well-formed {{secret.NAME}} placeholder" in {
     val errs = oauth2.copy(warehouse = "{{secret.WAREHOUSE}}").validate("sales_lake", Set.empty)
+    errs.exists(_.contains("warehouse")) shouldBe false
+  }
+
+  it should "accept a warehouse with a well-formed placeholder embedded among literal text" in {
+    val errs = oauth2.copy(warehouse = "wh-{{secret.ACCT}}").validate("sales_lake", Set.empty)
     errs.exists(_.contains("warehouse")) shouldBe false
   }
 
@@ -128,15 +158,34 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     cfg.validate("sales_lake", Set.empty).exists(_.contains("clientSecret")) shouldBe false
   }
 
-  it should "reject a clientId containing '{{'" in {
-    val errs = oauth2.copy(clientId = Some("{{secret.CID}}extra")).validate("sales_lake", Set.empty)
+  it should "reject a clientId containing a stray or malformed '{{'" in {
+    // "{{secret.CID}}extra" is no longer a fixture for this case: FederationBlobBuilder resolves
+    // the well-formed placeholder and leaves "extra" as ordinary trailing literal text, which is
+    // not a failure - see "accept a clientId with a well-formed placeholder followed by literal
+    // text" below. A genuinely malformed brace is required to exercise rejection.
+    val errs = oauth2.copy(clientId = Some("cid{{oops")).validate("sales_lake", Set.empty)
     errs.exists(_.contains("clientId")) shouldBe true
     errs.exists(_.contains("{{")) shouldBe true
   }
 
-  it should "reject an oauth2ServerUri containing '{{'" in {
+  it should "accept a clientId with a well-formed placeholder followed by literal text" in {
+    val errs =
+      oauth2.copy(clientId = Some("{{secret.CID}}extra")).validate("sales_lake", Set.empty)
+    errs.exists(_.contains("clientId")) shouldBe false
+  }
+
+  it should "accept an oauth2ServerUri with a well-formed placeholder embedded in a literal uri" in {
+    // Same shape as the uri/warehouse regression test: FederationBlobBuilder substitutes the
+    // placeholder wherever it appears, so this resolves cleanly and must not be rejected.
     val errs = oauth2
       .copy(oauth2ServerUri = Some("https://idp.example.com/{{secret.HOST}}"))
+      .validate("sales_lake", Set.empty)
+    errs.exists(_.contains("oauth2ServerUri")) shouldBe false
+  }
+
+  it should "reject an oauth2ServerUri containing a stray or malformed '{{'" in {
+    val errs = oauth2
+      .copy(oauth2ServerUri = Some("https://idp.example.com/serv{{oops"))
       .validate("sales_lake", Set.empty)
     errs.exists(_.contains("oauth2ServerUri")) shouldBe true
     errs.exists(_.contains("{{")) shouldBe true
@@ -144,14 +193,14 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
 
   it should "reject an oauth2Scope containing a malformed '{{'" in {
     val errs =
-      oauth2.copy(oauth2Scope = Some("{{secret.SCOPE}}extra")).validate("sales_lake", Set.empty)
+      oauth2.copy(oauth2Scope = Some("scope{{oops")).validate("sales_lake", Set.empty)
     errs.exists(_.contains("oauth2Scope")) shouldBe true
     errs.exists(_.contains("{{")) shouldBe true
   }
 
   it should "reject an oauth2GrantType containing a malformed '{{'" in {
     val errs = oauth2
-      .copy(oauth2GrantType = Some("{{secret.GRANT}}extra"))
+      .copy(oauth2GrantType = Some("grant{{oops"))
       .validate("sales_lake", Set.empty)
     errs.exists(_.contains("oauth2GrantType")) shouldBe true
     errs.exists(_.contains("{{")) shouldBe true

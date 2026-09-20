@@ -159,23 +159,32 @@ object IcebergRestConfig:
         )
       case None => Nil
 
-  /** `fieldName`, when set to a value containing '{{', must be a WELL-FORMED `{{secret.NAME}}`
-    * placeholder - anything else (a stray or malformed brace) would pass through
-    * [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]] unresolved and fail the whole
-    * tenant-db federation blob. Unlike [[placeholderErrors]], a literal value with no brace at all
-    * is fine here - these fields, unlike clientSecret / token, are not required to be placeholders.
+  /** `fieldName`, when set to a value containing '{{', must have every '{{' accounted for by a
+    * WELL-FORMED `{{secret.NAME}}` placeholder - a stray or malformed brace left over would pass
+    * through [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]] unresolved and fail
+    * the whole tenant-db federation blob. Unlike [[placeholderErrors]], a literal value with no
+    * brace at all is fine here - these fields, unlike clientSecret / token, are not required to be
+    * placeholders, and a placeholder MAY be embedded anywhere in a larger value (e.g. a uri or
+    * warehouse that is partly literal, partly secret).
+    *
+    * This mirrors `FederationBlobBuilder.substitute` exactly rather than approximating it: the
+    * builder resolves every well-formed `{{secret.NAME}}` wherever it appears in the rendered SQL
+    * (`SecretRegex.replaceAllIn`), then fails only if a `{{` still remains. Stripping every
+    * well-formed placeholder and checking what is left is that same test, so a value this accepts
+    * is one the builder can actually resolve.
     */
   private[iceberg] def strayBraceErrors(fieldName: String, value: Option[String]): List[String] =
     value.filter(_.contains("{{")) match
-      case Some(v) if SecretPlaceholder.matches(v.trim) => Nil
-      case Some(_)                                      =>
-        List(
-          s"$fieldName has a stray or malformed '{{' placeholder: only a well-formed " +
-            "{{secret.NAME}} is substituted, and an unresolved placeholder trips " +
-            "FederationBlobBuilder's stray-placeholder check, failing the entire tenant-db " +
-            "federation blob"
-        )
-      case None => Nil
+      case None    => Nil
+      case Some(v) =>
+        if SecretPlaceholder.replaceAllIn(v, "").contains("{{") then
+          List(
+            s"$fieldName has a stray or malformed '{{': a well-formed {{secret.NAME}} is " +
+              "substituted at node spawn, but anything else survives into the SQL and trips " +
+              "FederationBlobBuilder's stray-placeholder check, failing the entire tenant-db " +
+              "federation blob"
+          )
+        else Nil
 
   // Absent optional wire fields fall back to the case-class defaults: plain deriveCodec is strict
   // (it rejects a missing field even when the case class has a default), which would break every
