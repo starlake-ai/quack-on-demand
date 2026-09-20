@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.federation
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
+import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, IcebergSetupSql}
 import cats.effect.IO
 import cats.syntax.all.*
 
@@ -47,19 +48,69 @@ final class FederationBlobBuilder(
   def logSafePreview(tenantDbId: String): IO[Option[String]] =
     assemble(tenantDbId, redactSecrets = true)
 
+  /** Resolve ONE source's block, secrets substituted. Used by the Iceberg attach verifier to
+    * re-issue a single catalog's ATTACH on a live node: re-running the whole blob would re-execute
+    * every other source's CREATE SECRET and ATTACH. NEVER log this output.
+    */
+  def buildOne(src: FederatedSource): IO[String] =
+    renderOne(src, redactSecrets = false)
+
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
     sources <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
     blobs   <- sources.traverse(renderOne(_, redactSecrets))
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
 
   private def renderOne(src: FederatedSource, redactSecrets: Boolean): IO[String] = for {
-    secrets <- loadSecrets(src.id)
+    template <- bodyTemplate(src)
+    secrets  <- loadSecrets(src.id)
     byName = secrets.map(s => s.name -> s).toMap
-    body <- substitute(src, byName, redactSecrets)
+    body <- substitute(src, template, byName, redactSecrets)
   } yield s"-- BEGIN federation: ${src.alias}\n$body\n-- END federation: ${src.alias}"
+
+  /** The pre-substitution SQL for one source. A `Sql` source supplies it directly; an `IcebergRest`
+    * source has it rendered from typed config. The rendered form still carries `{{secret.NAME}}`
+    * placeholders, so everything downstream (substitution, SQL escaping, the stray-placeholder
+    * check, redaction) applies to both shapes identically.
+    *
+    * A config that will not parse raises rather than degrading: silently skipping the source would
+    * bring a node up with the catalog missing, which is exactly the failure the attach verifier
+    * exists to make visible.
+    */
+  private def bodyTemplate(src: FederatedSource): IO[String] =
+    src.sourceType match
+      case FederatedSourceType.Sql         => IO.pure(src.setupSql)
+      case FederatedSourceType.IcebergRest =>
+        src.config.filter(_.trim.nonEmpty) match
+          case None =>
+            IO.raiseError(
+              new RuntimeException(s"iceberg source '${src.alias}' has no config")
+            )
+          case Some(json) =>
+            IcebergRestConfig.fromJson(json) match
+              // validate BEFORE render. `render` is a pure total function with a stated
+              // precondition: it does not check the config, so an invalid one renders SQL DuckDB
+              // refuses (e.g. ENDPOINT_TYPE together with AUTHORIZATION_TYPE), and because this
+              // SQL runs in the node's startup script that takes down the node's whole init,
+              // not just this catalog.
+              // `render` accepts ONLY a ValidatedIcebergConfig (owner decision after the session
+              // audit): the illegal state is unrepresentable, so this arm cannot forget to validate.
+              case Right(cfg) =>
+                IcebergRestConfig.validated(cfg, src.alias) match
+                  case Left(errs) =>
+                    IO.raiseError(
+                      new RuntimeException(
+                        s"invalid iceberg config for source '${src.alias}': ${errs.mkString("; ")}"
+                      )
+                    )
+                  case Right(v) => IO.pure(IcebergSetupSql.render(v))
+              case Left(err) =>
+                IO.raiseError(
+                  new RuntimeException(s"invalid iceberg config for source '${src.alias}': $err")
+                )
 
   private def substitute(
       src: FederatedSource,
+      template: String,
       secrets: Map[String, FederatedSecret],
       redactSecrets: Boolean
   ): IO[String] = {
@@ -67,7 +118,7 @@ final class FederationBlobBuilder(
     //    an apostrophe can't break the surrounding literal context the
     //    operator wrote (`AS {{alias}}` is normally an identifier, but a
     //    template may wrap it in a literal for a comment or label).
-    val step1 = src.setupSql.replace(AliasToken, sqlEscapeSingleQuote(src.alias))
+    val step1 = template.replace(AliasToken, sqlEscapeSingleQuote(src.alias))
 
     // 2. Resolve each distinct {{secret.NAME}} via the resolver (or keep
     //    as placeholder when building the log-safe preview). Resolved
