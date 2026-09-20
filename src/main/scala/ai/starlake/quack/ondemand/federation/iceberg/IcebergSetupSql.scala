@@ -44,7 +44,14 @@ object IcebergSetupSql:
           cfg.clientSecret.filter(_.trim.nonEmpty).map(v => s"CLIENT_SECRET ${lit(v)}"),
           cfg.oauth2ServerUri.filter(_.trim.nonEmpty).map(v => s"OAUTH2_SERVER_URI ${lit(v)}"),
           cfg.oauth2Scope.filter(_.trim.nonEmpty).map(v => s"OAUTH2_SCOPE ${lit(v)}"),
-          cfg.oauth2GrantType.filter(_.trim.nonEmpty).map(v => s"OAUTH2_GRANT_TYPE ${lit(v)}")
+          cfg.oauth2GrantType.filter(_.trim.nonEmpty).map(v => s"OAUTH2_GRANT_TYPE ${lit(v)}"),
+          // DuckDB derives the oauth2 server URI fallback (<endpoint>/v1/oauth/tokens) from the
+          // SECRET's own ENDPOINT, not from the ATTACH's ENDPOINT option: with authType=oauth2
+          // and no explicit oauth2ServerUri, omitting this makes ATTACH fail before any network
+          // call ("no 'oauth2_server_uri' was provided, and no 'endpoint' was provided to fall
+          // back on"). Kept oauth2-only: a Token secret does no exchange, so ENDPOINT here would
+          // be inert, and the ATTACH already carries its own ENDPOINT for catalog operations.
+          Option.when(cfg.uri.trim.nonEmpty)(s"ENDPOINT ${lit(cfg.uri.trim)}")
         ).flatten
       case Some(IcebergAuthType.Token) =>
         List(
