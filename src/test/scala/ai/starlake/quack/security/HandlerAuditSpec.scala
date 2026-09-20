@@ -155,7 +155,13 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
       else None
     val tenantIdResolver = (tn: String) =>
       if tn == SecurityFixtures.TenantName then Some(tid) else None
-    new FederatedSourceHandlers(memStore, resolver, tenantIdResolver, audit)
+    new FederatedSourceHandlers(
+      memStore,
+      resolver,
+      tenantIdResolver,
+      audit,
+      catalogAliasOf = _ => None
+    )
 
   // ---------------------------------------------------------------------------
   // Federation audit tests

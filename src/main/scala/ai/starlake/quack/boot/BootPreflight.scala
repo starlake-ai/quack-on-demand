@@ -212,10 +212,12 @@ object BootPreflight extends LazyLogging:
         )
       }
 
-  /** Federated sources whose alias [[Names]]'s identifier rule now rejects (lowercase letters,
-    * digits and underscore only, not starting with a digit, 1..63 chars) -- every federated alias,
-    * `sql` as well as `iceberg_rest`, has been normalized through this rule since the typed
-    * iceberg_rest source type landed. Returned as (tenantDbId, alias) pairs.
+  /** Federated sources whose alias [[Names]]'s identifier rule would REWRITE (not merely reject) --
+    * every federated alias, `sql` as well as `iceberg_rest`, has been normalized through this rule
+    * since the typed iceberg_rest source type landed. This is broader than "invalid": an alias that
+    * is a valid identifier but not already lowercase (e.g. `extS3`) is silently rewritten to
+    * `exts3` on its next upsert rather than rejected, which is exactly the class `Names.isValid`
+    * alone is blind to (its pattern accepts uppercase). Returned as (tenantDbId, alias) pairs.
     *
     * Pure and total: a store failure yields `Nil` rather than throwing, because a legacy alias must
     * never prevent boot. Kept separate from [[checkFederatedAliases]] so the decision (what counts
@@ -226,7 +228,7 @@ object BootPreflight extends LazyLogging:
       for
         tenantDbId <- fedStore.tenantDbIdsWithSources().toList
         source     <- fedStore.listSources(tenantDbId)
-        if !Names.isValid(source.alias)
+        if !Names.isValid(source.alias) || source.alias != source.alias.toLowerCase
       yield (tenantDbId, source.alias)
     catch
       case e: Exception =>
@@ -234,27 +236,41 @@ object BootPreflight extends LazyLogging:
         Nil
 
   /** Boot-time check reporting [[invalidFederatedAliases]]: an alias created before every federated
-    * alias was normalized (e.g. containing a hyphen or a dot) cannot be re-upserted through REST,
-    * CLI, MCP or manifest import until it is recreated under a valid alias, and if its setup SQL
-    * used the bare `{{alias}}` substitution form (rather than a hand-quoted `AS "{{alias}}"`), its
-    * `ATTACH ... AS <alias>` has likely been failing silently at every node spawn already: DuckDB's
-    * parser rejects the unquoted identifier, and the piped CLI does not bail on that error.
+    * alias was normalized falls into one of two cases.
+    *
+    *   - **Invalid** (e.g. containing a hyphen or a dot, or over-length): cannot be re-upserted
+    *     through REST, CLI, MCP or manifest import until it is recreated under a valid alias, and
+    *     if its setup SQL used the bare `{{alias}}` substitution form (rather than a hand-quoted
+    *     `AS "{{alias}}"`), its `ATTACH ... AS <alias>` has likely been failing silently at every
+    *     node spawn already: DuckDB's parser rejects the unquoted identifier, and the piped CLI
+    *     does not bail on that error.
+    *   - **Valid but not lowercase** (e.g. `extS3`): will be rewritten in place to its lowercase
+    *     form on its next upsert (safe, now that the lookup falls back to a case-insensitive scan
+    *     for exactly this case) -- but until then its `ATTACH` may already be colliding with a
+    *     sibling alias differing only by case, since DuckDB treats catalog names
+    *     case-insensitively.
     *
     * MUST NOT fail boot and MUST NOT throw: an existing install carrying a legacy alias has to keep
     * starting -- `invalidFederatedAliases` already degrades a store failure to `Nil`. Reports
-    * nothing when every alias is valid, so the overwhelmingly common install stays silent.
+    * nothing when every alias is already normalized, so the overwhelmingly common install stays
+    * silent.
     */
   def checkFederatedAliases(fedStore: FederatedSourceOps): Unit =
     invalidFederatedAliases(fedStore).foreach { case (tenantDbId, alias) =>
       // ERROR, not WARN: the default logback root level is ERROR (see logback.xml), so a WARN
       // here would be silently swallowed on every install that hasn't raised the level -- and an
       // operator restarting into this state needs to see it, not lose it.
-      logger.error(
-        s"tenant-db '$tenantDbId': federated source alias '$alias' is no longer a valid " +
-          "identifier (lowercase letters, digits and underscore only, not starting with a " +
-          s"digit, 1..${Names.MaxLength} chars). It cannot be updated through REST, CLI, MCP or " +
-          "manifest import until it is recreated under a valid alias; if its setup SQL uses the " +
-          "bare {{alias}} substitution form, its ATTACH has likely been failing silently at " +
-          "every node spawn already."
-      )
+      val detail =
+        if !Names.isValid(alias) then
+          "is no longer a valid identifier (lowercase letters, digits and underscore only, not " +
+            s"starting with a digit, 1..${Names.MaxLength} chars). It cannot be updated through " +
+            "REST, CLI, MCP or manifest import until it is recreated under a valid alias; if its " +
+            "setup SQL uses the bare {{alias}} substitution form, its ATTACH has likely been " +
+            "failing silently at every node spawn already."
+        else
+          s"is not lowercase (stored as '$alias'). It will be rewritten to " +
+            s"'${alias.toLowerCase}' in place the next time it is updated; until then its ATTACH " +
+            "may already be colliding with a sibling alias differing only by case, since DuckDB " +
+            "treats catalog names case-insensitively."
+      logger.error(s"tenant-db '$tenantDbId': federated source alias '$alias' $detail")
     }

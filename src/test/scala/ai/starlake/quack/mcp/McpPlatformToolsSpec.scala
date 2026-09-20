@@ -156,7 +156,14 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
               cp.listTenants()
                 .find(_.id == t)
                 .flatMap(tt => cp.listTenantDbs(tt.id).find(_.name == d).map(_.id))
-          Some(new FederatedSourceHandlers(fedStore, resolver, scopeOf = scopeOf))
+          Some(
+            new FederatedSourceHandlers(
+              fedStore,
+              resolver,
+              scopeOf = scopeOf,
+              catalogAliasOf = _ => None
+            )
+          )
         else None
 
       val store               = new InMemoryControlPlaneStore()

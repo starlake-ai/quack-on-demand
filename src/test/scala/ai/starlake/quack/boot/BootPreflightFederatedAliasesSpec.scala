@@ -51,6 +51,19 @@ class BootPreflightFederatedAliasesSpec extends AnyFlatSpec with Matchers:
       BootPreflight.invalidFederatedAliases(store) shouldBe List(("td-1", "ext-s3"))
     }
 
+  it should "return a mixed-case alias too, even though Names.isValid accepts it" in {
+    val store = new InMemoryFederatedSourceStore
+    store.upsertSource(
+      FederatedSource(
+        id = "fs-1",
+        tenantDbId = "td-1",
+        alias = "extS3",
+        setupSql = "ATTACH ... AS extS3;"
+      )
+    )
+    BootPreflight.invalidFederatedAliases(store) shouldBe List(("td-1", "extS3"))
+  }
+
   it should "return Nil when every alias is valid" in {
     val store = new InMemoryFederatedSourceStore
     store.upsertSource(

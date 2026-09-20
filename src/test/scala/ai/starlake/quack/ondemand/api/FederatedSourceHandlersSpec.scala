@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.model.{FederatedSource, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.federation.iceberg.{
   IcebergAuthType,
@@ -71,7 +71,9 @@ class FederatedSourceHandlersSpec
     finally Try(TestPostgres.dropDatabase(dbName))
 
   private def withHandlers(test: (FederatedSourceHandlers, String) => Unit): Unit =
-    withEnv((fs, resolver, tdId) => test(new FederatedSourceHandlers(fs, resolver), tdId))
+    withEnv((fs, resolver, tdId) =>
+      test(new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None), tdId)
+    )
 
   // 1. POST source -> 200, GET it back, alias matches
   "FederatedSourceHandlers.createSource" should
@@ -192,7 +194,7 @@ class FederatedSourceHandlersSpec
   private def seedSource(fs: FederatedSourceStore, resolver: (String, String) => Option[String])(
       scopeOf: String => Option[SessionScope]
   ): FederatedSourceHandlers =
-    val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf)
+    val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf, catalogAliasOf = _ => None)
     h.createSource(
       "acme",
       "acme_prod",
@@ -476,6 +478,81 @@ class FederatedSourceHandlersSpec
         .sources
         .count(_.alias == "sales_lake") shouldBe 1
   }
+
+  // --- C1: a legacy (pre-normalization) mixed-case alias is rewritten in place, not duplicated --
+
+  it should "rewrite a legacy mixed-case row in place when re-POSTed under its own alias" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-1",
+          tenantDbId = tdId,
+          alias = "extS3",
+          setupSql = "ATTACH 'x';"
+        )
+      )
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(alias = "extS3", setupSql = Some("ATTACH 'y';")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+
+      val sources = fs.listSources(tdId)
+      sources.count(_.alias.equalsIgnoreCase("exts3")) shouldBe 1
+      val row = sources.find(_.alias.equalsIgnoreCase("exts3")).value
+      row.alias shouldBe "exts3"
+      row.id shouldBe "fs-legacy-1"
+    }
+
+  it should "rewrite a legacy mixed-case row in place when re-POSTed under a DIFFERENT case" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-2",
+          tenantDbId = tdId,
+          alias = "extS3",
+          setupSql = "ATTACH 'x';"
+        )
+      )
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(alias = "EXTS3", setupSql = Some("ATTACH 'y';")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+
+      val sources = fs.listSources(tdId)
+      sources.count(_.alias.equalsIgnoreCase("exts3")) shouldBe 1
+      val row = sources.find(_.alias.equalsIgnoreCase("exts3")).value
+      row.alias shouldBe "exts3"
+      row.id shouldBe "fs-legacy-2"
+    }
+
+  it should "400 the sourceType-mismatch guard against a legacy mixed-case row" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-3",
+          tenantDbId = tdId,
+          alias = "Sales",
+          setupSql = "ATTACH 'x';"
+        )
+      )
+      val (code, err) = h
+        .createSource("acme", "acme_prod", iceReq(alias = "sales"), None)
+        .unsafeRunSync()
+        .left
+        .value
+      code shouldBe StatusCode.BadRequest
+      err.message should include("sql")
+      fs.listSources(tdId).count(_.alias.equalsIgnoreCase("sales")) shouldBe 1
+    }
 
   "listSources" should "return the typed config it stored" in withHandlers { (h, _) =>
     h.createSource("acme", "acme_prod", iceReq(), None).unsafeRunSync()

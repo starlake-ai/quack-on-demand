@@ -27,7 +27,7 @@ final class FederatedSourceHandlers(
     tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop,
     scopeOf: String => Option[SessionScope] = _ => None,
-    catalogAliasOf: String => Option[String] = _ => None
+    catalogAliasOf: String => Option[String]
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -182,11 +182,19 @@ final class FederatedSourceHandlers(
             case Right(tenantDbId) =>
               // Upsert by NORMALIZED alias, so "Sales_Lake" and "sales_lake" resolve to the same
               // row rather than minting a second one the unique constraint (case-sensitive) admits.
+              // A pre-existing row's STORED alias was never normalized (this rule is new), so the
+              // normalized lookup can still miss a legacy mixed-case row; fall back to a
+              // case-insensitive scan of the tenant-db's sources so that row is rewritten in place
+              // under its normalized alias instead of minting a silent duplicate.
               val lookupAlias = ai.starlake.quack.model.Names
                 .normalizeOrError(req.alias, "alias")
                 .getOrElse(req.alias)
-              val existing = fedStore.getSource(tenantDbId, lookupAlias)
-              val id       =
+              val existing = fedStore
+                .getSource(tenantDbId, lookupAlias)
+                .orElse(
+                  fedStore.listSources(tenantDbId).find(_.alias.equalsIgnoreCase(lookupAlias))
+                )
+              val id =
                 existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fs"))
               toSource(id, tenantDbId, req, existing) match
                 case Left(e)       => Left(e)

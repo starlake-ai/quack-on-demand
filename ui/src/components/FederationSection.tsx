@@ -650,7 +650,7 @@ export default function FederationSection({
 
   function openEdit(s: FederatedSourceResponse) {
     setAlias(s.alias);
-    setSetupSql(s.setupSql);
+    setSetupSql(s.setupSql ?? '');
     setDescription(s.description ?? '');
     setError(null);
     setEditingAlias(s.alias);
@@ -669,7 +669,7 @@ export default function FederationSection({
     try {
       await api.createFederatedSource(tenant, tenantDb, {
         alias:       alias.trim(),
-        setupSql:    setupSql.trim(),
+        setupSql:    setupSql.trim() || undefined,
         description: description.trim() || undefined,
       });
       closeForm();
@@ -831,30 +831,32 @@ export default function FederationSection({
                           <DetailItem label="Disabled"    value={s.disabled ? 'Yes' : 'No'} />
                           {s.description && <DetailItem label="Description" value={s.description} />}
                         </div>
-                        <div style={{ marginTop: '.4rem' }}>
-                          <div style={{
-                            fontSize: '.75rem', color: 'var(--text-mute)',
-                            textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
-                          }}>
-                            Setup SQL
+                        {s.setupSql && (
+                          <div style={{ marginTop: '.4rem' }}>
+                            <div style={{
+                              fontSize: '.75rem', color: 'var(--text-mute)',
+                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                            }}>
+                              Setup SQL
+                            </div>
+                            <pre style={{
+                              margin: 0,
+                              padding: '.6rem .8rem',
+                              background: 'var(--bg-card)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 'var(--radius)',
+                              fontFamily: 'var(--mono)',
+                              fontSize: '.85em',
+                              color: 'var(--text)',
+                              whiteSpace: 'pre-wrap',
+                              overflowX: 'auto',
+                            }}>{s.setupSql}</pre>
+                            <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
+                              <code>{'{{alias}}'}</code> and <code>{'{{secret.NAME}}'}</code> placeholders are
+                              resolved at node spawn; never logged in resolved form.
+                            </div>
                           </div>
-                          <pre style={{
-                            margin: 0,
-                            padding: '.6rem .8rem',
-                            background: 'var(--bg-card)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius)',
-                            fontFamily: 'var(--mono)',
-                            fontSize: '.85em',
-                            color: 'var(--text)',
-                            whiteSpace: 'pre-wrap',
-                            overflowX: 'auto',
-                          }}>{s.setupSql}</pre>
-                          <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
-                            <code>{'{{alias}}'}</code> and <code>{'{{secret.NAME}}'}</code> placeholders are
-                            resolved at node spawn; never logged in resolved form.
-                          </div>
-                        </div>
+                        )}
                         <div style={{ marginTop: '.9rem' }}>
                           <div style={{
                             fontSize: '.75rem', color: 'var(--text-mute)',

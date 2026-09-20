@@ -1003,7 +1003,7 @@ export interface MaintenanceRunResponse {
 
 export interface FederatedSourceCreateRequest {
   alias: string;
-  setupSql: string;
+  setupSql?: string;
   description?: string;
   disabled?: boolean;
 }
@@ -1012,7 +1012,7 @@ export interface FederatedSourceResponse {
   id: string;
   tenantDbId: string;
   alias: string;
-  setupSql: string;
+  setupSql?: string;
   description?: string;
   disabled: boolean;
 }
