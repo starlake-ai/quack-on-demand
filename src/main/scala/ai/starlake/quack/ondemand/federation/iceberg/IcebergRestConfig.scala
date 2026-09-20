@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.federation.iceberg
 
-import io.circe.generic.semiauto.deriveCodec
+import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.syntax.*
 import io.circe.{Codec, Decoder, Encoder}
 
@@ -43,10 +43,12 @@ object IcebergEndpointType:
 /** Typed declaration of one external Iceberg REST catalog, persisted as JSON in
   * `qodstate_federated_source.config`.
   *
-  * Credential-bearing fields hold `{{secret.NAME}}` placeholders, never literal values: they are
-  * resolved at node spawn by [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]]
-  * against `qodstate_federated_secret`, exactly as operator-written federation SQL is. That is why
-  * this type is safe to return over REST and needs no redaction.
+  * `clientSecret` and `token` are the credential-bearing fields: `validate` enforces they hold a
+  * `{{secret.NAME}}` placeholder rather than a literal value, resolved at node spawn by
+  * [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]] against
+  * `qodstate_federated_secret`, exactly as operator-written federation SQL is. That is why this
+  * type is safe to return over REST unredacted. `clientId` is not constrained the same way: a
+  * client id is routinely not sensitive and operators set it inline.
   */
 final case class IcebergRestConfig(
     uri: String = "",
@@ -73,7 +75,8 @@ final case class IcebergRestConfig(
     if !IcebergRestConfig.AliasPattern.matches(alias) then
       errs += s"alias '$alias' must be a plain SQL identifier (letters, digits, underscore; " +
         "not starting with a digit)"
-    if reservedAliases.exists(_.equalsIgnoreCase(alias)) then errs += s"alias '$alias' is reserved"
+    if (reservedAliases ++ IcebergRestConfig.ReservedAliases).exists(_.equalsIgnoreCase(alias)) then
+      errs += s"alias '$alias' is reserved"
 
     if warehouse.trim.isEmpty then errs += "warehouse is required"
 
@@ -106,6 +109,9 @@ final case class IcebergRestConfig(
         if credentialFieldsSet then
           errs += "endpointType takes no clientId, clientSecret, oauth2 or token fields"
 
+    errs ++= IcebergRestConfig.placeholderErrors("clientSecret", clientSecret)
+    errs ++= IcebergRestConfig.placeholderErrors("token", token)
+
     errs.result()
 
 object IcebergRestConfig:
@@ -116,7 +122,27 @@ object IcebergRestConfig:
 
   private[iceberg] def isSet(o: Option[String]): Boolean = o.exists(_.trim.nonEmpty)
 
-  given Codec[IcebergRestConfig] = deriveCodec
+  private val SecretPlaceholder = "\\{\\{secret\\.[A-Za-z0-9_]+\\}\\}".r
+
+  /** `fieldName`, when set to a non-blank value, must be a `{{secret.NAME}}` placeholder rather
+    * than a literal - see the class scaladoc.
+    */
+  private def placeholderErrors(fieldName: String, value: Option[String]): List[String] =
+    value.map(_.trim).filter(_.nonEmpty) match
+      case Some(v) if SecretPlaceholder.matches(v) => Nil
+      case Some(_)                                 =>
+        List(
+          s"$fieldName must be a secret placeholder of the form {{secret.NAME}}, not a literal value"
+        )
+      case None => Nil
+
+  // Absent optional wire fields fall back to the case-class defaults: plain deriveCodec is strict
+  // (it rejects a missing field even when the case class has a default), which would break every
+  // stored row the day an eleventh field is added. ConfiguredCodec derives against the case class
+  // defaults instead, matching Dtos.scala's convention for persisted types.
+  private given Configuration = Configuration.default.withDefaults
+
+  given Codec[IcebergRestConfig] = ConfiguredCodec.derived
 
   def fromJson(s: String): Either[String, IcebergRestConfig] =
     io.circe.parser.decode[IcebergRestConfig](s).left.map(_.getMessage)
