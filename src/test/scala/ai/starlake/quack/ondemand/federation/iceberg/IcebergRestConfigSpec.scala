@@ -90,9 +90,9 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("{{secret.")) shouldBe true
   }
 
-  it should "reject a uri containing '{{'" in {
+  it should "reject a uri containing a stray or malformed '{{'" in {
     val errs = oauth2
-      .copy(uri = "https://catalog.example.com/{{secret.HOST}}")
+      .copy(uri = "https://catalog.example.com/cat{{alog")
       .validate(
         "sales_lake",
         Set.empty
@@ -101,10 +101,20 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("{{")) shouldBe true
   }
 
-  it should "reject a warehouse containing '{{'" in {
-    val errs = oauth2.copy(warehouse = "{{secret.WAREHOUSE}}").validate("sales_lake", Set.empty)
+  it should "accept a uri that is a well-formed {{secret.NAME}} placeholder" in {
+    val errs = oauth2.copy(uri = "{{secret.HOST}}").validate("sales_lake", Set.empty)
+    errs.exists(_.contains("uri")) shouldBe false
+  }
+
+  it should "reject a warehouse containing a stray or malformed '{{'" in {
+    val errs = oauth2.copy(warehouse = "ware{{house").validate("sales_lake", Set.empty)
     errs.exists(_.contains("warehouse")) shouldBe true
     errs.exists(_.contains("{{")) shouldBe true
+  }
+
+  it should "accept a warehouse containing a well-formed {{secret.NAME}} placeholder" in {
+    val errs = oauth2.copy(warehouse = "{{secret.WAREHOUSE}}").validate("sales_lake", Set.empty)
+    errs.exists(_.contains("warehouse")) shouldBe false
   }
 
   it should "accept a clientSecret placeholder when nothing else is a placeholder" in {
@@ -269,6 +279,28 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     val errs = r.left.toOption.get
     errs.exists(_.contains("warehouse")) shouldBe true
     errs.exists(_.contains("uri")) shouldBe true
+  }
+
+  it should "reject an alias present in extraReserved" in {
+    val r = IcebergRestConfig.validated(oauth2, "sales_lake", Set("sales_lake"))
+    r.isLeft shouldBe true
+    r.left.toOption.get.exists(_.contains("reserved")) shouldBe true
+  }
+
+  it should "reject an alias present in extraReserved regardless of case" in {
+    val r = IcebergRestConfig.validated(oauth2, "sales_lake", Set("SALES_LAKE"))
+    r.isLeft shouldBe true
+    r.left.toOption.get.exists(_.contains("reserved")) shouldBe true
+  }
+
+  it should "accept an alias not present in extraReserved" in {
+    val r = IcebergRestConfig.validated(oauth2, "sales_lake", Set("other"))
+    r.isRight shouldBe true
+  }
+
+  it should "behave exactly as the two-argument form when extraReserved is omitted" in {
+    IcebergRestConfig.validated(oauth2, "sales_lake") shouldBe
+      IcebergRestConfig.validated(oauth2, "sales_lake", Set.empty)
   }
 
   // ValidatedIcebergConfig's constructor is `private[iceberg]`: outside this package it cannot be

@@ -61,6 +61,10 @@ class FederatedSourceStore(
     "id, tenant_db_id, alias, setup_sql, description, disabled, created_at, " +
       "source_type, config, read_only"
 
+  // Single source of truth for the six `FederatedSecret` columns: getSecret and listSecrets each
+  // SELECT this exact list, and readSecret reads them back by label.
+  private val SecretColumns = "id, federated_source_id, name, value, external_ref, created_at"
+
   // Bounded once at construction: every caller of withConn (handlers, blob builder loads via
   // listEnabledSources/listSecrets, tenantDbIdsWithSources) benefits without a per-call cost.
   private val boundedUrl = FederatedSourceStore.withTimeouts(jdbcUrl)
@@ -202,7 +206,7 @@ class FederatedSourceStore(
 
   def getSecret(sourceId: String, name: String): Option[FederatedSecret] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, federated_source_id, name, value, external_ref, created_at
+      s"""SELECT $SecretColumns
         |FROM qodstate_federated_secret
         |WHERE federated_source_id = ? AND name = ?""".stripMargin
     )
@@ -217,7 +221,7 @@ class FederatedSourceStore(
 
   def listSecrets(sourceId: String): List[FederatedSecret] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, federated_source_id, name, value, external_ref, created_at
+      s"""SELECT $SecretColumns
         |FROM qodstate_federated_secret
         |WHERE federated_source_id = ? ORDER BY name""".stripMargin
     )

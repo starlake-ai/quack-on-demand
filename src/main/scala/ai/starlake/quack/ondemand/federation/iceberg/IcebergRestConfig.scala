@@ -81,17 +81,13 @@ final case class IcebergRestConfig(
 
     if warehouse.trim.isEmpty then errs += "warehouse is required"
 
-    if uri.contains("{{") then
-      errs += "uri must not contain '{{': it would be read as a secret placeholder and fail " +
-        "the whole tenant-db federation blob"
-    if warehouse.contains("{{") then
-      errs += "warehouse must not contain '{{': it would be read as a secret placeholder and " +
-        "fail the whole tenant-db federation blob"
-    // Unlike uri / warehouse (never placeholder-eligible, any '{{' is a mistake), clientId and the
-    // oauth2 free-form fields MAY legitimately carry a well-formed {{secret.NAME}} placeholder
-    // (FederationBlobBuilder substitutes it wherever it appears, not only in clientSecret/token).
-    // What must be caught is a MALFORMED brace - one that would not resolve and so would fail the
-    // whole tenant-db federation blob.
+    // uri, warehouse, clientId and the oauth2 free-form fields MAY all legitimately carry a
+    // well-formed {{secret.NAME}} placeholder (FederationBlobBuilder substitutes it wherever it
+    // appears in the rendered SQL, not only in clientSecret/token). What must be caught is a
+    // STRAY or MALFORMED brace - one that would not resolve and so would fail the whole
+    // tenant-db federation blob.
+    errs ++= IcebergRestConfig.strayBraceErrors("uri", Some(uri))
+    errs ++= IcebergRestConfig.strayBraceErrors("warehouse", Some(warehouse))
     errs ++= IcebergRestConfig.strayBraceErrors("clientId", clientId)
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2ServerUri", oauth2ServerUri)
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2Scope", oauth2Scope)
@@ -174,8 +170,10 @@ object IcebergRestConfig:
       case Some(v) if SecretPlaceholder.matches(v.trim) => Nil
       case Some(_)                                      =>
         List(
-          s"$fieldName must not contain '{{': it would be read as a secret placeholder and " +
-            "fail the whole tenant-db federation blob"
+          s"$fieldName has a stray or malformed '{{' placeholder: only a well-formed " +
+            "{{secret.NAME}} is substituted, and an unresolved placeholder trips " +
+            "FederationBlobBuilder's stray-placeholder check, failing the entire tenant-db " +
+            "federation blob"
         )
       case None => Nil
 
@@ -192,13 +190,24 @@ object IcebergRestConfig:
 
   /** Normalize the alias (Names rule: lowercase, 1..63 chars, identifier pattern), run every
     * validation rule against the normalized alias, and wrap. Left carries every error at once.
+    *
+    * `extraReserved` extends [[ReservedAliases]] (DuckDB's builtins) with whatever else the alias
+    * must not collide with. Callers SHOULD pass the tenant-db's own DuckDB catalog alias plus every
+    * sibling federated alias - the set Main.scala's `attachedCatalogsOf` computes - because an
+    * alias colliding with an already-attached catalog produces `ATTACH 'x' AS "name"` for a name
+    * DuckDB already holds, i.e. `Binder Error: Failed to attach database: database with name "name"
+    * already exists`. The DuckDB CLI reading piped stdin does not bail on that error, so the node
+    * comes up with a partly-failed federation blob and no loud signal. Comparison is
+    * case-insensitive (delegated to `validate`, which already lowercases via `equalsIgnoreCase`),
+    * so an entry in any case still blocks the normalized (lowercase) alias.
     */
   def validated(
       cfg: IcebergRestConfig,
-      alias: String
+      alias: String,
+      extraReserved: Set[String] = Set.empty
   ): Either[List[String], ValidatedIcebergConfig] =
     Names.normalizeOrError(alias, "alias") match
       case Left(err)   => Left(List(err))
       case Right(norm) =>
-        val errs = cfg.validate(norm, ReservedAliases)
+        val errs = cfg.validate(norm, ReservedAliases ++ extraReserved)
         if errs.isEmpty then Right(ValidatedIcebergConfig(cfg, norm)) else Left(errs)
