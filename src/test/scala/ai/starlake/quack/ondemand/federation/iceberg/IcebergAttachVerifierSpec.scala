@@ -250,20 +250,37 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.failuresFor(gen2.nodeId, gen2.startedAt.toEpochMilli) should not be empty
   }
 
-  // I4: alias matching must be case-insensitive end to end. This fixture pins the present-side
-  // normalization (`present.map(_.toLowerCase)`), which models the production case: the node
-  // reports "Sales_Lake" as it was at spawn time (DuckDB preserves the exact alias case), while
-  // the pool row has been normalized to lowercase. Removing the present-side `.toLowerCase` call
-  // in IcebergAttachVerifier's partition sends the alias to `missing`, causing re-attach on every
-  // tick forever. The declared alias is also normalized for registry key consistency.
-  it should "normalize alias case in the registry regardless of how the source declares it" in {
-    val rec      = new Recorder
-    val (v, reg) =
-      verifier(List(iceSrc("Sales_Lake")), Set("acme_db", "Sales_Lake"), rec.run(Right(())))
-    v.verify(node).unsafeRunSync()
-    rec.sent.get() shouldBe empty
-    reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
-  }
+  // I4: alias matching must be case-insensitive end to end. Two independent tests are required
+  // to cover both directions of the case-normalization logic (present.map(_.toLowerCase) and
+  // s.alias.toLowerCase); no single fixture can trigger all three mutations. This first test pins
+  // the present-side normalization, catching mutation of present.map(_.toLowerCase). Declared
+  // alias "Sales_Lake" (mixed case at spawn), present set "Sales_Lake" (node reports unchanged).
+  // Removing present-side toLowerCase sends the alias to `missing`, re-attaching forever.
+  // Production case: SqlLiterals.duckdbIdent always double-quotes, so DuckDB reports the exact
+  // spawn-time case, while the REST handler normalizes to lowercase without restarting nodes.
+  it should "normalize alias case when the node reports spawn-time case and the row is " +
+    "normalized" in {
+      val rec      = new Recorder
+      val (v, reg) =
+        verifier(List(iceSrc("Sales_Lake")), Set("acme_db", "Sales_Lake"), rec.run(Right(())))
+      v.verify(node).unsafeRunSync()
+      rec.sent.get() shouldBe empty
+      reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
+    }
+
+  // Second direction: this fixture pins the alias-side normalization, catching mutation of
+  // s.alias.toLowerCase. Declared alias "sales_lake" (lowercase after normalization), present
+  // set "Sales_Lake" (node still reports mixed case). Removing alias-side toLowerCase sends
+  // the alias to `missing`, re-attaching forever.
+  it should "normalize alias case when the row keeps mixed case and the node reports it " +
+    "lowercased" in {
+      val rec      = new Recorder
+      val (v, reg) =
+        verifier(List(iceSrc("sales_lake")), Set("acme_db", "Sales_Lake"), rec.run(Right(())))
+      v.verify(node).unsafeRunSync()
+      rec.sent.get() shouldBe empty
+      reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
+    }
 
   // Important 1 (fix review): pruneOtherIncarnations had zero coverage -- replacing its body with
   // `()` passed the whole suite. This drives it through the real `verify` path (not a raw registry
