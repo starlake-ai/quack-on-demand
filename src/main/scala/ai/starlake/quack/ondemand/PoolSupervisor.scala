@@ -252,8 +252,8 @@ final class PoolSupervisor(
     * `schemaName` is left as the merge yields it for every kind (the default `main` is correct).
     */
   private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
-    val merged = defaultMetastore ++ td.metastore
-    td.kind match
+    val merged  = defaultMetastore ++ td.metastore
+    val perKind = td.kind match
       case TenantDbKind.DuckLake =>
         val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
         val rootData = defaultMetastore.getOrElse("dataPath", "")
@@ -280,6 +280,14 @@ final class PoolSupervisor(
         if td.dataPath.nonEmpty then withDb.updated("dataPath", td.dataPath)
         else withDb.removed("dataPath")
 
+    // `encrypted` reaches both spawn scripts as a plain env var through the metastore-to-env
+    // plumbing every backend already has (LocalQuackBackend.scala:55,
+    // KubernetesQuackBackend.scala:88), the same indirection `catalogAlias` uses. Emitted only
+    // when true, and never for InMemory, which has nothing at rest: the scripts treat an absent
+    // value as false.
+    if td.encrypted && td.kind != TenantDbKind.InMemory then perKind.updated("encrypted", "true")
+    else perKind.removed("encrypted")
+
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
     * boot-time DuckLakeInitializer failure.
@@ -294,6 +302,10 @@ final class PoolSupervisor(
   /** Test-only seam: read back [[dataPathBlocked]] membership. */
   private[ondemand] def isDataPathBlockedForTest(tenantDbId: String): Boolean =
     dataPathBlocked.contains(tenantDbId)
+
+  /** Test-only seam: run the per-kind metastore resolution without spawning anything. */
+  private[ondemand] def effectiveMetastoreForTest(td: TenantDb): Map[String, String] =
+    effectiveMetastoreFor(td)
 
   def restore(): Unit =
     val snap = store.snapshot()
@@ -1230,6 +1242,13 @@ final class PoolSupervisor(
         * together with a caller-supplied dataPath/objectStore and on non-DuckLake kinds.
         */
       managedStorage: Boolean = false,
+      /** Encrypt this database's data at rest. For `kind=ducklake` the flag alone is enough:
+        * DuckLake mints a key per Parquet file into its own catalog. For `kind=duckdb-file` a
+        * single key is needed on every ATTACH, so one is minted here when the caller supplied none,
+        * and stored in the metastore map where `TenantDb.SecretKeys` keeps it out of every
+        * response. Create-time only: neither engine can encrypt an existing database in place.
+        */
+      encrypted: Boolean = false,
       gateBypass: Boolean = false
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
@@ -1265,8 +1284,17 @@ final class PoolSupervisor(
                     // database + metadata tables; DuckDbFile and InMemory skip both.
                     val effectiveMeta = kind match
                       case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
-                      case TenantDbKind.DuckDbFile => metastore
-                      case TenantDbKind.InMemory   => metastore
+                      case TenantDbKind.DuckDbFile =>
+                        // A DuckDB file needs the same key on every ATTACH forever. Mint one when
+                        // the caller supplied none (path A); keep theirs when they did (path B).
+                        // Validation has already refused a key without `encrypted`, and refused a
+                        // key carrying a literal-breaking metacharacter.
+                        if encrypted && !metastore
+                            .get(TenantDb.EncryptionKeyName)
+                            .exists(_.nonEmpty)
+                        then metastore.updated(TenantDb.EncryptionKeyName, EncryptionKeyGen.mint())
+                        else metastore
+                      case TenantDbKind.InMemory => metastore
 
                     // Minted up front: a managed prefix is keyed by this id, so a recreated
                     // database of the same name never lands on its predecessor's data.
@@ -1308,7 +1336,8 @@ final class PoolSupervisor(
                       objectStore = effectiveObjectStore,
                       defaultDatabase = defaultDatabase,
                       defaultSchema = defaultSchema,
-                      initSql = initSql
+                      initSql = initSql,
+                      encrypted = encrypted
                     )
 
                     TenantDb.validate(td, defaultMetastore) match
