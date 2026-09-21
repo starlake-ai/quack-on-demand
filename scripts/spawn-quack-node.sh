@@ -26,11 +26,8 @@
 
 set -euo pipefail
 
-# Normally positional (LocalQuackBackend spawns with `script <port> <token>`); the
-# SpawnScriptEncryptionSpec dry-run harness has no port/token to allocate, so it sets these
-# as env vars instead. A positional arg always wins when both are present.
-PORT="${1:-${PORT:?port required}}"
-TOKEN="${2:-${TOKEN:?token required}}"
+PORT="${1:?port required}"
+TOKEN="${2:?token required}"
 
 pgHost="${pgHost:-localhost}"
 pgPort="${pgPort:-5432}"
@@ -104,10 +101,9 @@ esac
 # a directory there and the later `ATTACH '$dataPath'` fails with "Is a
 # directory"; only the parent directory needs to exist. For `memory`, there
 # is no on-disk path at all.
-# Skipped in dry-run mode: the harness feeds paths like /var/lake purely to exercise the
-# emitted SQL, and mkdir -p on those would either fail (no write access outside a real
-# deployment) or create directories nobody asked for.
-if [[ "$IS_REMOTE" == "0" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]]; then
+# Not dry-run-gated: SpawnScriptEncryptionSpec supplies a writable temp dataPath, so this
+# exercises the same filesystem preparation a real spawn does.
+if [[ "$IS_REMOTE" == "0" ]]; then
   case "$kind" in
     ducklake)
       mkdir -p "$dataPath"
@@ -127,16 +123,24 @@ fi
 # the provisioned exe); otherwise the first `duckdb` on PATH. Mirrors
 # spawn-quack-node.ps1 so the manager can pin duckdb without relying on PATH
 # inheritance reaching this spawned process.
+# The presence check is skipped in dry-run mode: SpawnScriptEncryptionSpec only exercises
+# INIT_SQL assembly, which is pure string building and needs no duckdb binary at all.
 DUCKDB="${DUCKDB_BIN:-duckdb}"
-command -v "$DUCKDB" >/dev/null 2>&1 || {
-  echo "ERROR: duckdb not found (DUCKDB_BIN='${DUCKDB_BIN:-}', 'duckdb' not on PATH)" >&2
-  exit 1
-}
+if [[ "${QOD_SPAWN_DRY_RUN:-}" != "1" ]]; then
+  command -v "$DUCKDB" >/dev/null 2>&1 || {
+    echo "ERROR: duckdb not found (DUCKDB_BIN='${DUCKDB_BIN:-}', 'duckdb' not on PATH)" >&2
+    exit 1
+  }
+fi
 
 # Ensure the Postgres database $dbName exists. Connects to PG_ADMIN_DB (default
 # `postgres`) as admin and runs CREATE DATABASE if missing. Skipped when psql
 # isn't available - the DuckLake ATTACH below will fail loudly in that case.
 # Only needed for kind=ducklake.
+# Still dry-run-gated (unlike mkdir above): SpawnScriptEncryptionSpec's ducklake cases use a
+# fake pgHost, and a real psql invocation would attempt a network connection to it - DNS
+# resolution of an unresolvable host has no bounded latency guarantee, so this would make the
+# test's runtime depend on the test machine's network/resolver behavior.
 if [[ "$kind" == "ducklake" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]] && command -v psql >/dev/null 2>&1; then
   ADMIN_DB="${PG_ADMIN_DB:-postgres}"
   EXISTS=$(PGPASSWORD="$pgPassword" psql -h "$pgHost" -p "$pgPort" -U "$pgUser" \

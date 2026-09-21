@@ -765,12 +765,22 @@ object Main extends IOApp with LazyLogging:
               }
             }
         val probeSql = initSql.map(s => s"$s; SELECT 1").getOrElse("SELECT 1")
+        // tracker still holds the PREVIOUS tick's healthy flag here: HealthProbe.start only
+        // calls tracker.setHealthy(n.nodeId, ok) after this pingFn IO completes, so reading it
+        // now is a transition check (was healthy, now failing) without restructuring HealthProbe
+        // to expose one itself.
+        val wasHealthy = tracker.snapshot(n.nodeId).healthy
         adapter.probe(n, probeSql).map { ok =>
           if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
           // An encrypted database that fails its probe is most likely a key mismatch, which looks
-          // exactly like the orphaned-node-port failure. Name the likely cause once per transition
-          // so the operator is not sent down the wrong path.
-          if !ok && sup.get(n.poolKey).exists(_.metastore.get("encrypted").contains("true")) then
+          // exactly like the orphaned-node-port failure. Name the likely cause once per
+          // healthy-to-unhealthy transition (not on every tick of a still-unhealthy node) so the
+          // operator is not sent down the wrong path and a permanently key-mismatched node
+          // doesn't spam the log every healthCheckIntervalSec forever.
+          if !ok && wasHealthy && sup
+              .get(n.poolKey)
+              .exists(_.metastore.get("encrypted").contains("true"))
+          then
             logger.warn(
               s"node ${n.nodeId} is unhealthy and its database is encrypted: for kind=duckdb-file " +
                 "an ENCRYPTION_KEY that does not match the file fails the boot ATTACH, which " +
