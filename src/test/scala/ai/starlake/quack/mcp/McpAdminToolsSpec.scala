@@ -450,3 +450,37 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       "name"   -> Json.fromString(fullName)
     ).isRight shouldBe true
   }
+
+  "create_database" should "accept encrypted and encryption_key for kind=duckdb-file" in {
+    val f       = new Fixture
+    val created = f.call(
+      "create_database",
+      McpPrincipal.StaticKey,
+      "tenant"    -> Json.fromString(Tenant0),
+      "name"      -> Json.fromString("secure"),
+      "kind"      -> Json.fromString("duckdb-file"),
+      "data_path" -> Json.fromString("/tmp/qod-mcp-admin-test-secure.duckdb"),
+      "metastore" -> Json.obj(
+        "dbName"     -> Json.fromString("secure"),
+        "schemaName" -> Json.fromString("main")
+      ),
+      "encrypted"      -> Json.True,
+      "encryption_key" -> Json.fromString("caller-supplied-key")
+    )
+    withClue(created)(created.isRight shouldBe true)
+    created.toOption.get.hcursor.get[Boolean]("encrypted").toOption shouldBe Some(true)
+  }
+
+  it should "refuse encryption_key on kind=ducklake, matching the REST validation" in {
+    val f   = new Fixture
+    val out = f.call(
+      "create_database",
+      McpPrincipal.StaticKey,
+      "tenant"         -> Json.fromString(Tenant0),
+      "name"           -> Json.fromString("secure2"),
+      "kind"           -> Json.fromString("ducklake"),
+      "encrypted"      -> Json.True,
+      "encryption_key" -> Json.fromString("not-allowed-here")
+    )
+    out.isLeft shouldBe true
+  }

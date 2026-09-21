@@ -288,17 +288,32 @@ object ManifestImporter:
             case Right(dbKind) =>
               val existing = localDbs.get(mtd.name)
               val tdId     = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
+              // ManifestExporter redacts `encryptionKey` out of `metastore` (see the comment
+              // there), unlike every other metastore/objectStore secret, which round-trips
+              // verbatim. Re-importing that redacted manifest onto the SAME row (the ordinary
+              // "declarative apply" path, matched by tenant-db name above) would otherwise wipe
+              // a live encrypted duckdb-file database's key out of the stored metastore map --
+              // carry the existing key forward when the incoming manifest omits it, the same
+              // "no client can round-trip a value it was never shown" rule PoolSupervisor
+              // applies to REST updates via mergeSecretKeys.
+              val metastoreWithKey =
+                if mtd.metastore.contains(TenantDb.EncryptionKeyName) then mtd.metastore
+                else
+                  existing.flatMap(_.metastore.get(TenantDb.EncryptionKeyName)) match
+                    case Some(key) => mtd.metastore.updated(TenantDb.EncryptionKeyName, key)
+                    case None      => mtd.metastore
               val upserted = TenantDb(
                 id = tdId,
                 tenantId = tenantId,
                 name = mtd.name,
                 kind = dbKind,
-                metastore = mtd.metastore,
+                metastore = metastoreWithKey,
                 dataPath = mtd.dataPath,
                 objectStore = mtd.objectStore,
                 defaultDatabase = mtd.defaultDatabase,
                 defaultSchema = mtd.defaultSchema,
-                initSql = mtd.initSql
+                initSql = mtd.initSql,
+                encrypted = mtd.encrypted
               )
               // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
               // schemaName keys (they are merged from the default metastore at spawn time), so we

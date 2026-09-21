@@ -233,6 +233,58 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.listTenantDbs("acme") shouldBe empty
   }
 
+  it should "round-trip the encrypted flag onto the upserted tenant-db row" in {
+    val s   = new InMemoryControlPlaneStore()
+    val mtd = ManifestTenantDb(
+      name = "acme_secure",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_secure", "schemaName" -> "main"),
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.listTenantDbs("acme").find(_.name == "acme_secure").get.encrypted shouldBe true
+  }
+
+  it should "carry an existing row's encryptionKey forward when the manifest omits it" in {
+    // Mirrors what a real re-import sees: ManifestExporter redacts encryptionKey out of the
+    // metastore map, so a manifest built from a live encrypted duckdb-file database never
+    // carries the key. Re-applying that manifest onto the SAME row (matched by name) must not
+    // wipe the key the running node is relying on to open the file.
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-secure",
+        tenantId = "acme",
+        name = "acme_secure",
+        kind = TenantDbKind.DuckDbFile,
+        metastore = Map(
+          "dbName"        -> "acme_secure",
+          "schemaName"    -> "main",
+          "encryptionKey" -> "live-secret-key"
+        ),
+        dataPath = "/tmp/d",
+        encrypted = true
+      )
+    )
+    val mtd = ManifestTenantDb(
+      name = "acme_secure",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_secure", "schemaName" -> "main"), // no encryptionKey
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.listTenantDbs("acme")
+      .find(_.name == "acme_secure")
+      .get
+      .metastore
+      .get("encryptionKey") shouldBe Some("live-secret-key")
+  }
+
   it should "sweep node rows when an import drops a pool" in {
     val s = new InMemoryControlPlaneStore()
     // Seed: tenant + tenant-db + pool + one node row, as if a manager had run.
