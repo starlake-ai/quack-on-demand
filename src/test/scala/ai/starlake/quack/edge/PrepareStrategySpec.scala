@@ -124,3 +124,76 @@ class PrepareStrategySpec extends AnyFlatSpec with Matchers:
         offenders shouldBe empty
       }
     finally src.close()
+
+  // ---- I2: the two readers of the same SQL must agree ----
+  //
+  // `choose` reads the statement twice: once through `StatementClassifier` (which produced the
+  // `kind` it is handed) and once itself, to build the probe. `stripped` skipped the leading strip
+  // the classifier does, so on a nested leading comment the two disagreed: `kind` came back
+  // `Select` while `stripped` still carried the text between the inner and outer close. The probe
+  // then went out as `SELECT * FROM (c */ SELECT 1) AS _qod_probe LIMIT 0`, which a real DuckDB
+  // 1.5.4 rejects with `Parser Error: syntax error at or near "*/"` -- a prepared statement that
+  // worked before, now failing and naming a query the caller never wrote. The original
+  // `/* a /* b */ c */ SELECT 1 AS n` executes fine on that same DuckDB, and the probe this test
+  // pins parses and returns zero rows.
+  //
+  // MUTATION NOTE, because it matters for what these three tests actually pin: TWO independent
+  // changes close this, and each one alone masks a revert of the other. Reverting only the leading
+  // strip here leaves them green (the stripper now nests, so it removes the comment itself);
+  // reverting only the stripper's nesting leaves them green too (the leading strip has always
+  // nested, and it runs first). They fail with both reverted, which is the real pre-fix state.
+  // So they pin the OUTCOME -- a probe DuckDB accepts -- rather than either line of the fix, and
+  // the per-line pins live in `SqlCommentStripperSpec` (nesting) and `SqlTriviaSpec` (the leading
+  // strip) instead.
+  it should "build a clean probe for a nested leading block comment" in {
+    PrepareStrategy.choose("/* a /* b */ c */ SELECT 1", StatementKind.Select) shouldBe
+      PrepareStrategy.ProbeWrap("SELECT * FROM (SELECT 1) AS _qod_probe LIMIT 0")
+  }
+
+  it should "build a clean probe for a nested leading comment three levels deep" in {
+    PrepareStrategy.choose(
+      "/* L1 /* L2 /* L3 */ b2 */ b1 */ SELECT a FROM t",
+      StatementKind.Select
+    ) shouldBe PrepareStrategy.ProbeWrap("SELECT * FROM (SELECT a FROM t) AS _qod_probe LIMIT 0")
+  }
+
+  it should "not count a semicolon that a nested leading comment leaked as multi-statement" in {
+    // `isMultiStatement` reads the same `stripped` string. With the residue left in, the `;` in
+    // the comment body counted as a statement separator and pushed a perfectly wrappable SELECT
+    // onto the FullExecute path, which runs the statement for real to read its schema.
+    PrepareStrategy.choose("/* a /* b; */ c */ SELECT 1", StatementKind.Select) shouldBe
+      PrepareStrategy.ProbeWrap("SELECT * FROM (SELECT 1) AS _qod_probe LIMIT 0")
+  }
+
+  it should "keep a nested leading comment in front of a non-subquery-safe verb on FullExecute" in {
+    PrepareStrategy.choose("/* a /* b */ c */ EXPLAIN SELECT 1", StatementKind.Select) shouldBe
+      PrepareStrategy.FullExecute
+  }
+
+  it should "build a probe that keeps a quoted comment marker intact" in {
+    // The stripper used to close the statement at the `/*` inside the quoted identifier, so the
+    // probe went out as `SELECT * FROM (SELECT 1 AS "x) AS _qod_probe LIMIT 0`, which a real
+    // DuckDB 1.5.4 rejects with `Parser Error: unterminated quoted identifier`. The probe below
+    // parses on that same DuckDB and returns zero rows with the column named x-slash-star-y.
+    PrepareStrategy.choose("SELECT 1 AS \"x/*y\"", StatementKind.Select) shouldBe
+      PrepareStrategy.ProbeWrap("SELECT * FROM (SELECT 1 AS \"x/*y\") AS _qod_probe LIMIT 0")
+  }
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/edge/PrepareStrategySpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }

@@ -117,6 +117,35 @@ class SqlTriviaSpec extends AnyFlatSpec with Matchers:
   it should "not be defeated by a nested comment that sits AFTER the verb (benign shape, verb stays first)" in:
     SqlTrivia.firstToken("INSERT /* a /* b */ c */ INTO t VALUES (1)") shouldBe "INSERT"
 
+  // ---- C2: a line comment ends at a bare carriage return, not at a line feed alone ----
+  //
+  // DuckDB terminates a `--` comment at a line feed OR at a bare CR; each of the seven candidate
+  // line-ish characters was probed individually against a real DuckDB 1.5.4, and only those two
+  // terminate (vertical tab, form feed, U+0085, U+2028 and U+2029 all leave the comment open).
+  // `-- x<CR>INSERT INTO t VALUES (1)` writes the row, and the DROP form drops the table.
+  // `stripLeading` scanned to a line feed alone, so it swallowed the entire statement; because it
+  // is the FIRST pass of the shared composition, the verb behind the CR never reached any reader
+  // and the write classified `Other` -- reader-node routing, no ProtectedWriteGuard, no author
+  // stamp, no write audit record, and no refusal from a branch-only PAT.
+  "stripLeading" should "end a leading line comment at a bare carriage return" in:
+    SqlTrivia.stripLeading("-- x" + "\r" + "INSERT INTO t VALUES (1)") shouldBe
+      "INSERT INTO t VALUES (1)"
+
+  it should "still end a leading line comment at a line feed (guard)" in:
+    // GUARD: passes with the CR terminator reverted; pins that widening the set kept the old one.
+    SqlTrivia.stripLeading("-- x\nINSERT INTO t VALUES (1)") shouldBe "INSERT INTO t VALUES (1)"
+
+  it should "end a leading line comment at a CR LF pair without leaving the LF behind (guard)" in:
+    // GUARD: mutation-tested, passes with the CR terminator reverted -- the scan stops at the
+    // LF and the trivia arm then eats the CR. Pinned so neither terminator can regress alone.
+    SqlTrivia.stripLeading("-- x" + "\r" + "\nINSERT INTO t VALUES (1)") shouldBe
+      "INSERT INTO t VALUES (1)"
+
+  "firstToken" should "read the verb behind a bare carriage return in a leading line comment" in:
+    SqlTrivia.firstToken("-- x" + "\r" + "INSERT INTO t VALUES (1)") shouldBe "INSERT"
+    SqlTrivia.firstToken("-- h" + "\r" + "DROP TABLE t") shouldBe "DROP"
+    SqlTrivia.firstToken("--" + "\r" + "CREATE TABLE z(a int)") shouldBe "CREATE"
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as a
@@ -138,3 +167,22 @@ class SqlTriviaSpec extends AnyFlatSpec with Matchers:
         offenders shouldBe empty
       }
     finally src.close()
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/sql/SqlTriviaSpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }

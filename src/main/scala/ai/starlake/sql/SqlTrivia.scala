@@ -26,7 +26,14 @@ object SqlTrivia:
         i += 1
         moved = true
       if i + 1 < s.length && s(i) == '-' && s(i + 1) == '-' then
-        while i < s.length && s(i) != '\n' do i += 1
+        // A `--` comment ends at a line feed OR at a bare carriage return: DuckDB accepts both as
+        // terminators (verified against a real DuckDB 1.5.4 -- `-- x\rINSERT INTO t VALUES (1)`
+        // writes the row, and the `\r` form of a DROP drops the table). Scanning to `\n` alone
+        // swallowed the whole statement, so the verb behind the `\r` never reached the first-token
+        // read and the write classified `Other`: routed to a reader node, no ProtectedWriteGuard,
+        // no author stamp, no write audit record. The terminator is left in place for the trivia
+        // arm above to consume on the next pass.
+        while i < s.length && s(i) != '\n' && s(i) != '\r' do i += 1
         moved = true
       else if i + 1 < s.length && s(i) == '/' && s(i + 1) == '*' then
         var depth = 1
@@ -91,17 +98,29 @@ object SqlTrivia:
     * fold their own `.dropWhile(_ == '(')` / `.takeWhile(_ != ';')` / `.toUpperCase` /
     * `.toLowerCase` onto the result instead.
     *
-    * Composed as `stripLeading -> stripComments -> normalize`, in that order, NOT
-    * `stripComments -> stripLeading`: `stripComments` has no concept of comment nesting -- it stops
-    * at the first closing marker it finds, however deep -- while `stripLeading` tracks nesting
-    * depth correctly. DuckDB itself nests block comments to arbitrary depth (verified against a
-    * real DuckDB 1.5.4: `/* a /* b */ c */ INSERT INTO t VALUES (1)` executes and writes the row,
-    * and so does three levels deep). Running `stripComments` first on that leading comment stops at
-    * the inner closing marker, exposing the literal text between the inner and outer close (`c` in
-    * the example) as if it were the statement's real first token -- which is not merely "no
-    * discrimination", it is a MISCLASSIFICATION: `c` is not a keyword, so it lands in `Other`, the
-    * same bucket every gate treats as read-shaped / not-proven-a-write. `stripLeading` alone
-    * correctly consumes the entire nested comment in one pass, landing cleanly on the real verb.
+    * Composed as `stripLeading -> stripComments -> normalize`. Each pass covers something the other
+    * two do not, which is why all three are here:
+    *
+    *   - `stripLeading` is the only one that DELETES leading Unicode trivia. `normalize` rewrites
+    *     such a character to an ASCII space IN PLACE, and an ASCII space at index 0 stops a
+    *     `takeWhile` just as dead as the original NBSP did; `stripComments` does not touch it at
+    *     all. Mutation-tested: dropping this pass flips the "verb hidden behind a leading NBSP"
+    *     cases straight back to an empty first token.
+    *   - `stripComments` is the only one that removes an INTERIOR comment, and the only one that
+    *     knows DuckDB's quoting forms. It now tracks block-comment nesting depth as well, so this
+    *     order no longer depends on `stripLeading` reaching a nested LEADING comment first; the two
+    *     agree on that shape rather than one rescuing the other. Keeping `stripLeading` in front is
+    *     still right (it is the pass that must see index 0 untouched) and it keeps the leading
+    *     position covered by two independent scanners rather than one.
+    *   - `normalize` runs LAST because `stripComments` can re-expose an interior trivia character
+    *     that was sitting next to a comment body.
+    *
+    * DuckDB nests block comments to arbitrary depth (verified against a real DuckDB 1.5.4:
+    * `/* a /* b */ c */ INSERT INTO t VALUES (1)` executes and writes the row, and so does three
+    * levels deep). A scanner that closes on the first closing marker exposes the text between the
+    * inner and outer close (`c` in the example) where the next keyword should be -- not merely "no
+    * discrimination" but a MISCLASSIFICATION, since `c` is not a keyword and lands in `Other`, the
+    * bucket every gate treats as read-shaped / not-proven-a-write.
     */
   def firstToken(sql: String): String =
     normalize(SqlCommentStripper.stripComments(stripLeading(sql))).takeWhile(!_.isWhitespace)

@@ -541,6 +541,51 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     screen("CHECKPOINT; /* a /* b */ c */ SELECT * FROM sales_lake.main.orders") shouldBe None
   }
 
+  // ---- gate 3 inherits the classifier's two remaining comment holes ----
+  //
+  // Both shapes below reach this screen through the FRAGMENT-LIST fallback (forced by CHECKPOINT),
+  // which calls `isWriteShaped` on the raw split fragment with no jsqlparser re-rendering to fall
+  // back on -- the same path the nested-leading-comment witnesses above use. Both execute as
+  // writes on a real DuckDB 1.5.4.
+  it should "deny a CHECKPOINT-forced batch whose write hides behind a bare carriage return" in {
+    // `SqlTrivia.stripLeading` scanned a `--` comment to a line feed alone, so the whole fragment
+    // was consumed and `isWriteShaped` judged an empty string: `isPrepareOrExecute` false,
+    // `classify("")` Other, ADMITTED. DuckDB ends the comment at the CR and runs the INSERT.
+    val batch =
+      "CHECKPOINT; -- x" + "\r" + "INSERT INTO sales_lake.main.orders VALUES (1)"
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "deny a CHECKPOINT batch whose EXPLAIN ANALYZE write hides behind a nested comment" in {
+    // `EXPLAIN ANALYZE` executes its inner statement. A stripper that closed the nested comment at
+    // the inner marker left the residue exactly where the EXPLAIN arm reads its next token, so the
+    // fragment classified read-shaped and was admitted.
+    val batch =
+      "CHECKPOINT; EXPLAIN ANALYZE /* a /* b */ c */ INSERT INTO sales_lake.main.orders VALUES (1)"
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "deny a CHECKPOINT batch whose WITH write hides behind a quoted comment marker" in {
+    // The marker sits inside a double-quoted identifier, which DuckDB accepts verbatim; the
+    // single-quote-only stripper opened a comment there that never closed and truncated the
+    // fragment, so the WITH arm ran out of text and fell to the legacy select bucket.
+    val batch =
+      "CHECKPOINT; WITH x AS (SELECT 1 AS " + "\"" + "a/*b" + "\"" + ") " +
+        "INSERT INTO sales_lake.main.orders SELECT 1"
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "still admit a CHECKPOINT-forced read behind the same shapes (over-denial guard)" in {
+    // GUARD: these are reads, and they must stay admitted through exactly the same code path.
+    screen("CHECKPOINT; -- x" + "\r" + "SELECT * FROM sales_lake.main.orders") shouldBe None
+    screen(
+      "CHECKPOINT; EXPLAIN /* a /* b */ c */ SELECT * FROM sales_lake.main.orders"
+    ) shouldBe None
+  }
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised in this file must be a literal `\uXXXX` escape, never a raw
@@ -561,6 +606,25 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     try
       val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
       withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
         offenders shouldBe empty
       }
     finally src.close()

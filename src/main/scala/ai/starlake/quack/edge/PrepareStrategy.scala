@@ -35,7 +35,17 @@ object PrepareStrategy:
       case StatementKind.Begin | StatementKind.Commit | StatementKind.Rollback => SkipExecute
       case StatementKind.Other                                                 => FullExecute
       case StatementKind.Select                                                =>
-        val stripped = SqlCommentStripper.stripComments(sql).trim
+        // Same composition the verb reader below goes through (`SqlTrivia.firstToken` is
+        // `stripLeading -> stripComments -> normalize`), minus the normalize pass, which must NOT
+        // run here: `stripped` becomes the executed probe SQL, and rewriting an interior Unicode
+        // character inside a string literal would change the statement's data. Dropping the
+        // leading strip is what made the two readers disagree: `kind` came back `Select` for
+        // `/* a /* b */ c */ SELECT 1` (which DuckDB executes) while `stripped` still carried the
+        // `c */` residue of a naively-closed nested comment, so the probe went out as
+        // `SELECT * FROM (c */ SELECT 1) AS _qod_probe LIMIT 0` and DuckDB answered with a parser
+        // error naming a query the caller never wrote. `isMultiStatement` reads the same string,
+        // so it miscounted a `;` leaked out of a comment body the same way.
+        val stripped = SqlCommentStripper.stripComments(SqlTrivia.stripLeading(sql)).trim
         // Reads its own verb through the one shared reader (`SqlTrivia.firstToken`) instead of a
         // hand-rolled takeWhile of its own -- that hand-rolled version read RAW `sql`, disagreeing
         // with `StatementClassifier`'s (normalized) verdict on `kind` the moment either a leading

@@ -320,6 +320,74 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
       "WITH s AS (SELECT $$) INSERT $$ AS p) SELECT * FROM s"
     ) shouldBe StatementKind.Select
 
+  // ---- C2: a bare carriage return terminates a leading line comment ----
+  //
+  // Executed against a real DuckDB 1.5.4: `CREATE TABLE t(a int); -- x<CR>INSERT INTO t VALUES
+  // (1); SELECT count(*) FROM t` returns 1, the DROP form leaves zero tables, and the CREATE form
+  // creates one. (Each through `duckdb :memory: -c`, not piped on stdin: the CLI's own line reader
+  // mangles a bare CR and answers the opposite.) The composition put `SqlTrivia.stripLeading`
+  // first, and its line-comment arm scanned to a line feed alone, so it consumed the whole
+  // statement and the verb never reached any first-token read. `Other` is what `RoleMatcher`
+  // routes to a reader node, and it skips `ProtectedWriteGuard`, the RLS/CLS rewriters, the author
+  // stamp, the write audit record and a branch-only PAT's refusal all at once.
+  it should "classify the write behind a bare carriage return in a leading line comment" in:
+    StatementClassifier.classify("-- x" + "\r" + "INSERT INTO t VALUES (1)") shouldBe
+      StatementKind.Dml
+    StatementClassifier.classify("-- h" + "\r" + "DROP TABLE t") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("--" + "\r" + "CREATE TABLE z(a int)") shouldBe
+      StatementKind.Ddl
+
+  it should "still classify the same writes behind a line-feed-terminated comment (guard)" in:
+    // GUARD: passes with the CR fix reverted. Pins that widening the terminator set did not break
+    // the terminator that already worked.
+    StatementClassifier.classify("-- x\nINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("-- h\nDROP TABLE t") shouldBe StatementKind.Ddl
+
+  // ---- C3: a nested comment inside EXPLAIN / EXPLAIN ANALYZE ----
+  //
+  // `EXPLAIN ANALYZE` EXECUTES its inner statement. Both shapes below write the row on a real
+  // DuckDB 1.5.4 (checked by counting rows in a file-backed table afterwards; plain
+  // `EXPLAIN INSERT ...` leaves zero, so the ANALYZE really is what runs it). A stripper that
+  // closed a nested comment at the inner marker left the text between the inner and outer close
+  // sitting exactly where the EXPLAIN arm reads its next token from: the first shape read that
+  // residue instead of `ANALYZE` and returned `Select`, the second recursed onto it and returned
+  // `Other`. Both are read-shaped, for a statement DuckDB executes as a write.
+  it should "classify a nested comment between EXPLAIN and ANALYZE by the executed write" in:
+    StatementClassifier.classify(
+      "EXPLAIN /* a /* b */ c */ ANALYZE INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "classify a nested comment after EXPLAIN ANALYZE by the executed write" in:
+    StatementClassifier.classify(
+      "EXPLAIN ANALYZE /* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "keep plain EXPLAIN with a nested comment as Select (over-correction guard)" in:
+    // GUARD: plain EXPLAIN plans without executing (verified: zero rows), so it must stay Select.
+    StatementClassifier.classify(
+      "EXPLAIN /* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Select
+
+  // ---- I3: a comment marker inside a quoted identifier, reaching gate 1 through the WITH arm ----
+  //
+  // `WITH x AS (SELECT 1 AS "a/*b") INSERT INTO t SELECT 1` writes the row on a real DuckDB 1.5.4.
+  // The stripper tracked single quotes only, so the marker inside the quoted identifier opened a
+  // block comment that never closed and truncated the text to `WITH x AS (SELECT 1 AS "a`.
+  // `verbAfterWithClause` then scanned text whose paren depth never returned to zero, ran out, and
+  // the statement fell to the legacy select bucket.
+  it should "classify a WITH write whose CTE carries a comment marker in a quoted identifier" in:
+    StatementClassifier.classify(
+      "WITH x AS (SELECT 1 AS \"a/*b\") INSERT INTO t SELECT 1"
+    ) shouldBe StatementKind.Dml
+
+  it should "classify a write whose alias carries a marker in a quoted identifier (guard)" in:
+    // GUARD: mutation-tested, passes with the quoted-identifier arm reverted, because the verb
+    // sits ahead of the marker and the first-token read never reaches it. The discriminating
+    // shape is the WITH one above, where the marker precedes the verb.
+    StatementClassifier.classify(
+      "INSERT INTO t SELECT 1 AS \"x--y\""
+    ) shouldBe StatementKind.Dml
+
   // ---- EXPLAIN ANALYZE executes its inner statement (deep-review H3) ----
 
   it should "classify EXPLAIN ANALYZE by the statement it executes" in:
@@ -418,3 +486,22 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
         offenders shouldBe empty
       }
     finally src.close()
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }

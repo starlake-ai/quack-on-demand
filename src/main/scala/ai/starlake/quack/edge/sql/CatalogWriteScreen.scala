@@ -154,19 +154,12 @@ object CatalogWriteScreen extends LazyLogging:
         // `PREPARE p AS INSERT ...; EXECUTE p` composes into an executed write without either
         // statement ever classifying Dml/Ddl or resolving through SqlParser (neither node type has
         // an arm there) -- see the scaladoc's PREPARE/EXECUTE paragraph. Recognized purely by first
-        // token, independently of the classifier's tunable buckets. `normalized` is checked against
-        // a snippet with comments and LEADING trivia already stripped, and every remaining
-        // (interior) trivia character collapsed to an ASCII space (see `isWriteShaped`) rather than
-        // re-stripping here, so this and the `classify` arm below judge the exact same head. The
-        // takeWhile below anchors at index 0 with no leading-whitespace tolerance of its own, which
-        // is exactly why the leading strip must run FIRST and leave nothing in front of the token --
-        // `SqlTrivia.normalize` alone does not remove a leading trivia character, it only rewrites
-        // it in place to an ASCII space, and an ASCII space at index 0 stops this `takeWhile` just
-        // as dead as the original NBSP did (empty head, matches neither keyword).
-        // Routes through the one shared reader (`SqlTrivia.firstToken`) rather than its own
-        // takeWhile -- `normalized` here already went through stripComments/stripLeading/normalize
-        // above, so `firstToken`'s own passes are idempotent no-ops on it. `.takeWhile(_ != ';')`
-        // is this call site's own extra (a bare `EXECUTE;`), not universal to the shared primitive.
+        // token, independently of the classifier's tunable buckets. Routes through the one shared
+        // reader (`SqlTrivia.firstToken`) rather than a hand-rolled takeWhile, so this and the
+        // `classify` arm below judge the exact same head; `normalized` has already been through
+        // the same three passes in `isWriteShaped`, so `firstToken`'s own are no-ops on it.
+        // `.takeWhile(_ != ';')` is this call site's own extra (a bare `EXECUTE;`), not universal
+        // to the shared primitive.
         def isPrepareOrExecute(normalized: String): Boolean =
           val head = SqlTrivia.firstToken(normalized).takeWhile(_ != ';').toUpperCase
           head == "PREPARE" || head == "EXECUTE"
@@ -180,43 +173,25 @@ object CatalogWriteScreen extends LazyLogging:
         // fragment into an empty string too, and that is already handled by the check itself, so
         // normalizing before it would only cost the distinction for no benefit.
         //
-        // Every other check normalizes the snippet ONCE, up front, in three passes, each closing a
-        // gap the previous one leaves open:
-        //   1. `SqlTrivia.stripLeading` REMOVES leading whitespace/trivia and any (possibly nested)
-        //      leading comment. This MUST run BEFORE pass 2, not after: `SqlCommentStripper
-        //      .stripComments` has no concept of comment nesting -- it closes on the FIRST `*/` it
-        //      finds, however deep -- while `stripLeading` tracks nesting depth correctly. DuckDB
-        //      itself nests block comments to arbitrary depth (verified against a real DuckDB
-        //      1.5.4: a leading `/* a /* b */ c */ PREPARE p AS INSERT ...` executes the INSERT).
-        //      Running `stripComments` first on that input closes the "comment" at the INNER `*/`,
-        //      leaving the literal `c */ PREPARE p AS INSERT ...` as the residual text -- `c` is not
-        //      a keyword, so `isPrepareOrExecute` and `classify` both miss the real verb entirely.
-        //      This is not a hypothetical: with the passes in the wrong order, the CHECKPOINT
-        //      fragment-list fallback (this method's own second call site below) ADMITS a
-        //      nested-leading-comment-hidden PREPARE/EXECUTE or plain write against a read-only
-        //      catalog, because `fragments.exists(isWriteShaped)` calls this method directly on the
-        //      raw, comment-intact split fragments -- there is no jsqlparser re-rendering to fall
-        //      back on there, unlike the single-statement path below.
-        //   2. `SqlCommentStripper.stripComments` then removes every remaining (INTERIOR) `--` / `/*
-        //      */` comment (the same stripper `StatementClassifier.classify` uses). `SqlTrivia` has
-        //      no comment-aware scan outside `stripLeading`'s LEADING-only one, so this pass is
-        //      still required even though pass 1 also touches leading position.
-        //   3. `SqlTrivia.normalize` collapses every remaining (INTERIOR) trivia character
-        //      (whitespace, BOM, zero-width space, and the rest of `Character.FORMAT`/
-        //      `SPACE_SEPARATOR`) to an ASCII space ACROSS THE WHOLE remaining string, not just its
-        //      head. This must run LAST, after pass 1, not be replaced by running it instead of
-        //      pass 1: `isPrepareOrExecute`'s `takeWhile` starts at index 0 with no tolerance for a
-        //      leading separator of its own, and `SqlTrivia.normalize` does not DELETE a leading
-        //      trivia character, it only rewrites it to an ASCII space in place -- which still sits
-        //      at index 0 and still stops `takeWhile` immediately. (Caught by mutation-testing this
-        //      exact change: a version that used `normalize` alone, without `stripLeading` first,
-        //      flipped the pre-existing "PREPARE hidden behind a leading NBSP" tests from denied to
-        //      admitted.) Both arms (`isPrepareOrExecute` and `classify`) MUST see the same
-        //      fully-normalized snippet -- normalizing only the leading position left the interior
-        //      blind spot open, the same class of gap `LockdownScreen` and `StatementClassifier`
-        //      each had and each closed the same way. `classify` also normalizes internally
-        //      (`StatementClassifier.classify`), so passes 2+3 are redundant for that call but still
-        //      required for `isPrepareOrExecute`'s own first-token read.
+        // Every other check normalizes the snippet ONCE, up front, through the same three passes
+        // the rest of the manager uses, in the same order -- `SqlTrivia.firstToken`'s scaladoc is
+        // the authoritative account of why that order and not another. The short version: only
+        // `stripLeading` DELETES a leading trivia character (`normalize` rewrites it in place to an
+        // ASCII space, which still sits at index 0), only `stripComments` removes an INTERIOR
+        // comment and only it knows DuckDB's quoting forms, and `normalize` runs last because
+        // `stripComments` can re-expose a trivia character that sat next to a comment body.
+        //
+        // Both consumers below re-derive the same three passes internally (`isPrepareOrExecute`
+        // through `SqlTrivia.firstToken`, and `classify` through `StatementClassifier.classify`),
+        // so passing the raw snippet would give identical verdicts today. `normalized` is kept
+        // anyway, as defence in depth against either consumer's internal composition changing
+        // under this screen, and because it keeps the two arms provably judging one same string.
+        // What IS load-bearing here is the CHECKPOINT fragment-list fallback (this method's own
+        // second call site below): `fragments.exists(isWriteShaped)` hands this method raw,
+        // comment-intact split fragments with no jsqlparser re-rendering to fall back on, so a
+        // write hidden behind a leading comment reaches the gate through this path and nowhere
+        // else. Verified against a real DuckDB 1.5.4 that the shapes involved execute: a leading
+        // `/* a /* b */ c */ PREPARE p AS INSERT ...` runs the INSERT.
         def isWriteShaped(snippet: String): Boolean =
           if snippet.isBlank then true
           else

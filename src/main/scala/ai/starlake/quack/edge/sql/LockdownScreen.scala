@@ -4,6 +4,8 @@ import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
 import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
+import java.util.Locale
+
 import scala.collection.mutable.ListBuffer
 
 /** Statement screen for locked-down deployments (QOD_NODE_LOCKDOWN). Pure: the router consults it
@@ -17,10 +19,16 @@ import scala.collection.mutable.ListBuffer
   * before the first-token check, and every INTERIOR comment is also stripped (replaced by a
   * separator, not deleted -- see `screenOne`) before the keyword-adjacency regexes run, so a
   * comment sitting between a keyword and its argument cannot hide that adjacency the way an
-  * interior Unicode trivia character could. A denied function name (bare or double-quoted) followed
-  * by an open parenthesis is denied wherever it appears (subqueries included, EVERY occurrence),
-  * EXCEPT when every path argument is a string literal with an object-store scheme. Anything the
-  * tokenizer cannot prove safe is denied.
+  * interior Unicode trivia character could. That holds for a nested comment too, and a comment
+  * marker inside any of DuckDB's quoting forms is left alone rather than opening a comment; see
+  * `ai.starlake.sql.SqlCommentStripper`, which is where both properties live and are tested. A
+  * denied function name (bare or double-quoted) followed by an open parenthesis is denied wherever
+  * it appears (subqueries included, EVERY occurrence), EXCEPT when every path argument is a string
+  * literal with an object-store scheme.
+  *
+  * What this screen does NOT claim: it is a deny-list of shapes, not a proof of safety. A statement
+  * no rule below matches is ADMITTED. The strip passes exist so a rule cannot be dodged by hiding
+  * the shape it looks for, not so that every unrecognized statement is refused.
   */
 object LockdownScreen:
 
@@ -116,24 +124,30 @@ object LockdownScreen:
     // Normalized ONLY for screening, in three passes, each closing a gap the previous one leaves
     // open -- `stmt` itself, unnormalized, is never used past this point; only `lower` is matched
     // against, and the ORIGINAL `stmt` text is what the caller relays to the node.
-    //   1. `SqlTrivia.stripLeading` removes LEADING whitespace/trivia and any (possibly nested)
-    //      leading comment. This must run BEFORE `SqlCommentStripper.stripComments` below, not
-    //      after: `stripComments` has no concept of comment nesting (it closes on the first `*/`
-    //      it sees, however deep), while `stripLeading` tracks nesting depth correctly, and a
-    //      leading `/* a /* nested */ b */ ATTACH ...` needs the nesting-aware scan to land on
-    //      `ATTACH`, not on the literal `b` a naive strip would expose.
+    //   1. `SqlTrivia.stripLeading` DELETES leading whitespace/trivia and any leading comment. It
+    //      is the only pass that deletes rather than rewrites, which is what `FirstToken`'s
+    //      index-0 anchor needs: `SqlTrivia.normalize` turns a leading NBSP into an ASCII space
+    //      that still sits at index 0, and `stripComments` does not touch it at all.
     //   2. `SqlCommentStripper.stripComments` then removes every remaining (INTERIOR) `--` / `/*
-    //      */` comment. DuckDB treats a comment as a SEPARATOR, not a weld -- confirmed against a
-    //      real DuckDB 1.5.4, `SELECT * FROM/*x*/'/etc/passwd.parquet'` and
-    //      `read_csv/*x*/('/etc/x.parquet')` both execute and return the target file's rows --
-    //      and `stripComments` now replaces a closed block comment with a single ASCII space
-    //      rather than nothing, so `FROM/*x*/'...'` strips to `FROM '...'`, keeping the
-    //      keyword-adjacency the regexes below key on. Before this pass existed at all, an
-    //      interior comment hid that adjacency exactly like an interior NBSP or zero-width space
-    //      already handled by pass 3 -- this closed the sibling gap in the SAME class of bug.
+    //      */` comment, nesting and quoting handled the way DuckDB's own lexer handles them (see
+    //      that object's scaladoc, where each property is tied to the statement that proves it).
+    //      DuckDB treats a comment as a SEPARATOR, not a weld -- confirmed against a real DuckDB
+    //      1.5.4, `SELECT * FROM/*x*/'/etc/passwd.parquet'` and `read_csv/*x*/('/etc/x.parquet')`
+    //      both execute and return the target file's rows -- and a closed block comment is
+    //      replaced by a single ASCII space rather than nothing. For the three regexes that use
+    //      `\s*` (`FromLiteral`, `CopyPathLiteral`, `deniedFunctionIn`'s call regex) the space is
+    //      not what makes them match, since they already match `from'...'`: what matters there is
+    //      that the comment is GONE. The space is load-bearing for `FromEscapeLiteral`, which uses
+    //      `\s+`; `SELECT * FROM/*x*/e'/tmp/x.csv'` executes on DuckDB and is admitted without the
+    //      space, denied with it, and `LockdownScreenSpec` carries that witness.
     //   3. `SqlTrivia.normalize` collapses every remaining trivia character (unicode space /
     //      format, see `SqlTrivia.isTriviaSpace`) to an ASCII space across the whole statement,
-    //      matching what DuckDB's own parser front end does before tokenizing.
+    //      matching what DuckDB's own parser front end does before tokenizing. It runs LAST
+    //      because pass 2 can re-expose a trivia character that sat next to a comment body.
+    //
+    // `Locale.ROOT` on the lowercasing, not the default locale: under `-Duser.language=tr`,
+    // `"INSTALL".toLowerCase` is a dotless-i `install` (U+0131), which matches no key in
+    // `DeniedFirstTokens` and admits INSTALL on a locked-down deployment.
     val lower =
       SqlTrivia.normalize(
         SqlCommentStripper.stripComments(SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT)))

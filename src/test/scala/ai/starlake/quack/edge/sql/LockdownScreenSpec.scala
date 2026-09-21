@@ -337,6 +337,90 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("SELECT 1") shouldBe false
   }
 
+  // ---- C1: a comment marker inside a QUOTED region must not truncate the statement ----
+  //
+  // `screenOne` runs the statement through `SqlCommentStripper`, which tracked single quotes only.
+  // A `/*` or `--` inside a double-quoted identifier or a dollar-quoted string therefore opened a
+  // comment that never closed and swallowed the rest of the statement, so `lower` arrived as
+  // `select 1 as "x` and ALL FOUR arms (deniedFunctionIn, barePathFrom, copyLocalPath,
+  // settingTargeted) matched nothing. Every statement below executes on a real DuckDB 1.5.4 and
+  // returns the target file's rows; a column alias is not an adversarial construct.
+  "quoted comment markers" should "not hide a denied function behind a quoted identifier" in {
+    denied("SELECT 1 AS \"x/*y\", * FROM read_csv('/etc/passwd.csv')") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a double-quoted identifier" in {
+    denied("SELECT 1 AS \"x--y\", * FROM '/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a denied function behind a dollar-quoted string" in {
+    denied("SELECT $$a/*b$$ AS s, * FROM read_csv('/etc/passwd.csv')") shouldBe true
+    denied("SELECT $tg$a--b$tg$ AS s, * FROM read_csv('/etc/passwd.csv')") shouldBe true
+  }
+
+  it should "not hide an ATTACH behind a quoted comment marker in an earlier statement (guard)" in {
+    // GUARD: mutation-tested, passes with the quoted-identifier arm reverted, because
+    // `splitStatements` is already double-quote aware and hands the ATTACH over as its own
+    // fragment. Pinned because it is the shape an operator would expect this file to cover.
+    denied("SELECT 1 AS \"x/*y\"; ATTACH 'x' AS q") shouldBe true
+  }
+
+  it should "still admit a remote read whose alias carries a marker (over-denial guard)" in {
+    denied("SELECT 1 AS \"x/*y\", * FROM read_csv('s3://bucket/x.csv')") shouldBe false
+  }
+
+  // ---- I1: a NESTED interior comment defeated every adjacency regex ----
+  //
+  // Same mechanism as the non-nested case pinned above, one nesting level deeper. `stripComments`
+  // closed at the inner marker and left the text between the inner and the outer close sitting
+  // between the keyword and its argument, so `from\s*'` and `read_csv\s*\(` found no adjacency.
+  // All three execute on a real DuckDB 1.5.4 (two return the file's rows, the COPY writes it).
+  "nested interior comments" should "not hide a bare-path FROM" in {
+    denied("SELECT * FROM/* a /* b */ c */'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a denied function call" in {
+    denied("SELECT * FROM read_csv/* a /* b */ c */('/etc/x.csv')") shouldBe true
+  }
+
+  it should "not hide a COPY path literal" in {
+    denied("COPY t TO/* a /* b */ c */'/tmp/out.csv'") shouldBe true
+  }
+
+  it should "still admit a remote literal behind a nested comment (over-denial guard)" in {
+    denied("SELECT * FROM/* a /* b */ c */'s3://bucket/x.parquet'") shouldBe false
+  }
+
+  // ---- m2: the ASCII space a stripped block comment leaves behind ----
+  //
+  // The three interior-comment tests further up pass with that space removed, because
+  // `FromLiteral`, `CopyPathLiteral` and the denied-function call regex all use `\s*`. This is the
+  // one lockdown rule where the space is genuinely load-bearing: `FromEscapeLiteral` uses `\s+`.
+  // `SELECT * FROM/*x*/e'/tmp/probe.csv'` executes on a real DuckDB 1.5.4 and is ADMITTED when the
+  // block comment is deleted rather than replaced (the regex needs at least one space between
+  // `from` and `e'`), DENIED when it is replaced by one.
+  "the separator a block comment leaves" should "keep FROM adjacent to an escape-string path" in {
+    denied("SELECT * FROM/*x*/e'/etc/passwd.csv'") shouldBe true
+  }
+
+  it should "keep FROM adjacent to an escape-string path behind a NESTED comment too" in {
+    denied("SELECT * FROM/* a /* b */ c */e'/etc/passwd.csv'") shouldBe true
+  }
+
+  // ---- m6: the lowercasing must not depend on the JVM's default locale ----
+  //
+  // Under `-Duser.language=tr`, `"INSTALL".toLowerCase` is a dotless i followed by `nstall`, which
+  // is not the key `install` in `DeniedFirstTokens`, so INSTALL is admitted on a locked-down
+  // deployment. The default locale is restored in a finally so no other test in this JVM sees it.
+  "first-token lowercasing" should "not depend on the default locale" in {
+    val previous = java.util.Locale.getDefault
+    try
+      java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr"))
+      denied("INSTALL spatial") shouldBe true
+      denied("INSERT INTO t VALUES (1)") shouldBe false
+    finally java.util.Locale.setDefault(previous)
+  }
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised above must be a literal `\uXXXX` escape, never a raw
@@ -357,6 +441,25 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     try
       val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
       withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/edge/sql/LockdownScreenSpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
         offenders shouldBe empty
       }
     finally src.close()
