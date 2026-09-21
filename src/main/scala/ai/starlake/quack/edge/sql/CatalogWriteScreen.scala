@@ -154,18 +154,11 @@ object CatalogWriteScreen extends LazyLogging:
         // `PREPARE p AS INSERT ...; EXECUTE p` composes into an executed write without either
         // statement ever classifying Dml/Ddl or resolving through SqlParser (neither node type has
         // an arm there) -- see the scaladoc's PREPARE/EXECUTE paragraph. Recognized purely by first
-        // token, independently of the classifier's tunable buckets. The snippet is stripped of
-        // comments first (the same `SqlCommentStripper` `StatementClassifier.classify` and
-        // `LockdownScreen.stripLeadingTrivia` already use) -- a raw `.trim` alone lets a leading
-        // `/*x*/` or `-- ...` comment hide the first token and re-open the exact bypass this rule
-        // exists to close, since `classify` strips comments before matching and would otherwise see
-        // a bucket-less `PREPARE`/`EXECUTE` and admit it as `Other`.
-        def isPrepareOrExecute(snippet: String): Boolean =
-          val head = SqlCommentStripper
-            .stripComments(snippet)
-            .trim
-            .takeWhile(c => !c.isWhitespace && c != ';')
-            .toUpperCase
+        // token, independently of the classifier's tunable buckets. `normalized` is checked
+        // against an ALREADY-normalized snippet (see `isWriteShaped`) rather than re-stripping
+        // here, so this and the `classify` arm below judge the exact same head.
+        def isPrepareOrExecute(normalized: String): Boolean =
+          val head = normalized.takeWhile(c => !c.isWhitespace && c != ';').toUpperCase
           head == "PREPARE" || head == "EXECUTE"
 
         // jsqlparser's `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements`
@@ -173,13 +166,30 @@ object CatalogWriteScreen extends LazyLogging:
         // `sqlSnippet` is built from `stmt.toString`. A blank snippet is therefore not evidence of
         // anything -- it is the parser giving up on the ORIGINAL text, which may well have been a
         // write. Fail closed rather than let an empty string classify as `Other` and be admitted.
+        // The blank check runs on the RAW snippet: normalizing first would turn a comment-only
+        // fragment into an empty string too, and that is already handled by the check itself, so
+        // normalizing before it would only cost the distinction for no benefit.
+        //
+        // Every other check normalizes the snippet ONCE, up front, by stripping comments (the same
+        // `SqlCommentStripper` `StatementClassifier.classify` uses) and then leading trivia (the
+        // same `LockdownScreen.stripLeadingTrivia` scanner `LockdownScreen` uses to the same end,
+        // widened to `private[sql]` for this reuse). A raw `.trim` alone only removes characters
+        // `<= U+0020`; it lets a leading NBSP, BOM, zero-width space, or `/*x*/`/`--` comment hide
+        // the first token from BOTH `isPrepareOrExecute` and `classify`'s own first-token read,
+        // admitting an invisible-character-prefixed `INSERT`/`PREPARE`/etc as `Other`. Both arms
+        // MUST see the same normalized snippet -- normalizing only one leaves the other's blind
+        // spot open, which is exactly how the previous fix (comments only, no leading trivia)
+        // still admitted a plain write behind one invisible character.
         def isWriteShaped(snippet: String): Boolean =
           if snippet.isBlank then true
-          else if isPrepareOrExecute(snippet) then true
           else
-            classify(snippet) match
-              case StatementKind.Dml | StatementKind.Ddl => true
-              case _                                     => false
+            val normalized =
+              LockdownScreen.stripLeadingTrivia(SqlCommentStripper.stripComments(snippet))
+            if isPrepareOrExecute(normalized) then true
+            else
+              classify(normalized) match
+                case StatementKind.Dml | StatementKind.Ddl => true
+                case _                                     => false
 
         def offendingIn(accesses: Set[TableAccess]): Set[String] =
           accesses.collect {

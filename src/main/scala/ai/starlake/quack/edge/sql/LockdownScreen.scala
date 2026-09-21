@@ -136,8 +136,12 @@ object LockdownScreen:
     * line comments, and (nested) block comments so a comment prefix cannot hide the first token. An
     * unterminated block comment consumes the rest of the statement (nothing executable remains, so
     * the empty remainder screens clean).
+    *
+    * `private[sql]`, not `private`, so `CatalogWriteScreen` can normalize a fragment's leading
+    * trivia with the same scanner before judging its first token, instead of a fifth hand-rolled
+    * one that would inevitably drift from this one (see `CatalogWriteScreen.isWriteShaped`).
     */
-  private def stripLeadingTrivia(s: String): String =
+  private[sql] def stripLeadingTrivia(s: String): String =
     var i     = 0
     var moved = true
     while moved do
@@ -163,9 +167,16 @@ object LockdownScreen:
         moved = true
     s.substring(i)
 
+  // `Character.FORMAT` (Unicode category Cf) is the general class BOM (U+FEFF) and zero-width
+  // space (U+200B) belong to, along with other invisible-but-not-whitespace characters such as the
+  // word joiner (U+2060) -- confirmed separately against a real DuckDB to still execute with one
+  // prepended, unlike Java's `isWhitespace`/`SPACE_SEPARATOR`, which both say no to it. Matching
+  // the whole category rather than naming characters one at a time closes that gap and any sibling
+  // Cf character, not just the ones already found.
   private def isTriviaSpace(c: Char): Boolean =
-    c.isWhitespace || c == '\uFEFF' || c == '\u200B' ||
-      Character.getType(c) == Character.SPACE_SEPARATOR
+    c.isWhitespace ||
+      Character.getType(c) == Character.SPACE_SEPARATOR ||
+      Character.getType(c) == Character.FORMAT
 
   /** Splits the input on top-level semicolons: semicolons inside single-quoted strings,
     * double-quoted identifiers, line comments, or (nested) block comments do not split.

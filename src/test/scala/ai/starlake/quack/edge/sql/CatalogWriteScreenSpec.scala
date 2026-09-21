@@ -274,10 +274,78 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     r.value should include("read-only")
   }
 
-  it should "still admit a leading comment on an ordinary read against a read-only catalog" in {
-    // Guards against the strip becoming blanket over-denial: a comment prefix on a genuine read
-    // must still classify as a read and be admitted.
-    screen("/*x*/SELECT * FROM sales_lake.main.orders") shouldBe None
+  // --- C1b: invisible LEADING TRIVIA (not just comments) must not hide a write's first token
+  // from EITHER isPrepareOrExecute OR the classify arm. Before this fix, `.trim` alone (which only
+  // removes characters <= U+0020) let a single NBSP/BOM/ZWSP survive in front of the keyword, so
+  // the head became e.g. " INSERT", matched no bucket, classified Other, and was admitted -- a
+  // PLAIN write, no PREPARE/EXECUTE needed, broader than C1's scope. Characters are written as
+  // explicit \u escapes, never as literal bytes, so a future reader does not mistake them for
+  // stray whitespace and delete them. ---
+
+  it should "deny a plain INSERT hidden behind a leading NBSP (U+00A0)" in {
+    // Mutation-tested: this DOES flip (None) if the leading-trivia strip is removed from
+    // isWriteShaped -- NBSP survives both `.trim` (only <= U+0020) and
+    // `Character.isWhitespace` (false for NBSP), so the un-normalized head is " INSERT", which
+    // matches neither PREPARE/EXECUTE nor any classifier bucket and classifies Other.
+    val r = screen(" INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a plain INSERT hidden behind a leading BOM (U+FEFF)" in {
+    val r = screen("﻿INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a plain INSERT hidden behind a leading zero-width space (U+200B)" in {
+    val r = screen("​INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a plain INSERT hidden behind a leading word joiner (U+2060)" in {
+    // U+2060 is Unicode category Cf (format), the same category as BOM/ZWSP, but was not one of
+    // the three characters LockdownScreen.isTriviaSpace enumerated by name. Confirmed separately
+    // against a real DuckDB CLI that it still executes an INSERT prepended with this character
+    // (SELECT count(*) returned 1 after the statement ran), so isTriviaSpace was broadened to
+    // match the whole Cf category rather than naming characters one at a time.
+    val r = screen("⁠INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a PREPARE hidden behind a leading NBSP" in {
+    val r = screen(" PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a PREPARE hidden behind a leading NBSP followed by a block comment" in {
+    // Pins the composition order: comments are stripped, THEN leading trivia, and the result is
+    // fed to isPrepareOrExecute -- neither strip alone (nor the wrong order) would leave a bare
+    // "PREPARE" head from this input.
+    val r = screen(" /*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a batch whose write fragment alone carries a leading NBSP" in {
+    // Mirrors the existing CHECKPOINT witness below (P1), but only the write fragment is
+    // NBSP-prefixed, pinning that normalization runs per-fragment through the P1 fallback and not
+    // only on a lone single-statement submission.
+    val batch = "CHECKPOINT;  INSERT INTO sales_lake.main.orders VALUES (1)"
+    SqlParser.extract(batch, cfg).statements.length shouldBe 1
+    LockdownScreen.splitStatements(batch).length shouldBe 2
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "still admit a leading comment on an ordinary read reached via the parsed fallback" in {
+    // The previous version of this guard (`screen("/*x*/SELECT * FROM sales_lake.main.orders")`)
+    // returned at the cheap path (step 2): every fragment classifies read-side without being
+    // parsed, so isWriteShaped -- and therefore this commit's strip -- was never reached. It pinned
+    // a pre-existing StatementClassifier property, not this fix, and its stated purpose was false.
+    // Pairing the read with CHECKPOINT forces SqlParser.extract to throw on the whole submission,
+    // routing judgment through the P1 fragment-list fallback, where the /*x*/-prefixed SELECT
+    // fragment is actually judged by isWriteShaped with the strip live.
+    // Mutation-tested: this DOES flip (Some) if isWriteShaped is changed to treat every
+    // non-blank normalized snippet as write-shaped, confirming it now exercises the changed code.
+    screen("CHECKPOINT; /*x*/SELECT * FROM sales_lake.main.orders") shouldBe None
   }
 
   it should "still admit CALL, which classifies Other like PREPARE/EXECUTE but is not treated as write-shaped" in {
