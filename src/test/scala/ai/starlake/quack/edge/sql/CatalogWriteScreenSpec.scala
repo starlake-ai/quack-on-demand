@@ -381,3 +381,87 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     )
     r.value should include("read-only on this deployment")
   }
+
+  // --- N: INTERIOR invisible trivia (not just leading) must not hide PREPARE/EXECUTE's or a
+  // plain write's first token either. C1b closed the LEADING position by stripping leading
+  // trivia; this is the same gap one word to the right. `PREPARE<NBSP>p AS INSERT ...` has a
+  // head of `PREPARE` already (nothing leading to strip), so `SqlTrivia.stripLeading` was a
+  // no-op here: `isPrepareOrExecute`'s `takeWhile(!isWhitespace)` read `PREPARE<NBSP>p` as one
+  // token matching neither `PREPARE` nor `EXECUTE`, and `classify` -- which DOES normalize
+  // internally -- saw `PREPARE p AS INSERT ...`, a first token in no configured bucket, so
+  // `Other`: ADMITTED. Verified against a real DuckDB 1.5.4 that `PREPARE<NBSP>p AS ...` and
+  // `EXECUTE<NBSP>p` both execute identically to the space-separated form. Every character below
+  // is written as a literal `\uXXXX` escape, never a raw invisible byte (see the byte-hygiene
+  // test at the end of this file). ---
+
+  it should "deny a PREPARE hidden behind an interior NBSP" in {
+    // Mutation-tested: flips to None if isWriteShaped normalizes with SqlTrivia.stripLeading
+    // instead of SqlTrivia.normalize.
+    val r = screen("PREPARE\u00A0p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a PREPARE hidden behind an interior word joiner (U+2060)" in {
+    val r = screen("PREPARE\u2060p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a PREPARE hidden behind an interior BOM (U+FEFF)" in {
+    val r = screen("PREPARE\uFEFFp AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a bare EXECUTE hidden behind an interior NBSP while a catalog is read-only" in {
+    val r = screen("EXECUTE\u00A0p")
+    r.value should include("read-only")
+  }
+
+  it should "deny a plain INSERT hidden behind an interior NBSP (not just leading)" in {
+    // NOT discriminating for this commit's own fix -- confirmed by mutation: reverting
+    // isWriteShaped's SqlTrivia.normalize back to SqlTrivia.stripLeading does NOT flip this one.
+    // `StatementClassifier.classify` normalizes internally (its own earlier fix), so it correctly
+    // reads INSERT as the verb and returns Dml regardless of whether the snippet handed to it was
+    // already normalized. Kept anyway as a coverage/regression witness that the PREPARE/EXECUTE
+    // fix's composition (comments -> strip leading -> normalize) does not regress this
+    // already-protected path; pairing with CHECKPOINT (as the P1 witness above does) forces the
+    // fragment-list fallback so the raw, un-reconstructed fragment is what gets judged.
+    val batch = "CHECKPOINT; INSERT\u00A0INTO sales_lake.main.orders VALUES (1)"
+    SqlParser.extract(batch, cfg).statements.length shouldBe 1
+    LockdownScreen.splitStatements(batch).length shouldBe 2
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "still admit a read with interior trivia against a read-only catalog, via the parsed path" in {
+    // Over-denial guard: this must reach the parsed per-statement path (denialFor), not just the
+    // cheap classify-only path at step 2 -- CHECKPOINT forces the fragment-list fallback, and
+    // fragments.exists(isWriteShaped) must come back false for a read with interior trivia, not
+    // true. Mutation-tested: flips to Some if isWriteShaped treats every non-blank normalized
+    // snippet as write-shaped (the same mutation the leading-trivia read guard above pins).
+    screen("CHECKPOINT; SELECT\u00A0* FROM sales_lake.main.orders") shouldBe None
+  }
+
+  // ---- escape hygiene of this file's own invisible-character test literals ----
+  //
+  // Every trivia character exercised in this file must be a literal `\uXXXX` escape, never a raw
+  // invisible byte pasted into the source: an editor or an "helpful" formatting pass can silently
+  // decode `\u00A0` back into a raw NBSP, at which point this file still compiles and every
+  // assertion still passes (a `String` built from the escape and one built from the raw byte are
+  // identical at runtime -- that's the whole point of an escape), while the next reader sees what
+  // looks like ordinary blank space around a keyword with no way to tell the test asserts
+  // anything about trivia at all. This test reads this very source file back and fails if any
+  // codepoint above ASCII (U+007F) appears anywhere in it.
+  it should "carry no raw non-ASCII codepoints in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
+      withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }
