@@ -45,8 +45,14 @@ object DuckLakeInitializer extends LazyLogging:
     * (already wrapped in `IO.blocking { ... }`). Skips with a warning if the metastore lacks the
     * keys needed to reach the tenant-db Postgres - the per-node ATTACH later on will surface the
     * same misconfiguration loudly.
+    *
+    * `encrypted` is an explicit parameter rather than read off the metastore map: at the
+    * catalog-creating call site (`PoolSupervisor.createTenantDb`) the metastore in hand is the
+    * caller-supplied one, which is stamped with `"encrypted" -> "true"` only later by
+    * `effectiveMetastoreFor` - relying on the map here would silently create the catalog
+    * unencrypted. Defaults to `false` so every other caller is unaffected.
     */
-  def initBlocking(metastore: Map[String, String]): Unit =
+  def initBlocking(metastore: Map[String, String], encrypted: Boolean = false): Unit =
     val dbName   = metastore.getOrElse("dbName", "")
     val dataPath = metastore.getOrElse("dataPath", "")
     if !metastore.contains("pgHost") || dbName.isEmpty || dataPath.isEmpty then
@@ -60,12 +66,13 @@ object DuckLakeInitializer extends LazyLogging:
       val pgUser     = metastore.getOrElse("pgUser", "postgres")
       val pgPassword = metastore.getOrElse("pgPassword", "")
       val schemaName = metastore.getOrElse("schemaName", "main")
-      runInit(pgHost, pgPort, pgUser, pgPassword, dbName, schemaName, dataPath)
+      runInit(pgHost, pgPort, pgUser, pgPassword, dbName, schemaName, dataPath, encrypted)
 
   /** IO wrapper around [[initBlocking]]. Retained for callers that already compose `IO` (none today
     * inside the codebase - kept for symmetry with the rest of the bootstrap chain).
     */
-  def init(metastore: Map[String, String]): IO[Unit] = IO.blocking(initBlocking(metastore))
+  def init(metastore: Map[String, String], encrypted: Boolean = false): IO[Unit] =
+    IO.blocking(initBlocking(metastore, encrypted))
 
   private def runInit(
       pgHost: String,
@@ -74,7 +81,8 @@ object DuckLakeInitializer extends LazyLogging:
       pgPassword: String,
       dbName: String,
       schemaName: String,
-      dataPath: String
+      dataPath: String,
+      encrypted: Boolean
   ): Unit =
     logger.info(
       s"DuckLake pre-init: ATTACHing ducklake:postgres://$pgHost:$pgPort/$dbName " +
@@ -159,9 +167,7 @@ object DuckLakeInitializer extends LazyLogging:
             s"dbname=${libpqValue(dbName)} " +
             s"user=${libpqValue(pgUser)} " +
             s"password=${libpqValue(pgPassword)}"
-        val attach =
-          s"ATTACH ${duckdbLiteral(connstr)} " +
-            s"AS ${quoteIdent(dbName)} (DATA_PATH ${duckdbLiteral(dataPath)})"
+        val attach = attachSql(connstr, dbName, dataPath, encrypted)
 
         // Side-channel Postgres connection that holds the per-dbname
         // advisory lock only for the duration of the DuckLake ATTACH.
@@ -182,6 +188,7 @@ object DuckLakeInitializer extends LazyLogging:
           // per spawn attempt, forever. Catch it here instead, before the lock and the
           // ATTACH, with one clear message naming the fix.
           guardDataPath(pgConn, dbName, dataPath)
+          guardEncryption(pgConn, dbName, encrypted)
 
           val lockStmt = pgConn.prepareStatement(
             "SELECT pg_advisory_lock(hashtext(?))"
@@ -290,6 +297,48 @@ object DuckLakeInitializer extends LazyLogging:
   private[ondemand] def libpqValue(v: String): String =
     "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
+  /** The DuckLake ATTACH, extracted so its option list is assertable without a live Postgres.
+    * `ENCRYPTED` is passed on every attach, not only the one that creates the catalog: the DuckLake
+    * documentation does not say whether the flag must be repeated once
+    * `ducklake_metadata.encrypted` exists, and passing it always is correct under either answer.
+    * This mirrors how DATA_PATH is already passed on every attach and cross-checked by
+    * [[guardDataPath]].
+    */
+  private[ondemand] def attachSql(
+      connstr: String,
+      dbName: String,
+      dataPath: String,
+      encrypted: Boolean
+  ): String =
+    val opts =
+      if encrypted then s"DATA_PATH ${duckdbLiteral(dataPath)}, ENCRYPTED"
+      else s"DATA_PATH ${duckdbLiteral(dataPath)}"
+    s"ATTACH ${duckdbLiteral(connstr)} AS ${quoteIdent(dbName)} ($opts)"
+
+  /** Compares the catalog's recorded `ducklake_metadata.encrypted` against what the tenant-db row
+    * asks for. `None` recorded means a fresh catalog, which the ATTACH is about to stamp. Same role
+    * as [[guardDataPath]]: turn a per-spawn DuckLake error that repeats forever into one message
+    * naming the cause and the fix.
+    */
+  private[ondemand] def encryptionMismatch(
+      recorded: Option[String],
+      wanted: Boolean
+  ): Option[String] =
+    recorded.map(_.trim.toLowerCase) match
+      case Some("true") if !wanted =>
+        Some(
+          "this DuckLake catalog was created encrypted (ducklake_metadata.encrypted='true') but the " +
+            "tenant-db row asks for no encryption. Encryption cannot be removed from an existing " +
+            "catalog: create a new database with encrypted=false and copy the data."
+        )
+      case Some("false") if wanted =>
+        Some(
+          "this DuckLake catalog was created unencrypted (ducklake_metadata.encrypted='false') but " +
+            "the tenant-db row asks for encryption. Encryption cannot be enabled on an existing " +
+            "catalog: create a new database with encrypted=true and copy the data."
+        )
+      case _ => None
+
   /** Raised by [[guardDataPath]] when the effective dataPath this manager is about to ATTACH with
     * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`. Callers
     * (`PoolSupervisor`) catch this type specifically to log at ERROR and refuse to proceed, unlike
@@ -371,3 +420,49 @@ object DuckLakeInitializer extends LazyLogging:
               "manager to re-attempt."
           )
       }
+
+  /** Resolves the schema holding `ducklake_metadata` and reads the `value` recorded for `key`, or
+    * `None` when the table does not exist yet (a fresh catalog) or has no row for that key. Schema
+    * resolution mirrors `BranchCloner.metaSchema`: prefer `public` when the table exists in more
+    * than one schema, otherwise take whichever schema has it.
+    */
+  private[ondemand] def readMetadataValue(
+      pgConn: java.sql.Connection,
+      key: String
+  ): Option[String] =
+    val schemaStmt = pgConn.prepareStatement(
+      "SELECT table_schema FROM information_schema.tables WHERE table_name = 'ducklake_metadata' " +
+        "ORDER BY (table_schema = 'public') DESC LIMIT 1"
+    )
+    val schemaOpt =
+      try
+        val rs = schemaStmt.executeQuery()
+        try if rs.next() then Some(rs.getString(1)) else None
+        finally rs.close()
+      finally schemaStmt.close()
+    schemaOpt.flatMap { schema =>
+      val valueStmt = pgConn.prepareStatement(
+        s"SELECT value FROM ${quoteIdent(schema)}.ducklake_metadata WHERE key = ? LIMIT 1"
+      )
+      try
+        valueStmt.setString(1, key)
+        val rs = valueStmt.executeQuery()
+        try if rs.next() then Some(rs.getString(1)) else None
+        finally rs.close()
+      finally valueStmt.close()
+    }
+
+  /** Fails fast when the catalog's recorded encryption disagrees with the tenant-db row. Reads
+    * through the same connection and at the same point as [[guardDataPath]], before the advisory
+    * lock, so the failure is one clear message rather than DuckLake's raw error once per spawn. A
+    * catalog with no `ducklake_metadata` yet is a fresh one: nothing to compare.
+    */
+  private def guardEncryption(
+      pgConn: java.sql.Connection,
+      dbName: String,
+      encrypted: Boolean
+  ): Unit =
+    val recorded = readMetadataValue(pgConn, "encrypted")
+    encryptionMismatch(recorded, encrypted).foreach { msg =>
+      sys.error(s"DuckLake catalog '$dbName': $msg")
+    }

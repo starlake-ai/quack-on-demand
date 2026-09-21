@@ -128,7 +128,7 @@ final class PoolSupervisor(
       * stamps on the tombstone row.
       */
     managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None,
-    duckLakeInitializer: Map[String, String] => Unit = DuckLakeInitializer.initBlocking
+    duckLakeInitializer: (Map[String, String], Boolean) => Unit = DuckLakeInitializer.initBlocking
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -503,7 +503,7 @@ final class PoolSupervisor(
     tenantDbs.values.toList.foreach { td =>
       if td.kind == TenantDbKind.DuckLake then
         try
-          DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
+          DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td), td.encrypted)
           dataPathBlocked.remove(td.id)
         catch
           case t: DuckLakeInitializer.DataPathMismatchException =>
@@ -1361,7 +1361,8 @@ final class PoolSupervisor(
                                 try
                                   duckLakeInitializer(
                                     (defaultMetastore ++ effectiveMeta)
-                                      .updated("dataPath", effectiveDataPath)
+                                      .updated("dataPath", effectiveDataPath),
+                                    encrypted
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()

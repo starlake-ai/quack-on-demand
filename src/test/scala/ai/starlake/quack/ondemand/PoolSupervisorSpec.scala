@@ -985,7 +985,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
       defaultMetastore = sparseDefaults,
-      duckLakeInitializer = captured += _
+      duckLakeInitializer = (m, _) => captured += m
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
