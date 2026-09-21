@@ -156,7 +156,7 @@ if (-not $isRemote) {
 # The presence check is skipped in dry-run mode: SpawnScriptEncryptionWindowsSpec only
 # exercises init-SQL assembly, which is pure string building and needs no duckdb binary at
 # all. Mirrors the QOD_SPAWN_DRY_RUN-gated `command -v` check in spawn-quack-node.sh.
-$dryRun = ($env:QOD_SPAWN_DRY_RUN -eq '1')
+$dryRun = ([Environment]::GetEnvironmentVariable('QOD_SPAWN_DRY_RUN') -eq '1')
 $duckdbBin = [Environment]::GetEnvironmentVariable('DUCKDB_BIN')
 if ([string]::IsNullOrEmpty($duckdbBin)) {
   if ($dryRun) {
@@ -206,7 +206,10 @@ if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objec
 # mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently
 # read-only node rather than an error. storageSql only loads httpfs for remote data paths, so a
 # local encrypted database would miss it. Mirrors ENCRYPTION_SQL in spawn-quack-node.sh.
-if ($encrypted -eq 'true') {
+# -ceq (case-sensitive) matches bash's `==`, which is also case-sensitive: this script's own
+# code always emits the lowercase string "true", but staying case-sensitive keeps the two
+# scripts behaving identically for any other caller of the env var.
+if ($encrypted -ceq 'true') {
   [void]$sb.AppendLine("INSTALL httpfs; LOAD httpfs;")
 }
 
@@ -218,7 +221,7 @@ switch ($kind) {
     [void]$sb.AppendLine("ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);")
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');")
     [void]$sb.AppendLine("ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS ""$catalogAlias""")
-    if ($encrypted -eq 'true') {
+    if ($encrypted -ceq 'true') {
       [void]$sb.AppendLine("  (DATA_PATH '$dataPath', ENCRYPTED);")
     } else {
       [void]$sb.AppendLine("  (DATA_PATH '$dataPath');")
@@ -230,7 +233,7 @@ switch ($kind) {
     [void]$sb.AppendLine("USE ""$catalogAlias"".""$schemaName"";")
   }
   'duckdb-file' {
-    if ($encrypted -eq 'true') {
+    if ($encrypted -ceq 'true') {
       [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"" (ENCRYPTION_KEY '$encryptionKey');")
     } else {
       [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"";")
