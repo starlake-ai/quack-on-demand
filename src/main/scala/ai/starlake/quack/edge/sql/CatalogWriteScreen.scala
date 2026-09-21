@@ -182,38 +182,46 @@ object CatalogWriteScreen extends LazyLogging:
         //
         // Every other check normalizes the snippet ONCE, up front, in three passes, each closing a
         // gap the previous one leaves open:
-        //   1. `SqlCommentStripper.stripComments` removes `--`/`/* */` comments ANYWHERE in the
-        //      snippet (the same stripper `StatementClassifier.classify` uses). `SqlTrivia` has no
-        //      comment-aware scan outside `stripLeading`'s LEADING-only one, so this pass is still
-        //      required even though the next two also touch leading position.
-        //   2. `SqlTrivia.stripLeading` REMOVES leading whitespace/trivia (and any leading comment
-        //      that pass 1 somehow left, belt and suspenders). This has to run BEFORE pass 3, not
-        //      be replaced by it: `isPrepareOrExecute`'s `takeWhile` starts at index 0 with no
-        //      tolerance for a leading separator of its own, and `SqlTrivia.normalize` does not
-        //      DELETE a leading trivia character, it only rewrites it to an ASCII space in place --
-        //      which still sits at index 0 and still stops `takeWhile` immediately, reproducing the
-        //      exact bug this pass exists to fix. (Caught by mutation-testing this exact change: a
-        //      version that used `normalize` alone, without `stripLeading` first, flipped the
-        //      pre-existing "PREPARE hidden behind a leading NBSP" tests from denied to admitted.)
+        //   1. `SqlTrivia.stripLeading` REMOVES leading whitespace/trivia and any (possibly nested)
+        //      leading comment. This MUST run BEFORE pass 2, not after: `SqlCommentStripper
+        //      .stripComments` has no concept of comment nesting -- it closes on the FIRST `*/` it
+        //      finds, however deep -- while `stripLeading` tracks nesting depth correctly. DuckDB
+        //      itself nests block comments to arbitrary depth (verified against a real DuckDB
+        //      1.5.4: a leading `/* a /* b */ c */ PREPARE p AS INSERT ...` executes the INSERT).
+        //      Running `stripComments` first on that input closes the "comment" at the INNER `*/`,
+        //      leaving the literal `c */ PREPARE p AS INSERT ...` as the residual text -- `c` is not
+        //      a keyword, so `isPrepareOrExecute` and `classify` both miss the real verb entirely.
+        //      This is not a hypothetical: with the passes in the wrong order, the CHECKPOINT
+        //      fragment-list fallback (this method's own second call site below) ADMITS a
+        //      nested-leading-comment-hidden PREPARE/EXECUTE or plain write against a read-only
+        //      catalog, because `fragments.exists(isWriteShaped)` calls this method directly on the
+        //      raw, comment-intact split fragments -- there is no jsqlparser re-rendering to fall
+        //      back on there, unlike the single-statement path below.
+        //   2. `SqlCommentStripper.stripComments` then removes every remaining (INTERIOR) `--` / `/*
+        //      */` comment (the same stripper `StatementClassifier.classify` uses). `SqlTrivia` has
+        //      no comment-aware scan outside `stripLeading`'s LEADING-only one, so this pass is
+        //      still required even though pass 1 also touches leading position.
         //   3. `SqlTrivia.normalize` collapses every remaining (INTERIOR) trivia character
         //      (whitespace, BOM, zero-width space, and the rest of `Character.FORMAT`/
         //      `SPACE_SEPARATOR`) to an ASCII space ACROSS THE WHOLE remaining string, not just its
-        //      head. Passes 1+2 alone (the previous form of this check) left this gap open:
-        //      `PREPARE<NBSP>p AS INSERT ...` has a head of `PREPARE` already (nothing leading to
-        //      strip), so pass 2 was a no-op, `isPrepareOrExecute`'s `takeWhile(!isWhitespace)` read
-        //      `PREPARE<NBSP>p` as one token (matching neither `PREPARE` nor `EXECUTE`), and
-        //      `classify` -- which DOES normalize internally -- saw `PREPARE p AS INSERT ...`, a
-        //      first token in no configured bucket, so `Other`: admitted. Both arms MUST see the
-        //      same fully-normalized snippet -- normalizing only the leading position left the
-        //      interior blind spot open, the same class of gap `LockdownScreen` and
-        //      `StatementClassifier` each had and each closed the same way. `classify` also
-        //      normalizes internally (`StatementClassifier.classify`), so passes 2+3 are redundant
-        //      for that call but still required for `isPrepareOrExecute`'s own first-token read.
+        //      head. This must run LAST, after pass 1, not be replaced by running it instead of
+        //      pass 1: `isPrepareOrExecute`'s `takeWhile` starts at index 0 with no tolerance for a
+        //      leading separator of its own, and `SqlTrivia.normalize` does not DELETE a leading
+        //      trivia character, it only rewrites it to an ASCII space in place -- which still sits
+        //      at index 0 and still stops `takeWhile` immediately. (Caught by mutation-testing this
+        //      exact change: a version that used `normalize` alone, without `stripLeading` first,
+        //      flipped the pre-existing "PREPARE hidden behind a leading NBSP" tests from denied to
+        //      admitted.) Both arms (`isPrepareOrExecute` and `classify`) MUST see the same
+        //      fully-normalized snippet -- normalizing only the leading position left the interior
+        //      blind spot open, the same class of gap `LockdownScreen` and `StatementClassifier`
+        //      each had and each closed the same way. `classify` also normalizes internally
+        //      (`StatementClassifier.classify`), so passes 2+3 are redundant for that call but still
+        //      required for `isPrepareOrExecute`'s own first-token read.
         def isWriteShaped(snippet: String): Boolean =
           if snippet.isBlank then true
           else
             val normalized =
-              SqlTrivia.normalize(SqlTrivia.stripLeading(SqlCommentStripper.stripComments(snippet)))
+              SqlTrivia.normalize(SqlCommentStripper.stripComments(SqlTrivia.stripLeading(snippet)))
             if isPrepareOrExecute(normalized) then true
             else
               classify(normalized) match

@@ -307,6 +307,22 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("COPY t TO/*x*/'/tmp/out.csv'") shouldBe true
   }
 
+  // ---- a nested leading block comment must not put a non-keyword first ----
+  //
+  // Already correctly handled by this file's `stripLeading -> stripComments -> normalize` order
+  // (see `screenOne`'s scaladoc) -- these pin the DENIAL outcome DuckDB's actual nesting behaviour
+  // requires (verified against a real DuckDB 1.5.4: every leading example below executes and
+  // writes the row / attaches), matching the sibling regression witnesses added to
+  // `SqlTriviaSpec` and `StatementClassifierSpec` for the shared reader those two use instead of
+  // this file's own regex.
+  it should "close arbitrarily deep nesting in a leading comment before ATTACH, not just two levels" in {
+    denied("/* L1 /* L2 /* L3 */ back2 */ back1 */ ATTACH 'x' AS y") shouldBe true
+  }
+
+  it should "close a nested leading comment preceded by a plain trivia character before ATTACH" in {
+    denied("\u00A0/* a /* b */ c */ ATTACH 'x' AS y") shouldBe true
+  }
+
   it should "still admit a remote literal with an interior comment (over-denial guard)" in {
     // The remote exemption must survive comment stripping exactly as it survives trivia
     // normalization: a legitimate object-store literal separated from FROM by a comment is not

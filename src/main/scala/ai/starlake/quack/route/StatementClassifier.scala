@@ -94,8 +94,19 @@ final class StatementClassifier(
 
   private val cfg = config.normalized
 
+  // Leading trivia/comments are stripped BEFORE stripComments, not after: `SqlTrivia.stripLeading`
+  // tracks comment-nesting depth correctly, `SqlCommentStripper.stripComments` does not (it closes
+  // on the FIRST `*/` it sees, however deep). DuckDB nests block comments to arbitrary depth
+  // (verified against a real DuckDB 1.5.4: a leading `/* a /* b */ c */ INSERT INTO t VALUES (1)`
+  // executes and writes the row), so stripping comments before leading trivia on a nested leading
+  // comment exposes the literal text between the inner and outer close (`c` above) as if it were
+  // the real first token -- a misclassification to `Other`, the same bucket `RoleMatcher` treats as
+  // read-shaped, not merely a missed normalization. See `SqlTrivia.firstToken`'s scaladoc for the
+  // identical reasoning; this entry point needs its own copy because `classifyStripped` below
+  // receives already-comment-stripped text and reuses it for more than just the first token (the
+  // `WITH`/`EXPLAIN` arms slice into it directly).
   def classify(sql: String): StatementKind =
-    classifyStripped(SqlCommentStripper.stripComments(sql))
+    classifyStripped(SqlCommentStripper.stripComments(SqlTrivia.stripLeading(sql)))
 
   private def classifyStripped(raw: String): StatementKind =
     val sql = SqlTrivia.normalize(raw)

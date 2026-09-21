@@ -90,6 +90,33 @@ class SqlTriviaSpec extends AnyFlatSpec with Matchers:
   it should "not change case -- callers choose their own" in:
     SqlTrivia.firstToken("select 1") shouldBe "select"
 
+  // ---- a nested leading block comment must not put a non-keyword first ----
+  //
+  // `stripComments` has no concept of comment nesting -- it stops at the first closing marker it
+  // finds, however deep -- while `stripLeading` tracks nesting depth correctly. DuckDB nests block
+  // comments to arbitrary depth (verified against a real DuckDB 1.5.4: every one of the leading
+  // examples below executes and writes the row). Composing `stripComments` before `stripLeading`
+  // (the order this method used to have) stops at the INNER closing marker on a nested leading
+  // comment, exposing the literal text between the inner and outer close as the "first token" --
+  // not a missed normalization, a MISCLASSIFICATION into a bucket (`Other`) every gate treats as
+  // safe. `stripLeading -> stripComments -> normalize` is the only order that survives this.
+  it should "not let a nested leading block comment expose its own interior text as the first token" in:
+    SqlTrivia.firstToken("/* a /* b */ c */ INSERT INTO t VALUES (1)") shouldBe "INSERT"
+
+  it should "close arbitrarily deep nesting, not just two levels" in:
+    SqlTrivia.firstToken(
+      "/* L1 /* L2 /* L3 */ back2 */ back1 */ INSERT INTO t VALUES (1)"
+    ) shouldBe "INSERT"
+
+  it should "not over-correct: a non-nested leading comment still behaves as before" in:
+    SqlTrivia.firstToken("/* x */ INSERT INTO t VALUES (1)") shouldBe "INSERT"
+
+  it should "close a nested leading comment preceded by a plain trivia character" in:
+    SqlTrivia.firstToken("\u00A0/* a /* b */ c */ INSERT INTO t VALUES (1)") shouldBe "INSERT"
+
+  it should "not be defeated by a nested comment that sits AFTER the verb (benign shape, verb stays first)" in:
+    SqlTrivia.firstToken("INSERT /* a /* b */ c */ INTO t VALUES (1)") shouldBe "INSERT"
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as a

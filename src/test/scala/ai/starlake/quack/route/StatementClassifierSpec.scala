@@ -235,6 +235,36 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
     StatementClassifier.classify("SELECT * FROM/*x*/t") shouldBe StatementKind.Select
     StatementClassifier.classify("SELECT a/*x*/FROM t") shouldBe StatementKind.Select
 
+  // ---- a nested leading block comment must not put a non-keyword first ----
+  //
+  // `classify` used to strip comments (non-nesting-aware) before stripping leading trivia
+  // (nesting-aware), so a nested leading comment exposed the literal text between its inner and
+  // outer close as the "first token" -- a misclassification into `Other`, not merely a missed
+  // normalization. DuckDB nests block comments to arbitrary depth and executes every one of these
+  // as a write (verified against a real DuckDB 1.5.4).
+  it should "not let a nested leading block comment misclassify a write as Other" in:
+    StatementClassifier.classify(
+      "/* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not let a nested leading block comment misclassify a DDL statement as Other" in:
+    StatementClassifier.classify(
+      "/* a /* b */ c */ CREATE TABLE t(a int)"
+    ) shouldBe StatementKind.Ddl
+
+  it should "close arbitrarily deep nesting, not just two levels" in:
+    StatementClassifier.classify(
+      "/* L1 /* L2 /* L3 */ back2 */ back1 */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not over-correct: a non-nested leading comment still behaves as before" in:
+    StatementClassifier.classify("/* x */ INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "close a nested leading comment preceded by a plain trivia character" in:
+    StatementClassifier.classify(
+      "\u00A0/* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
   it should "classify from a normalized copy without altering the original statement" in:
     // `SqlTrivia.normalize` must never be threaded anywhere but the classifier's own scan --
     // the original SQL text is what is sent to the node. Strings are immutable in the JVM, so

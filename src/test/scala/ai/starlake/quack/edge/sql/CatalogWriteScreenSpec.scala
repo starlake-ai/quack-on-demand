@@ -474,6 +474,73 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     r.value should include("read-only")
   }
 
+  // ---- a nested leading block comment must not put a non-keyword first ----
+  //
+  // `isWriteShaped` used to strip comments (non-nesting-aware) before stripping leading trivia
+  // (nesting-aware), so a nested leading comment stopped at the INNER closing marker and exposed
+  // the literal text between the inner and outer close as the "first token" to both
+  // `isPrepareOrExecute` and `classify` -- not a missed normalization, a misclassification into a
+  // bucket neither treats as write-shaped. DuckDB nests block comments to arbitrary depth and
+  // executes every one of these as a write (verified against a real DuckDB 1.5.4).
+  //
+  // This is the LIVE regression witness, not a hypothetical: the single-statement path
+  // (`denialFor` on a `ParseError`) is accidentally safe regardless of this bug, because
+  // jsqlparser's own `toString` re-renders a `PrepareStatement`/`Execute` node WITHOUT the
+  // original comment -- confirmed by running the un-fixed code before this commit, which already
+  // denied a bare `screen("/* a /* b */ c */ PREPARE p AS INSERT INTO sales_lake.main.orders
+  // VALUES (1)")`. The FRAGMENT-LIST fallback (forced by `CHECKPOINT`, below) has no such
+  // rescue: it calls `isWriteShaped` directly on the raw, comment-intact split fragment, and with
+  // the pre-fix ordering this test's batch was ADMITTED (`None`) instead of denied -- confirmed by
+  // running the un-fixed code before writing this test.
+  it should "deny a CHECKPOINT-forced batch whose PREPARE/EXECUTE writes hide behind a nested leading comment" in {
+    val batch =
+      "CHECKPOINT; /* a /* b */ c */ PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1); " +
+        "/* a /* b */ c */ EXECUTE p"
+    SqlParser.extract(batch, cfg).statements.length shouldBe 1
+    LockdownScreen.splitStatements(batch).length shouldBe 3
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "deny a CHECKPOINT-forced batch whose plain INSERT hides behind a nested leading comment" in {
+    val batch = "CHECKPOINT; /* a /* b */ c */ INSERT INTO sales_lake.main.orders VALUES (1)"
+    val r     = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "deny a CHECKPOINT-forced batch whose CREATE TABLE hides behind a nested leading comment" in {
+    val batch = "CHECKPOINT; /* a /* b */ c */ CREATE TABLE sales_lake.main.newtable(a int)"
+    val r     = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "close arbitrarily deep nesting, not just two levels" in {
+    val batch =
+      "CHECKPOINT; /* L1 /* L2 /* L3 */ back2 */ back1 */ INSERT INTO sales_lake.main.orders VALUES (1)"
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "deny a nested leading comment preceded by a plain trivia character" in {
+    val batch = "CHECKPOINT; \u00A0/* a /* b */ c */ INSERT INTO sales_lake.main.orders VALUES (1)"
+    val r     = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "not over-correct: a non-nested leading comment in a CHECKPOINT batch still denies as before" in {
+    // Over-correction guard: this exact batch shape (single-level comment) was already denied
+    // before this fix -- see the existing "comment-blind witness batch" test above -- pinning that
+    // the reordering did not regress the already-working non-nested case.
+    val batch =
+      "CHECKPOINT; /*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1); /*x*/EXECUTE p"
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "still admit a CHECKPOINT-forced read whose nested leading comment is not write-shaped (over-denial guard)" in {
+    screen("CHECKPOINT; /* a /* b */ c */ SELECT * FROM sales_lake.main.orders") shouldBe None
+  }
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised in this file must be a literal `\uXXXX` escape, never a raw

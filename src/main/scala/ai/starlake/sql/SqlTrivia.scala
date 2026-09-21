@@ -91,10 +91,17 @@ object SqlTrivia:
     * fold their own `.dropWhile(_ == '(')` / `.takeWhile(_ != ';')` / `.toUpperCase` /
     * `.toLowerCase` onto the result instead.
     *
-    * Comment REMOVAL (not substitution) is a distinct, separately-tracked gap: `SqlCommentStripper`
-    * deletes a comment rather than replacing it with a separator, so `INSERT/*x*/INTO` still welds
-    * into one token here, same as at every other consumer of `stripComments`. This primitive closes
-    * the trivia half of the token-boundary problem, not that one.
+    * Composed as `stripLeading -> stripComments -> normalize`, in that order, NOT
+    * `stripComments -> stripLeading`: `stripComments` has no concept of comment nesting -- it stops
+    * at the first closing marker it finds, however deep -- while `stripLeading` tracks nesting
+    * depth correctly. DuckDB itself nests block comments to arbitrary depth (verified against a
+    * real DuckDB 1.5.4: `/* a /* b */ c */ INSERT INTO t VALUES (1)` executes and writes the row,
+    * and so does three levels deep). Running `stripComments` first on that leading comment stops at
+    * the inner closing marker, exposing the literal text between the inner and outer close (`c` in
+    * the example) as if it were the statement's real first token -- which is not merely "no
+    * discrimination", it is a MISCLASSIFICATION: `c` is not a keyword, so it lands in `Other`, the
+    * same bucket every gate treats as read-shaped / not-proven-a-write. `stripLeading` alone
+    * correctly consumes the entire nested comment in one pass, landing cleanly on the real verb.
     */
   def firstToken(sql: String): String =
-    normalize(stripLeading(SqlCommentStripper.stripComments(sql))).takeWhile(!_.isWhitespace)
+    normalize(SqlCommentStripper.stripComments(stripLeading(sql))).takeWhile(!_.isWhitespace)
