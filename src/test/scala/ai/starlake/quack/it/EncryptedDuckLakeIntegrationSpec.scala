@@ -9,7 +9,8 @@ import java.nio.file.{Files, Path}
 import java.sql.{Connection, DriverManager}
 import scala.util.{Failure, Success, Try, Using}
 
-/** Proves that an encrypted DuckLake database actually encrypts its data files.
+/** Proves that an encrypted database actually encrypts what it writes: the Parquet files for
+  * `kind=ducklake`, the `.duckdb` file itself for `kind=duckdb-file`.
   *
   * Everything else in this feature asserts about intent: the model carries a flag, the ATTACH
   * carries `ENCRYPTED`, the catalog records `ducklake_metadata.encrypted='true'`, the guard refuses
@@ -19,7 +20,9 @@ import scala.util.{Failure, Success, Try, Using}
   * What none of those establish is the only property an operator cares about: that the bytes on
   * disk are unreadable without the catalog. A catalog could record `encrypted='true'` and still
   * write plain Parquet, and every other test in the feature would stay green. So this spec drives
-  * data all the way to a Parquet file and asserts a reader holding no key cannot open it.
+  * data all the way to a file and asserts a reader holding no key cannot open it. The duckdb-file
+  * case at the bottom does the same for the other kind, whose coverage was otherwise only string
+  * assertions on the SQL the spawn scripts emit.
   *
   * The negative assertion is worthless on its own: a wrong path, an absent extension, or any
   * unrelated error would make it pass. The unencrypted control case at the bottom is what turns it
@@ -196,3 +199,105 @@ class EncryptedDuckLakeIntegrationSpec extends AnyFlatSpec with Matchers:
               "measures something other than encryption"
           )
     }
+
+  // ---------- kind=duckdb-file: the other half of the feature ----------
+
+  /** Attaches a `.duckdb` file the way `spawn-quack-node.sh` does, with or without a key, and runs
+    * `body` against it. `INSTALL httpfs` mirrors the spawn script: DuckDB needs OpenSSL for a
+    * WRITABLE encrypted database, and in its mbedtls fallback writes are refused outright.
+    */
+  private def withAttachedFile[A](file: Path, key: Option[String])(
+      body: java.sql.Statement => A
+  ): A =
+    withDuckdb { st =>
+      st.execute("INSTALL httpfs; LOAD httpfs;")
+      val opts = key.fold("")(k => s" (ENCRYPTION_KEY ${duckdbLiteral(k)})")
+      st.execute(s"ATTACH ${duckdbLiteral(file.toString)} AS db$opts")
+      try body(st)
+      finally st.execute("DETACH db")
+    }
+
+  private def writeFile(file: Path, key: Option[String]): Unit =
+    withAttachedFile(file, key)(_.execute("CREATE TABLE db.secrets AS SELECT 'top-secret' AS s"))
+
+  /** Reads the row back through a fresh session, returning the error rather than asserting: the
+    * keyless case expects a failure and has to show what it was.
+    */
+  private def readFile(file: Path, key: Option[String]): Either[String, String] =
+    Try {
+      withAttachedFile(file, key) { st =>
+        val rs = st.executeQuery("SELECT s FROM db.secrets")
+        try if rs.next() then rs.getString(1) else ""
+        finally rs.close()
+      }
+    }.toEither.left.map(t => Option(t.getMessage).getOrElse(t.toString))
+
+  /** The first 16 bytes, non-printables dotted. Reported, not asserted: an encrypted DuckDB file
+    * still carries the plain `DUCK` magic just past its 8-byte checksum (observed: `....u...DUCKD`
+    * for an encrypted file against `..o'....DUCK@` for a plain one), because the header is what
+    * tells a reader the database is encrypted in the first place. Only the blocks are ciphertext,
+    * which is why the assertion below scans the whole file for the row instead.
+    */
+  private def head(file: Path): String =
+    new String(
+      Files.readAllBytes(file).take(16).map(b => if b >= 0x20 && b < 0x7f then b else '.'.toByte),
+      "US-ASCII"
+    )
+
+  /** Whether the file contains `needle` as raw bytes anywhere. ISO-8859-1 maps bytes one to one, so
+    * this is a byte scan, not a text decode.
+    */
+  private def containsBytes(file: Path, needle: String): Boolean =
+    new String(Files.readAllBytes(file), "ISO-8859-1").contains(needle)
+
+  "an encrypted duckdb-file database" should "refuse a keyless reader and keep its rows off disk" in {
+    val dir       = Files.createTempDirectory("qodencfile-")
+    val encrypted = dir.resolve("enc.duckdb")
+    val plain     = dir.resolve("plain.duckdb")
+    try
+      orSkip(writeFile(encrypted, Some("hunter2")))
+      orSkip(writeFile(plain, None))
+
+      info(s"encrypted file header: ${head(encrypted)}")
+      info(s"unencrypted file header: ${head(plain)}")
+
+      // The control, same shape as the DuckLake case above: without it, a bad path or a missing
+      // extension would fail the keyless read just as convincingly as encryption does.
+      readFile(plain, None) match
+        case Right(v)  => v shouldBe "top-secret"
+        case Left(err) =>
+          fail(
+            s"the control case failed to read the unencrypted $plain ($err), so the encrypted " +
+              "case below measures something other than encryption"
+          )
+      // And the file itself is intact: the right key still opens it, so the refusal below is
+      // about the key and not about a corrupt write.
+      readFile(encrypted, Some("hunter2")) shouldBe Right("top-secret")
+
+      readFile(encrypted, None) match
+        case Left(err) =>
+          info(s"a keyless reader was refused with: $err")
+          withClue(s"the attach failed for a reason other than encryption: $err; ") {
+            err.toLowerCase should include("encrypt")
+          }
+        case Right(v) =>
+          fail(s"a reader holding no key read '$v' out of $encrypted: the file is not encrypted")
+
+      // The at-rest property itself, one level below the engine: the row is legible in the bytes
+      // of the unencrypted file (the control, which is what makes the negative mean something) and
+      // absent from the encrypted one.
+      withClue(s"the control file $plain does not contain the row in clear; ") {
+        containsBytes(plain, "top-secret") shouldBe true
+      }
+      withClue(s"the encrypted file $encrypted contains the row in clear; ") {
+        containsBytes(encrypted, "top-secret") shouldBe false
+      }
+    finally
+      // Walk rather than delete the two names: DuckDB leaves a `.wal` beside each file.
+      Try(
+        Using.resource(Files.walk(dir)) { s =>
+          s.sorted(java.util.Comparator.reverseOrder[Path]())
+            .forEach(p => Files.deleteIfExists(p))
+        }
+      )
+  }
