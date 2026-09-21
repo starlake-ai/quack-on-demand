@@ -832,6 +832,65 @@ qod database create --tenant acme --name fed --kind memory \
   --default-database fedpg --default-schema public
 ```
 
+### Encryption at rest (create-time only)
+
+`--encrypted` makes a database encrypt what it writes to disk or to a bucket.
+
+```bash
+# ducklake: every Parquet file DuckLake writes is encrypted. DuckLake mints one key
+# per file into its own catalog; QoD holds no key material.
+qod database create --tenant acme --name warehouse --encrypted
+
+# duckdb-file: the .duckdb file, its WAL and its temp files (AES-256-GCM).
+# QoD mints the key unless you pass --encryption-key.
+qod database create --tenant acme --name ledger --kind duckdb-file \
+  --data-path /srv/qod/ledger.duckdb --encrypted
+
+# Bring your own key instead (duckdb-file only; ducklake rejects it).
+qod database create --tenant acme --name ledger --kind duckdb-file \
+  --data-path /srv/qod/ledger.duckdb --encrypted --encryption-key "$MY_KEY"
+```
+
+Rules to know before using it:
+
+- **Create-time only, in both directions, for both kinds.** Neither engine can encrypt an
+  existing database in place, or decrypt one. There is no `encrypted` field on
+  `qod database update`, and a manifest import that flips the flag on an existing database
+  is refused. To change it, create a new database and copy the data.
+- **The `duckdb-file` key is never readable back.** It is redacted from every API response,
+  from `qod database list`, and from an exported manifest. Recovery means reading the
+  control-plane Postgres directly. Lose the key and that row, and the database is unreadable.
+  This also means
+  **an exported manifest cannot recreate an encrypted `duckdb-file` database**; an encrypted
+  `ducklake` database round-trips fine, since its keys live in its own catalog.
+- `--encrypted` on `--kind memory` is refused: nothing is at rest.
+- A **branch inherits its parent's encryption**, and reads the parent's encrypted files with
+  the parent's keys.
+- Encrypting a database makes its nodes load `httpfs`, because DuckDB needs OpenSSL for a
+  writable encrypted file. On an air-gapped host, pre-cache that extension.
+- **Trust boundary.** Encryption at rest moves the trust boundary to the control plane. For
+  `ducklake` the object store becomes untrusted storage, which is the point, but the per-file
+  keys sit in the tenant-db's Postgres catalog and `pgPassword` reaches it. For `duckdb-file`
+  the key sits in the control-plane row. In both cases, whoever can read the control-plane
+  database can decrypt the data. Treat an exported manifest as a secret for the same reason:
+  `encryptionKey` is redacted out of it, but `pgPassword` is not, and for an encrypted
+  `ducklake` database that password opens the catalog holding the per-file keys.
+
+Manager-wide policy: `QOD_REQUIRE_ENCRYPTION=true` (default off) refuses any database create
+that does not ask for encryption, so no plaintext database can exist in the deployment. It
+gates creates only, so turning it on never breaks databases that already exist.
+
+One asymmetry worth knowing: DuckLake errors when an unencrypted catalog is attached as
+encrypted, but attaching an encrypted catalog *without* the flag silently succeeds (and still
+writes encrypted files, since the catalog's own metadata decides). The engine will therefore
+never tell you that a database row saying `encrypted=false` points at a catalog that is in
+fact encrypted. QoD's pre-attach guard is what catches that, in both directions.
+
+**Upgrading on Kubernetes:** node credentials (`pgPassword`, and `encryptionKey` for encrypted
+`duckdb-file` databases) now reach a pod through a per-pool Secret instead of the pod's plain
+environment. Pods created by an earlier manager keep the old shape and are not migrated in
+place. Restart every node after upgrading, for example by scaling each pool down and back up.
+
 ### Update a database
 
 ```bash
@@ -1499,6 +1558,7 @@ opt-in except pod security:
 | `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `qod role permission grant` or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `qod pool delete` + `qod pool create` |
+| `DuckLake catalog '<db>': this DuckLake catalog was created unencrypted ... but the tenant-db row asks for encryption` (or the reverse) | The database row's `encrypted` flag disagrees with what the catalog recorded when it was created | Encryption is create-time only and the flag has no update path: create a new database with the encryption you want and copy the data. A row that is merely mislabelled has to be corrected in the control-plane database directly |
 | Manager (or spawned node) hangs at startup right after `BaseAllocator` log line, java pegged at 100% CPU | `INSTALL quack` is blocked by a corporate proxy - DuckDB is silently retrying to fetch the extension from `extensions.duckdb.org` | Pass `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars to the process (container `-e` or shell env). See "Behind a corporate proxy" in the project README on GitHub. |
 
 ## Where state lives

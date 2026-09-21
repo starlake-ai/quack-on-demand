@@ -187,6 +187,7 @@ Then harden it: **[Production hardening](https://docs.starlake.ai/qod/operating/
 - **Admin REST API** guarded by an `X-API-Key` static key OR a session token from `/api/auth/login`
 - **MCP server for AI agents** at `POST /mcp`: agents authenticate with a personal access token (self-scoped, tenant-inferred) or the static key, and reach the full admin control plane - identity, access, pools & nodes, databases, maintenance & tags, time travel, federation, manifest, PATs, telemetry - gated by the same server-side guards as REST. See `skills/quack-on-demand/SKILL.md` ("Administering over MCP") for the tool families and setup
 - **Account security**: opt-in login lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), self-service password reset over SMTP (email a single-use link), and admin-forced password change at next login. Database users can carry an email; an email-format username is its own email
+- **Encryption at rest**: `qod database create --encrypted` makes a DuckLake database write encrypted Parquet (DuckLake mints a key per file into its own catalog) or a `duckdb-file` database an AES-256-GCM encrypted file. Create-time only, per database, with `QOD_REQUIRE_ENCRYPTION` as the manager-wide policy gate. See [Encryption at rest](#encryption-at-rest)
 
 ### Data plane
 
@@ -287,6 +288,83 @@ Hosted / self-serve deployments should also harden the data plane:
 - **Catalog-reader eviction**: tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting
 
 The full hardening runbook is in `plugins/qod/skills/quack-on-demand/SKILL.md`.
+
+## Encryption at rest
+
+A tenant database can be created encrypted, so the bytes QoD writes to disk or to a bucket are
+unreadable without the control plane. It is a per-database choice, made at creation.
+
+```bash
+qod database create --tenant acme --name warehouse --encrypted
+qod database create --tenant acme --name ledger --kind duckdb-file \
+  --data-path /srv/qod/ledger.duckdb --encrypted
+```
+
+REST is `POST /api/database/create` with `"encrypted": true`; the admin console exposes the same
+switch on the database create form, and a control-plane manifest carries `encrypted` per tenant-db.
+
+| kind | What gets encrypted | Where the key lives |
+|---|---|---|
+| `ducklake` | every Parquet file DuckLake writes under the data path | DuckLake mints one key per file into `ducklake_data_file.encryption_key`, in the tenant-db's own Postgres catalog. QoD holds no key material |
+| `duckdb-file` | the `.duckdb` file, its WAL and its temp files (AES-256-GCM) | one key per database, in the control-plane row's `metastore` |
+| `memory` | nothing is at rest | refused with `400 invalid` |
+
+For `duckdb-file` QoD mints the key (32 random bytes, base64) unless you supply your own with
+`--encryption-key`. Either way it is **never readable back through any API**: it is redacted from
+every response, from `database/list`, and from an exported manifest. Recovery means reading the
+control-plane Postgres directly. Lose the key and that row, and the database is unreadable.
+
+**It is create-time only, in both directions, for both kinds.** Neither DuckDB nor DuckLake can
+encrypt an existing database in place, or decrypt one. There is no `encrypted` field on
+`database/update`, and a manifest import that flips the flag on an existing database is refused.
+To change it, create a new database and copy the data.
+
+**`QOD_REQUIRE_ENCRYPTION=true`** (default off) makes the manager refuse any `database/create`
+that does not ask for encryption, so an operator can guarantee no plaintext database exists in the
+deployment. It gates creates only: existing databases keep working, so turning it on never bricks a
+running deployment. A `kind=memory` create is refused outright while it is on.
+
+A **branch** inherits its parent's encryption. Cloning copies the parent's catalog rows wholesale,
+so a branch of an encrypted database is encrypted and reads the parent's encrypted Parquet with the
+parent's keys.
+
+An **exported manifest cannot recreate an encrypted `duckdb-file` database**, and that is
+deliberate: the key is redacted on export like every other secret, so an import has nothing to open
+the file with. An encrypted `ducklake` database round-trips fine, because its keys live in its own
+catalog rather than in the manifest.
+
+Encrypting a database makes its nodes load the `httpfs` extension, because DuckDB needs OpenSSL for
+a *writable* encrypted file (in its mbedtls fallback, writes to an encrypted database are refused
+outright since 1.4.1). On an air-gapped host, make sure `httpfs` is already in the extension cache.
+
+### One asymmetry worth knowing
+
+DuckLake **errors** when you attach an unencrypted catalog *with* `ENCRYPTED`, but attaching an
+encrypted catalog *without* the flag silently **succeeds** (and still writes encrypted files, since
+the catalog's own metadata decides). So the engine will not tell you when a control-plane row says
+`encrypted=false` about a catalog that is in fact encrypted. QoD's own pre-attach guard is what
+catches that, in both directions, with one message naming the cause instead of a DuckDB error
+repeated once per node spawn.
+
+### Upgrading on Kubernetes
+
+Node credentials (`pgPassword`, and `encryptionKey` for encrypted `duckdb-file` databases) now
+reach a pod through a per-pool Secret instead of the pod's plain environment. Pods created by an
+earlier manager keep the old shape and are not migrated in place. Restart every node after
+upgrading, for example by scaling each pool down and back up.
+
+### The trust boundary
+
+Encryption at rest moves the trust boundary to the control plane. For `kind=ducklake` the object
+store becomes untrusted storage, which is the point, but the per-file keys sit in the tenant-db's
+Postgres catalog and `pgPassword` reaches it. For `kind=duckdb-file` the key sits in
+`qodstate_tenant_db.metastore` in the control-plane Postgres. In both cases, whoever can read the
+control-plane database can decrypt the data. This feature does not change that, and no design at
+this layer can.
+
+Treat an **exported manifest as a secret** for the same reason. `encryptionKey` is redacted out of
+it, but `pgPassword` is not, and for an encrypted `ducklake` database that password is what opens
+the catalog holding the per-file keys.
 
 ## Claude Code skill
 

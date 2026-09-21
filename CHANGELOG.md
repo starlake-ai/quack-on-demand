@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Encryption at rest for tenant databases.** `qod database create --encrypted` (REST
+  `"encrypted": true`, the same switch on the admin console's create form, `encrypted` in a
+  control-plane manifest) makes a `kind=ducklake` database write encrypted Parquet, with DuckLake
+  minting a key per file into its own catalog, and a `kind=duckdb-file` database an AES-256-GCM
+  encrypted file whose key QoD mints per database (or you supply with `--encryption-key`). The key
+  is never readable back through any API, so an exported manifest cannot recreate an encrypted
+  `duckdb-file` database. `kind=memory` is refused. Encryption is create-time only in both
+  directions for both kinds, since neither engine can encrypt or decrypt a database in place: there
+  is no `encrypted` field on `database/update`, a manifest import that flips it is refused, and a
+  pre-attach guard turns a control-plane row that disagrees with the catalog's recorded
+  `ducklake_metadata.encrypted` into one clear message instead of a DuckDB error repeated once per
+  node spawn. A branch inherits its parent's encryption. `QOD_REQUIRE_ENCRYPTION=true` (default
+  off) refuses any create that does not ask for encryption, gating creates only so existing
+  databases keep working. Encrypted nodes load `httpfs`, because DuckDB needs OpenSSL for a
+  writable encrypted file. **Kubernetes upgrade note:** node credentials (`pgPassword`, and
+  `encryptionKey` for encrypted `duckdb-file` databases) now reach a pod through a per-pool Secret
+  instead of the pod's plain environment, and pods created by an earlier manager are not migrated
+  in place, so restart every node after upgrading. The trust boundary is stated in the README:
+  whoever can read the control-plane Postgres can decrypt the data, for both kinds.
+
 - **Native Quack protocol front door (Epic 5).** Any DuckDB that carries the `quack` extension
   (the CLI, the Python package, an embedded DuckDB) can now `ATTACH 'quack:<manager>:9494' AS qod
   (TYPE quack, TOKEN 'tenant=<t>&pool=<p>&user=<u>&password=<pw>')` or call
