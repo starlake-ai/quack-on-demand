@@ -258,6 +258,24 @@ class KubernetesQuackBackendSecuritySpec
       .map(_._2)
       .toSet shouldBe payload.keySet
 
+  /** The response redaction (`HandlerResolvers.redactPassword`) and the update merge
+    * (`PoolSupervisor.mergeSecretKeys`) both match these key names case-insensitively, so an
+    * oddly-cased key is a real credential that no API ever shows back. A case-sensitive strip here
+    * would have redacted it from every response while writing it into the pod spec in clear.
+    */
+  it should "hold an oddly-cased sensitive key rather than leaving it a plain env var" in:
+    val backend = makeBackend()
+    backend
+      .start(
+        nodeEnvSpec("quack-nodeenv-case", lakeMeta ++ Map("PgPassword" -> "hunter2"))
+      )
+      .unsafeRunSync()
+    val plain = plainEnv("quack-nodeenv-case")
+    plain.map(_.getValue) should not contain "hunter2"
+    secretRefs("quack-nodeenv-case").get("PgPassword") shouldBe
+      Some((nodeEnvSecretName, "PgPassword"))
+    secretPayload(nodeEnvSecretName).value shouldBe Map("PgPassword" -> "hunter2")
+
   it should "not be created at all when the metastore carries neither sensitive key" in:
     val backend = makeBackend()
     backend.start(nodeEnvSpec("quack-nodeenv-6", lakeMeta)).unsafeRunSync()

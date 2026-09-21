@@ -658,7 +658,14 @@ final class KubernetesQuackBackend(
     * Secret to be created for a tenant-db that carries neither key.
     */
   private def nodeEnvSecretValues(spec: NodeSpec): Map[String, String] =
-    spec.metastore.view.filterKeys(KubernetesQuackBackend.NodeEnvSecretKeys).toMap
+    // Case-insensitive, like `HandlerResolvers.redactPassword` and
+    // `PoolSupervisor.mergeSecretKeys`: a metastore key spelled `PgPassword` is redacted from every
+    // API response by those two, so it must not be the one spelling that lands in a pod spec as a
+    // plain EnvVar. The key keeps its original spelling in the Secret and in the secretKeyRef, so
+    // the two still agree by construction.
+    spec.metastore.view
+      .filterKeys(k => KubernetesQuackBackend.NodeEnvSecretKeys.exists(_.equalsIgnoreCase(k)))
+      .toMap
 
   /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
     * pool attaches the same tenant-db with the same credentials. Same RFC-1123 hyphenization as
