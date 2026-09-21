@@ -416,6 +416,21 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     r.value should include("read-only")
   }
 
+  it should "deny a PREPARE hidden behind interior trivia outside every other test's list" in {
+    // I3 coverage witness, not a discriminating regression test (see the identical honesty note
+    // in `StatementClassifierSpec`): U+205F (medium mathematical space) and U+2004 (three-per-em
+    // space) are accepted by DuckDB as separators and appear in no other test in this file (which
+    // names NBSP, word joiner and BOM), but both are ALSO `Character.isWhitespace` true, so
+    // `isPrepareOrExecute`'s reader would still terminate on either even if `SqlTrivia`'s
+    // category checks were narrowed to a hardcoded list, as long as the `isWhitespace` disjunct
+    // survived. Kept as a coverage pin; `SqlTriviaSpec`'s category-derived property test is the
+    // one that actually discriminates that narrowing (mutation-verified).
+    val r1 = screen("PREPARE\u205Fp AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r1.value should include("read-only")
+    val r2 = screen("PREPARE\u2004p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r2.value should include("read-only")
+  }
+
   it should "deny a plain INSERT hidden behind an interior NBSP (not just leading)" in {
     // NOT discriminating for this commit's own fix -- confirmed by mutation: reverting
     // isWriteShaped's SqlTrivia.normalize back to SqlTrivia.stripLeading does NOT flip this one.

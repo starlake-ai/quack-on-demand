@@ -257,6 +257,21 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("SELECT * FROM\uFEFF'/etc/passwd.parquet'") shouldBe true
   }
 
+  it should "not hide a bare-path FROM behind trivia outside every other test's character list" in {
+    // I3 coverage witness, not a discriminating regression test (see the identical honesty note
+    // in `StatementClassifierSpec`): U+205F (medium mathematical space) and U+2004 (three-per-em
+    // space) are accepted by DuckDB as separators and appear in no other test in this file, but
+    // both are ALSO `Character.isWhitespace` true (confirmed directly, not assumed), so
+    // `SqlTrivia.normalize` would still convert either to an ASCII space even if its
+    // `SPACE_SEPARATOR`/`FORMAT` category checks were narrowed to a hardcoded list, as long as
+    // the `isWhitespace` disjunct survived the narrowing. Kept as a coverage pin;
+    // `SqlTriviaSpec`'s category-derived property test is the one that actually discriminates
+    // that narrowing (mutation-verified: it is the only test in the whole suite that fails when
+    // `isTriviaSpace` is reverted to a named set).
+    denied("SELECT * FROM\u205F'/etc/passwd.parquet'") shouldBe true
+    denied("SELECT * FROM\u2004'/etc/passwd.parquet'") shouldBe true
+  }
+
   it should "not hide a denied function call behind interior trivia" in {
     denied("SELECT * FROM read_parquet\u00A0('/etc/x.parquet')") shouldBe true
     denied("SELECT * FROM read_csv\u00A0('/etc/y.csv')") shouldBe true

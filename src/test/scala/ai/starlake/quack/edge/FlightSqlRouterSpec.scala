@@ -1478,6 +1478,32 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     calls.head._1.get should include("'flightsql insert'")
 
+  // ---- I1 regression: an invisible character must not leak into the audit ledger's verb ----
+  //
+  // `stampPrelude` only runs for `kind`=Dml/Ddl. Before the classifier normalized trivia,
+  // `INSERT<NBSP>INTO ...` classified `Other`, so this code path never saw it. Once the classifier
+  // started seeing through trivia, statements like this reached `stampPrelude` for the first time,
+  // and its own verb reader had no trivia handling of its own: `stripped.trim` does not strip
+  // NBSP (`String.trim` only strips <= U+0020), so the verb read as "insert\u00A0into" (or, with a
+  // leading NBSP, "\u00A0insert") instead of "insert" -- an invisible character landing in the
+  // DuckLake commit ledger's verb field, the field an operator greps to reconstruct who wrote
+  // what. No injection risk (`SqlLiterals.duckdbLiteral` escapes it), but the ledger row no longer
+  // matches `flightsql insert`. Every character below is a literal `\uXXXX` escape, never a raw
+  // invisible byte (see the byte-hygiene test at the end of this file).
+  it should "not let an interior NBSP leak into the commit-message verb" in:
+    val (router, _, _, calls) = stampedSetup()
+    router
+      .execute("c-s10", "alice", poolKey, "INSERT\u00A0INTO t VALUES (1)")
+      .unsafeRunSync()
+    calls.head._1.get should include("'flightsql insert'")
+
+  it should "not let a leading NBSP leak into the commit-message verb" in:
+    val (router, _, _, calls) = stampedSetup()
+    router
+      .execute("c-s11", "alice", poolKey, "\u00A0INSERT INTO t VALUES (1)")
+      .unsafeRunSync()
+    calls.head._1.get should include("'flightsql insert'")
+
   it should "carry the stamping prelude through to the retry node on transient failure" in:
     // Two-node stamped pool; first call fails transiently; retry succeeds.
     // Both recorded calls must carry Some(prelude) to prove the prelude threads through retryOnce.
@@ -2300,3 +2326,33 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
+
+  // ---- escape hygiene of this file's own I1 trivia test literals ----
+  //
+  // The NBSP characters exercised by the two I1 regression tests above must stay literal `\u00A0`
+  // escapes, never a raw invisible byte pasted into the source -- see the identical (whole-file)
+  // guard in `StatementClassifierSpec`, `LockdownScreenSpec`, `CatalogWriteScreenSpec`,
+  // `PrepareStrategySpec` and `SqlTriviaSpec` for why this matters: an editor or an "helpful"
+  // formatting pass can silently decode the escape back into a raw invisible character, at which
+  // point the file still compiles and every assertion above still passes, with no way for the
+  // next reader to tell. Scoped to a substring search rather than a whole-file scan (the pattern
+  // those other files use) because this file predates the trivia arc and already carries an
+  // unrelated raw non-ASCII character elsewhere (an ellipsis in a test name) that a whole-file
+  // scan would also flag -- out of this task's scope to touch.
+  it should "carry the I1 regression tests' NBSP as a literal escape, not a raw byte" in:
+    val path = "src/test/scala/ai/starlake/quack/edge/FlightSqlRouterSpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val text          = src.mkString
+      val nbspOffenders = text.zipWithIndex.filter { case (c, _) => c == '\u00A0' }
+      withClue(
+        s"found a raw NBSP (should be the \\u00A0 escape) at offsets " +
+          s"${nbspOffenders.map(_._2).mkString(", ")}: "
+      ) {
+        nbspOffenders shouldBe empty
+      }
+    finally src.close()

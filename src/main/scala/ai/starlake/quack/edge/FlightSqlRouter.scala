@@ -17,7 +17,7 @@ import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
 import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.SqlTrivia
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
@@ -274,9 +274,16 @@ final class FlightSqlRouter(
     if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
     else
       Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty).map { db =>
-        val author   = s"tenant:$tenant/user:$user"
-        val stripped = SqlCommentStripper.stripComments(sql)
-        val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase(Locale.ROOT)
+        val author = s"tenant:$tenant/user:$user"
+        // Reuses the same first-token reader `StatementClassifier` classified `kind` with (see
+        // `SqlTrivia.firstToken`), so a leading or interior trivia character that made `kind`
+        // Dml/Ddl in the first place (e.g. `INSERT<NBSP>INTO`) cannot also survive into this
+        // verb. Once the classifier started seeing through such trivia, this path became
+        // reachable for exactly those statements, and this reader had not caught up: an
+        // invisible character leaked into the DuckLake commit ledger's verb field (rendering as
+        // `flightsql insert<NBSP>into`) -- a ledger-integrity regression, not an injection risk
+        // (`SqlLiterals.duckdbLiteral` below escapes it regardless).
+        val verb = SqlTrivia.firstToken(sql).toLowerCase(Locale.ROOT)
         s"BEGIN; CALL ducklake_set_commit_message(" +
           s"${SqlLiterals.duckdbLiteral(db)}, " +
           s"${SqlLiterals.duckdbLiteral(author)}, " +

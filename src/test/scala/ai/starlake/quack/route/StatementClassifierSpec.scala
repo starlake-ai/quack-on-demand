@@ -184,6 +184,21 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
       "\u00A0EXPLAIN ANALYZE INSERT INTO t VALUES (1)"
     ) shouldBe StatementKind.Dml
 
+  it should "not let interior trivia outside every named test's own character list hide the verb" in:
+    // I3 coverage witness, not a discriminating regression test (documented honestly, matching
+    // the "already safe" test below): U+205F (medium mathematical space) and U+2004
+    // (three-per-em space) are accepted by DuckDB as separators and appear in NO other test in
+    // this file, but both are ALSO true for plain `Character.isWhitespace` (confirmed directly,
+    // not assumed), so `firstToken`'s own `takeWhile(!c.isWhitespace)` already terminates on them
+    // regardless of `SqlTrivia`'s category check or any named list -- a regression to a
+    // hardcoded `SPACE_SEPARATOR`/`FORMAT` list would NOT be caught by this test. It is kept as a
+    // pin that the category check does not regress ORDINARY classification for these two
+    // characters specifically; `SqlTriviaSpec`'s category-derived property test is the one that
+    // actually discriminates a narrowing to a hardcoded list (mutation-verified: it is the only
+    // test in the suite that fails when `isTriviaSpace` is reverted to a named set).
+    StatementClassifier.classify("INSERT\u205FINTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("DROP\u2004TABLE t") shouldBe StatementKind.Ddl
+
   it should "not regress on interior trivia that was already safe" in:
     // U+2000 (en quad) and U+3000 (ideographic space) are true to `Character.isWhitespace`
     // already, so they terminated `firstToken` correctly even before normalization; pin that

@@ -133,10 +133,17 @@ final class StatementClassifier(
     else if cfg.rollback.contains(tok) then StatementKind.Rollback
     else StatementKind.Other
 
+  // Routes through the one shared reader (`SqlTrivia.firstToken`) rather than a hand-rolled
+  // takeWhile of its own -- see that method's scaladoc for why a sibling reader is exactly how
+  // this class of bug regenerates. `sql` here is already comment-stripped and whole-string
+  // normalized by `classifyStripped`, so `firstToken`'s own stripComments/stripLeading/normalize
+  // passes are idempotent no-ops on it; kept anyway so this method stays correct even if a future
+  // caller passes it raw SQL directly. `.takeWhile(_ != ';')` and `.dropWhile(_ == '(')` are this
+  // call site's own extras (a bare `COMMIT;` or a WITH-list's opening paren), not universal to the
+  // shared primitive.
   private def firstToken(sql: String): Option[String] =
-    val trimmed = sql.trim
-    if trimmed.isEmpty then None
-    else Some(trimmed.takeWhile(c => !c.isWhitespace && c != ';').dropWhile(_ == '('))
+    val tok = SqlTrivia.firstToken(sql).takeWhile(_ != ';').dropWhile(_ == '(')
+    Option.when(tok.nonEmpty)(tok)
 
   /** The first depth-0 keyword token after the leading WITH's CTE list, uppercased: the statement's
     * real verb. The scan is quote-aware (single-quoted literals with '' doubling and backslash

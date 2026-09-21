@@ -76,3 +76,51 @@ class PrepareStrategySpec extends AnyFlatSpec with Matchers:
   it should "strip both comments and a trailing semicolon before wrapping" in:
     PrepareStrategy.choose("-- foo\nSELECT a FROM t ;", StatementKind.Select) shouldBe
       PrepareStrategy.ProbeWrap("SELECT * FROM (SELECT a FROM t) AS _qod_probe LIMIT 0")
+
+  // ---- I2 regression: a leading trivia character must not desync this reader from `kind` ----
+  //
+  // `kind` is `StatementClassifier`'s verdict, computed over a fully trivia-normalized copy of
+  // the SQL. This method's own verb reader used to run its own hand-rolled first-token scan over
+  // the RAW `sql`, with no trivia handling of its own. A BOM (or any other leading trivia
+  // character) ahead of EXPLAIN left `kind` correctly Select but this reader's own token as
+  // "<BOM>EXPLAIN", matching no entry in `NotSubquerySafe`, so a previously-working prepared
+  // EXPLAIN took the ProbeWrap path and DuckDB rejected the resulting
+  // `SELECT * FROM (<BOM>EXPLAIN ...) LIMIT 0` with a parser error naming a query the caller never
+  // wrote. Verified against a real DuckDB 1.5.4 that a BOM- or NBSP-prefixed EXPLAIN executes
+  // identically to the unprefixed form. Every character below is a literal `\uXXXX` escape, never
+  // a raw invisible byte (see the byte-hygiene test at the end of this file).
+  it should "fall back to full execute for a BOM-prefixed EXPLAIN, not wrap it as a subquery" in:
+    PrepareStrategy.choose("\uFEFFEXPLAIN SELECT 1", StatementKind.Select) shouldBe
+      PrepareStrategy.FullExecute
+
+  it should "fall back to full execute for an NBSP-prefixed EXPLAIN, not wrap it as a subquery" in:
+    PrepareStrategy.choose("\u00A0EXPLAIN SELECT 1", StatementKind.Select) shouldBe
+      PrepareStrategy.FullExecute
+
+  it should "fall back to full execute for a BOM-prefixed SHOW / DESCRIBE too" in:
+    PrepareStrategy.choose("\uFEFFSHOW TABLES", StatementKind.Select) shouldBe
+      PrepareStrategy.FullExecute
+    PrepareStrategy.choose("\uFEFFDESCRIBE customer", StatementKind.Select) shouldBe
+      PrepareStrategy.FullExecute
+
+  // ---- escape hygiene of this file's own invisible-character test literals ----
+  //
+  // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as a
+  // raw invisible byte pasted into the source -- see the identical guard in
+  // `StatementClassifierSpec`, `LockdownScreenSpec`, `CatalogWriteScreenSpec` and `SqlTriviaSpec`
+  // for why this matters: an editor or an "helpful" formatting pass can silently decode the
+  // escape back into a raw invisible character, at which point the file still compiles and every
+  // assertion above still passes, with no way for the next reader to tell.
+  it should "carry no raw non-ASCII codepoints in its own source file" in:
+    val path = "src/test/scala/ai/starlake/quack/edge/PrepareStrategySpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
+      withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()

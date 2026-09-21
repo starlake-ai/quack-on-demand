@@ -73,3 +73,28 @@ object SqlTrivia:
       if isTriviaSpace(chars(i)) then chars(i) = ' '
       i += 1
     new String(chars)
+
+  /** The first token of `sql` as the ENGINE sees it: `--`/`/* */` comments and leading trivia
+    * removed, remaining (interior) trivia normalized to ASCII spaces, then read up to the first
+    * remaining whitespace character. Every first-token decision in the manager -- the router's
+    * classifier, the two write-screens, the prepare-strategy chooser -- must go through this one
+    * primitive, so the manager and DuckDB can never again disagree about where a statement's verb
+    * ends: that disagreement, reproduced independently at each hand-rolled reader, is the exact
+    * defect this arc closed three times over (BOM+ZWSP by name, then U+2060, then the whole `Cf`
+    * category) and left open a fourth and fifth time in two readers this normalization never
+    * reached (`FlightSqlRouter.stampPrelude`'s audit verb, `PrepareStrategy.choose`'s own reader).
+    *
+    * Deliberately minimal: it does NOT drop a leading `(`, does NOT stop at `;`, and does NOT
+    * change case. Those are call-site extras, not universal to "what is the engine's first token"
+    * -- e.g. `stampPrelude` wants the bare verb for a human-read audit log and never sees a leading
+    * paren or an embedded `;`, while `StatementClassifier` and `PrepareStrategy` need both. Callers
+    * fold their own `.dropWhile(_ == '(')` / `.takeWhile(_ != ';')` / `.toUpperCase` /
+    * `.toLowerCase` onto the result instead.
+    *
+    * Comment REMOVAL (not substitution) is a distinct, separately-tracked gap: `SqlCommentStripper`
+    * deletes a comment rather than replacing it with a separator, so `INSERT/*x*/INTO` still welds
+    * into one token here, same as at every other consumer of `stripComments`. This primitive closes
+    * the trivia half of the token-boundary problem, not that one.
+    */
+  def firstToken(sql: String): String =
+    normalize(stripLeading(SqlCommentStripper.stripComments(sql))).takeWhile(!_.isWhitespace)

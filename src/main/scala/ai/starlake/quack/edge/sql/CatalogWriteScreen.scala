@@ -163,8 +163,12 @@ object CatalogWriteScreen extends LazyLogging:
         // `SqlTrivia.normalize` alone does not remove a leading trivia character, it only rewrites
         // it in place to an ASCII space, and an ASCII space at index 0 stops this `takeWhile` just
         // as dead as the original NBSP did (empty head, matches neither keyword).
+        // Routes through the one shared reader (`SqlTrivia.firstToken`) rather than its own
+        // takeWhile -- `normalized` here already went through stripComments/stripLeading/normalize
+        // above, so `firstToken`'s own passes are idempotent no-ops on it. `.takeWhile(_ != ';')`
+        // is this call site's own extra (a bare `EXECUTE;`), not universal to the shared primitive.
         def isPrepareOrExecute(normalized: String): Boolean =
-          val head = normalized.takeWhile(c => !c.isWhitespace && c != ';').toUpperCase
+          val head = SqlTrivia.firstToken(normalized).takeWhile(_ != ';').toUpperCase
           head == "PREPARE" || head == "EXECUTE"
 
         // jsqlparser's `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements`
