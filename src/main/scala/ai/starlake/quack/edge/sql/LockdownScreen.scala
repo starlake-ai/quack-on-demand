@@ -2,7 +2,7 @@ package ai.starlake.quack.edge.sql
 
 import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
-import ai.starlake.sql.SqlTrivia
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
 import scala.collection.mutable.ListBuffer
 
@@ -14,10 +14,13 @@ import scala.collection.mutable.ListBuffer
   * Matching is token-based, deliberately not a full parse: the input is split on top-level
   * semicolons (quote- and comment-aware) and each statement is screened independently. Leading
   * trivia (whitespace, BOM, unicode spaces, line comments, nested block comments) is stripped
-  * before the first-token check. A denied function name (bare or double-quoted) followed by an open
-  * parenthesis is denied wherever it appears (subqueries included, EVERY occurrence), EXCEPT when
-  * every path argument is a string literal with an object-store scheme. Anything the tokenizer
-  * cannot prove safe is denied.
+  * before the first-token check, and every INTERIOR comment is also stripped (replaced by a
+  * separator, not deleted -- see `screenOne`) before the keyword-adjacency regexes run, so a
+  * comment sitting between a keyword and its argument cannot hide that adjacency the way an
+  * interior Unicode trivia character could. A denied function name (bare or double-quoted) followed
+  * by an open parenthesis is denied wherever it appears (subqueries included, EVERY occurrence),
+  * EXCEPT when every path argument is a string literal with an object-store scheme. Anything the
+  * tokenizer cannot prove safe is denied.
   */
 object LockdownScreen:
 
@@ -110,14 +113,31 @@ object LockdownScreen:
     splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
   private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
-    // Normalized ONLY for screening: every trivia character (unicode space / format, see
-    // SqlTrivia.isTriviaSpace) becomes an ASCII space across the whole statement, matching what
-    // DuckDB's own parser front end does before tokenizing. Without this, a single interior NBSP
-    // or zero-width space (e.g. `FROM<NBSP>'/etc/passwd'`) hides the keyword-adjacency the regexes
-    // below key on, while DuckDB itself still treats it as an ordinary separator -- a lockdown
-    // bypass. `stmt` itself, unnormalized, is never used past this point; only `lower` is matched
+    // Normalized ONLY for screening, in three passes, each closing a gap the previous one leaves
+    // open -- `stmt` itself, unnormalized, is never used past this point; only `lower` is matched
     // against, and the ORIGINAL `stmt` text is what the caller relays to the node.
-    val lower = SqlTrivia.normalize(SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT)))
+    //   1. `SqlTrivia.stripLeading` removes LEADING whitespace/trivia and any (possibly nested)
+    //      leading comment. This must run BEFORE `SqlCommentStripper.stripComments` below, not
+    //      after: `stripComments` has no concept of comment nesting (it closes on the first `*/`
+    //      it sees, however deep), while `stripLeading` tracks nesting depth correctly, and a
+    //      leading `/* a /* nested */ b */ ATTACH ...` needs the nesting-aware scan to land on
+    //      `ATTACH`, not on the literal `b` a naive strip would expose.
+    //   2. `SqlCommentStripper.stripComments` then removes every remaining (INTERIOR) `--` / `/*
+    //      */` comment. DuckDB treats a comment as a SEPARATOR, not a weld -- confirmed against a
+    //      real DuckDB 1.5.4, `SELECT * FROM/*x*/'/etc/passwd.parquet'` and
+    //      `read_csv/*x*/('/etc/x.parquet')` both execute and return the target file's rows --
+    //      and `stripComments` now replaces a closed block comment with a single ASCII space
+    //      rather than nothing, so `FROM/*x*/'...'` strips to `FROM '...'`, keeping the
+    //      keyword-adjacency the regexes below key on. Before this pass existed at all, an
+    //      interior comment hid that adjacency exactly like an interior NBSP or zero-width space
+    //      already handled by pass 3 -- this closed the sibling gap in the SAME class of bug.
+    //   3. `SqlTrivia.normalize` collapses every remaining trivia character (unicode space /
+    //      format, see `SqlTrivia.isTriviaSpace`) to an ASCII space across the whole statement,
+    //      matching what DuckDB's own parser front end does before tokenizing.
+    val lower =
+      SqlTrivia.normalize(
+        SqlCommentStripper.stripComments(SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT)))
+      )
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
       case some @ Some(_) => some

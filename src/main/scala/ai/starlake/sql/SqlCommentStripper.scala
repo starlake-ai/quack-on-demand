@@ -6,6 +6,16 @@ package ai.starlake.sql
   *
   * Mirrors the implementation from the Starlake codebase (`ai.starlake.sql.SqlCommentStripper`) so
   * SQL-handling utilities stay consistent across projects.
+  *
+  * A comment is a SEPARATOR to DuckDB's own parser, not a weld: `INSERT/*x*/INTO t VALUES (1)`
+  * still runs and writes the row (verified against DuckDB 1.5.4), because DuckDB treats the comment
+  * as whitespace between the two keywords, not as if it had never been there. A block comment is
+  * therefore replaced with a single ASCII space rather than deleted outright, so `INSERT/*x*/INTO`
+  * strips to `INSERT INTO`, not the welded `INSERTINTO` that matches no classifier keyword bucket
+  * and defeats `RoleMatcher`/`ProtectedWriteGuard`/audit stamping the same way a hidden Unicode
+  * trivia character does (see `SqlTrivia`). A line (`--`) comment already appends its own
+  * terminating newline (or, unterminated, runs to the end of the statement with nothing left to
+  * weld to), so it needs no equivalent change.
   */
 object SqlCommentStripper:
 
@@ -26,6 +36,11 @@ object SqlCommentStripper:
         if inBlockComment then
           if currentChar == '*' && i + 1 < length && sql.charAt(i + 1) == '/' then
             inBlockComment = false
+            // A closed block comment becomes a single ASCII space, not nothing: DuckDB treats
+            // the comment as a separator, so the two tokens it sat between must not weld
+            // together (`INSERT/*x*/INTO` -> `INSERT INTO`, not `INSERTINTO`). Harmless when the
+            // comment already sat next to real whitespace; load-bearing when it didn't.
+            result.append(' ')
             i += 2
           else i += 1
         else if inLineComment then

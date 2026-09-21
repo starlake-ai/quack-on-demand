@@ -456,6 +456,24 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     screen("CHECKPOINT; SELECT\u00A0* FROM sales_lake.main.orders") shouldBe None
   }
 
+  // ---- C1/C2 sibling: an interior comment must not hide a write from isWriteShaped either ----
+  //
+  // `SqlCommentStripper` used to delete a block comment with nothing in its place, welding the
+  // tokens on either side of it. Verified against a real DuckDB 1.5.4 that both of these still
+  // execute as writes. Before the fix, `INSERT/*x*/INTO ...` stripped to `INSERTINTO ...`
+  // (classifies Other, not Dml) and `PREPARE/*x*/p AS ...` stripped to `PREPAREp` (matches
+  // neither `isPrepareOrExecute` head), so neither was write-shaped and both were admitted while
+  // the catalog was read-only.
+  it should "deny an INSERT into a read-only catalog hidden behind a block comment" in {
+    val r = screen("INSERT/*x*/INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a PREPARE'd write against a read-only catalog hidden behind a block comment" in {
+    val r = screen("PREPARE/*x*/p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
   // ---- escape hygiene of this file's own invisible-character test literals ----
   //
   // Every trivia character exercised in this file must be a literal `\uXXXX` escape, never a raw

@@ -287,6 +287,33 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("SELECT * FROM\u00A0's3://bucket/x.parquet'") shouldBe false
   }
 
+  // ---- C2: an interior comment cannot hide a local-file read either ----
+  //
+  // `screenOne` used to normalize trivia but never strip an INTERIOR comment. DuckDB treats a
+  // comment as a SEPARATOR: verified against a real DuckDB 1.5.4, `SELECT * FROM/*x*/
+  // '/tmp/probe2.csv'` and `SELECT * FROM read_csv/*x*/('/tmp/probe.csv')` both return the target
+  // file's rows. Before this fix, `\s*` in every regex below did not match `/*x*/`, so
+  // `barePathFrom` and `deniedFunctionIn` found no adjacency at all and admitted every one of
+  // these -- the exact lockdown bypass this deployment flag is sold on closing.
+  "interior comments" should "not hide a bare-path FROM behind a block comment" in {
+    denied("SELECT * FROM/*x*/'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a denied function call behind a block comment" in {
+    denied("SELECT * FROM read_parquet/*x*/('/etc/x.parquet')") shouldBe true
+  }
+
+  it should "not hide a COPY path literal behind a block comment" in {
+    denied("COPY t TO/*x*/'/tmp/out.csv'") shouldBe true
+  }
+
+  it should "still admit a remote literal with an interior comment (over-denial guard)" in {
+    // The remote exemption must survive comment stripping exactly as it survives trivia
+    // normalization: a legitimate object-store literal separated from FROM by a comment is not
+    // local-path evidence.
+    denied("SELECT * FROM/*x*/'s3://bucket/x.parquet'") shouldBe false
+  }
+
   it should "leave an ordinary statement with no trivia behaving exactly as before" in {
     denied("SELECT * FROM read_parquet('s3://bucket/k.parquet')") shouldBe false
     denied("SELECT * FROM '/etc/passwd.parquet'") shouldBe true

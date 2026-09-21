@@ -218,6 +218,23 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
       "SELECT 'a\u00A0b' FROM t"
     ) shouldBe StatementKind.Select
 
+  // ---- C1: a stripped comment must not weld two keywords into one token ----
+  //
+  // `SqlCommentStripper` used to delete a block comment entirely, leaving nothing in its place.
+  // DuckDB treats a comment as a SEPARATOR, not a weld -- verified against a real DuckDB 1.5.4,
+  // `INSERT/*x*/INTO t VALUES (1)` writes the row -- so the pre-fix stripped text was
+  // `INSERTINTO t VALUES (1)`, a first token matching no classifier bucket (`Other`), the exact
+  // same class of bypass the interior-trivia tests above pin, one comment class over.
+  it should "classify INSERT/*x*/INTO t VALUES (1) as Dml, not Other" in:
+    StatementClassifier.classify("INSERT/*x*/INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "classify CREATE/*x*/TABLE t(a int) as Ddl, not Other" in:
+    StatementClassifier.classify("CREATE/*x*/TABLE t(a int)") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: a SELECT with an interior comment stays Select" in:
+    StatementClassifier.classify("SELECT * FROM/*x*/t") shouldBe StatementKind.Select
+    StatementClassifier.classify("SELECT a/*x*/FROM t") shouldBe StatementKind.Select
+
   it should "classify from a normalized copy without altering the original statement" in:
     // `SqlTrivia.normalize` must never be threaded anywhere but the classifier's own scan --
     // the original SQL text is what is sent to the node. Strings are immutable in the JVM, so
