@@ -250,14 +250,70 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.failuresFor(gen2.nodeId, gen2.startedAt.toEpochMilli) should not be empty
   }
 
-  // I4: alias matching must be case-insensitive end to end, including inside the registry -- a
-  // manifest-imported row can carry an un-normalized alias.
+  // I4: alias matching must be case-insensitive end to end -- both at the verifier's own presence
+  // diff (declared "Sales_Lake" against a node that reports "sales_lake") and inside the registry
+  // (a manifest-imported row can carry an un-normalized alias). Removing EITHER `.toLowerCase` at
+  // IcebergAttachVerifier's presence diff sends the alias to `missing`: `rec.sent` would then be
+  // non-empty (a live, working catalog gets re-attached on every tick forever).
   it should "normalize alias case in the registry regardless of how the source declares it" in {
+    val rec      = new Recorder
     val (v, reg) =
-      verifier(List(iceSrc("Sales_Lake")), Set("acme_db"), new Recorder().run(Right(())))
+      verifier(List(iceSrc("Sales_Lake")), Set("acme_db", "sales_lake"), rec.run(Right(())))
     v.verify(node).unsafeRunSync()
+    rec.sent.get() shouldBe empty
     reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
   }
+
+  // Important 1 (fix review): pruneOtherIncarnations had zero coverage -- replacing its body with
+  // `()` passed the whole suite. This drives it through the real `verify` path (not a raw registry
+  // call) so it also proves prune runs as part of a normal tick, and checks the "another node's
+  // entries survive" half of the contract at the same time.
+  it should "prune a node's earlier incarnation once its successor is verified, " +
+    "without touching another node's entries" in {
+      val reg = new AttachStatusRegistry()
+      reg.recordFailure("n-1", 1000L, "sales_lake", "boom")
+      reg.recordFailure("n-2", 1000L, "sales_lake", "boom")
+
+      val gen2   = node.copy(startedAt = Instant.ofEpochMilli(2000L))
+      val (v, _) = verifier(
+        List(iceSrc("sales_lake")),
+        Set("acme_db", "sales_lake"),
+        new Recorder().run(Right(())),
+        reg
+      )
+      v.verify(gen2).unsafeRunSync()
+
+      reg.latched(gen2.nodeId, 2000L) shouldBe true
+      reg.failuresFor("n-1", 1000L) shouldBe empty
+      reg.failuresFor("n-2", 1000L) should not be empty
+    }
+
+  // Important 4 (fix review): the exponential backoff used to gate only the re-attach inside
+  // `reattach`, not the lookup that precedes it -- a permanently broken catalog paid one Postgres
+  // round trip (sourcesOf) and one node round trip (listCatalogs) on EVERY health tick, forever.
+  // With the whole-pass gate, once every alias for this incarnation is inside its backoff window,
+  // neither is called at all on the next tick.
+  it should "skip sourcesOf and listCatalogs entirely while every known failure is still " +
+    "inside its backoff window" in {
+      val reg         = new AttachStatusRegistry(baseBackoffMs = 600000L, maxBackoffMs = 600000L)
+      var sourceCalls = 0
+      var listCalls   = 0
+      val v           = new IcebergAttachVerifier(
+        sourcesOf = _ => IO.delay { sourceCalls += 1; List(iceSrc("sales_lake")) },
+        renderOne = s => IO.pure(""),
+        runOnNode = (_, _) => IO.pure(Left("boom")),
+        listCatalogs = _ => IO.delay { listCalls += 1; Right(Set("acme_db")) },
+        registry = reg
+      )
+      v.verify(node).unsafeRunSync() // first tick: fails, records a failure, enters backoff
+      sourceCalls shouldBe 1
+      listCalls shouldBe 1
+
+      v.verify(node)
+        .unsafeRunSync() // second tick: still inside backoff, whole pass must be skipped
+      sourceCalls shouldBe 1
+      listCalls shouldBe 1
+    }
 
   // I5: renderOne can raise (an invalid Iceberg config is a documented, reachable state); that must
   // be captured, not propagated past `verify`.
@@ -378,11 +434,18 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
         )
       )
 
-  "IcebergAttachVerifier.decodeCatalogNames" should "drain and merge every batch of a reader" in {
-    val reader = new ScriptedCatalogReader(List(List("acme_db"), List("sales_lake", "other_lake")))
-    IcebergAttachVerifier.decodeCatalogNames(reader, () => ()) shouldBe
-      Right(Set("acme_db", "sales_lake", "other_lake"))
-  }
+  // Important 3 (fix review): the only test that inspected `close` drove the failure path, so
+  // moving `close()` out of `finally` into the `catch` arm passed the whole suite while leaking the
+  // Arrow reader on every SUCCESSFUL catalog listing. Asserting `closed` here too closes that gap.
+  "IcebergAttachVerifier.decodeCatalogNames" should "drain and merge every batch of a reader, " +
+    "closing the reader on success too" in {
+      var closed = false
+      val reader =
+        new ScriptedCatalogReader(List(List("acme_db"), List("sales_lake", "other_lake")))
+      IcebergAttachVerifier.decodeCatalogNames(reader, () => closed = true) shouldBe
+        Right(Set("acme_db", "sales_lake", "other_lake"))
+      closed shouldBe true
+    }
 
   it should "not stop at a schema-only first batch" in {
     val reader = new ScriptedCatalogReader(List(Nil, List("sales_lake")))

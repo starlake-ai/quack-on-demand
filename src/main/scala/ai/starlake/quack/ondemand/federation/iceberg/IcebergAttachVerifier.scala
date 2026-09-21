@@ -28,6 +28,15 @@ import org.apache.arrow.vector.ipc.ArrowReader
   * instead of a synchronous exception that would kill the whole HealthProbe fiber (nobody joins
   * that fiber, so cats-effect would drop the failure silently and health probing would stop for
   * every node in the manager).
+  *
+  * Once every alias this incarnation has ever tried has failed, and none of them is due for a retry
+  * per [[AttachStatusRegistry.shouldRetry]], the WHOLE pass is skipped -- `sourcesOf` and
+  * `listCatalogs` are not called at all, not just the re-attach. Without this, a catalog that is
+  * genuinely and permanently broken (an expired credential on a pool nobody is going to fix) would
+  * cost one non-pooled Postgres connection plus one node round trip on every health tick, forever
+  * (`healthCheckIntervalSec = 5` by default). The one behaviour this trades away: a source ADDED to
+  * a pool while it is in backoff is not picked up until the current backoff window ends, bounded by
+  * `maxBackoffMs` (5 minutes by default) -- never longer than that ceiling.
   */
 final class IcebergAttachVerifier(
     sourcesOf: PoolKey => IO[List[FederatedSource]],
@@ -43,42 +52,47 @@ final class IcebergAttachVerifier(
       registry.pruneOtherIncarnations(node.nodeId, startedAtMs)
       if registry.latched(node.nodeId, startedAtMs) then IO.unit
       else
-        sourcesOf(node.poolKey).attempt.flatMap {
-          case Left(t) =>
-            // The lookup itself failed -- a missing tenant-db in the supervisor's cache, or a
-            // Postgres blip. That is NOT the same as "this pool declares no Iceberg source": stay
-            // unlatched and say nothing at info/warn, so the next tick retries.
-            IO.delay(
-              logger.debug(s"attach verify ${node.nodeId}: source lookup failed: ${t.getMessage}")
-            )
-          case Right(sources) =>
-            val declared = sources.filter { s =>
-              s.sourceType == FederatedSourceType.IcebergRest && !s.disabled
-            }
-            // Nothing declared: latch without ever touching the node, so the overwhelmingly common
-            // pool (no Iceberg catalog at all) costs exactly zero round-trips.
-            if declared.isEmpty then IO.delay(registry.markLatched(node.nodeId, startedAtMs))
-            else
-              listCatalogs(node).flatMap {
-                case Left(err) =>
-                  // The node itself is unreachable or answered nonsense. Stay unlatched and say
-                  // nothing: the health probe already owns node liveness.
-                  IO.delay(
-                    logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
-                  )
-                case Right(present) =>
-                  val lower            = present.map(_.toLowerCase)
-                  val (found, missing) =
-                    declared.partition(s => lower.contains(s.alias.toLowerCase))
-                  found.traverse_(s =>
-                    IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
-                  ) *>
-                    missing.traverse_(reattach(node, startedAtMs, _)) *> IO.delay {
-                      if registry.failuresFor(node.nodeId, startedAtMs).isEmpty then
-                        registry.markLatched(node.nodeId, startedAtMs)
-                    }
+        val pastFailures  = registry.failuresFor(node.nodeId, startedAtMs)
+        val allBackingOff = pastFailures.nonEmpty &&
+          pastFailures.forall(f => !registry.shouldRetry(node.nodeId, startedAtMs, f.alias))
+        if allBackingOff then IO.unit
+        else
+          sourcesOf(node.poolKey).attempt.flatMap {
+            case Left(t) =>
+              // The lookup itself failed -- a missing tenant-db in the supervisor's cache, or a
+              // Postgres blip. That is NOT the same as "this pool declares no Iceberg source": stay
+              // unlatched and say nothing at info/warn, so the next tick retries.
+              IO.delay(
+                logger.debug(s"attach verify ${node.nodeId}: source lookup failed: ${t.getMessage}")
+              )
+            case Right(sources) =>
+              val declared = sources.filter { s =>
+                s.sourceType == FederatedSourceType.IcebergRest && !s.disabled
               }
-        }
+              // Nothing declared: latch without ever touching the node, so the overwhelmingly
+              // common pool (no Iceberg catalog at all) costs exactly zero round-trips.
+              if declared.isEmpty then IO.delay(registry.markLatched(node.nodeId, startedAtMs))
+              else
+                listCatalogs(node).flatMap {
+                  case Left(err) =>
+                    // The node itself is unreachable or answered nonsense. Stay unlatched and say
+                    // nothing: the health probe already owns node liveness.
+                    IO.delay(
+                      logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
+                    )
+                  case Right(present) =>
+                    val lower            = present.map(_.toLowerCase)
+                    val (found, missing) =
+                      declared.partition(s => lower.contains(s.alias.toLowerCase))
+                    found.traverse_(s =>
+                      IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
+                    ) *>
+                      missing.traverse_(reattach(node, startedAtMs, _)) *> IO.delay {
+                        if registry.failuresFor(node.nodeId, startedAtMs).isEmpty then
+                          registry.markLatched(node.nodeId, startedAtMs)
+                      }
+                }
+          }
     }
 
   private def reattach(node: RunningNode, startedAtMs: Long, src: FederatedSource): IO[Unit] =
