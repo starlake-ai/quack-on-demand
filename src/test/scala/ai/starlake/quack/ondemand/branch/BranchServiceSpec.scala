@@ -48,7 +48,10 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     override def snapshotByCommitMessage(msg: String): Option[Long] = committed.get(msg)
     override def close(): Unit                                      = ()
 
-  private final class Fixture(cfg: BranchingConfig = BranchingConfig()):
+  private final class Fixture(
+      cfg: BranchingConfig = BranchingConfig(),
+      parentEncrypted: Boolean = false
+  ):
     val store   = new InMemoryControlPlaneStore()
     val created = mutable.ListBuffer.empty[String]
     val dropped = mutable.ListBuffer.empty[String]
@@ -71,7 +74,8 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
           "dbName"     -> "ignored",
           "schemaName" -> "main"
         ),
-        "/tmp/qod-branch-spec/acme_tpch/"
+        "/tmp/qod-branch-spec/acme_tpch/",
+        encrypted = parentEncrypted
       )
       .unsafeRunSync()
       .toOption
@@ -136,7 +140,7 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
       branchReader.changes = List((11L, "inlined_insert:2"), (12L, "inlined_delete:2"))
 
   "create" should "clone at head, register the catalog under the parent alias and start one pool" in {
-    val f = new Fixture
+    val f = new Fixture(parentEncrypted = true)
     val b = f.create("feature-x", ttl = Some(24)).toOption.get
     b.status shouldBe BranchStatus.Open
     b.forkSnapshot shouldBe 10L
@@ -153,6 +157,11 @@ class BranchServiceSpec extends AnyFlatSpec with Matchers:
     td.metastore("dbName") shouldBe b.tenantDbName
     f.sup.get(PoolKey("acme", b.tenantDbName, b.poolName)).map(_.nodes.size) shouldBe Some(1)
     f.store.findBranch(f.parent.id, "feature-x").map(_.id) shouldBe Some(b.id)
+    f.store
+      .listTenantDbs(f.tenant.id)
+      .find(_.branchOf.contains(f.parent.id))
+      .get
+      .encrypted shouldBe true
   }
 
   it should "refuse duplicates, bad names, branches of branches and the per-db cap" in {

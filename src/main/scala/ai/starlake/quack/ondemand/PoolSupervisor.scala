@@ -769,13 +769,23 @@ final class PoolSupervisor(
       val key   = PoolKey(tenantName, parentDbName, "__merge")
       val m     = base.metastore
       val alias = ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias
+      // The branch is a clone of the parent's catalog, so it carries the same encryption flag
+      // (BranchService inherits parent.encrypted onto the branch row). Resolved from the
+      // TenantDb row, not the metastore map: the map at this call site does not carry the
+      // derived "encrypted" stamp.
+      val parentEncrypted =
+        tenantDbs.values.exists(td => td.name == parentDbName && td.encrypted)
+      val opts =
+        if parentEncrypted then
+          s"DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY, ENCRYPTED"
+        else s"DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY"
       // Same unquoted connection-string shape as spawn-quack-node.sh: every value passed
       // TenantDb.validateSafety (no quote, semicolon, backslash or newline).
       val attach =
         s"ATTACH 'ducklake:postgres:host=${m.getOrElse("pgHost", "localhost")} " +
           s"port=${m.getOrElse("pgPort", "5432")} dbname=$branchDbName " +
           s"user=${m.getOrElse("pgUser", "postgres")} password=${m.getOrElse("pgPassword", "")}' " +
-          s"AS $alias (DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY);"
+          s"AS $alias ($opts);"
       base.copy(
         poolKey = key,
         nodeId = s"merge-${branchDbName.takeRight(8)}-${System.nanoTime()}",
