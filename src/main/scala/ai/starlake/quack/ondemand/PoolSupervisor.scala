@@ -283,7 +283,7 @@ final class PoolSupervisor(
 
     // `encrypted` reaches both spawn scripts as a plain env var through the metastore-to-env
     // plumbing every backend already has (LocalQuackBackend.scala:55,
-    // KubernetesQuackBackend.scala:88), the same indirection `catalogAlias` uses. Emitted only
+    // KubernetesQuackBackend.buildPod), the same indirection `catalogAlias` uses. Emitted only
     // when true, and never for InMemory, which has nothing at rest: the scripts treat an absent
     // value as false.
     if td.encrypted && td.kind != TenantDbKind.InMemory then perKind.updated("encrypted", "true")

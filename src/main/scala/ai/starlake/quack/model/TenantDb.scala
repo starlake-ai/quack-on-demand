@@ -59,10 +59,10 @@ object TenantDb {
     )
 
   /** Metastore keys that must never reach a Kubernetes pod spec as a plain `EnvVar`. Read by both
-    * the strip in `KubernetesQuackBackend.podFor` and the contents of the per-pool node-env Secret,
-    * so the two cannot drift. Deliberately distinct from [[SecretKeys]], which answers a different
-    * question (what must never round-trip through an API response) and spans the `objectStore` map
-    * as well.
+    * the strip in `KubernetesQuackBackend.buildPod` and the contents of the per-pool node-env
+    * Secret, so the two cannot drift. Deliberately distinct from [[SecretKeys]], which answers a
+    * different question (what must never round-trip through an API response) and spans the
+    * `objectStore` map as well.
     */
   val NodeSecretEnvKeys: Set[String] = Set("pgPassword", EncryptionKeyName)
 
