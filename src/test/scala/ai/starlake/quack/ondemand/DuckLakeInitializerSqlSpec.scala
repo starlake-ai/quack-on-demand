@@ -22,6 +22,11 @@ class DuckLakeInitializerSqlSpec extends AnyFlatSpec with Matchers:
     val sql = DuckLakeInitializer.attachSql(connstr, "acme_lake", "/var/lake", encrypted = true)
     sql should include("DATA_PATH '/var/lake'")
     sql should include("ENCRYPTED")
+    // Pin the separator, not just the two tokens: DuckLake parses the parenthesized list as
+    // comma-separated options, so a missing or wrong separator is a syntax error at the one ATTACH
+    // that decides a catalog's encryption forever.
+    sql should include("DATA_PATH '/var/lake', ENCRYPTED")
+    sql should endWith("(DATA_PATH '/var/lake', ENCRYPTED)")
   }
 
   "encryptionMismatch" should "pass when the catalog has no recorded value yet" in {

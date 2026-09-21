@@ -978,16 +978,26 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     msg should not include "pgHost"
   }
 
-  it should "pass manager defaults merged with the sparse row to DuckLakeInitializer" in {
-    val captured = scala.collection.mutable.ListBuffer.empty[Map[String, String]]
-    val sup = new PoolSupervisor(
+  /** Captures both arguments the initializer seam receives. The `encrypted` half matters more than
+    * the map: DuckLake stamps a catalog's encryption once, at the creating ATTACH, and it can
+    * never be changed afterwards, so dropping or hardcoding the flag on the way in is a permanent,
+    * unfixable defect that no later test could catch.
+    */
+  private def capturingInitializer()
+      : (scala.collection.mutable.ListBuffer[(Map[String, String], Boolean)], PoolSupervisor) =
+    val captured = scala.collection.mutable.ListBuffer.empty[(Map[String, String], Boolean)]
+    val sup      = new PoolSupervisor(
       new CapturingBackend,
       new NodeLoadTracker,
       new InMemoryControlPlaneStore(),
       defaultMetastore = sparseDefaults,
-      duckLakeInitializer = (m, _) => captured += m
+      duckLakeInitializer = (m, e) => captured += ((m, e))
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
+    (captured, sup)
+
+  it should "pass manager defaults merged with the sparse row to DuckLakeInitializer" in {
+    val (captured, sup) = capturingInitializer()
     sup
       .createTenantDb(
         "acme",
@@ -1002,8 +1012,40 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       sparseDefaults
         .updated("pgHost", "tenant-host")
         .updated("dbName", "acme_prod")
-        .updated("dataPath", "/data/acme_prod")
+        .updated("dataPath", "/data/acme_prod") -> false
     )
+  }
+
+  it should "pass encrypted = true through to DuckLakeInitializer" in {
+    val (captured, sup) = capturingInitializer()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map.empty,
+        "/data/acme_prod",
+        encrypted = true
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    captured.toList.map(_._2) shouldBe List(true)
+  }
+
+  it should "pass encrypted = false through to DuckLakeInitializer" in {
+    val (captured, sup) = capturingInitializer()
+    sup
+      .createTenantDb(
+        "acme",
+        "prod",
+        TenantDbKind.DuckLake,
+        Map.empty,
+        "/data/acme_prod",
+        encrypted = false
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    captured.toList.map(_._2) shouldBe List(false)
   }
 
   "metastoreDefaults" should "expose the raw configured defaults" in {
