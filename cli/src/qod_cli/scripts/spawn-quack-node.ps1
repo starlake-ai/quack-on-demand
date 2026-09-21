@@ -153,12 +153,20 @@ if (-not $isRemote) {
 
 # Resolve the DuckDB CLI. $env:DUCKDB_BIN wins; otherwise the first `duckdb`
 # on PATH (run-jar.ps1 prepends the self-installed .duckdb\<ver>\bin).
+# The presence check is skipped in dry-run mode: SpawnScriptEncryptionWindowsSpec only
+# exercises init-SQL assembly, which is pure string building and needs no duckdb binary at
+# all. Mirrors the QOD_SPAWN_DRY_RUN-gated `command -v` check in spawn-quack-node.sh.
+$dryRun = ([Environment]::GetEnvironmentVariable('QOD_SPAWN_DRY_RUN') -eq '1')
 $duckdbBin = [Environment]::GetEnvironmentVariable('DUCKDB_BIN')
 if ([string]::IsNullOrEmpty($duckdbBin)) {
-  $cmd = Get-Command duckdb.exe -ErrorAction SilentlyContinue
-  if ($null -eq $cmd) { $cmd = Get-Command duckdb -ErrorAction SilentlyContinue }
-  if ($null -eq $cmd) { Write-Error "ERROR: duckdb not on PATH"; exit 1 }
-  $duckdbBin = $cmd.Source
+  if ($dryRun) {
+    $duckdbBin = 'duckdb'
+  } else {
+    $cmd = Get-Command duckdb.exe -ErrorAction SilentlyContinue
+    if ($null -eq $cmd) { $cmd = Get-Command duckdb -ErrorAction SilentlyContinue }
+    if ($null -eq $cmd) { Write-Error "ERROR: duckdb not on PATH"; exit 1 }
+    $duckdbBin = $cmd.Source
+  }
 }
 
 # DuckDB does NOT honour HTTP_PROXY/HTTPS_PROXY for `INSTALL <extension>`
@@ -179,6 +187,8 @@ $dbInitSql    = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql = [Environment]::GetEnvironmentVariable('extraSetupSql')
 $lockdownSql  = [Environment]::GetEnvironmentVariable('lockdownSql')
 $objectStoreSql = [Environment]::GetEnvironmentVariable('objectStoreSql')
+$encrypted    = [Environment]::GetEnvironmentVariable('encrypted')
+$encryptionKey = [Environment]::GetEnvironmentVariable('encryptionKey')
 
 # Build init SQL piecemeal based on $kind so memory / duckdb-file skip the
 # DuckLake-specific setup entirely. Mirrors spawn-quack-node.sh.
@@ -192,6 +202,17 @@ if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql)
 # of views over remote parquet reads nothing without the CREATE SECRET. Must precede ATTACH.
 if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
 
+# Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
+# mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently
+# read-only node rather than an error. storageSql only loads httpfs for remote data paths, so a
+# local encrypted database would miss it. Mirrors ENCRYPTION_SQL in spawn-quack-node.sh.
+# -ceq (case-sensitive) matches bash's `==`, which is also case-sensitive: this script's own
+# code always emits the lowercase string "true", but staying case-sensitive keeps the two
+# scripts behaving identically for any other caller of the env var.
+if ($encrypted -ceq 'true') {
+  [void]$sb.AppendLine("INSTALL httpfs; LOAD httpfs;")
+}
+
 switch ($kind) {
   'ducklake' {
     [void]$sb.AppendLine("INSTALL ducklake; LOAD ducklake;")
@@ -200,7 +221,11 @@ switch ($kind) {
     [void]$sb.AppendLine("ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);")
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');")
     [void]$sb.AppendLine("ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS ""$catalogAlias""")
-    [void]$sb.AppendLine("  (DATA_PATH '$dataPath');")
+    if ($encrypted -ceq 'true') {
+      [void]$sb.AppendLine("  (DATA_PATH '$dataPath', ENCRYPTED);")
+    } else {
+      [void]$sb.AppendLine("  (DATA_PATH '$dataPath');")
+    }
     [void]$sb.AppendLine("SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');")
     [void]$sb.AppendLine("DETACH qod_init_pg;")
     [void]$sb.AppendLine("USE ""$catalogAlias"";")
@@ -208,7 +233,11 @@ switch ($kind) {
     [void]$sb.AppendLine("USE ""$catalogAlias"".""$schemaName"";")
   }
   'duckdb-file' {
-    [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"";")
+    if ($encrypted -ceq 'true') {
+      [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"" (ENCRYPTION_KEY '$encryptionKey');")
+    } else {
+      [void]$sb.AppendLine("ATTACH '$dataPath' AS ""$catalogAlias"";")
+    }
     [void]$sb.AppendLine("USE ""$catalogAlias"";")
     [void]$sb.AppendLine("CREATE SCHEMA IF NOT EXISTS ""$schemaName"";")
     [void]$sb.AppendLine("USE ""$catalogAlias"".""$schemaName"";")
@@ -228,6 +257,14 @@ if (-not [string]::IsNullOrEmpty($lockdownSql)) { [void]$sb.AppendLine($lockdown
 [void]$sb.AppendLine("CALL quack_serve('quack:0.0.0.0:$Port', token := '$Token', allow_other_hostname := true);")
 
 $initSql = $sb.ToString()
+
+# Test seam, mirror of QOD_SPAWN_DRY_RUN in spawn-quack-node.sh: print the assembled init SQL
+# and exit without launching duckdb. Used by SpawnScriptEncryptionWindowsSpec to assert the
+# emitted SQL, which is the only testable surface of a script the manager shells out to.
+if ($dryRun) {
+  [Console]::Out.Write($initSql)
+  exit 0
+}
 
 # Start duckdb with a redirected stdin we keep OPEN (the Windows analogue of
 # the bash FIFO). stdout/stderr are inherited so node logs flow to the
