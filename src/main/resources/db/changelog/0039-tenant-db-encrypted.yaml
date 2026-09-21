@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0039-tenant-db-encrypted
+      author: qod
+      changes:
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: encrypted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
