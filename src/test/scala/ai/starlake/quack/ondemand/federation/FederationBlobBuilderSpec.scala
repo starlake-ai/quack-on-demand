@@ -143,14 +143,19 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     clientSecret = Some("{{secret.CSEC}}")
   ).toJson
 
-  private def iceSrc(alias: String = "sales_lake", cfg: Option[String] = None) =
+  private def iceSrc(
+      alias: String = "sales_lake",
+      cfg: Option[String] = None,
+      readOnly: Boolean = false
+  ) =
     FederatedSource(
       id = "src-" + alias,
       tenantDbId = "td-1",
       alias = alias,
       setupSql = "",
       sourceType = ai.starlake.quack.model.FederatedSourceType.IcebergRest,
-      config = cfg.orElse(Some(iceCfgJson))
+      config = cfg.orElse(Some(iceCfgJson)),
+      readOnly = readOnly
     )
 
   private def iceSecrets(s: FederatedSource) =
@@ -293,5 +298,22 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
         .unsafeRunSync()
         .value
     blob should include("-- BEGIN federation: sales_lake")
+  }
+
+  // ---------- read-only threading ----------
+  // This is the test that proves `FederatedSource.readOnly` actually reaches the rendered ATTACH,
+  // not just that `IcebergSetupSql.render` can produce READ_ONLY in isolation (that's
+  // IcebergSetupSqlSpec's job).
+
+  it should "carry READ_ONLY on the ATTACH for a stored source with readOnly = true" in {
+    val s    = iceSrc(readOnly = true)
+    val blob = builderWith(List(s), iceSecrets(s)).build("td-1").unsafeRunSync().value
+    blob should include("READ_ONLY")
+  }
+
+  it should "emit no READ_ONLY for a stored source with readOnly = false" in {
+    val s    = iceSrc(readOnly = false)
+    val blob = builderWith(List(s), iceSecrets(s)).build("td-1").unsafeRunSync().value
+    blob should not include "READ_ONLY"
   }
 }

@@ -171,3 +171,30 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
     IcebergSetupSql.secretName("sales_lake") shouldBe "qod_ice_sales_lake"
     IcebergSetupSql.secretName("Sales_Lake") shouldBe "qod_ice_Sales_Lake"
   }
+
+  "render with readOnly = true" should "emit a bare READ_ONLY option on the ATTACH" in {
+    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = true)
+    val attachBlock = sql.substring(sql.indexOf("ATTACH"))
+    attachBlock should include("READ_ONLY")
+  }
+
+  it should "emit READ_ONLY as a bare flag, not a key-value pair" in {
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = true)
+    // Exact substring: READ_ONLY is appended last (see render), immediately before the ATTACH's
+    // closing "\n);" - a bare flag, never followed by a space then a value.
+    sql should include("READ_ONLY\n);")
+  }
+
+  it should "not put READ_ONLY on the CREATE SECRET block" in {
+    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = true)
+    val secretBlock = sql.substring(0, sql.indexOf("ATTACH"))
+    secretBlock should not include "READ_ONLY"
+  }
+
+  "render with readOnly = false (the default)" should "emit no READ_ONLY anywhere" in {
+    IcebergSetupSql.render(v(oauth2, "sales_lake")) should not include "READ_ONLY"
+  }
+
+  it should "emit no READ_ONLY when explicitly passed false" in {
+    IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false) should not include "READ_ONLY"
+  }

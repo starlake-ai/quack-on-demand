@@ -141,7 +141,7 @@ final class FederationBlobBuilder(
                         s"invalid iceberg config for source '${src.alias}': ${errs.mkString("; ")}"
                       )
                     )
-                  case Right(v) => IO.pure(IcebergSetupSql.render(v))
+                  case Right(v) => IO.pure(IcebergSetupSql.render(v, src.readOnly))
               case Left(err) =>
                 IO.raiseError(
                   new RuntimeException(s"invalid iceberg config for source '${src.alias}': $err")

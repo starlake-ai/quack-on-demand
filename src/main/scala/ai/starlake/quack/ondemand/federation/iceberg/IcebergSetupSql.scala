@@ -34,12 +34,22 @@ object IcebergSetupSql:
     * for example, an ATTACH carrying both `ENDPOINT_TYPE` and `AUTHORIZATION_TYPE`, which DuckDB
     * refuses at ATTACH time. Because this SQL runs inside a node's startup script, that failure
     * takes down the whole node's init, not just this one catalog.
+    *
+    * `readOnly` is a property of the federated-source row (`FederatedSource.readOnly`), not of the
+    * catalog connection config, so it arrives as its own parameter rather than living on
+    * `ValidatedIcebergConfig`. When true this emits a bare `READ_ONLY` ATTACH option, which makes
+    * DuckDB refuse writes to this catalog in the engine itself, below SQL parsing - e.g. `INSERT`
+    * fails with `Cannot execute statement of type "INSERT" on database "..." which is attached in
+    * read-only mode!`. That is the PRIMARY enforcement of read-only for `iceberg_rest` sources;
+    * `CatalogWriteScreen` remains defence in depth on top of it (and is the ONLY enforcement for
+    * free-form `sql` sources, whose ATTACH text QoD does not control - see
+    * `FederatedSource.readOnly`'s scaladoc).
     */
-  def render(v: ValidatedIcebergConfig): String =
+  def render(v: ValidatedIcebergConfig, readOnly: Boolean = false): String =
     val cfg    = v.config
     val alias  = v.alias
     val secret = secretBlock(cfg, alias)
-    val opts   = attachOptions(cfg, alias, needsSecret(cfg))
+    val opts   = attachOptions(cfg, alias, needsSecret(cfg)) ++ Option.when(readOnly)("READ_ONLY")
     "INSTALL iceberg; LOAD iceberg;\n" +
       secret +
       s"ATTACH ${lit(cfg.warehouse.trim)} AS ${ident(alias)} (\n  " +

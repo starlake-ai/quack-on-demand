@@ -34,6 +34,15 @@ import java.time.Instant
   * driving a write past this catalog has been enumerated. The REST create path defaults a new
   * `iceberg_rest` source to true (Task 5). This field defaults to false so pre-0038 sources keep
   * their behaviour.
+  *
+  * Enforcement is a two-layer split by `sourceType`, and the layers are NOT equally strong:
+  *   - `IcebergRest`: engine-level. QoD writes the ATTACH itself
+  *     ([[ai.starlake.quack.ondemand.federation.iceberg.IcebergSetupSql.render]]), so a true value
+  *     here is threaded onto the ATTACH as a bare `READ_ONLY` option and DuckDB refuses writes
+  *     below SQL parsing - this is the primary gate, with `CatalogWriteScreen` as defence in depth.
+  *   - `Sql`: edge-screen-only. The operator writes the ATTACH text (`setupSql`), so QoD has no
+  *     rendering step to add the flag to; `CatalogWriteScreen` is the ONLY enforcement for these
+  *     sources, with every gap documented above.
   */
 final case class FederatedSource(
     id: String,
