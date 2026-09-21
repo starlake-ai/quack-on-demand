@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, RoleDistribution, RunningNode, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.ha.PoolLocker
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, DbAdmin, InMemoryControlPlaneStore, RbacRole, RbacUser, RoleColumnPolicy}
@@ -2244,6 +2244,76 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     )).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get.message should include("drops required")
+  }
+
+  // ---------- updateTenantDb: the encryption key is create-time only ----------
+
+  /** An encrypted duckdb-file tenant-db plus the key createTenantDb minted for it. Rotating that
+    * key through database/update would leave the file on disk encrypted with the OLD key and the
+    * control plane holding a key that opens nothing, so every one of these cases is about a
+    * database that can still be opened afterwards.
+    */
+  private def encryptedFileFixture(): (PoolSupervisor, String, String) =
+    val sup = new PoolSupervisor(new CapturingBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb(
+      tenantName = "acme",
+      suffix     = "enc",
+      kind       = TenantDbKind.DuckDbFile,
+      metastore  = Map("dbName" -> "acme_enc", "schemaName" -> "main"),
+      dataPath   = "/tmp/acme_enc.duckdb",
+      encrypted  = true
+    ).unsafeRunSync().isRight shouldBe true
+    val stored = sup.findTenantDb("acme", "acme_enc").get.metastore(TenantDb.EncryptionKeyName)
+    stored should not be empty
+    (sup, "acme_enc", stored)
+
+  "updateTenantDb" should "preserve the encryption key when the incoming metastore omits it" in {
+    // The ordinary round-trip: responses redact encryptionKey, so no client can send it back.
+    val (sup, dbName, stored) = encryptedFileFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(Map("dbName" -> "acme_enc", "schemaName" -> "s2"))
+    )).unsafeRunSync()
+    out.isRight shouldBe true
+    out.toOption.get.td.metastore(TenantDb.EncryptionKeyName) shouldBe stored
+  }
+
+  it should "accept an update that resends the very same encryption key" in {
+    val (sup, dbName, stored) = encryptedFileFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(
+        Map("dbName" -> "acme_enc", "schemaName" -> "main", TenantDb.EncryptionKeyName -> stored)
+      )
+    )).unsafeRunSync()
+    out.isRight shouldBe true
+    out.toOption.get.td.metastore(TenantDb.EncryptionKeyName) shouldBe stored
+  }
+
+  it should "refuse an update that rotates the encryption key" in {
+    val (sup, dbName, stored) = encryptedFileFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(
+        Map("dbName" -> "acme_enc", "schemaName" -> "main", TenantDb.EncryptionKeyName -> "some-other-key")
+      )
+    )).unsafeRunSync()
+    out.isLeft shouldBe true
+    out.swap.toOption.get.message should include("encryptionKey cannot be changed")
+    // The stored row is untouched, so the file is still openable with the key it was created with.
+    sup.findTenantDb("acme", dbName).get.metastore(TenantDb.EncryptionKeyName) shouldBe stored
+  }
+
+  it should "refuse an update that sends an empty encryption key" in {
+    // An empty value is how mergeSecretKeys REMOVES a redacted key, which would leave an encrypted
+    // row with no key at all: the node would then ATTACH with ENCRYPTION_KEY '' and fail forever.
+    val (sup, dbName, stored) = encryptedFileFixture()
+    val out = sup.updateTenantDb("acme", dbName, TenantDbPatch(
+      metastore = Some(
+        Map("dbName" -> "acme_enc", "schemaName" -> "main", TenantDb.EncryptionKeyName -> "")
+      )
+    )).unsafeRunSync()
+    out.isLeft shouldBe true
+    out.swap.toOption.get.message should include("encryptionKey cannot be changed")
+    sup.findTenantDb("acme", dbName).get.metastore(TenantDb.EncryptionKeyName) shouldBe stored
   }
 
   it should "keep rejecting a duckdb-file patch that drops dbName even with manager defaults" in {

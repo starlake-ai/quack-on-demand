@@ -1544,12 +1544,34 @@ final class PoolSupervisor(
             val droppedRequired =
               (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --
                 merged.metastore.keySet -- defaultedKeys
+            // A duckdb-file database is encrypted with ONE key, fixed when the file was created,
+            // and neither DuckDB nor the manager can re-key or decrypt it in place: a row whose
+            // stored key no longer matches the file's is a file nobody can ever open again.
+            // mergeSecretKeys preserves the key when the incoming map omits it (that is how a
+            // redacted round-trip survives), but a supplied value overwrites it and a supplied
+            // EMPTY value drops it entirely, both silently. Refuse either, here rather than in
+            // validateSafety, which only sees the merged row and cannot tell a rotation from the
+            // create that first set the key.
+            val storedEncryptionKey = encryptionKeyOf(td.metastore)
+            val mergedEncryptionKey = encryptionKeyOf(merged.metastore)
             if droppedRequired.nonEmpty then
               IO.pure(
                 Left(
                   SupervisorError.InvalidArgument(
                     s"invalid: metastore update drops required key(s) ${droppedRequired.mkString(", ")}; " +
                       "send the full map (pgPassword may be omitted, it is preserved)"
+                  )
+                )
+              )
+            else if storedEncryptionKey.isDefined && mergedEncryptionKey != storedEncryptionKey then
+              IO.pure(
+                Left(
+                  SupervisorError.InvalidArgument(
+                    "invalid: encryptionKey cannot be changed on an existing database: the file " +
+                      "was encrypted with the stored key when it was created and neither engine " +
+                      "can re-key or decrypt it in place, so a new or empty value would leave it " +
+                      "permanently unopenable. Omit encryptionKey to keep the stored one; to use " +
+                      "a different key, create a new database and copy the data."
                   )
                 )
               )
@@ -1612,6 +1634,14 @@ final class PoolSupervisor(
                 Right(TenantDbUpdateResult(merged, ok, failed))
               }
             }
+    }
+
+  /** The stored `encryptionKey` of a metastore map, matched case-insensitively like every other
+    * site that reasons about [[TenantDb.SecretKeys]]. An empty value reads as no key at all.
+    */
+  private def encryptionKeyOf(metastore: Map[String, String]): Option[String] =
+    metastore.collectFirst {
+      case (k, v) if k.equalsIgnoreCase(TenantDb.EncryptionKeyName) && v.nonEmpty => v
     }
 
   /** Empty patch value clears an Option field; non-blank sets it. */
