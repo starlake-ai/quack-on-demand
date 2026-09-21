@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.Config
+import ai.starlake.acl.parser.SqlParser
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import org.scalatest.OptionValues
@@ -229,6 +230,54 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     // fails closed on EXECUTE itself rather than only on the paired PREPARE.
     val r = screen("EXECUTE p")
     r.value should include("read-only")
+  }
+
+  // --- C1: a leading comment must not hide PREPARE/EXECUTE from isWriteShaped's first-token
+  // check. Before the fix, `snippet.trim.takeWhile(...)` read the head straight off the raw
+  // snippet, so a `/*x*/` or `--` prefix made the head e.g. "/*X*/PREPARE" (never equal to
+  // "PREPARE"), the rule declined to fire, and classify (which DOES strip comments) resolved the
+  // statement to Other -- not write-shaped -- admitting the write. ---
+
+  it should "deny a comment-prefixed PREPARE whose body is a write against the read-only catalog" in {
+    // Mutation-tested: this does NOT flip if the strip is removed, because a single-statement
+    // submission never reaches the fragment-list fallback (fragments.length == statements.length
+    // == 1) -- it is judged via denialFor(stmt), and jsqlparser's own ParseError#toString already
+    // re-renders the statement without the original comment, independently of this fix. Kept
+    // because it is the exact shape the review asked for and it does pin the correct verdict; see
+    // the batch witness below for the assertion that actually discriminates the fix.
+    val r = screen("/*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a line-comment-prefixed bare EXECUTE while a catalog is read-only" in {
+    // Same caveat as above: mutation-tested to NOT flip, for the same reason (single fragment,
+    // jsqlparser's reconstructed snippet is already comment-free). Kept for the same reason.
+    val r = screen("-- c\nEXECUTE p")
+    r.value should include("read-only")
+  }
+
+  it should "deny the full comment-blind witness batch (collapsed batch, comment-prefixed PREPARE/EXECUTE)" in {
+    // This is the robust witness from the review: CHECKPOINT forces SqlParser.extract to throw on
+    // the whole submission (collapsing it to one ParseError), which routes judgment through the
+    // fragment-list fallback rather than the per-statement path -- so this also proves the fix
+    // reaches isWriteShaped when called from the P1 fallback, not just from the per-statement rule.
+    // Mutation-tested: this DOES flip when the strip is removed from isPrepareOrExecute, because
+    // the fallback judges the splitter's raw fragments directly (comments intact), unlike the
+    // per-statement path above where jsqlparser's own toString reconstruction already drops
+    // comments. Pinning why the fallback fires at all (m1's ask), rather than trusting it: three
+    // fragments collapse to one StatementResult.
+    val batch =
+      "CHECKPOINT; /*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1); /*x*/EXECUTE p"
+    SqlParser.extract(batch, cfg).statements.length shouldBe 1
+    LockdownScreen.splitStatements(batch).length shouldBe 3
+    val r = screen(batch)
+    r.value should include("read-only")
+  }
+
+  it should "still admit a leading comment on an ordinary read against a read-only catalog" in {
+    // Guards against the strip becoming blanket over-denial: a comment prefix on a genuine read
+    // must still classify as a read and be admitted.
+    screen("/*x*/SELECT * FROM sales_lake.main.orders") shouldBe None
   }
 
   it should "still admit CALL, which classifies Other like PREPARE/EXECUTE but is not treated as write-shaped" in {

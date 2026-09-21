@@ -35,14 +35,30 @@ import java.time.Instant
   * `iceberg_rest` source to true (Task 5). This field defaults to false so pre-0038 sources keep
   * their behaviour.
   *
-  * Enforcement is a two-layer split by `sourceType`, and the layers are NOT equally strong:
-  *   - `IcebergRest`: engine-level. QoD writes the ATTACH itself
+  * Enforcement is a two-layer split by `sourceType`, and the layers are NOT equally strong, NOT
+  * equally proven, and NOT synchronized with each other:
+  *   - `IcebergRest`: engine-level, conditionally. QoD writes the ATTACH itself
   *     ([[ai.starlake.quack.ondemand.federation.iceberg.IcebergSetupSql.render]]), so a true value
-  *     here is threaded onto the ATTACH as a bare `READ_ONLY` option and DuckDB refuses writes
-  *     below SQL parsing - this is the primary gate, with `CatalogWriteScreen` as defence in depth.
+  *     here is threaded onto the ATTACH as a bare `READ_ONLY` option. What is proven today: DuckDB
+  *     accepts `READ_ONLY` as a recognized Iceberg ATTACH option (a bogus option fails ATTACH
+  *     outright) and enforces read-only below SQL parsing for a FILE-BACKED attach. Whether the
+  *     `iceberg` extension itself honours that bit against a live REST catalog is NOT yet proven
+  *     end to end - that verification is still pending, so treat this layer as the intended primary
+  *     gate rather than a confirmed one until it lands, and keep relying on `CatalogWriteScreen` as
+  *     defence in depth regardless. This layer also binds only at ATTACH time (node spawn, via
+  *     `FederationBlobBuilder`'s rendered startup SQL): flipping `readOnly` on a live pool does NOT
+  *     change an already-attached node's engine-level enforcement until the pool's nodes recycle,
+  *     even though `CatalogWriteScreen` picks the new value up within its ~60s cache. Concretely,
+  *     false -> true briefly leaves only the screen (with all its gaps) standing, and true -> false
+  *     leaves the catalog engine-read-only (raw DuckDB read-only-mode errors, not this screen's
+  *     denial) until an operator recycles the pool. A mutating `CALL` is the one shape this layer
+  *     closes that the screen alone cannot (`CatalogWriteScreen` cannot resolve `CALL` and admits
+  *     it) - but only once both the extension enforcement above is real and the pool has recycled.
   *   - `Sql`: edge-screen-only. The operator writes the ATTACH text (`setupSql`), so QoD has no
   *     rendering step to add the flag to; `CatalogWriteScreen` is the ONLY enforcement for these
-  *     sources, with every gap documented above.
+  *     sources, with every gap documented above PLUS a mutating `CALL`, which the screen cannot
+  *     resolve and therefore admits unconditionally - there is no second layer to catch it for this
+  *     source type.
   */
 final case class FederatedSource(
     id: String,

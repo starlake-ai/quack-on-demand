@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.sql
 import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
 import ai.starlake.quack.model.StatementKind
+import ai.starlake.sql.SqlCommentStripper
 import com.typesafe.scalalogging.LazyLogging
 
 /** Per-catalog write kill switch. Denies WRITE and DDL whose target sits in a catalog an operator
@@ -153,9 +154,18 @@ object CatalogWriteScreen extends LazyLogging:
         // `PREPARE p AS INSERT ...; EXECUTE p` composes into an executed write without either
         // statement ever classifying Dml/Ddl or resolving through SqlParser (neither node type has
         // an arm there) -- see the scaladoc's PREPARE/EXECUTE paragraph. Recognized purely by first
-        // token, independently of the classifier's tunable buckets.
+        // token, independently of the classifier's tunable buckets. The snippet is stripped of
+        // comments first (the same `SqlCommentStripper` `StatementClassifier.classify` and
+        // `LockdownScreen.stripLeadingTrivia` already use) -- a raw `.trim` alone lets a leading
+        // `/*x*/` or `-- ...` comment hide the first token and re-open the exact bypass this rule
+        // exists to close, since `classify` strips comments before matching and would otherwise see
+        // a bucket-less `PREPARE`/`EXECUTE` and admit it as `Other`.
         def isPrepareOrExecute(snippet: String): Boolean =
-          val head = snippet.trim.takeWhile(c => !c.isWhitespace && c != ';').toUpperCase
+          val head = SqlCommentStripper
+            .stripComments(snippet)
+            .trim
+            .takeWhile(c => !c.isWhitespace && c != ';')
+            .toUpperCase
           head == "PREPARE" || head == "EXECUTE"
 
         // jsqlparser's `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements`

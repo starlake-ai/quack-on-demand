@@ -37,13 +37,22 @@ object IcebergSetupSql:
     *
     * `readOnly` is a property of the federated-source row (`FederatedSource.readOnly`), not of the
     * catalog connection config, so it arrives as its own parameter rather than living on
-    * `ValidatedIcebergConfig`. When true this emits a bare `READ_ONLY` ATTACH option, which makes
-    * DuckDB refuse writes to this catalog in the engine itself, below SQL parsing - e.g. `INSERT`
+    * `ValidatedIcebergConfig`. When true this emits a bare `READ_ONLY` ATTACH option. What is
+    * proven about that option today: DuckDB accepts it as a recognized Iceberg ATTACH option (a
+    * bogus option fails ATTACH with "Unhandled options found"; this one does not), and DuckDB
+    * enforces read-only below SQL parsing for a FILE-BACKED attach carrying it - e.g. `INSERT`
     * fails with `Cannot execute statement of type "INSERT" on database "..." which is attached in
-    * read-only mode!`. That is the PRIMARY enforcement of read-only for `iceberg_rest` sources;
-    * `CatalogWriteScreen` remains defence in depth on top of it (and is the ONLY enforcement for
-    * free-form `sql` sources, whose ATTACH text QoD does not control - see
-    * `FederatedSource.readOnly`'s scaladoc).
+    * read-only mode!`. Whether the `iceberg` extension's write paths honour that same bit against a
+    * live REST catalog is NOT yet proven end to end; that verification is gated into a separate
+    * task. Until it lands, treat this as the INTENDED primary enforcement of read-only for
+    * `iceberg_rest` sources, not a confirmed one, and keep `CatalogWriteScreen` as defence in depth
+    * regardless (it is also the ONLY enforcement for free-form `sql` sources, whose ATTACH text QoD
+    * does not control). This render call runs at node spawn, so the emitted `READ_ONLY` binds for
+    * the lifetime of the attach: flipping `FederatedSource.readOnly` afterwards does not change an
+    * already-running node's engine-level behaviour until the pool recycles and re-renders this
+    * output, even though `CatalogWriteScreen` re-reads the flag on its own ~60s cache - see
+    * `FederatedSource.readOnly`'s scaladoc for the full two-layer split, including the `CALL`
+    * residual this layer is meant to close.
     */
   def render(v: ValidatedIcebergConfig, readOnly: Boolean = false): String =
     val cfg    = v.config
