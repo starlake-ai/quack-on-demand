@@ -285,6 +285,106 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       .get("encryptionKey") shouldBe Some("live-secret-key")
   }
 
+  it should "mint an encryptionKey for a new encrypted duckdb-file row that supplies none" in {
+    // The REST/MCP path mints a key at PoolSupervisor.createDatabase when the caller declares
+    // encrypted=true and supplies no key. A manifest row expressing the identical intent (fresh
+    // row, encrypted=true, no key anywhere) bypasses PoolSupervisor entirely, so the importer
+    // must mint one itself -- otherwise the spawn script ATTACHes with an empty encryption key
+    // (scripts/spawn-quack-node.sh), silently downgrading a declared-encrypted database to
+    // unencrypted.
+    val s   = new InMemoryControlPlaneStore()
+    val mtd = ManifestTenantDb(
+      name = "acme_fresh",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_fresh", "schemaName" -> "main"), // no encryptionKey
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.listTenantDbs("acme")
+      .find(_.name == "acme_fresh")
+      .get
+      .metastore
+      .get("encryptionKey") shouldBe Symbol("nonEmpty")
+  }
+
+  it should "not let an empty-string encryptionKey in the manifest overwrite a live key" in {
+    // `contains` alone treats a present-but-empty "" the same as a real key ("incoming wins"),
+    // which would silently wipe a live database's key and leave it unopenable. The manifest must
+    // treat an empty string the same as "omitted" and carry the existing key forward.
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-secure",
+        tenantId = "acme",
+        name = "acme_secure",
+        kind = TenantDbKind.DuckDbFile,
+        metastore = Map(
+          "dbName"        -> "acme_secure",
+          "schemaName"    -> "main",
+          "encryptionKey" -> "live-secret-key"
+        ),
+        dataPath = "/tmp/d",
+        encrypted = true
+      )
+    )
+    val mtd = ManifestTenantDb(
+      name = "acme_secure",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_secure", "schemaName" -> "main", "encryptionKey" -> ""),
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s) shouldBe Right(())
+    s.listTenantDbs("acme")
+      .find(_.name == "acme_secure")
+      .get
+      .metastore
+      .get("encryptionKey") shouldBe Some("live-secret-key")
+  }
+
+  it should "refuse turning encryption off on an existing encrypted row, with a clear message" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-secure",
+        tenantId = "acme",
+        name = "acme_secure",
+        kind = TenantDbKind.DuckDbFile,
+        metastore = Map(
+          "dbName"        -> "acme_secure",
+          "schemaName"    -> "main",
+          "encryptionKey" -> "live-secret-key"
+        ),
+        dataPath = "/tmp/d",
+        encrypted = true
+      )
+    )
+    val mtd = ManifestTenantDb(
+      name = "acme_secure",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_secure", "schemaName" -> "main"),
+      dataPath = "/tmp/d",
+      encrypted = false
+    )
+    val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    val res = ManifestImporter.apply(m, s)
+    res.isLeft shouldBe true
+    res.swap.getOrElse(Nil).mkString("\n") should include(
+      "encryption cannot be turned off on an existing database"
+    )
+    // The live row's key must survive the refused apply untouched.
+    s.listTenantDbs("acme")
+      .find(_.name == "acme_secure")
+      .get
+      .metastore
+      .get("encryptionKey") shouldBe Some("live-secret-key")
+  }
+
   it should "sweep node rows when an import drops a pool" in {
     val s = new InMemoryControlPlaneStore()
     // Seed: tenant + tenant-db + pool + one node row, as if a manager had run.

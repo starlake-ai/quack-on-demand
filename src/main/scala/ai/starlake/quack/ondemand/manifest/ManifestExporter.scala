@@ -100,7 +100,7 @@ object ManifestExporter:
           kind = d.kind.wireValue,
           // `encryptionKey` exports redacted like every other SecretKeys member, which means an
           // exported manifest cannot recreate an encrypted duckdb-file database. That is
-          // deliberate: the key must not leave the control plane. Documented in guides/, not
+          // deliberate: the key must not leave the control plane. Documented in README.md, not
           // left to be discovered. Unlike `pgPassword` (also a SecretKeys member but carried
           // verbatim here so a manifest replay can still connect), this key is minted or
           // caller-supplied per database and has no legitimate reason to travel with a backup.

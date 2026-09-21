@@ -483,4 +483,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       "encryption_key" -> Json.fromString("not-allowed-here")
     )
     out.isLeft shouldBe true
+    // Pin the reason, not just that it failed -- a refusal for the wrong cause (a bad tenant,
+    // a name clash, anything else) would still make isLeft pass.
+    out.left.toOption.get should include("kind=ducklake manages its own per-file encryption keys")
   }

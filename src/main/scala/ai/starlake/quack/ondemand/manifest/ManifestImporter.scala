@@ -16,6 +16,7 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.EncryptionKeyGen
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   EmailPolicy,
@@ -288,45 +289,62 @@ object ManifestImporter:
             case Right(dbKind) =>
               val existing = localDbs.get(mtd.name)
               val tdId     = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
-              // ManifestExporter redacts `encryptionKey` out of `metastore` (see the comment
-              // there), unlike every other metastore/objectStore secret, which round-trips
-              // verbatim. Re-importing that redacted manifest onto the SAME row (the ordinary
-              // "declarative apply" path, matched by tenant-db name above) would otherwise wipe
-              // a live encrypted duckdb-file database's key out of the stored metastore map --
-              // carry the existing key forward when the incoming manifest omits it, the same
-              // "no client can round-trip a value it was never shown" rule PoolSupervisor
-              // applies to REST updates via mergeSecretKeys.
-              val metastoreWithKey =
-                if mtd.metastore.contains(TenantDb.EncryptionKeyName) then mtd.metastore
-                else
-                  existing.flatMap(_.metastore.get(TenantDb.EncryptionKeyName)) match
-                    case Some(key) => mtd.metastore.updated(TenantDb.EncryptionKeyName, key)
-                    case None      => mtd.metastore
-              val upserted = TenantDb(
-                id = tdId,
-                tenantId = tenantId,
-                name = mtd.name,
-                kind = dbKind,
-                metastore = metastoreWithKey,
-                dataPath = mtd.dataPath,
-                objectStore = mtd.objectStore,
-                defaultDatabase = mtd.defaultDatabase,
-                defaultSchema = mtd.defaultSchema,
-                initSql = mtd.initSql,
-                encrypted = mtd.encrypted
-              )
-              // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
-              // schemaName keys (they are merged from the default metastore at spawn time), so we
-              // must not enforce required-key presence here. We still reject any interpolation-
-              // breaking metacharacter in the values that ARE supplied, including a semicolon in an
-              // objectStore value (validateSafety covers both).
-              TenantDb.validateSafety(upserted) match
-                case Some(err) =>
-                  errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
-                case None =>
-                  store.upsertTenantDb(upserted)
-                  localDbs.put(mtd.name, upserted)
-                  applyFederatedSources(federatedStore, mtd, tdId, errs)
+              if existing.exists(_.encrypted) && !mtd.encrypted then
+                // `encrypted` is create-time only and can never flip back off. TenantDb's own
+                // encryptionError would also catch this once the existing key is carried forward
+                // below, but its message talks about `encryptionKey`, which is misleading here --
+                // the incoming manifest carries no key at all; the operator is trying to turn
+                // encryption off on a row that already has it on, and that is what must be said.
+                errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': encryption cannot be turned off on an existing database"
+              else
+                // ManifestExporter redacts `encryptionKey` out of `metastore` (see the comment
+                // there), unlike every other metastore/objectStore secret, which round-trips
+                // verbatim. Re-importing that redacted manifest onto the SAME row (the ordinary
+                // "declarative apply" path, matched by tenant-db name above) would otherwise wipe
+                // a live encrypted duckdb-file database's key out of the stored metastore map --
+                // carry the existing key forward when the incoming manifest omits it, the same
+                // "no client can round-trip a value it was never shown" rule PoolSupervisor
+                // applies to REST updates via mergeSecretKeys. A brand-new encrypted duckdb-file
+                // row with no key anywhere (a fresh create via manifest) mints one instead,
+                // mirroring PoolSupervisor's mint-on-create so the same declared intent produces
+                // the same result whether it arrives via REST or a manifest apply.
+                val metastoreWithKey =
+                  if mtd.metastore.get(TenantDb.EncryptionKeyName).exists(_.nonEmpty) then
+                    mtd.metastore
+                  else
+                    existing
+                      .flatMap(_.metastore.get(TenantDb.EncryptionKeyName))
+                      .filter(_.nonEmpty) match
+                      case Some(key) => mtd.metastore.updated(TenantDb.EncryptionKeyName, key)
+                      case None      =>
+                        if mtd.encrypted && dbKind == TenantDbKind.DuckDbFile then
+                          mtd.metastore.updated(TenantDb.EncryptionKeyName, EncryptionKeyGen.mint())
+                        else mtd.metastore
+                val upserted = TenantDb(
+                  id = tdId,
+                  tenantId = tenantId,
+                  name = mtd.name,
+                  kind = dbKind,
+                  metastore = metastoreWithKey,
+                  dataPath = mtd.dataPath,
+                  objectStore = mtd.objectStore,
+                  defaultDatabase = mtd.defaultDatabase,
+                  defaultSchema = mtd.defaultSchema,
+                  initSql = mtd.initSql,
+                  encrypted = mtd.encrypted
+                )
+                // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
+                // schemaName keys (they are merged from the default metastore at spawn time), so we
+                // must not enforce required-key presence here. We still reject any interpolation-
+                // breaking metacharacter in the values that ARE supplied, including a semicolon in an
+                // objectStore value (validateSafety covers both).
+                TenantDb.validateSafety(upserted) match
+                  case Some(err) =>
+                    errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': $err"
+                  case None =>
+                    store.upsertTenantDb(upserted)
+                    localDbs.put(mtd.name, upserted)
+                    applyFederatedSources(federatedStore, mtd, tdId, errs)
         }
 
         // ---- Pools: delete-then-upsert, keyed by (tenant, pool name).
