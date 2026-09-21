@@ -143,11 +143,12 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
-  // tenant-db.id -> the DataPathMismatchException message that blocked it. Populated by
-  // ensureDuckLakeInitialized when the guard refuses a pre-existing dataPath at boot; consulted by
+  // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
+  // encryption disagreement between the control-plane row and the catalog's own metadata).
+  // Populated by ensureDuckLakeInitialized when a pre-init guard refuses at boot; consulted by
   // reconcile() to skip that tenant-db's pools instead of failing every node spawn with the same
-  // DuckDB DATA_PATH error. Cleared by updateTenantDb (remediation) and deleteTenantDb. In-memory
-  // only: a restart also clears it and re-attempts on the next boot.
+  // DuckDB error. Cleared by updateTenantDb (remediation) and deleteTenantDb. In-memory only: a
+  // restart also clears it and re-attempts on the next boot.
   private val dataPathBlocked = TrieMap.empty[String, String]
 
   /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
@@ -506,9 +507,9 @@ final class PoolSupervisor(
           DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td), td.encrypted)
           dataPathBlocked.remove(td.id)
         catch
-          case t: DuckLakeInitializer.DataPathMismatchException =>
-            // Not transient: every future node spawn hits the same DuckDB DATA_PATH error, so log
-            // loudly and block this tenant-db's pools from reconcile()'s spawns (see
+          case t: DuckLakeInitializer.PreInitMismatchException =>
+            // Not transient: every future node spawn hits the same DuckDB DATA_PATH or encryption
+            // error, so log loudly and block this tenant-db's pools from reconcile()'s spawns (see
             // isDataPathBlocked). The loop continues: one bad tenant-db must not abort boot.
             dataPathBlocked.put(td.id, t.getMessage)
             logger.error(s"ensureDuckLakeInitialized: '${td.name}' ${t.getMessage}")
@@ -1371,10 +1372,11 @@ final class PoolSupervisor(
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
                                 catch
-                                  case t: DuckLakeInitializer.DataPathMismatchException =>
-                                    // Not transient: retrying reproduces the DATA_PATH error on
-                                    // every future node spawn, so refuse to create the tenant-db
-                                    // instead of the swallow-and-retry handling below.
+                                  case t: DuckLakeInitializer.PreInitMismatchException =>
+                                    // Not transient: retrying reproduces the DATA_PATH or
+                                    // encryption error on every future node spawn, so refuse to
+                                    // create the tenant-db instead of the swallow-and-retry
+                                    // handling below.
                                     logger.error(
                                       s"createTenantDb: DuckLake pre-init for '$full' refused: " +
                                         t.getMessage

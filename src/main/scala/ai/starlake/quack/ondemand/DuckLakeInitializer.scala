@@ -50,9 +50,11 @@ object DuckLakeInitializer extends LazyLogging:
     * catalog-creating call site (`PoolSupervisor.createTenantDb`) the metastore in hand is the
     * caller-supplied one, which is stamped with `"encrypted" -> "true"` only later by
     * `effectiveMetastoreFor` - relying on the map here would silently create the catalog
-    * unencrypted. Defaults to `false` so every other caller is unaffected.
+    * unencrypted. It carries no default on purpose: a defaulted `false` here is the same
+    * implicit-dangerous-value hazard, one no caller would notice until the catalog was already
+    * created unencrypted and unfixable.
     */
-  def initBlocking(metastore: Map[String, String], encrypted: Boolean = false): Unit =
+  def initBlocking(metastore: Map[String, String], encrypted: Boolean): Unit =
     val dbName   = metastore.getOrElse("dbName", "")
     val dataPath = metastore.getOrElse("dataPath", "")
     if !metastore.contains("pgHost") || dbName.isEmpty || dataPath.isEmpty then
@@ -71,7 +73,7 @@ object DuckLakeInitializer extends LazyLogging:
   /** IO wrapper around [[initBlocking]]. Retained for callers that already compose `IO` (none today
     * inside the codebase - kept for symmetry with the rest of the bootstrap chain).
     */
-  def init(metastore: Map[String, String], encrypted: Boolean = false): IO[Unit] =
+  def init(metastore: Map[String, String], encrypted: Boolean): IO[Unit] =
     IO.blocking(initBlocking(metastore, encrypted))
 
   private def runInit(
@@ -339,14 +341,27 @@ object DuckLakeInitializer extends LazyLogging:
         )
       case _ => None
 
-  /** Raised by [[guardDataPath]] when the effective dataPath this manager is about to ATTACH with
-    * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`. Callers
-    * (`PoolSupervisor`) catch this type specifically to log at ERROR and refuse to proceed, unlike
-    * the generic "first pool spawn will retry" handling for other init failures -- a dataPath
-    * mismatch is not transient and retrying only reproduces the same DuckDB error on every node
-    * spawn.
+  /** A permanent disagreement between what the control-plane row says about a catalog and what the
+    * catalog itself already recorded. Callers (`PoolSupervisor`) catch this type to log at ERROR
+    * and refuse to proceed, unlike the generic "first pool spawn will retry" handling for other
+    * init failures: none of these is transient, and retrying only reproduces the same DuckDB error
+    * on every node spawn, forever.
     */
-  final case class DataPathMismatchException(message: String) extends RuntimeException(message)
+  sealed abstract class PreInitMismatchException(message: String) extends RuntimeException(message)
+
+  /** Raised by [[guardDataPath]] when the effective dataPath this manager is about to ATTACH with
+    * does not match the dataPath already recorded in the tenant-db's `ducklake_metadata`.
+    */
+  final case class DataPathMismatchException(message: String)
+      extends PreInitMismatchException(message)
+
+  /** Raised by [[guardEncryption]] when the tenant-db row's `encrypted` flag disagrees with the
+    * catalog's recorded `ducklake_metadata.encrypted`. Permanent by construction: DuckLake stamps
+    * `encrypted` once, at catalog creation, and neither engine can encrypt or decrypt an existing
+    * catalog in place.
+    */
+  final case class EncryptionMismatchException(message: String)
+      extends PreInitMismatchException(message)
 
   /** Strict URI scheme prefix, e.g. `s3://`, `gs://`, `az://`. Mirrors the scheme regex
     * `PoolSupervisor.replaceLastSegment` uses for the same "is this a URI root" question.
@@ -421,15 +436,25 @@ object DuckLakeInitializer extends LazyLogging:
           )
       }
 
-  /** Resolves the schema holding `ducklake_metadata` and reads the `value` recorded for `key`, or
-    * `None` when the table does not exist yet (a fresh catalog) or has no row for that key. Schema
-    * resolution mirrors `BranchCloner.metaSchema`: prefer `public` when the table exists in more
-    * than one schema, otherwise take whichever schema has it.
+  /** What a `ducklake_metadata` lookup actually found. Three answers rather than two: a catalog
+    * with no `ducklake_metadata` table at all is a fresh one, whereas a table that exists but
+    * carries no row for the key is an ESTABLISHED catalog that simply never recorded that key.
+    * Collapsing both into `None` would leave [[guardEncryption]] blind in the one case it exists
+    * for, an encrypted tenant-db row pointed at a catalog whose creation never wrote the key.
     */
-  private[ondemand] def readMetadataValue(
+  private[ondemand] enum MetadataRead:
+    case NoTable
+    case NoRow
+    case Value(value: String)
+
+  /** Resolves the schema holding `ducklake_metadata` and reads the `value` recorded for `key`.
+    * Schema resolution mirrors `BranchCloner.metaSchema`: prefer `public` when the table exists in
+    * more than one schema, otherwise take whichever schema has it.
+    */
+  private[ondemand] def readMetadata(
       pgConn: java.sql.Connection,
       key: String
-  ): Option[String] =
+  ): MetadataRead =
     val schemaStmt = pgConn.prepareStatement(
       "SELECT table_schema FROM information_schema.tables WHERE table_name = 'ducklake_metadata' " +
         "ORDER BY (table_schema = 'public') DESC LIMIT 1"
@@ -440,29 +465,77 @@ object DuckLakeInitializer extends LazyLogging:
         try if rs.next() then Some(rs.getString(1)) else None
         finally rs.close()
       finally schemaStmt.close()
-    schemaOpt.flatMap { schema =>
-      val valueStmt = pgConn.prepareStatement(
-        s"SELECT value FROM ${quoteIdent(schema)}.ducklake_metadata WHERE key = ? LIMIT 1"
-      )
-      try
-        valueStmt.setString(1, key)
-        val rs = valueStmt.executeQuery()
-        try if rs.next() then Some(rs.getString(1)) else None
-        finally rs.close()
-      finally valueStmt.close()
-    }
+    schemaOpt match
+      case None         => MetadataRead.NoTable
+      case Some(schema) =>
+        val valueStmt = pgConn.prepareStatement(
+          s"SELECT value FROM ${quoteIdent(schema)}.ducklake_metadata WHERE key = ? LIMIT 1"
+        )
+        try
+          valueStmt.setString(1, key)
+          val rs = valueStmt.executeQuery()
+          try
+            // A row whose value is SQL NULL is no recorded value at all, and reads the same as a
+            // missing row rather than producing a null-bearing Value.
+            val found = if rs.next() then Option(rs.getString(1)) else None
+            found.fold[MetadataRead](MetadataRead.NoRow)(MetadataRead.Value(_))
+          finally rs.close()
+        finally valueStmt.close()
+
+  /** True once the catalog has recorded its own `data_path`, i.e. a DuckLake ATTACH has committed
+    * the metadata rows. [[guardEncryption]] runs BEFORE the advisory lock, so it can observe a
+    * concurrent initializer mid-creation; this is the gate that keeps that race from reading as a
+    * mismatch.
+    */
+  private[ondemand] def catalogEstablished(pgConn: java.sql.Connection): Boolean =
+    readMetadata(pgConn, "data_path") match
+      case MetadataRead.Value(_) => true
+      case _                     => false
+
+  /** Folds a [[readMetadata]] answer for the `encrypted` key into the value [[encryptionMismatch]]
+    * compares against.
+    *
+    * `NoRow` on an established catalog means the catalog exists and never recorded the key; read
+    * that as unencrypted. DuckLake as of DuckDB 08e34c447b writes `encrypted='false'` explicitly
+    * (see `DuckLakeInitializerRaceSpec`, which observes it against a real ATTACH), so this arm is
+    * defensive today; it is what keeps the guard from being silently neutered if a release ever
+    * omits the key, which would be exactly the case the guard was written for. `NoRow` on a catalog
+    * that is not established yet is a concurrent initializer's half-written metadata: nothing to
+    * compare.
+    */
+  private[ondemand] def recordedEncryption(
+      read: MetadataRead,
+      established: Boolean
+  ): Option[String] =
+    read match
+      case MetadataRead.Value(v)             => Some(v)
+      case MetadataRead.NoRow if established => Some("false")
+      case MetadataRead.NoRow                => None
+      case MetadataRead.NoTable              => None
 
   /** Fails fast when the catalog's recorded encryption disagrees with the tenant-db row. Reads
     * through the same connection and at the same point as [[guardDataPath]], before the advisory
-    * lock, so the failure is one clear message rather than DuckLake's raw error once per spawn. A
-    * catalog with no `ducklake_metadata` yet is a fresh one: nothing to compare.
+    * lock, so the failure is one clear message rather than DuckLake's raw error once per spawn.
+    *
+    * A catalog with no `ducklake_metadata` yet is a fresh one: nothing to compare. A catalog that
+    * HAS the table but no `encrypted` row is read through [[recordedEncryption]], which treats it
+    * as unencrypted once the catalog is established.
+    *
+    * Throws [[EncryptionMismatchException]] rather than a bare `RuntimeException` so callers can
+    * tell this permanent misconfiguration apart from a transient init failure, exactly as they do
+    * for [[DataPathMismatchException]]. Routing it into the retry path would let reconcile keep
+    * spawning nodes that each reproduce the mismatch, which is the outcome this guard exists to
+    * prevent.
     */
-  private def guardEncryption(
+  private[ondemand] def guardEncryption(
       pgConn: java.sql.Connection,
       dbName: String,
       encrypted: Boolean
   ): Unit =
-    val recorded = readMetadataValue(pgConn, "encrypted")
-    encryptionMismatch(recorded, encrypted).foreach { msg =>
-      sys.error(s"DuckLake catalog '$dbName': $msg")
+    val read        = readMetadata(pgConn, "encrypted")
+    val established = read match
+      case MetadataRead.NoRow => catalogEstablished(pgConn)
+      case _                  => false
+    encryptionMismatch(recordedEncryption(read, established), encrypted).foreach { msg =>
+      throw EncryptionMismatchException(s"DuckLake catalog '$dbName': $msg")
     }
