@@ -570,12 +570,16 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
+    if mgrCfg.requireEncryption then
+      logger.info("encryption at rest is REQUIRED for new databases (QOD_REQUIRE_ENCRYPTION=true)")
+
     val tenantDbs = new TenantDbHandlers(
       sup,
       manifestFedStore,
       catalog = catalogHandlers,
       audit = auditRecorder,
-      managedEnabled = mgrCfg.managedObjectStore.enabled
+      managedEnabled = mgrCfg.managedObjectStore.enabled,
+      requireEncryption = mgrCfg.requireEncryption
     )
 
     // REST surface only; the scheduler + drain-loop fibers start later with the duty fibers.

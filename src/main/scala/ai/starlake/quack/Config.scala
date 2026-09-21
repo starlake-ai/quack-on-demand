@@ -563,6 +563,14 @@ final case class ManagerConfig(
     )
     publicBaseUrl: String = "",
     @field @ConfigField(
+      envVar = "QOD_REQUIRE_ENCRYPTION",
+      description =
+        "Refuse `database/create` unless the caller asks for encryption at rest. Gates creates " +
+          "only: existing databases are untouched, so turning this on never bricks a running " +
+          "deployment."
+    )
+    requireEncryption: Boolean = false,
+    @field @ConfigField(
       envVar = "QOD_SESSION_IDLE_TTL_SEC",
       description =
         "UI session idle TTL in seconds. A session unused for this long is dropped on the next " +
