@@ -111,6 +111,51 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.latched(node.nodeId, startedAtMs) shouldBe false
   }
 
+  // The error text DuckDB hands back carries the catalog's HTTP response body verbatim, and a
+  // catalog that echoes the `Authorization: Basic base64(client_id:client_secret)` header it
+  // received therefore puts the plaintext client secret in it. Redaction happens BEFORE the
+  // registry stores it (and before the WARN), because both of those outlive the request.
+  it should "scrub the rendered block's credentials out of the error it stores" in {
+    val secret = "SENTINEL_CLIENT_SECRET_AAA111"
+    val basic  = java.util.Base64.getEncoder.encodeToString(
+      s"cid:$secret".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    )
+    val reg = new AttachStatusRegistry()
+    val v   = new IcebergAttachVerifier(
+      sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      renderOne = _ =>
+        IO.pure(
+          "CREATE OR REPLACE SECRET \"qod_ice_sales\" (\n  TYPE ICEBERG,\n" +
+            s"  CLIENT_ID 'cid',\n  CLIENT_SECRET '$secret'\n);"
+        ),
+      runOnNode = (_, _) =>
+        IO.pure(
+          Left(
+            "Invalid Configuration Error: Could not get token from https://idp/v1/oauth/tokens: " +
+              s"""HTTP Unauthorized_401 - {"message": "rejected Basic $basic, secret was $secret"}"""
+          )
+        ),
+      listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      registry = reg
+    )
+    v.verify(node).unsafeRunSync()
+    val stored = reg.failuresFor(node.nodeId, startedAtMs).head.error
+    stored should not include secret
+    stored should not include basic
+    // The diagnostic itself must survive: redaction is surgical, not a blanket drop.
+    stored should include("Could not get token from https://idp/v1/oauth/tokens")
+    stored should include("Unauthorized_401")
+  }
+
+  it should "report a legacy mixed-case alias as declared, not lowercased" in {
+    val rec      = new Recorder
+    val (v, reg) = verifier(List(iceSrc("Sales_Lake")), Set("acme_db"), rec.run(Left("boom")))
+    v.verify(node).unsafeRunSync()
+    reg.failuresFor(node.nodeId, startedAtMs).map(_.alias) shouldBe List("Sales_Lake")
+    // The lookup key stays normalized, so the operator summary still finds it.
+    reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "failed on 1 of 1 nodes"
+  }
+
   it should "stay unlatched and retry on the next tick while an alias is missing" in {
     val rec    = new Recorder
     val reg    = new AttachStatusRegistry(baseBackoffMs = 0L, maxBackoffMs = 0L)

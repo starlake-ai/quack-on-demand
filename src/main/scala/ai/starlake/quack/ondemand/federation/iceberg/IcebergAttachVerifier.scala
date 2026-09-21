@@ -112,23 +112,34 @@ final class IcebergAttachVerifier(
                   s"attach verify ${node.nodeId}: catalog '${src.alias}' attached on retry"
                 )
               }
-            case Left(err) => note(node, startedAtMs, src, err)
+            // The credentials come from the SQL we just rendered, so `note` can scrub the exact
+            // values this attempt handed DuckDB out of whatever the catalog echoed back.
+            case Left(err) =>
+              note(node, startedAtMs, src, err, AttachErrorRedactor.credentialsIn(sql))
           }
       }
 
+  /** The ONE funnel every stored attach error goes through, which is why the redaction lives here
+    * rather than at the REST rendering sites: the registry entry AND the WARN below both get the
+    * scrubbed text, so neither the API response nor the manager log can carry a credential a
+    * hostile or merely verbose catalog echoed back. See [[AttachErrorRedactor]] for the proven
+    * vector.
+    */
   private def note(
       node: RunningNode,
       startedAtMs: Long,
       src: FederatedSource,
-      err: String
+      err: String,
+      credentials: Set[String] = Set.empty
   ): IO[Unit] =
     IO.delay {
-      val noteworthy = registry.recordFailure(node.nodeId, startedAtMs, src.alias, err)
+      val safe       = AttachErrorRedactor.scrub(err, credentials)
+      val noteworthy = registry.recordFailure(node.nodeId, startedAtMs, src.alias, safe)
       if noteworthy then
         logger.warn(
           s"iceberg catalog '${src.alias}' is NOT attached on node ${node.nodeId} " +
             s"(tenant=${node.poolKey.tenant} db=${node.poolKey.tenantDb} " +
-            s"pool=${node.poolKey.pool}): $err"
+            s"pool=${node.poolKey.pool}): $safe"
         )
     }
 

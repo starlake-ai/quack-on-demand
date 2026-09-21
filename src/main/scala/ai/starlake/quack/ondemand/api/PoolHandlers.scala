@@ -21,8 +21,11 @@ final class PoolHandlers(
     // Declared-but-unattached Iceberg catalogs for one node INCARNATION, from the in-memory
     // AttachStatusRegistry (Task 7). Inert default so every existing caller/test keeps compiling;
     // Main wires it from the registry, keyed on (nodeId, startedAt) so a respawned node under the
-    // same slot id does not inherit its predecessor's failures. Never allowed to fail this
-    // endpoint: any lookup error should be swallowed by the caller into an empty list.
+    // same slot id does not inherit its predecessor's failures. Called UNGUARDED below, like the
+    // load/latency/engine lookups beside it: this is the surface whose whole purpose is to make a
+    // silent attach failure visible, so degrading a broken lookup into "no failures" would
+    // reproduce exactly the bug the feature exists to catch. A lookup that can throw belongs
+    // guarded (and logged) at the wiring site, where the failure can still be said out loud.
     attachFailuresOf: (String, java.time.Instant) => List[CatalogAttachFailureDto] = (_, _) => Nil
 ):
 
@@ -74,8 +77,7 @@ final class PoolHandlers(
             duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
             duckdbSpillFiles = engine.map(_.spillFiles),
             duckdbSpillBytes = engine.map(_.spillBytes),
-            catalogAttachFailures =
-              scala.util.Try(attachFailuresOf(n.nodeId, n.startedAt)).getOrElse(Nil)
+            catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt)
           )
         },
         status = if p.disabled then "disabled" else "ready",

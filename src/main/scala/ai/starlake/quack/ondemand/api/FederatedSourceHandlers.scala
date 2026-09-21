@@ -24,7 +24,11 @@ import sttp.model.StatusCode
   *   keyed on (tenantDbId, alias): the live attach state of one federated source aggregated across
   *   its pool's nodes, from the in-memory AttachStatusRegistry (Task 7) -- `"attached"`,
   *   `"unknown"`, or `"failed on N of M nodes"`. Replica-local like [[PoolHandlers]]'s
-  *   `attachFailuresOf`; inert default so existing callers/tests keep compiling.
+  *   `attachFailuresOf`; inert default so existing callers/tests keep compiling. Consulted ONLY for
+  *   enabled `iceberg_rest` rows, which is exactly what `IcebergAttachVerifier` looks at: a `sql`
+  *   row or a disabled one has no attach state at all, and reporting `"unknown"` for it forever
+  *   reads as "we could not tell" rather than the truthful "does not apply". Called unguarded, same
+  *   reasoning as [[PoolHandlers]]'s `attachFailuresOf`.
   */
 final class FederatedSourceHandlers(
     fedStore: FederatedSourceOps,
@@ -67,7 +71,10 @@ final class FederatedSourceHandlers(
       sourceType = s.sourceType.wire,
       config = s.config.flatMap(j => IcebergRestConfig.fromJson(j).toOption),
       readOnly = s.readOnly,
-      attachStatus = scala.util.Try(attachStatusOf(s.tenantDbId, s.alias)).getOrElse(None)
+      attachStatus =
+        if s.sourceType == FederatedSourceType.IcebergRest && !s.disabled then
+          attachStatusOf(s.tenantDbId, s.alias)
+        else None
     )
 
   /** Turn the request's loose wire fields into a validated [[FederatedSource]], or the 400 that

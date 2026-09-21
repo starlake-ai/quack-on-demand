@@ -6686,6 +6686,24 @@ components:
           type: boolean
         reason:
           type: string
+    CatalogAttachFailureDto:
+      title: CatalogAttachFailureDto
+      type: object
+      required:
+      - alias
+      - error
+      - at
+      - attempts
+      properties:
+        alias:
+          type: string
+        error:
+          type: string
+        at:
+          type: string
+        attempts:
+          type: integer
+          format: int32
     CatalogColumnEntry:
       title: CatalogColumnEntry
       type: object
@@ -7928,6 +7946,10 @@ components:
         duckdbSpillBytes:
           type: integer
           format: int64
+        catalogAttachFailures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogAttachFailureDto'
     NodeOpRequest:
       title: NodeOpRequest
       type: object

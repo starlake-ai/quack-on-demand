@@ -636,3 +636,35 @@ class FederatedSourceHandlersSpec
       out.sources.find(_.alias == "sales_lake").value.attachStatus shouldBe
         Some("failed on 1 of 2 nodes")
     }
+
+  it should "leave attachStatus unset for a sql source and for a disabled iceberg one" in
+    withEnv { (fs, resolver, tdId) =>
+      // The registry answers for EVERY alias it is asked about, so if the handler asked, the
+      // assertions below would read Some("unknown") instead of None.
+      val h = new FederatedSourceHandlers(
+        fedStore = fs,
+        resolver = resolver,
+        catalogAliasOf = _ => None,
+        attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
+      )
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(alias = "pg_src", setupSql = Some("ATTACH 'x';")),
+        None
+      ).unsafeRunSync()
+      h.createSource(
+        "acme",
+        "acme_prod",
+        iceReq(alias = "off_lake").copy(disabled = true),
+        None
+      ).unsafeRunSync()
+      h.createSource("acme", "acme_prod", iceReq(), None).unsafeRunSync()
+
+      val out = h.listSources("acme", "acme_prod").unsafeRunSync().toOption.value
+      out.sources.find(_.alias == "pg_src").value.attachStatus shouldBe None
+      out.sources.find(_.alias == "off_lake").value.attachStatus shouldBe None
+      // The enabled iceberg row in the same response still reports, so the gate is on the row's
+      // own type/disabled state and not on the whole call.
+      out.sources.find(_.alias == "sales_lake").value.attachStatus shouldBe Some("unknown")
+    }

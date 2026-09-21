@@ -36,7 +36,17 @@ final class AttachStatusRegistry(
     maxBackoffMs: Long = 300000L
 ):
 
-  private final case class Entry(error: String, at: Instant, attempts: Int, lastAttemptMs: Long)
+  /** `alias` is the alias AS DECLARED by the caller, kept alongside the normalized map key so
+    * [[failuresFor]] can report a legacy mixed-case alias the way the operator wrote it instead of
+    * the lowercased lookup key.
+    */
+  private final case class Entry(
+      alias: String,
+      error: String,
+      at: Instant,
+      attempts: Int,
+      lastAttemptMs: Long
+  )
 
   // (nodeId, startedAt-epoch-millis): identifies one node INCARNATION, not just its slot.
   private type NodeKey = (String, Long)
@@ -71,7 +81,7 @@ final class AttachStatusRegistry(
     val prev       = Option(failures.get(key))
     val attempts   = prev.map(_.attempts + 1).getOrElse(1)
     val noteworthy = prev.forall(_.error != error)
-    failures.put(key, Entry(error, Instant.ofEpochMilli(nowMs), attempts, nowMs))
+    failures.put(key, Entry(alias, error, Instant.ofEpochMilli(nowMs), attempts, nowMs))
     complete.remove((nodeId, startedAtMs))
     noteworthy
 
@@ -119,8 +129,8 @@ final class AttachStatusRegistry(
     val key = (nodeId, startedAtMs)
     failures.asScala.toList
       .collect {
-        case ((k, alias), e) if k == key =>
-          CatalogAttachFailure(alias, e.error, e.at, e.attempts)
+        case ((k, _), e) if k == key =>
+          CatalogAttachFailure(e.alias, e.error, e.at, e.attempts)
       }
       .sortBy(_.alias)
 
@@ -132,10 +142,15 @@ final class AttachStatusRegistry(
   def aliasSummary(alias: String, nodeIds: Set[String]): Option[String] =
     if nodeIds.isEmpty then Some("unknown")
     else
-      val a       = normalize(alias)
-      val failing =
-        nodeIds.count(n => failures.keySet().asScala.exists(k => k._1._1 == n && k._2 == a))
-      val ok = nodeIds.count(n => attached.asScala.exists(k => k._1._1 == n && k._2 == a))
+      val a = normalize(alias)
+      // One pass over each index, projected down to the node ids that carry this alias, rather
+      // than rescanning the whole index once per node id: `listSources` calls this per source, so
+      // the naive form was O(sources x nodes x entries) on a single GET.
+      val failingNodes =
+        failures.keySet().asScala.collect { case ((n, _), al) if al == a => n }.toSet
+      val okNodes = attached.asScala.collect { case ((n, _), al) if al == a => n }.toSet
+      val failing = nodeIds.count(failingNodes.contains)
+      val ok      = nodeIds.count(okNodes.contains)
       if failing > 0 then Some(s"failed on $failing of ${nodeIds.size} nodes")
       else if ok == nodeIds.size then Some("attached")
       else Some("unknown")

@@ -1287,22 +1287,32 @@ object Main extends IOApp with LazyLogging:
           }
         // Aggregated across the tenant-db's pool(s): a tenant-db id resolves to zero or more live
         // PoolStates, whose nodes' incarnations are looked up in the same AttachStatusRegistry the
-        // node endpoint reads (attachFailuresOf above). Never allowed to fail this endpoint --
-        // aliasSummary's own None ("unknown") is the fallback, and the lookup itself is guarded.
+        // node endpoint reads (attachFailuresOf above). This is the one guarded lookup on the
+        // attach-reporting path, because unlike the handler-side calls it does real work
+        // (supervisor map reads plus a scan) -- and it LOGS rather than swallowing, so a lookup
+        // that starts throwing cannot masquerade as a healthy catalog in silence. Both supervisor
+        // calls are plain in-memory map reads, so the per-source re-derivation costs a filter over
+        // the pool map; hoisting it would mean reshaping the handler's parameter, which is not
+        // worth it at this cost.
         val attachStatusOf: (String, String) => Option[String] = (tenantDbId, alias) =>
-          scala.util
-            .Try {
-              sup.getTenantDbById(tenantDbId) match
-                case None     => None
-                case Some(td) =>
-                  val nodeIds = sup
-                    .list()
-                    .filter(st => st.key.tenant == td.tenantId && st.key.tenantDb == td.name)
-                    .flatMap(_.nodes.map(_.nodeId))
-                    .toSet
-                  attachRegistry.aliasSummary(alias, nodeIds)
-            }
-            .getOrElse(None)
+          scala.util.Try {
+            sup.getTenantDbById(tenantDbId) match
+              case None     => None
+              case Some(td) =>
+                val nodeIds = sup
+                  .list()
+                  .filter(st => st.key.tenant == td.tenantId && st.key.tenantDb == td.name)
+                  .flatMap(_.nodes.map(_.nodeId))
+                  .toSet
+                attachRegistry.aliasSummary(alias, nodeIds)
+          } match
+            case scala.util.Success(v) => v
+            case scala.util.Failure(t) =>
+              logger.warn(
+                s"attach status lookup failed for tenant-db $tenantDbId alias '$alias': " +
+                  t.getMessage
+              )
+              None
         Some(
           new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
             fedHandlersStore,
