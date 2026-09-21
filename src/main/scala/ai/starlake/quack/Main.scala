@@ -24,7 +24,7 @@ import ai.starlake.quack.boot.{
 }
 import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
-import ai.starlake.quack.model.{Names, TenantDb}
+import ai.starlake.quack.model.{Names, RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -777,7 +777,60 @@ object Main extends IOApp with LazyLogging:
     // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
     // recorded, so the next tick retries the (idempotent) CREATE.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
-    val healthProbe  = new HealthProbe(
+
+    val attachRegistry = new ai.starlake.quack.ondemand.federation.iceberg.AttachStatusRegistry()
+
+    // Reads one node's attached catalogs. The quack wire can emit a schema-only first batch, so
+    // batches are drained rather than assuming the first carries rows (same reason EngineStats
+    // loops). Fail-soft: any surprise becomes a Left, never an exception.
+    def nodeCatalogs(n: RunningNode): IO[Either[String, Set[String]]] =
+      adapter
+        .send(n, "SELECT database_name FROM duckdb_databases()", session = None, recordLoad = false)
+        .map {
+          case QuackResponse.Failed(err, _)     => Left(err.toString)
+          case QuackResponse.Ok(rows, _, close) =>
+            try
+              val acc = scala.collection.mutable.Set.empty[String]
+              while rows.loadNextBatch() do
+                val root = rows.getVectorSchemaRoot
+                val vec  = root.getFieldVectors.get(0)
+                var i    = 0
+                while i < root.getRowCount do
+                  Option(vec.getObject(i)).foreach(v => acc += v.toString)
+                  i += 1
+              Right(acc.toSet)
+            catch case t: Throwable => Left(s"could not decode duckdb_databases(): ${t.getMessage}")
+            finally close()
+        }
+        .handleError(t => Left(t.getMessage))
+
+    val attachVerifier = manifestFedStore match
+      case Some(fedStore) =>
+        val builder = new FederationBlobBuilder(
+          loadEnabled = tdId => IO.blocking(fedStore.listEnabledSources(tdId)),
+          loadSecrets = sid => IO.blocking(fedStore.listSecrets(sid)),
+          resolver = secretResolver
+        )
+        Some(
+          new ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier(
+            sourcesOf = key =>
+              sup
+                .findTenantDb(key.tenant, key.tenantDb)
+                .map(td => fedStore.listEnabledSources(td.id))
+                .getOrElse(Nil),
+            renderOne = src => builder.buildOne(src),
+            runOnNode = (n, sql) =>
+              adapter.send(n, sql, session = None, recordLoad = false).map {
+                case QuackResponse.Ok(_, _, close) => close(); Right(())
+                case QuackResponse.Failed(err, _)  => Left(err.toString)
+              },
+            listCatalogs = nodeCatalogs,
+            registry = attachRegistry
+          )
+        )
+      case None => None
+
+    val healthProbe = new HealthProbe(
       tracker,
       n => {
         val initSql =
@@ -818,9 +871,12 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
-      // Piggyback the engine-stats scrape on each healthy tick; fail-soft.
+      // Piggyback the engine-stats scrape and the Iceberg attach verifier on each healthy tick;
+      // both are fail-soft (HealthProbe swallows onHealthy errors, so neither can flip the health
+      // flag).
       onHealthy = n =>
-        adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st)))
+        adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st))) *>
+          attachVerifier.fold(IO.unit)(_.verify(n).handleErrorWith(_ => IO.unit))
     )
 
     def runWithMetrics(
