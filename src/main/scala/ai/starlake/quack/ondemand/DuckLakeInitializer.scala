@@ -447,25 +447,27 @@ object DuckLakeInitializer extends LazyLogging:
     case NoRow
     case Value(value: String)
 
-  /** Resolves the schema holding `ducklake_metadata` and reads the `value` recorded for `key`.
-    * Schema resolution mirrors `BranchCloner.metaSchema`: prefer `public` when the table exists in
-    * more than one schema, otherwise take whichever schema has it.
+  /** The schema holding `ducklake_metadata`, or None when no schema has it. Mirrors
+    * `BranchCloner.metaSchema`: prefer `public` when the table exists in more than one schema,
+    * otherwise take whichever schema has it.
     */
-  private[ondemand] def readMetadata(
-      pgConn: java.sql.Connection,
-      key: String
-  ): MetadataRead =
+  private def metadataSchema(pgConn: java.sql.Connection): Option[String] =
     val schemaStmt = pgConn.prepareStatement(
       "SELECT table_schema FROM information_schema.tables WHERE table_name = 'ducklake_metadata' " +
         "ORDER BY (table_schema = 'public') DESC LIMIT 1"
     )
-    val schemaOpt =
-      try
-        val rs = schemaStmt.executeQuery()
-        try if rs.next() then Some(rs.getString(1)) else None
-        finally rs.close()
-      finally schemaStmt.close()
-    schemaOpt match
+    try
+      val rs = schemaStmt.executeQuery()
+      try if rs.next() then Some(rs.getString(1)) else None
+      finally rs.close()
+    finally schemaStmt.close()
+
+  /** Resolves the schema holding `ducklake_metadata` and reads the `value` recorded for `key`. */
+  private[ondemand] def readMetadata(
+      pgConn: java.sql.Connection,
+      key: String
+  ): MetadataRead =
+    metadataSchema(pgConn) match
       case None         => MetadataRead.NoTable
       case Some(schema) =>
         val valueStmt = pgConn.prepareStatement(
@@ -482,15 +484,42 @@ object DuckLakeInitializer extends LazyLogging:
           finally rs.close()
         finally valueStmt.close()
 
-  /** True once the catalog has recorded its own `data_path`, i.e. a DuckLake ATTACH has committed
-    * the metadata rows. [[guardEncryption]] runs BEFORE the advisory lock, so it can observe a
-    * concurrent initializer mid-creation; this is the gate that keeps that race from reading as a
-    * mismatch.
+  /** Both answers [[guardEncryption]] needs, from ONE statement: what the catalog recorded for
+    * `encrypted`, and whether it is established (has recorded its own `data_path`, i.e. a DuckLake
+    * ATTACH has committed the metadata rows).
+    *
+    * One statement rather than two because this guard runs BEFORE the advisory lock, so it can
+    * observe a concurrent initializer mid-creation. Read separately, a competing ATTACH committing
+    * between them yields `encrypted` = NoRow followed by `data_path` = present, which
+    * [[recordedEncryption]] reads as "established and unencrypted": a genuinely encrypted catalog
+    * then fails an encrypted tenant-db row with a spurious mismatch, and since the resulting block
+    * is in-memory, it holds until a manager restart. Reading both keys in one snapshot makes that
+    * interleaving unrepresentable.
     */
-  private[ondemand] def catalogEstablished(pgConn: java.sql.Connection): Boolean =
-    readMetadata(pgConn, "data_path") match
-      case MetadataRead.Value(_) => true
-      case _                     => false
+  private[ondemand] def readEncryptionState(
+      pgConn: java.sql.Connection
+  ): (MetadataRead, Boolean) =
+    metadataSchema(pgConn) match
+      case None         => (MetadataRead.NoTable, false)
+      case Some(schema) =>
+        val stmt = pgConn.prepareStatement(
+          s"SELECT key, value FROM ${quoteIdent(schema)}.ducklake_metadata " +
+            "WHERE key IN ('encrypted', 'data_path')"
+        )
+        try
+          val rs = stmt.executeQuery()
+          try
+            // Same NULL handling as readMetadata: a row whose value is SQL NULL is no recorded
+            // value at all, so it never enters the map and reads as a missing row.
+            val found = scala.collection.mutable.Map.empty[String, String]
+            while rs.next() do
+              val k = rs.getString(1)
+              Option(rs.getString(2)).foreach(v => found.put(k, v))
+            val read =
+              found.get("encrypted").fold[MetadataRead](MetadataRead.NoRow)(MetadataRead.Value(_))
+            (read, found.contains("data_path"))
+          finally rs.close()
+        finally stmt.close()
 
   /** Folds a [[readMetadata]] answer for the `encrypted` key into the value [[encryptionMismatch]]
     * compares against.
@@ -532,10 +561,7 @@ object DuckLakeInitializer extends LazyLogging:
       dbName: String,
       encrypted: Boolean
   ): Unit =
-    val read        = readMetadata(pgConn, "encrypted")
-    val established = read match
-      case MetadataRead.NoRow => catalogEstablished(pgConn)
-      case _                  => false
+    val (read, established) = readEncryptionState(pgConn)
     encryptionMismatch(recordedEncryption(read, established), encrypted).foreach { msg =>
       throw EncryptionMismatchException(s"DuckLake catalog '$dbName': $msg")
     }

@@ -5,6 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.sql.{Connection, DriverManager}
+import java.util.concurrent.atomic.AtomicInteger
 
 /** TDD coverage for [[DuckLakeInitializer.guardEncryption]] and the metadata read it stands on, the
   * check that refuses to ATTACH a tenant-db's DuckLake catalog when the control-plane row's
@@ -71,6 +72,24 @@ class DuckLakeEncryptionGuardSpec extends AnyFlatSpec with Matchers:
   private def established(conn: Connection, schema: String = "public"): Unit =
     seed(conn, "data_path", "/data/some_db", schema)
 
+  /** A pass-through Connection that counts the VALUE reads of `ducklake_metadata`, i.e. the
+    * schema-qualified `FROM "<schema>".ducklake_metadata` statements. The information_schema lookup
+    * that resolves that schema names the table too, as a string literal, and is deliberately not
+    * counted: the race this guards against is between the two value reads, and a catalog whose
+    * metadata table does not exist yet has nothing to compare either way.
+    */
+  private def countingConn(real: Connection, counter: AtomicInteger): Connection =
+    java.lang.reflect.Proxy
+      .newProxyInstance(
+        classOf[Connection].getClassLoader,
+        Array(classOf[Connection]),
+        (_, method, args) =>
+          if method.getName == "prepareStatement" && args != null && args.length > 0 then
+            if String.valueOf(args(0)).contains(".ducklake_metadata") then counter.incrementAndGet()
+          if args == null then method.invoke(real) else method.invoke(real, args*)
+      )
+      .asInstanceOf[Connection]
+
   // ---------- readMetadata: three answers, not two ----------
 
   "readMetadata" should "report NoTable on a catalog with no ducklake_metadata at all" in
@@ -103,18 +122,46 @@ class DuckLakeEncryptionGuardSpec extends AnyFlatSpec with Matchers:
         DuckLakeInitializer.MetadataRead.Value("true")
     }
 
-  "catalogEstablished" should "be false before the creating ATTACH recorded data_path" in
+  // ---------- readEncryptionState: both answers from ONE snapshot ----------
+
+  "readEncryptionState" should "report not-established before the creating ATTACH recorded data_path" in
     withFreshDb { conn =>
-      DuckLakeInitializer.catalogEstablished(conn) shouldBe false
+      DuckLakeInitializer.readEncryptionState(conn) shouldBe
+        (DuckLakeInitializer.MetadataRead.NoTable, false)
       createMetadata(conn)
-      DuckLakeInitializer.catalogEstablished(conn) shouldBe false
+      DuckLakeInitializer.readEncryptionState(conn) shouldBe
+        (DuckLakeInitializer.MetadataRead.NoRow, false)
     }
 
-  it should "be true once data_path is recorded" in
+  it should "report established once data_path is recorded" in
     withFreshDb { conn =>
       createMetadata(conn)
       established(conn)
-      DuckLakeInitializer.catalogEstablished(conn) shouldBe true
+      DuckLakeInitializer.readEncryptionState(conn) shouldBe
+        (DuckLakeInitializer.MetadataRead.NoRow, true)
+      seed(conn, "encrypted", "true")
+      DuckLakeInitializer.readEncryptionState(conn) shouldBe
+        (DuckLakeInitializer.MetadataRead.Value("true"), true)
+    }
+
+  /** The reason this helper exists at all. The guard runs BEFORE the advisory lock, so a concurrent
+    * initializer can commit between two separate reads: `encrypted` would come back NoRow, then
+    * `data_path` would come back present, and an encrypted catalog would read as an established
+    * unencrypted one -- a spurious mismatch that blocks the tenant-db's pools until a manager
+    * restart, because the block is in-memory. One statement makes that unrepresentable, so the
+    * count is the property under test, not an implementation detail.
+    */
+  it should "read both keys with a single ducklake_metadata statement" in
+    withFreshDb { conn =>
+      // An established catalog with NO `encrypted` row: the one shape that used to take a second
+      // read (the `encrypted` lookup answered NoRow, then a separate data_path lookup decided
+      // whether the catalog was established), so this case fails against the two-statement shape
+      // and passes against the current one.
+      createMetadata(conn)
+      established(conn)
+      val counted = new AtomicInteger(0)
+      DuckLakeInitializer.guardEncryption(countingConn(conn, counted), "some_db", encrypted = false)
+      counted.get() shouldBe 1
     }
 
   // ---------- guardEncryption ----------
