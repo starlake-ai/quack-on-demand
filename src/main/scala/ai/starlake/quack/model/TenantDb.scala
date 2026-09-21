@@ -35,6 +35,11 @@ final case class TenantDb(
 
 object TenantDb {
 
+  /** Metastore key holding the per-database DuckDB file encryption key. Only ever set for
+    * `kind=duckdb-file`: DuckLake keeps its own per-file keys in `ducklake_data_file`.
+    */
+  val EncryptionKeyName: String = "encryptionKey"
+
   /** Keys that must never round-trip in an API response, and that
     * [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] carries over from the stored map
     * when an update's incoming map omits them (no client can round-trip a value it was never
@@ -44,11 +49,6 @@ object TenantDb {
     * `HandlerResolvers.redactPassword` (response redaction) and `PoolSupervisor.mergeSecretKeys`
     * (update merge) so the two sites cannot drift out of sync.
     */
-  /** Metastore key holding the per-database DuckDB file encryption key. Only ever set for
-    * `kind=duckdb-file`: DuckLake keeps its own per-file keys in `ducklake_data_file`.
-    */
-  val EncryptionKeyName: String = "encryptionKey"
-
   val SecretKeys: Set[String] =
     Set(
       "pgPassword",
