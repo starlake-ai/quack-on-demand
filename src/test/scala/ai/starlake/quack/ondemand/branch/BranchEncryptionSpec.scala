@@ -63,3 +63,45 @@ class BranchEncryptionSpec extends AnyFlatSpec with Matchers:
       .get
     spec.extraSetupSql should not include "ENCRYPTED"
   }
+
+  /** [[ai.starlake.quack.model.Names.normalizeTenantDbName]] composes `"${tenant}_${suffix}"` only
+    * when the suffix does not already start with `"${tenant}_"`, so two different tenants can land
+    * on the SAME composed tenant-db name: tenant `a` with suffix `b_c`, and tenant `a_b` with
+    * suffix `c`, both compose to `a_b_c`. A parent-encryption lookup that scans `tenantDbs` by name
+    * alone (not scoped by tenant) would match whichever row happens to come first, so this pins the
+    * fix against that specific collision instead of matching by name only.
+    */
+  it should "resolve the parent's encryption by tenant, not by a name that collides across tenants" in {
+    val sup =
+      new PoolSupervisor(new StubQuackBackend, new NodeLoadTracker, new InMemoryControlPlaneStore())
+    sup.createTenant(Tenant("a")).unsafeRunSync()
+    sup.createTenant(Tenant("a_b")).unsafeRunSync()
+    // tenant "a", tenant-db "b_c" -> composed name "a_b_c", NOT encrypted.
+    sup
+      .createTenantDb(
+        "a",
+        "b_c",
+        TenantDbKind.DuckLake,
+        lakeMeta,
+        dataPath = "/var/a_b_c",
+        encrypted = false
+      )
+      .unsafeRunSync()
+    // tenant "a_b", tenant-db "c" -> composed name ALSO "a_b_c", but for an unrelated tenant, and
+    // it IS encrypted.
+    sup
+      .createTenantDb(
+        "a_b",
+        "c",
+        TenantDbKind.DuckLake,
+        lakeMeta,
+        dataPath = "/var/other_a_b_c",
+        encrypted = true
+      )
+      .unsafeRunSync()
+
+    val spec = sup
+      .mergeNodeSpec("a", "a_b_c", "a_b_c__br_ab12cd34", "/var/a_b_c__br_ab12cd34/")
+      .get
+    spec.extraSetupSql should not include "ENCRYPTED"
+  }

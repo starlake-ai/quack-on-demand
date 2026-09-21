@@ -772,9 +772,11 @@ final class PoolSupervisor(
       // The branch is a clone of the parent's catalog, so it carries the same encryption flag
       // (BranchService inherits parent.encrypted onto the branch row). Resolved from the
       // TenantDb row, not the metastore map: the map at this call site does not carry the
-      // derived "encrypted" stamp.
+      // derived "encrypted" stamp. Scoped by tenant, not just by name: TenantDb.name is only
+      // unique WITHIN a tenant (Names.normalizeTenantDbName can compose the same string from
+      // two different tenants), so an unscoped scan could match an unrelated tenant's db.
       val parentEncrypted =
-        tenantDbs.values.exists(td => td.name == parentDbName && td.encrypted)
+        findTenantDb(tenantName, parentDbName).exists(_.encrypted)
       val opts =
         if parentEncrypted then
           s"DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY, ENCRYPTED"
