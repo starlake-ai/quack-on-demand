@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.sql
 
 import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
+import ai.starlake.sql.SqlTrivia
 
 import scala.collection.mutable.ListBuffer
 
@@ -109,7 +110,7 @@ object LockdownScreen:
     splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
   private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
-    val lower = stripLeadingTrivia(stmt.toLowerCase(Locale.ROOT))
+    val lower = SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT))
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
       case some @ Some(_) => some
@@ -131,52 +132,6 @@ object LockdownScreen:
           .orElse(copyHit)
           .orElse(deniedFunctionIn(lower, deniedBuckets))
           .orElse(barePathFrom(lower, deniedBuckets))
-
-  /** Skips leading whitespace (including BOM, zero-width space and unicode space separators), `--`
-    * line comments, and (nested) block comments so a comment prefix cannot hide the first token. An
-    * unterminated block comment consumes the rest of the statement (nothing executable remains, so
-    * the empty remainder screens clean).
-    *
-    * `private[sql]`, not `private`, so `CatalogWriteScreen` can normalize a fragment's leading
-    * trivia with the same scanner before judging its first token, instead of a fifth hand-rolled
-    * one that would inevitably drift from this one (see `CatalogWriteScreen.isWriteShaped`).
-    */
-  private[sql] def stripLeadingTrivia(s: String): String =
-    var i     = 0
-    var moved = true
-    while moved do
-      moved = false
-      while i < s.length && isTriviaSpace(s(i)) do
-        i += 1
-        moved = true
-      if i + 1 < s.length && s(i) == '-' && s(i + 1) == '-' then
-        while i < s.length && s(i) != '\n' do i += 1
-        moved = true
-      else if i + 1 < s.length && s(i) == '/' && s(i + 1) == '*' then
-        var depth = 1
-        i += 2
-        while i < s.length && depth > 0 do
-          if i + 1 < s.length && s(i) == '/' && s(i + 1) == '*' then
-            depth += 1
-            i += 2
-          else if i + 1 < s.length && s(i) == '*' && s(i + 1) == '/' then
-            depth -= 1
-            i += 2
-          else i += 1
-        if depth > 0 then i = s.length
-        moved = true
-    s.substring(i)
-
-  // `Character.FORMAT` (Unicode category Cf) is the general class BOM (U+FEFF) and zero-width
-  // space (U+200B) belong to, along with other invisible-but-not-whitespace characters such as the
-  // word joiner (U+2060) -- confirmed separately against a real DuckDB to still execute with one
-  // prepended, unlike Java's `isWhitespace`/`SPACE_SEPARATOR`, which both say no to it. Matching
-  // the whole category rather than naming characters one at a time closes that gap and any sibling
-  // Cf character, not just the ones already found.
-  private def isTriviaSpace(c: Char): Boolean =
-    c.isWhitespace ||
-      Character.getType(c) == Character.SPACE_SEPARATOR ||
-      Character.getType(c) == Character.FORMAT
 
   /** Splits the input on top-level semicolons: semicolons inside single-quoted strings,
     * double-quoted identifiers, line comments, or (nested) block comments do not split.

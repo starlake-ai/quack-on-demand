@@ -2,7 +2,7 @@ package ai.starlake.quack.route
 
 import java.util.Locale
 import ai.starlake.quack.model.StatementKind
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
 /** Per-bucket keyword sets used to classify a statement by its first non-blank token. Sets are
   * uppercased on construction so matching is case-insensitive without per-call allocation.
@@ -76,8 +76,13 @@ object StatementClassifierConfig:
   * a coarse three-bucket answer; authorization runs `SqlParser.extract` separately and consumes its
   * own per-`TableAccess` `Verb` enum.
   *
-  * SQL comments (`--`, `/* */`) are stripped before the first-token match so a leading comment
-  * doesn't make a query look like `Other`.
+  * SQL comments (`--`, `/* */`) and leading trivia (whitespace, BOM, zero-width space, and other
+  * invisible `Character.FORMAT` characters `String.trim` and `Character.isWhitespace` don't treat
+  * as blank -- see `ai.starlake.sql.SqlTrivia`) are stripped before the first-token match, so
+  * neither a leading comment nor an invisible character can make a write look like `Other`, which
+  * `RoleMatcher` routes to a reader node and lets skip `ProtectedWriteGuard` and the write audit
+  * path (the same class of bypass the `WITH` special case below documents, reached here through a
+  * hidden first token instead of a misleading one).
   */
 final class StatementClassifier(
     config: StatementClassifierConfig = StatementClassifierConfig.Defaults
@@ -86,7 +91,7 @@ final class StatementClassifier(
   private val cfg = config.normalized
 
   def classify(sql: String): StatementKind =
-    classifyStripped(SqlCommentStripper.stripComments(sql))
+    classifyStripped(SqlTrivia.stripLeading(SqlCommentStripper.stripComments(sql)))
 
   private def classifyStripped(sql: String): StatementKind =
     firstToken(sql).map(_.toUpperCase(Locale.ROOT)) match

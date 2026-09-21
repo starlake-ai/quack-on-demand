@@ -67,6 +67,71 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
       "INSERT INTO t VALUES ('-- not a comment')"
     ) shouldBe StatementKind.Dml
 
+  // ---- invisible leading trivia cannot hide the verb (live security bypass) ----
+  //
+  // `String.trim` only strips characters <= U+0020, and `Character.isWhitespace` is false for
+  // NBSP (U+00A0), the word joiner (U+2060), the BOM (U+FEFF), zero-width space (U+200B) and soft
+  // hyphen (U+00AD). A statement prefixed with one of these classified as `Other` -- the same
+  // reader-routed bypass the `WITH` special case below exists to close, reached here through a
+  // hidden first token on a PLAIN INSERT/UPDATE/DELETE/DROP instead of a misleading one. Verified
+  // against a real DuckDB 1.5.4: NBSP, BOM, ZWSP and the word joiner all still execute as a prefix;
+  // soft hyphen is rejected by DuckDB itself but is stripped here too since nothing downstream
+  // should ever see it as part of the token.
+  it should "not let a leading NBSP hide a write's verb" in:
+    StatementClassifier.classify(" INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading BOM hide a write's verb" in:
+    StatementClassifier.classify("﻿INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading zero-width space hide a write's verb" in:
+    StatementClassifier.classify("​INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading word joiner hide a write's verb" in:
+    StatementClassifier.classify("⁠INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading soft hyphen hide a write's verb" in:
+    StatementClassifier.classify("­INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "strip the same invisible prefixes ahead of UPDATE, DELETE and DROP" in:
+    StatementClassifier.classify(" UPDATE t SET x = 1") shouldBe StatementKind.Dml
+    StatementClassifier.classify("﻿DELETE FROM t WHERE x = 1") shouldBe StatementKind.Dml
+    StatementClassifier.classify("​DROP TABLE t") shouldBe StatementKind.Ddl
+
+  it should "strip an invisible prefix ahead of CREATE TABLE as Ddl" in:
+    StatementClassifier.classify(" CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("﻿CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("​CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("⁠CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("­CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: an invisible prefix ahead of SELECT stays Select" in:
+    StatementClassifier.classify(" SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("﻿SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("​SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("⁠SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("­SELECT * FROM t") shouldBe StatementKind.Select
+
+  it should "strip an invisible prefix ahead of the WITH ... INSERT special case too" in:
+    StatementClassifier.classify(
+      "﻿WITH s AS (SELECT * FROM t) INSERT INTO m SELECT * FROM s"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "​WITH cte AS (SELECT 1) SELECT * FROM cte"
+    ) shouldBe StatementKind.Select
+
+  it should "combine an invisible prefix with a leading comment" in:
+    StatementClassifier.classify(
+      "﻿-- a comment\nINSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "-- a comment\n﻿INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "leave ordinary, unprefixed statements unchanged" in:
+    StatementClassifier.classify("INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("SELECT 1") shouldBe StatementKind.Select
+    StatementClassifier.classify("CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+
   // ---- WITH-prefixed statements classify by their real verb (deep-review H2) ----
   //
   // First-token classification put every WITH-prefixed statement in the select bucket,

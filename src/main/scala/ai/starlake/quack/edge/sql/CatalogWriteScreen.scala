@@ -3,7 +3,7 @@ package ai.starlake.quack.edge.sql
 import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
 import ai.starlake.quack.model.StatementKind
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 import com.typesafe.scalalogging.LazyLogging
 
 /** Per-catalog write kill switch. Denies WRITE and DDL whose target sits in a catalog an operator
@@ -172,19 +172,21 @@ object CatalogWriteScreen extends LazyLogging:
         //
         // Every other check normalizes the snippet ONCE, up front, by stripping comments (the same
         // `SqlCommentStripper` `StatementClassifier.classify` uses) and then leading trivia (the
-        // same `LockdownScreen.stripLeadingTrivia` scanner `LockdownScreen` uses to the same end,
-        // widened to `private[sql]` for this reuse). A raw `.trim` alone only removes characters
-        // `<= U+0020`; it lets a leading NBSP, BOM, zero-width space, or `/*x*/`/`--` comment hide
-        // the first token from BOTH `isPrepareOrExecute` and `classify`'s own first-token read,
-        // admitting an invisible-character-prefixed `INSERT`/`PREPARE`/etc as `Other`. Both arms
-        // MUST see the same normalized snippet -- normalizing only one leaves the other's blind
-        // spot open, which is exactly how the previous fix (comments only, no leading trivia)
-        // still admitted a plain write behind one invisible character.
+        // shared `SqlTrivia` scanner, which `LockdownScreen` also uses to the same end). A raw
+        // `.trim` alone only removes characters `<= U+0020`; it lets a leading NBSP, BOM,
+        // zero-width space, or `/*x*/`/`--` comment hide the first token from BOTH
+        // `isPrepareOrExecute` and `classify`'s own first-token read, admitting an
+        // invisible-character-prefixed `INSERT`/`PREPARE`/etc as `Other`. Both arms MUST see the
+        // same normalized snippet -- normalizing only one leaves the other's blind spot open, which
+        // is exactly how the previous fix (comments only, no leading trivia) still admitted a plain
+        // write behind one invisible character. `classify` now strips this same trivia internally
+        // too (`StatementClassifier.classify`), so this normalization is redundant for that call
+        // but still required for `isPrepareOrExecute`'s own first-token read.
         def isWriteShaped(snippet: String): Boolean =
           if snippet.isBlank then true
           else
             val normalized =
-              LockdownScreen.stripLeadingTrivia(SqlCommentStripper.stripComments(snippet))
+              SqlTrivia.stripLeading(SqlCommentStripper.stripComments(snippet))
             if isPrepareOrExecute(normalized) then true
             else
               classify(normalized) match
