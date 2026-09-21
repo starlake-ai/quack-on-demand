@@ -132,6 +132,90 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
     StatementClassifier.classify("SELECT 1") shouldBe StatementKind.Select
     StatementClassifier.classify("CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
 
+  // ---- interior invisible trivia cannot hide the verb either (C1 follow-up) ----
+  //
+  // Stripping only the LEADING position fixes one spot; the same character one word to the
+  // right reproduces the identical bypass, because the token terminator was still
+  // `Character.isWhitespace`, which is false for exactly these characters. DuckDB's parser
+  // front end substitutes ASCII spaces for its Unicode space/format set ACROSS THE WHOLE
+  // QUERY before parsing, so an interior NBSP between the verb and the next keyword is just
+  // as executable as a leading one. Verified against a real DuckDB 1.5.4: every one of
+  // `INSERT<char>INTO t VALUES (1)` below still writes a row. `SqlTrivia.normalize` mirrors
+  // that whole-query substitution so every downstream scan (`firstToken`,
+  // `verbAfterWithClause`) sees the same token boundaries DuckDB does.
+  it should "not let an interior NBSP hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u00A0INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior BOM hide a write's verb" in:
+    StatementClassifier.classify("INSERT\uFEFFINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior zero-width space hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u200BINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior word joiner hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u2060INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior figure space (U+2007) hide a write's verb" in:
+    // A non-breaking Zs character `isTriviaSpace` already covered (via SPACE_SEPARATOR), but
+    // that alone was not enough: `firstToken`'s old terminator was `Character.isWhitespace`,
+    // which U+2007 also fails. Only whole-string normalization closes it.
+    StatementClassifier.classify("INSERT\u2007INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior narrow no-break space (U+202F) hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u202FINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let interior trivia hide a DROP TABLE's verb" in:
+    StatementClassifier.classify("DROP\u00A0TABLE t") shouldBe StatementKind.Ddl
+
+  it should "not let interior trivia hide the verb throughout a WITH ... INSERT" in:
+    StatementClassifier.classify(
+      "WITH\u00A0x\u00A0AS\u00A0(SELECT\u00A01)\u00A0INSERT\u00A0INTO t SELECT 1"
+    ) shouldBe StatementKind.Dml
+
+  it should "not let interior trivia hide EXPLAIN ANALYZE's inner write" in:
+    // Regression for the recursion gap (C2): `classifyStripped` re-entered itself for the
+    // ANALYZE case with a freshly sliced substring that was never normalized, so a trivia
+    // character right before the inner statement stayed hidden even though the entry point
+    // was fixed. Verified against DuckDB 1.5.4: this writes a row.
+    StatementClassifier.classify(
+      "EXPLAIN ANALYZE\u00A0INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "\u00A0EXPLAIN ANALYZE INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not regress on interior trivia that was already safe" in:
+    // U+2000 (en quad) and U+3000 (ideographic space) are true to `Character.isWhitespace`
+    // already, so they terminated `firstToken` correctly even before normalization; pin that
+    // whole-string normalization doesn't disturb them.
+    StatementClassifier.classify("INSERT\u2000INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("DROP\u3000TABLE t") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: interior trivia in a SELECT stays Select" in:
+    StatementClassifier.classify("SELECT\u00A01") shouldBe StatementKind.Select
+    StatementClassifier.classify("SELECT * FROM\u00A0t") shouldBe StatementKind.Select
+
+  it should "not let trivia inside a string literal change the classification" in:
+    StatementClassifier.classify(
+      "INSERT INTO t VALUES ('a\u00A0b')"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "SELECT 'a\u00A0b' FROM t"
+    ) shouldBe StatementKind.Select
+
+  it should "classify from a normalized copy without altering the original statement" in:
+    // `SqlTrivia.normalize` must never be threaded anywhere but the classifier's own scan --
+    // the original SQL text is what is sent to the node. Strings are immutable in the JVM, so
+    // this also documents the property `normalize`'s scaladoc promises: pin that the input
+    // string a caller holds still carries its original invisible characters unchanged, and
+    // still has its original length, after `classify` has run.
+    val original = "INSERT\u00A0INTO t VALUES ('a\u00A0b')"
+    val length   = original.length
+    StatementClassifier.classify(original) shouldBe StatementKind.Dml
+    original.length shouldBe length
+    original.charAt(6) shouldBe '\u00A0'
+    original.contains("a\u00A0b") shouldBe true
+
   // ---- WITH-prefixed statements classify by their real verb (deep-review H2) ----
   //
   // First-token classification put every WITH-prefixed statement in the select bucket,
@@ -240,3 +324,35 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
     val cfg = StatementClassifierConfig.Defaults.copy(dml = Set.empty)
     val c   = new StatementClassifier(cfg)
     c.classify("INSERT INTO t VALUES (1)") shouldBe StatementKind.Other
+
+  // ---- escape hygiene of this file's own invisible-character test literals (I1) ----
+  //
+  // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as
+  // a raw invisible byte pasted into the source: an editor or an "helpful" formatting pass can
+  // silently decode `\u00A0` back into a raw NBSP, at which point this file still compiles,
+  // every assertion above still passes (a `String` built from the escape and one built from
+  // the raw byte are identical at runtime -- that's the whole point of an escape), and the
+  // next reader sees what looks like ordinary blank space around a keyword with no way to
+  // tell the test asserts anything about trivia at all. That already happened once in this
+  // file. This test is the only thing in the suite that can catch a repeat: it reads this very
+  // source file back and fails if any codepoint above ASCII (U+007F) appears anywhere in it.
+  it should "carry no raw non-ASCII codepoints in its own source file" in:
+    // Path is relative to the sbt project root, which is the forked test JVM's working
+    // directory (`Test / fork := true` in build.sbt, no `Test / baseDirectory` override to
+    // change it). If this ever proves brittle under a different launcher, the fallback is a
+    // `Thread.currentThread.getContextClassLoader` resource lookup keyed off a copy of this
+    // file placed under `src/test/resources`, or a CI-level grep step -- both discussed in the
+    // review; the in-spec form is kept because it travels with the code and runs under plain
+    // `sbt test`.
+    val path = "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
+      withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()

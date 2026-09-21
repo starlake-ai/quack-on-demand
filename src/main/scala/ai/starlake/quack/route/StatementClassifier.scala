@@ -76,13 +76,17 @@ object StatementClassifierConfig:
   * a coarse three-bucket answer; authorization runs `SqlParser.extract` separately and consumes its
   * own per-`TableAccess` `Verb` enum.
   *
-  * SQL comments (`--`, `/* */`) and leading trivia (whitespace, BOM, zero-width space, and other
-  * invisible `Character.FORMAT` characters `String.trim` and `Character.isWhitespace` don't treat
-  * as blank -- see `ai.starlake.sql.SqlTrivia`) are stripped before the first-token match, so
-  * neither a leading comment nor an invisible character can make a write look like `Other`, which
-  * `RoleMatcher` routes to a reader node and lets skip `ProtectedWriteGuard` and the write audit
-  * path (the same class of bypass the `WITH` special case below documents, reached here through a
-  * hidden first token instead of a misleading one).
+  * SQL comments (`--`, `/* */`) are stripped, and every trivia character (whitespace, BOM,
+  * zero-width space, non-breaking space, and other invisible `Character.FORMAT` / `SPACE_SEPARATOR`
+  * characters `String.trim` and `Character.isWhitespace` don't treat as blank -- see
+  * `ai.starlake.sql.SqlTrivia`) is normalized to an ASCII space ACROSS THE WHOLE STATEMENT, not
+  * just its head, before the first-token match. A leading OR an interior trivia character (e.g.
+  * `INSERT<NBSP>INTO t VALUES (1)`, which DuckDB executes identically to `INSERT INTO ...`) can
+  * otherwise make a write look like `Other`, which `RoleMatcher` routes to a reader node and lets
+  * skip `ProtectedWriteGuard` and the write audit path (the same class of bypass the `WITH` special
+  * case below documents, reached here through a hidden first or verb token instead of a misleading
+  * one). The normalized copy is used ONLY for classification -- `sql` itself is what every other
+  * consumer, and the node, receives.
   */
 final class StatementClassifier(
     config: StatementClassifierConfig = StatementClassifierConfig.Defaults
@@ -91,9 +95,10 @@ final class StatementClassifier(
   private val cfg = config.normalized
 
   def classify(sql: String): StatementKind =
-    classifyStripped(SqlTrivia.stripLeading(SqlCommentStripper.stripComments(sql)))
+    classifyStripped(SqlCommentStripper.stripComments(sql))
 
-  private def classifyStripped(sql: String): StatementKind =
+  private def classifyStripped(raw: String): StatementKind =
+    val sql = SqlTrivia.normalize(raw)
     firstToken(sql).map(_.toUpperCase(Locale.ROOT)) match
       // A WITH prefix says nothing about what the statement DOES: the verb after the
       // CTE list decides. First-token classification put WITH ... INSERT in the select

@@ -53,3 +53,23 @@ object SqlTrivia:
     c.isWhitespace ||
       Character.getType(c) == Character.SPACE_SEPARATOR ||
       Character.getType(c) == Character.FORMAT
+
+  /** Every trivia character (see `isTriviaSpace`) replaced by an ASCII space, across the WHOLE
+    * string, not just its head. Mirrors DuckDB's own parser front end, which substitutes its
+    * Unicode space and format set with ASCII spaces before parsing -- which is why a non-breaking
+    * space or a zero-width space BETWEEN two keywords is executable SQL, not just one sitting
+    * before the first keyword. `stripLeading` only fixes the leading position; a scan that
+    * terminates on `Character.isWhitespace` (e.g. `StatementClassifier.firstToken`) still misses an
+    * interior occurrence, so the same hidden-verb bypass reappears one word to the right.
+    *
+    * SAFETY: the returned string is for CLASSIFICATION ONLY. The original `sql` string passed in
+    * remains what is sent to the node and what every other consumer (audit, ACL, rewriters) sees --
+    * never thread this normalized copy anywhere except into a classification scan.
+    */
+  def normalize(s: String): String =
+    val chars = s.toCharArray
+    var i     = 0
+    while i < chars.length do
+      if isTriviaSpace(chars(i)) then chars(i) = ' '
+      i += 1
+    new String(chars)
