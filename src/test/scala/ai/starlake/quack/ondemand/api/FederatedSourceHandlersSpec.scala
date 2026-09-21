@@ -618,3 +618,21 @@ class FederatedSourceHandlersSpec
     out.sources.find(_.alias == "sales_lake").value.config.value.authType shouldBe
       Some(IcebergAuthType.OAuth2)
   }
+
+  // --- Task 8: live attach status surfaced from the registry -----------------
+
+  "listSources" should "surface the attach status supplied by the registry" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(
+        fedStore = fs,
+        resolver = resolver,
+        catalogAliasOf = _ => None,
+        attachStatusOf = (tenantDbId, alias) =>
+          if tenantDbId == tdId && alias == "sales_lake" then Some("failed on 1 of 2 nodes")
+          else None
+      )
+      h.createSource("acme", "acme_prod", iceReq(), None).unsafeRunSync()
+      val out = h.listSources("acme", "acme_prod").unsafeRunSync().toOption.value
+      out.sources.find(_.alias == "sales_lake").value.attachStatus shouldBe
+        Some("failed on 1 of 2 nodes")
+    }

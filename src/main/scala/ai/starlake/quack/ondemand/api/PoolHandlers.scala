@@ -17,7 +17,13 @@ final class PoolHandlers(
     // Upper bound accepted for maxNodes at validation time (autoscale.hardCap):
     // a typo guard, not a quota.
     autoscaleHardCap: Int = 16,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    // Declared-but-unattached Iceberg catalogs for one node INCARNATION, from the in-memory
+    // AttachStatusRegistry (Task 7). Inert default so every existing caller/test keeps compiling;
+    // Main wires it from the registry, keyed on (nodeId, startedAt) so a respawned node under the
+    // same slot id does not inherit its predecessor's failures. Never allowed to fail this
+    // endpoint: any lookup error should be swallowed by the caller into an empty list.
+    attachFailuresOf: (String, java.time.Instant) => List[CatalogAttachFailureDto] = (_, _) => Nil
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -67,7 +73,9 @@ final class PoolHandlers(
             duckdbMemoryBytes = engine.map(_.memoryUsedBytes),
             duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
             duckdbSpillFiles = engine.map(_.spillFiles),
-            duckdbSpillBytes = engine.map(_.spillBytes)
+            duckdbSpillBytes = engine.map(_.spillBytes),
+            catalogAttachFailures =
+              scala.util.Try(attachFailuresOf(n.nodeId, n.startedAt)).getOrElse(Nil)
           )
         },
         status = if p.disabled then "disabled" else "ready",

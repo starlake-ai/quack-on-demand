@@ -10,6 +10,7 @@ import sttp.tapir.generic.auto._
   * `import EndpointSchemas.given`.
   */
 object EndpointSchemas:
+  given Schema[CatalogAttachFailureDto]  = Schema.derived
   given Schema[NodeInfo]                 = Schema.derived
   given Schema[NodeTolerationDto]        = Schema.derived
   given Schema[NodePlacementDto]         = Schema.derived

@@ -541,13 +541,30 @@ object Main extends IOApp with LazyLogging:
     val moduleStart: IO[Unit] =
       modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
 
+    // Declared here (rather than beside its verifier below) so both the node and federated-source
+    // REST responses can read from it: NodeInfo.catalogAttachFailures needs it right away, and
+    // IcebergAttachVerifier (further down, once adapter/manifestFedStore exist) writes into this
+    // same instance.
+    val attachRegistry = new ai.starlake.quack.ondemand.federation.iceberg.AttachStatusRegistry()
+
     val pools = new PoolHandlers(
       sup,
       tracker,
       engineStatsTracker,
       mgrCfg.k8s.podTemplateEnabled,
       autoscaleHardCap = mgrCfg.autoscale.hardCap,
-      audit = auditRecorder
+      audit = auditRecorder,
+      attachFailuresOf = (nodeId, startedAt) =>
+        attachRegistry
+          .failuresFor(nodeId, startedAt.toEpochMilli)
+          .map(f =>
+            ai.starlake.quack.ondemand.api.CatalogAttachFailureDto(
+              alias = f.alias,
+              error = f.error,
+              at = f.at.toString,
+              attempts = f.attempts
+            )
+          )
     )
     val nodes   = new NodeHandlers(sup, tracker, store, publisher, audit = auditRecorder)
     val tenants = new TenantHandlers(
@@ -777,8 +794,6 @@ object Main extends IOApp with LazyLogging:
     // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
     // recorded, so the next tick retries the (idempotent) CREATE.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
-
-    val attachRegistry = new ai.starlake.quack.ondemand.federation.iceberg.AttachStatusRegistry()
 
     // Reads one node's attached catalogs. Decoding (batch draining, schema-only first batch,
     // close-on-every-path) lives in IcebergAttachVerifier.decodeCatalogNames, which is unit
@@ -1270,6 +1285,24 @@ object Main extends IOApp with LazyLogging:
           sup.getTenantDbById(tenantDbId).map { td =>
             TenantDb.catalogAlias(sup.effectiveMetastoreFor(td.tenantId, td.name), td.name)
           }
+        // Aggregated across the tenant-db's pool(s): a tenant-db id resolves to zero or more live
+        // PoolStates, whose nodes' incarnations are looked up in the same AttachStatusRegistry the
+        // node endpoint reads (attachFailuresOf above). Never allowed to fail this endpoint --
+        // aliasSummary's own None ("unknown") is the fallback, and the lookup itself is guarded.
+        val attachStatusOf: (String, String) => Option[String] = (tenantDbId, alias) =>
+          scala.util
+            .Try {
+              sup.getTenantDbById(tenantDbId) match
+                case None     => None
+                case Some(td) =>
+                  val nodeIds = sup
+                    .list()
+                    .filter(st => st.key.tenant == td.tenantId && st.key.tenantDb == td.name)
+                    .flatMap(_.nodes.map(_.nodeId))
+                    .toSet
+                  attachRegistry.aliasSummary(alias, nodeIds)
+            }
+            .getOrElse(None)
         Some(
           new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
             fedHandlersStore,
@@ -1277,7 +1310,8 @@ object Main extends IOApp with LazyLogging:
             tenantIdResolver,
             audit = auditRecorder,
             scopeOf = t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t)),
-            catalogAliasOf = catalogAliasOf
+            catalogAliasOf = catalogAliasOf,
+            attachStatusOf = attachStatusOf
           )
         )
 

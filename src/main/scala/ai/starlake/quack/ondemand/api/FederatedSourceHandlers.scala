@@ -20,6 +20,11 @@ import sttp.model.StatusCode
   *   resolves a tenantDbId to the tenant-db's own DuckDB catalog alias, or None if not found. Fed
   *   into `extraReserved` so an iceberg_rest source cannot be aliased onto the tenant-db's own
   *   attached name.
+  * @param attachStatusOf
+  *   keyed on (tenantDbId, alias): the live attach state of one federated source aggregated across
+  *   its pool's nodes, from the in-memory AttachStatusRegistry (Task 7) -- `"attached"`,
+  *   `"unknown"`, or `"failed on N of M nodes"`. Replica-local like [[PoolHandlers]]'s
+  *   `attachFailuresOf`; inert default so existing callers/tests keep compiling.
   */
 final class FederatedSourceHandlers(
     fedStore: FederatedSourceOps,
@@ -27,7 +32,8 @@ final class FederatedSourceHandlers(
     tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop,
     scopeOf: String => Option[SessionScope] = _ => None,
-    catalogAliasOf: String => Option[String]
+    catalogAliasOf: String => Option[String],
+    attachStatusOf: (String, String) => Option[String] = (_, _) => None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -60,7 +66,8 @@ final class FederatedSourceHandlers(
       disabled = s.disabled,
       sourceType = s.sourceType.wire,
       config = s.config.flatMap(j => IcebergRestConfig.fromJson(j).toOption),
-      readOnly = s.readOnly
+      readOnly = s.readOnly,
+      attachStatus = scala.util.Try(attachStatusOf(s.tenantDbId, s.alias)).getOrElse(None)
     )
 
   /** Turn the request's loose wire fields into a validated [[FederatedSource]], or the 400 that
