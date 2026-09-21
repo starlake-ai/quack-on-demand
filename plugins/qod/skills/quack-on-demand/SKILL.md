@@ -877,8 +877,10 @@ Rules to know before using it:
   `ducklake` database that password opens the catalog holding the per-file keys.
 
 Manager-wide policy: `QOD_REQUIRE_ENCRYPTION=true` (default off) refuses any database create
-that does not ask for encryption, so no plaintext database can exist in the deployment. It
-gates creates only, so turning it on never breaks databases that already exist.
+that does not ask for encryption, whether it arrives through `database/create` or through a
+manifest import, so no plaintext database can exist in the deployment. It gates creates only,
+so turning it on never breaks databases that already exist, and a manifest describing them
+still applies.
 
 One asymmetry worth knowing: DuckLake errors when an unencrypted catalog is attached as
 encrypted, but attaching an encrypted catalog *without* the flag silently succeeds (and still

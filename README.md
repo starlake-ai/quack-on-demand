@@ -319,10 +319,12 @@ encrypt an existing database in place, or decrypt one. There is no `encrypted` f
 `database/update`, and a manifest import that flips the flag on an existing database is refused.
 To change it, create a new database and copy the data.
 
-**`QOD_REQUIRE_ENCRYPTION=true`** (default off) makes the manager refuse any `database/create`
-that does not ask for encryption, so an operator can guarantee no plaintext database exists in the
-deployment. It gates creates only: existing databases keep working, so turning it on never bricks a
-running deployment. A `kind=memory` create is refused outright while it is on.
+**`QOD_REQUIRE_ENCRYPTION=true`** (default off) makes the manager refuse any `database/create` that
+does not ask for encryption, and likewise any manifest import (REST, `qod manifest import`, or the
+boot-time bootstrap manifest) that would create such a database, so an operator can guarantee no
+plaintext database exists in the deployment. It gates creates only: existing databases keep working
+and a manifest describing them still applies, so turning it on never bricks a running deployment. A
+`kind=memory` create is refused outright while it is on.
 
 A **branch** inherits its parent's encryption. Cloning copies the parent's catalog rows wholesale,
 so a branch of an encrypted database is encrypted and reads the parent's encrypted Parquet with the

@@ -163,11 +163,20 @@ object ManifestImporter:
     *   when present, federated sources and secrets nested inside each tenant-db are upserted using
     *   the same replace-by-alias + reuse-on-redacted semantics as the dedicated federation YAML
     *   endpoint. Pass None in file-mode or tests that do not exercise federation.
+    * @param requireEncryption
+    *   mirrors `quack-on-demand.requireEncryption` (`QOD_REQUIRE_ENCRYPTION`), the same policy
+    *   `TenantDbHandlers` applies to `database/create`. This importer upserts tenant-db rows
+    *   directly rather than going through `PoolSupervisor.createTenantDb`, so without the gate here
+    *   a manifest apply would be an open side door for plaintext databases and the deployment-wide
+    *   guarantee the knob promises would not hold. Gates CREATES only, exactly like REST: a row
+    *   that already exists keeps being applied, so turning the knob on never makes an operator's
+    *   own manifest unreplayable.
     */
   def apply(
       m: ConfigManifest,
       store: ControlPlaneStore,
-      federatedStore: Option[FederatedSourceStore] = None
+      federatedStore: Option[FederatedSourceStore] = None,
+      requireEncryption: Boolean = false
   ): ValidationResult =
     validate(m, store).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]
@@ -304,6 +313,17 @@ object ManifestImporter:
                 // already exists, and that is what must be said.
                 val direction = if mtd.encrypted then "on" else "off"
                 errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': encryption cannot be turned $direction for an existing database -- create a new database and copy the data instead"
+              else if requireEncryption && existing.isEmpty && dbKind == TenantDbKind.InMemory then
+                // Same two refusals `TenantDbHandlers.validateEncryption` applies to
+                // database/create, in the same order and with the same wording, because they are
+                // the same policy: this importer is the other way a tenant-db row is born, and a
+                // policy that only one of the two honours guarantees nothing. `existing.isEmpty`
+                // keeps it a CREATE gate: re-applying a manifest that describes databases which
+                // already exist stays legal, matching the documented "turning it on never breaks
+                // databases that already exist".
+                errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': this deployment requires encryption at rest (QOD_REQUIRE_ENCRYPTION): kind=memory cannot satisfy it"
+              else if requireEncryption && existing.isEmpty && !mtd.encrypted then
+                errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': this deployment requires encryption at rest (QOD_REQUIRE_ENCRYPTION): set encrypted: true"
               else
                 // ManifestExporter redacts `encryptionKey` out of `metastore` (see the comment
                 // there), unlike every other metastore/objectStore secret, which round-trips

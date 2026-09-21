@@ -18,7 +18,12 @@ final class ManifestHandlers(
     managerVersion: String,
     hostname: String,
     federatedStore: Option[FederatedSourceStore] = None,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    /** Mirrors `quack-on-demand.requireEncryption`, the same knob `TenantDbHandlers` applies to
+      * database/create. An import is the other way a tenant-db row is created, so it has to honour
+      * the policy or the deployment-wide guarantee is not one.
+      */
+    requireEncryption: Boolean = false
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
@@ -54,7 +59,7 @@ final class ManifestHandlers(
             case Left(e) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
             case Right(m) =>
-              ManifestImporter.apply(m, store, federatedStore) match
+              ManifestImporter.apply(m, store, federatedStore, requireEncryption) match
                 case Left(errs) =>
                   Left(
                     StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; "))

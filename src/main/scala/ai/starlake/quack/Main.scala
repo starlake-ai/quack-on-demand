@@ -156,7 +156,11 @@ object Main extends IOApp with LazyLogging:
         IO.blocking {
           val mgrCfg = ConfigSource.default.at("quack-on-demand").loadOrThrow[ManagerConfig]
           val store  = PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
-          ai.starlake.quack.cli.ManifestCli.importFrom(store, System.in)
+          ai.starlake.quack.cli.ManifestCli.importFrom(
+            store,
+            System.in,
+            mgrCfg.requireEncryption
+          )
         }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
       case "demo" :: rest =>
         ai.starlake.quack.ondemand.demo.DemoRunner.runDemo(rest)
@@ -1181,7 +1185,8 @@ object Main extends IOApp with LazyLogging:
         hostname =
           scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
         federatedStore = manifestFedStore,
-        audit = auditRecorder
+        audit = auditRecorder,
+        requireEncryption = mgrCfg.requireEncryption
       )
 
       // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
@@ -1619,7 +1624,8 @@ object Main extends IOApp with LazyLogging:
               )(_.getLines().mkString("\n"))
           ,
           store = store,
-          fedStore = manifestFedStore
+          fedStore = manifestFedStore,
+          requireEncryption = mgrCfg.requireEncryption
         ) *>
           IO.delay(sup.restore()) *>
           sup.ensureDuckLakeInitialized() *>

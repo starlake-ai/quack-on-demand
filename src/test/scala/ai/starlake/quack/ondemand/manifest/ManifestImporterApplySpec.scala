@@ -428,6 +428,89 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     row.metastore.get("encryptionKey") shouldBe empty
   }
 
+  // ---------- QOD_REQUIRE_ENCRYPTION is a deployment policy, not a REST-only one ----------
+
+  /** The importer upserts tenant-db rows directly instead of going through
+    * `PoolSupervisor.createTenantDb`, so the knob `TenantDbHandlers` enforces on database/create
+    * has to be enforced here too. Otherwise a manifest apply is an open side door and the
+    * documented "no plaintext database can exist in the deployment" guarantee is false.
+    */
+  it should "refuse to create an unencrypted tenant-db when encryption is required" in {
+    val s   = new InMemoryControlPlaneStore()
+    val mtd = ManifestTenantDb(
+      name = "acme_plain",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_plain", "schemaName" -> "main"),
+      dataPath = "/tmp/d",
+      encrypted = false
+    )
+    val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    val res = ManifestImporter.apply(m, s, requireEncryption = true)
+    res.isLeft shouldBe true
+    res.swap.getOrElse(Nil).mkString("\n") should include("QOD_REQUIRE_ENCRYPTION")
+    // Refused means NOT created: a plaintext row must not survive the failed apply.
+    s.listTenantDbs("acme").find(_.name == "acme_plain") shouldBe empty
+  }
+
+  it should "refuse to create a kind=memory tenant-db when encryption is required" in {
+    // Same wording as the REST refusal: memory cannot satisfy the policy at all, rather than
+    // being told to pass encrypted=true (which the model would then reject on its own).
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          tenantDbs = List(ManifestTenantDb(name = "acme_mem", kind = "memory"))
+        )
+      )
+    )
+    val res = ManifestImporter.apply(m, s, requireEncryption = true)
+    res.isLeft shouldBe true
+    res.swap.getOrElse(Nil).mkString("\n") should include("kind=memory cannot satisfy it")
+  }
+
+  it should "still create an encrypted tenant-db when encryption is required" in {
+    val s   = new InMemoryControlPlaneStore()
+    val mtd = ManifestTenantDb(
+      name = "acme_safe",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_safe", "schemaName" -> "main"),
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s, requireEncryption = true) shouldBe Right(())
+    s.listTenantDbs("acme").find(_.name == "acme_safe").get.encrypted shouldBe true
+  }
+
+  it should "keep applying an existing unencrypted row when encryption is required" in {
+    // The knob gates CREATES only, exactly as documented: turning it on must not make an
+    // operator's own manifest unreplayable against the databases they already run.
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-plain",
+        tenantId = "acme",
+        name = "acme_plain",
+        kind = TenantDbKind.DuckDbFile,
+        metastore = Map("dbName" -> "acme_plain", "schemaName" -> "main"),
+        dataPath = "/tmp/d",
+        encrypted = false
+      )
+    )
+    val mtd = ManifestTenantDb(
+      name = "acme_plain",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_plain", "schemaName" -> "s2"),
+      dataPath = "/tmp/d",
+      encrypted = false
+    )
+    val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    ManifestImporter.apply(m, s, requireEncryption = true) shouldBe Right(())
+    s.listTenantDbs("acme").find(_.name == "acme_plain").get.metastore("schemaName") shouldBe "s2"
+  }
+
   it should "sweep node rows when an import drops a pool" in {
     val s = new InMemoryControlPlaneStore()
     // Seed: tenant + tenant-db + pool + one node row, as if a manager had run.
