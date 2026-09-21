@@ -80,6 +80,14 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
     denied("/* x */ SELECT 1") shouldBe false
   }
 
+  it should "not be defeated by a leading word joiner (U+2060), a Cf character once missed by name" in {
+    // U+2060 is neither `Character.isWhitespace` nor `SPACE_SEPARATOR`; confirmed separately
+    // against a real DuckDB CLI that a write prefixed with it still executes. isTriviaSpace was
+    // broadened from two hardcoded Cf characters (BOM, ZWSP) to the whole Cf (FORMAT) category, so
+    // this deployment-lockdown gate needs the same regression witness CatalogWriteScreenSpec pins.
+    denied("\u2060ATTACH 'x' AS y") shouldBe true
+  }
+
   "quoted identifiers" should "not evade the function screen" in {
     denied("SELECT \"read_text\"('/etc/passwd')") shouldBe true
     denied("SELECT \"my_read_text\" FROM t") shouldBe false

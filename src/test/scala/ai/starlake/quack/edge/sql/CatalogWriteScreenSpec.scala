@@ -287,17 +287,17 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     // isWriteShaped -- NBSP survives both `.trim` (only <= U+0020) and
     // `Character.isWhitespace` (false for NBSP), so the un-normalized head is " INSERT", which
     // matches neither PREPARE/EXECUTE nor any classifier bucket and classifies Other.
-    val r = screen(" INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\u00A0INSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
   it should "deny a plain INSERT hidden behind a leading BOM (U+FEFF)" in {
-    val r = screen("﻿INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\uFEFFINSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
   it should "deny a plain INSERT hidden behind a leading zero-width space (U+200B)" in {
-    val r = screen("​INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\u200BINSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
@@ -307,12 +307,22 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     // against a real DuckDB CLI that it still executes an INSERT prepended with this character
     // (SELECT count(*) returned 1 after the statement ran), so isTriviaSpace was broadened to
     // match the whole Cf category rather than naming characters one at a time.
-    val r = screen("⁠INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\u2060INSERT INTO sales_lake.main.orders VALUES (1)")
+    r.value should include("read-only")
+  }
+
+  it should "deny a plain INSERT hidden behind a leading soft hyphen (U+00AD)" in {
+    // U+00AD is Cf too, same as U+2060, but unlike the word joiner, a real DuckDB CLI
+    // (v1.5.4) rejects a statement prefixed with it, so it was never a live bypass against
+    // DuckDB. Pinned anyway: this screen must not depend on which Cf characters DuckDB
+    // happens to reject, and the broadened isTriviaSpace catches the whole category, not
+    // only the ones already proven executable.
+    val r = screen("\u00ADINSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
   it should "deny a PREPARE hidden behind a leading NBSP" in {
-    val r = screen(" PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\u00A0PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
@@ -320,7 +330,7 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     // Pins the composition order: comments are stripped, THEN leading trivia, and the result is
     // fed to isPrepareOrExecute -- neither strip alone (nor the wrong order) would leave a bare
     // "PREPARE" head from this input.
-    val r = screen(" /*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
+    val r = screen("\u00A0/*x*/PREPARE p AS INSERT INTO sales_lake.main.orders VALUES (1)")
     r.value should include("read-only")
   }
 
@@ -328,7 +338,7 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     // Mirrors the existing CHECKPOINT witness below (P1), but only the write fragment is
     // NBSP-prefixed, pinning that normalization runs per-fragment through the P1 fallback and not
     // only on a lone single-statement submission.
-    val batch = "CHECKPOINT;  INSERT INTO sales_lake.main.orders VALUES (1)"
+    val batch = "CHECKPOINT; \u00A0INSERT INTO sales_lake.main.orders VALUES (1)"
     SqlParser.extract(batch, cfg).statements.length shouldBe 1
     LockdownScreen.splitStatements(batch).length shouldBe 2
     val r = screen(batch)
