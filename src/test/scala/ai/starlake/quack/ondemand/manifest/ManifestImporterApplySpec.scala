@@ -302,11 +302,17 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     )
     val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
     ManifestImporter.apply(m, s) shouldBe Right(())
-    s.listTenantDbs("acme")
+    val mintedKey = s
+      .listTenantDbs("acme")
       .find(_.name == "acme_fresh")
       .get
       .metastore
-      .get("encryptionKey") shouldBe Symbol("nonEmpty")
+      .get("encryptionKey")
+    mintedKey shouldBe Symbol("nonEmpty")
+    // `Some("")` would also satisfy `nonEmpty` above (a non-empty Option holding an empty
+    // string) -- assert on the minted string itself so an empty mint cannot pass this test.
+    mintedKey.get should not be empty
+    mintedKey.get.length should be >= 16
   }
 
   it should "not let an empty-string encryptionKey in the manifest overwrite a live key" in {
@@ -375,7 +381,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val res = ManifestImporter.apply(m, s)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include(
-      "encryption cannot be turned off on an existing database"
+      "encryption cannot be turned off for an existing database"
     )
     // The live row's key must survive the refused apply untouched.
     s.listTenantDbs("acme")
@@ -383,6 +389,43 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       .get
       .metastore
       .get("encryptionKey") shouldBe Some("live-secret-key")
+  }
+
+  it should "refuse turning encryption on for an existing unencrypted row, with a clear message" in {
+    // Turning encryption ON in place is exactly as impossible as turning it off: DuckDB cannot
+    // encrypt an already-written, unencrypted file, so admitting this would mint a key and store
+    // encrypted=true against a row whose data on disk is still plaintext -- the next node spawn
+    // would ATTACH an unencrypted file with an ENCRYPTION_KEY clause.
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+    s.upsertTenantDb(
+      TenantDb(
+        id = "td-plain",
+        tenantId = "acme",
+        name = "acme_plain",
+        kind = TenantDbKind.DuckDbFile,
+        metastore = Map("dbName" -> "acme_plain", "schemaName" -> "main"),
+        dataPath = "/tmp/d",
+        encrypted = false
+      )
+    )
+    val mtd = ManifestTenantDb(
+      name = "acme_plain",
+      kind = "duckdb-file",
+      metastore = Map("dbName" -> "acme_plain", "schemaName" -> "main"),
+      dataPath = "/tmp/d",
+      encrypted = true
+    )
+    val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
+    val res = ManifestImporter.apply(m, s)
+    res.isLeft shouldBe true
+    res.swap.getOrElse(Nil).mkString("\n") should include(
+      "encryption cannot be turned on for an existing database"
+    )
+    // The live row must survive the refused apply untouched: still unencrypted, no key minted.
+    val row = s.listTenantDbs("acme").find(_.name == "acme_plain").get
+    row.encrypted shouldBe false
+    row.metastore.get("encryptionKey") shouldBe empty
   }
 
   it should "sweep node rows when an import drops a pool" in {

@@ -289,13 +289,21 @@ object ManifestImporter:
             case Right(dbKind) =>
               val existing = localDbs.get(mtd.name)
               val tdId     = existing.map(_.id).getOrElse(Names.newSurrogateId("td"))
-              if existing.exists(_.encrypted) && !mtd.encrypted then
-                // `encrypted` is create-time only and can never flip back off. TenantDb's own
-                // encryptionError would also catch this once the existing key is carried forward
-                // below, but its message talks about `encryptionKey`, which is misleading here --
-                // the incoming manifest carries no key at all; the operator is trying to turn
-                // encryption off on a row that already has it on, and that is what must be said.
-                errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': encryption cannot be turned off on an existing database"
+              if existing.exists(_.encrypted != mtd.encrypted) then
+                // `encrypted` is create-time only and can never be flipped in either direction on
+                // an existing row: neither DuckDB nor DuckLake can encrypt or decrypt data in
+                // place. DuckLake records `encrypted` in its own catalog metadata at creation, and
+                // a DuckDB file is either encrypted on disk or it is not -- changing the flag on a
+                // live row would only make the control plane disagree with the data, permanently.
+                // This importer is the only code path in the system that can change this flag at
+                // all (REST has no update field for it by design), so both directions must be
+                // refused here. TenantDb's own encryptionError would also catch the off-direction
+                // once the existing key is carried forward below, but its message talks about
+                // `encryptionKey`, which is misleading here -- the incoming manifest carries no key
+                // at all; the operator is trying to change whether encryption is on for a row that
+                // already exists, and that is what must be said.
+                val direction = if mtd.encrypted then "on" else "off"
+                errs += s"tenant '${mt.name}' tenant-db '${mtd.name}': encryption cannot be turned $direction for an existing database -- create a new database and copy the data instead"
               else
                 // ManifestExporter redacts `encryptionKey` out of `metastore` (see the comment
                 // there), unlike every other metastore/objectStore secret, which round-trips
