@@ -31,6 +31,8 @@ import ai.starlake.quack.ondemand.state.{
 
 object ManifestImporter:
 
+  private val logger = org.slf4j.LoggerFactory.getLogger(getClass)
+
   type ValidationResult = Either[List[String], Unit]
 
   // ------------------------------------------------------------------
@@ -346,6 +348,20 @@ object ManifestImporter:
                       case Some(key) => mtd.metastore.updated(TenantDb.EncryptionKeyName, key)
                       case None      =>
                         if mtd.encrypted && dbKind == TenantDbKind.DuckDbFile then
+                          // Say so. On a fresh create this is exactly right, but the same code
+                          // runs when a manifest exported from ANOTHER cluster is replayed here:
+                          // the row is new locally while the file it names may already exist, in
+                          // which case the minted key opens nothing and the only symptom is a node
+                          // that never turns healthy. Nothing can distinguish the two cases from
+                          // inside the importer, so name the mint in the log instead.
+                          logger.warn(
+                            s"manifest import: minted a NEW encryption key for tenant-db " +
+                              s"'${mtd.name}' (tenant '${mt.name}'), which carried none. If a " +
+                              "DuckDB file already exists for this database (a manifest replayed " +
+                              "from another cluster), it will NOT open with this key: restore the " +
+                              "original key from that cluster's control plane, or create the " +
+                              "database fresh."
+                          )
                           mtd.metastore.updated(TenantDb.EncryptionKeyName, EncryptionKeyGen.mint())
                         else mtd.metastore
                 val upserted = TenantDb(
