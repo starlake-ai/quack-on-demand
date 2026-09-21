@@ -250,15 +250,16 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.failuresFor(gen2.nodeId, gen2.startedAt.toEpochMilli) should not be empty
   }
 
-  // I4: alias matching must be case-insensitive end to end -- both at the verifier's own presence
-  // diff (declared "Sales_Lake" against a node that reports "sales_lake") and inside the registry
-  // (a manifest-imported row can carry an un-normalized alias). Removing EITHER `.toLowerCase` at
-  // IcebergAttachVerifier's presence diff sends the alias to `missing`: `rec.sent` would then be
-  // non-empty (a live, working catalog gets re-attached on every tick forever).
+  // I4: alias matching must be case-insensitive end to end. This fixture pins the present-side
+  // normalization (`present.map(_.toLowerCase)`), which models the production case: the node
+  // reports "Sales_Lake" as it was at spawn time (DuckDB preserves the exact alias case), while
+  // the pool row has been normalized to lowercase. Removing the present-side `.toLowerCase` call
+  // in IcebergAttachVerifier's partition sends the alias to `missing`, causing re-attach on every
+  // tick forever. The declared alias is also normalized for registry key consistency.
   it should "normalize alias case in the registry regardless of how the source declares it" in {
     val rec      = new Recorder
     val (v, reg) =
-      verifier(List(iceSrc("Sales_Lake")), Set("acme_db", "sales_lake"), rec.run(Right(())))
+      verifier(List(iceSrc("Sales_Lake")), Set("acme_db", "Sales_Lake"), rec.run(Right(())))
     v.verify(node).unsafeRunSync()
     rec.sent.get() shouldBe empty
     reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
