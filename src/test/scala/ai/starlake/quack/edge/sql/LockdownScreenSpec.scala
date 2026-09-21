@@ -220,3 +220,86 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
       .screen("SELECT * FROM read_parquet('s3://lakebucket/x.parquet')", Set("lakebucket"))
       .get should include("'lakebucket'")
   }
+
+  // ---- interior invisible trivia cannot hide a local-path read either ----
+  //
+  // Java's default `\s` (used by every regex in this file) is `[ \t\n\x0B\f\r]`. It does not
+  // match NBSP (U+00A0), figure space (U+2007), narrow no-break space (U+202F), or the Cf
+  // characters (zero-width space U+200B, word joiner U+2060, BOM U+FEFF). DuckDB's own parser
+  // front end substitutes ASCII spaces for its whole Unicode space/format set before parsing,
+  // so `SELECT * FROM<NBSP>'/etc/passwd.parquet'` is an ordinary, executable replacement scan
+  // to DuckDB -- verified against a real DuckDB 1.5.4, both this and the read_parquet form
+  // below return the target file's rows -- while the un-normalized regex above saw no
+  // separator between `from` and the quote at all and let it straight through. Every character
+  // below is written as a literal `\uXXXX` escape, never a raw invisible byte (see the
+  // byte-hygiene test at the end of this file).
+  "interior trivia" should "not hide a bare-path FROM behind a non-breaking space" in {
+    denied("SELECT * FROM\u00A0'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a figure space (U+2007)" in {
+    denied("SELECT * FROM\u2007'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a narrow no-break space (U+202F)" in {
+    denied("SELECT * FROM\u202F'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a zero-width space (U+200B)" in {
+    denied("SELECT * FROM\u200B'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a word joiner (U+2060)" in {
+    denied("SELECT * FROM\u2060'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a bare-path FROM behind a BOM (U+FEFF)" in {
+    denied("SELECT * FROM\uFEFF'/etc/passwd.parquet'") shouldBe true
+  }
+
+  it should "not hide a denied function call behind interior trivia" in {
+    denied("SELECT * FROM read_parquet\u00A0('/etc/x.parquet')") shouldBe true
+    denied("SELECT * FROM read_csv\u00A0('/etc/y.csv')") shouldBe true
+  }
+
+  it should "not hide a COPY path literal behind interior trivia" in {
+    denied("COPY t TO\u00A0'/tmp/out.csv'") shouldBe true
+  }
+
+  it should "still admit a remote literal with interior trivia (over-denial guard)" in {
+    // The remote exemption must survive normalization: a legitimate object-store literal
+    // separated from FROM by an invisible character is not local-path evidence.
+    denied("SELECT * FROM\u00A0's3://bucket/x.parquet'") shouldBe false
+  }
+
+  it should "leave an ordinary statement with no trivia behaving exactly as before" in {
+    denied("SELECT * FROM read_parquet('s3://bucket/k.parquet')") shouldBe false
+    denied("SELECT * FROM '/etc/passwd.parquet'") shouldBe true
+    denied("ATTACH 'x' AS y") shouldBe true
+    denied("SELECT 1") shouldBe false
+  }
+
+  // ---- escape hygiene of this file's own invisible-character test literals ----
+  //
+  // Every trivia character exercised above must be a literal `\uXXXX` escape, never a raw
+  // invisible byte pasted into the source: an editor or an "helpful" formatting pass can
+  // silently decode `\u00A0` back into a raw NBSP, at which point this file still compiles and
+  // every assertion above still passes (a `String` built from the escape and one built from the
+  // raw byte are identical at runtime -- that's the whole point of an escape), while the next
+  // reader sees what looks like ordinary blank space around a keyword with no way to tell the
+  // test asserts anything about trivia at all. This test reads this very source file back and
+  // fails if any codepoint above ASCII (U+007F) appears anywhere in it.
+  it should "carry no raw non-ASCII codepoints in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/edge/sql/LockdownScreenSpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
+      withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }

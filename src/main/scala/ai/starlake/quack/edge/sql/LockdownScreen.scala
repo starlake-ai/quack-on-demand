@@ -110,7 +110,14 @@ object LockdownScreen:
     splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
   private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
-    val lower = SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT))
+    // Normalized ONLY for screening: every trivia character (unicode space / format, see
+    // SqlTrivia.isTriviaSpace) becomes an ASCII space across the whole statement, matching what
+    // DuckDB's own parser front end does before tokenizing. Without this, a single interior NBSP
+    // or zero-width space (e.g. `FROM<NBSP>'/etc/passwd'`) hides the keyword-adjacency the regexes
+    // below key on, while DuckDB itself still treats it as an ordinary separator -- a lockdown
+    // bypass. `stmt` itself, unnormalized, is never used past this point; only `lower` is matched
+    // against, and the ORIGINAL `stmt` text is what the caller relays to the node.
+    val lower = SqlTrivia.normalize(SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT)))
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
       case some @ Some(_) => some
