@@ -767,6 +767,15 @@ object Main extends IOApp with LazyLogging:
         val probeSql = initSql.map(s => s"$s; SELECT 1").getOrElse("SELECT 1")
         adapter.probe(n, probeSql).map { ok =>
           if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
+          // An encrypted database that fails its probe is most likely a key mismatch, which looks
+          // exactly like the orphaned-node-port failure. Name the likely cause once per transition
+          // so the operator is not sent down the wrong path.
+          if !ok && sup.get(n.poolKey).exists(_.metastore.get("encrypted").contains("true")) then
+            logger.warn(
+              s"node ${n.nodeId} is unhealthy and its database is encrypted: for kind=duckdb-file " +
+                "an ENCRYPTION_KEY that does not match the file fails the boot ATTACH, which " +
+                "presents identically to an occupied node port"
+            )
           ok
         }
       },

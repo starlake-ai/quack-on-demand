@@ -26,8 +26,11 @@
 
 set -euo pipefail
 
-PORT="${1:?port required}"
-TOKEN="${2:?token required}"
+# Normally positional (LocalQuackBackend spawns with `script <port> <token>`); the
+# SpawnScriptEncryptionSpec dry-run harness has no port/token to allocate, so it sets these
+# as env vars instead. A positional arg always wins when both are present.
+PORT="${1:-${PORT:?port required}}"
+TOKEN="${2:-${TOKEN:?token required}}"
 
 pgHost="${pgHost:-localhost}"
 pgPort="${pgPort:-5432}"
@@ -101,7 +104,10 @@ esac
 # a directory there and the later `ATTACH '$dataPath'` fails with "Is a
 # directory"; only the parent directory needs to exist. For `memory`, there
 # is no on-disk path at all.
-if [[ "$IS_REMOTE" == "0" ]]; then
+# Skipped in dry-run mode: the harness feeds paths like /var/lake purely to exercise the
+# emitted SQL, and mkdir -p on those would either fail (no write access outside a real
+# deployment) or create directories nobody asked for.
+if [[ "$IS_REMOTE" == "0" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]]; then
   case "$kind" in
     ducklake)
       mkdir -p "$dataPath"
@@ -131,7 +137,7 @@ command -v "$DUCKDB" >/dev/null 2>&1 || {
 # `postgres`) as admin and runs CREATE DATABASE if missing. Skipped when psql
 # isn't available - the DuckLake ATTACH below will fail loudly in that case.
 # Only needed for kind=ducklake.
-if [[ "$kind" == "ducklake" ]] && command -v psql >/dev/null 2>&1; then
+if [[ "$kind" == "ducklake" && "${QOD_SPAWN_DRY_RUN:-}" != "1" ]] && command -v psql >/dev/null 2>&1; then
   ADMIN_DB="${PG_ADMIN_DB:-postgres}"
   EXISTS=$(PGPASSWORD="$pgPassword" psql -h "$pgHost" -p "$pgPort" -U "$pgUser" \
     -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = '$dbName'" 2>/dev/null || true)
@@ -144,26 +150,31 @@ if [[ "$kind" == "ducklake" ]] && command -v psql >/dev/null 2>&1; then
   fi
 fi
 
-# A named pipe keeps duckdb's stdin live without blocking after we feed the
-# init SQL. fd 9 holds the writer side open until this shell exits.
-FIFO_DIR="$(mktemp -d -t quack-fifo.XXXXXX)"
-FIFO="$FIFO_DIR/in"
-mkfifo "$FIFO"
+# Early guard: in dry-run mode we only want the assembled INIT_SQL (below), never a live
+# duckdb process. Skip the FIFO and the duckdb launch entirely rather than starting one and
+# killing it - SpawnScriptEncryptionSpec drives this script many times per run.
+if [[ "${QOD_SPAWN_DRY_RUN:-}" != "1" ]]; then
+  # A named pipe keeps duckdb's stdin live without blocking after we feed the
+  # init SQL. fd 9 holds the writer side open until this shell exits.
+  FIFO_DIR="$(mktemp -d -t quack-fifo.XXXXXX)"
+  FIFO="$FIFO_DIR/in"
+  mkfifo "$FIFO"
 
-# Start duckdb first - open() on FIFO blocks until the writer side appears.
-"$DUCKDB" < "$FIFO" &
-DUCK_PID=$!
+  # Start duckdb first - open() on FIFO blocks until the writer side appears.
+  "$DUCKDB" < "$FIFO" &
+  DUCK_PID=$!
 
-# Open the writer end; this unblocks duckdb's open().
-exec 9> "$FIFO"
+  # Open the writer end; this unblocks duckdb's open().
+  exec 9> "$FIFO"
 
-cleanup() {
-  kill -TERM "$DUCK_PID" 2>/dev/null || true
-  wait "$DUCK_PID" 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
-  rm -rf "$FIFO_DIR"
-}
-trap cleanup TERM INT EXIT
+  cleanup() {
+    kill -TERM "$DUCK_PID" 2>/dev/null || true
+    wait "$DUCK_PID" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+    rm -rf "$FIFO_DIR"
+  }
+  trap cleanup TERM INT EXIT
+fi
 
 # DuckDB does NOT honour the HTTP_PROXY / HTTPS_PROXY env vars for
 # `INSTALL <extension>` downloads - those have to be set via the SQL
@@ -280,6 +291,16 @@ if [[ -n "${objectStoreSql:-}" ]]; then
   INIT_SQL+="$objectStoreSql"$'\n'
 fi
 
+# Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
+# mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently
+# read-only node rather than an error. STORAGE_SQL only loads httpfs for remote data paths, so a
+# local encrypted database would miss it.
+ENCRYPTION_SQL=""
+if [[ "${encrypted:-}" == "true" ]]; then
+  ENCRYPTION_SQL=$'INSTALL httpfs; LOAD httpfs;\n'
+fi
+INIT_SQL+="$ENCRYPTION_SQL"
+
 case "$kind" in
   ducklake)
     INIT_SQL+=$'INSTALL ducklake; LOAD ducklake;\n'
@@ -288,7 +309,11 @@ case "$kind" in
     INIT_SQL+="ATTACH 'host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS qod_init_pg (TYPE postgres);"$'\n'
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_lock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
     INIT_SQL+="ATTACH 'ducklake:postgres:host=$pgHost port=$pgPort dbname=$dbName user=$pgUser password=$pgPassword' AS \"$catalogAlias\""$'\n'
-    INIT_SQL+="  (DATA_PATH '$dataPath');"$'\n'
+    if [[ "${encrypted:-}" == "true" ]]; then
+      INIT_SQL+="  (DATA_PATH '$dataPath', ENCRYPTED);"$'\n'
+    else
+      INIT_SQL+="  (DATA_PATH '$dataPath');"$'\n'
+    fi
     INIT_SQL+="SELECT * FROM postgres_query('qod_init_pg', 'SELECT pg_advisory_unlock(hashtext(''qod-ducklake-init:$dbName''))');"$'\n'
     INIT_SQL+=$'DETACH qod_init_pg;\n'
     INIT_SQL+="USE \"$catalogAlias\";"$'\n'
@@ -296,7 +321,11 @@ case "$kind" in
     INIT_SQL+="USE \"$catalogAlias\".\"$schemaName\";"$'\n'
     ;;
   duckdb-file)
-    INIT_SQL+="ATTACH '$dataPath' AS \"$catalogAlias\";"$'\n'
+    if [[ "${encrypted:-}" == "true" ]]; then
+      INIT_SQL+="ATTACH '$dataPath' AS \"$catalogAlias\" (ENCRYPTION_KEY '$encryptionKey');"$'\n'
+    else
+      INIT_SQL+="ATTACH '$dataPath' AS \"$catalogAlias\";"$'\n'
+    fi
     INIT_SQL+="USE \"$catalogAlias\";"$'\n'
     INIT_SQL+="CREATE SCHEMA IF NOT EXISTS \"$schemaName\";"$'\n'
     INIT_SQL+="USE \"$catalogAlias\".\"$schemaName\";"$'\n'
@@ -318,6 +347,14 @@ if [[ -n "${lockdownSql:-}" ]]; then
 fi
 
 INIT_SQL+="CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
+
+# Test seam: print the assembled init SQL and exit without launching duckdb.
+# Used by SpawnScriptEncryptionSpec to assert the emitted SQL, which is the only
+# testable surface of a script the manager shells out to.
+if [[ "${QOD_SPAWN_DRY_RUN:-}" == "1" ]]; then
+  printf '%s' "$INIT_SQL"
+  exit 0
+fi
 
 printf '%s' "$INIT_SQL" >&9
 
