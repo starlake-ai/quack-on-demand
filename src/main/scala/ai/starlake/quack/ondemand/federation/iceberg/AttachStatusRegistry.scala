@@ -14,13 +14,22 @@ final case class CatalogAttachFailure(
     attempts: Int
 )
 
-/** Live attach state per `(nodeId, alias)`, plus the retry backoff.
+/** Live attach state per `(node incarnation, alias)`, plus the retry backoff.
+  *
+  * `PoolSupervisor.nodeId` is a deterministic slot id (`respawnSpec` reuses it verbatim), so a node
+  * id identifies a SLOT, not an incarnation: a scale-to-zero resume, a `/api/node/restart`, or an
+  * autoscale cycle can all respawn a new node under the same id. Every key here therefore carries
+  * `startedAt` too, so a respawned node starts with a clean slate instead of inheriting its
+  * predecessor's latch -- the feature exists precisely to catch a respawn whose credentials expired
+  * while it was gone.
   *
   * Deliberately NOT persisted: it describes live process state, and a manager restart re-probes
   * every node anyway. Under HA each replica verifies the nodes it tracks, so this is replica-local
   * (the same trade-off already accepted for the revoked-jti denylist).
   *
-  * Bounded by construction: one entry per (live node, declared alias).
+  * Bounded by construction: one entry per (live node incarnation, declared alias), and
+  * [[pruneOtherIncarnations]] drops a slot's previous incarnation the first time its successor is
+  * verified, so a long-lived manager cycling nodes through the same slot does not leak entries.
   */
 final class AttachStatusRegistry(
     baseBackoffMs: Long = 30000L,
@@ -29,13 +38,22 @@ final class AttachStatusRegistry(
 
   private final case class Entry(error: String, at: Instant, attempts: Int, lastAttemptMs: Long)
 
-  private val failures = new ConcurrentHashMap[(String, String), Entry]()
-  private val attached = ConcurrentHashMap.newKeySet[(String, String)]()
-  private val complete = ConcurrentHashMap.newKeySet[String]()
+  // (nodeId, startedAt-epoch-millis): identifies one node INCARNATION, not just its slot.
+  private type NodeKey = (String, Long)
 
-  def recordAttached(nodeId: String, alias: String): Unit =
-    failures.remove((nodeId, alias))
-    attached.add((nodeId, alias))
+  private val failures = new ConcurrentHashMap[(NodeKey, String), Entry]()
+  private val attached = ConcurrentHashMap.newKeySet[(NodeKey, String)]()
+  private val complete = ConcurrentHashMap.newKeySet[NodeKey]()
+
+  // Every alias key is normalized here, once, so callers can pass the alias however the source
+  // declared it (manifest imports do not normalize) and every lookup -- including a caller's own
+  // -- agrees on what it is looking up.
+  private def normalize(alias: String): String = alias.toLowerCase
+
+  def recordAttached(nodeId: String, startedAtMs: Long, alias: String): Unit =
+    val key = ((nodeId, startedAtMs), normalize(alias))
+    failures.remove(key)
+    attached.add(key)
 
   /** Returns true when this failure is NEW or its error text CHANGED, which is the only time the
     * caller should emit a WARN. A permanently broken catalog then costs one log line, not one per
@@ -43,61 +61,81 @@ final class AttachStatusRegistry(
     */
   def recordFailure(
       nodeId: String,
+      startedAtMs: Long,
       alias: String,
       error: String,
       nowMs: Long = System.currentTimeMillis()
   ): Boolean =
-    attached.remove((nodeId, alias))
-    val prev       = Option(failures.get((nodeId, alias)))
+    val key = ((nodeId, startedAtMs), normalize(alias))
+    attached.remove(key)
+    val prev       = Option(failures.get(key))
     val attempts   = prev.map(_.attempts + 1).getOrElse(1)
     val noteworthy = prev.forall(_.error != error)
-    failures.put(
-      (nodeId, alias),
-      Entry(error, Instant.ofEpochMilli(nowMs), attempts, nowMs)
-    )
-    complete.remove(nodeId)
+    failures.put(key, Entry(error, Instant.ofEpochMilli(nowMs), attempts, nowMs))
+    complete.remove((nodeId, startedAtMs))
     noteworthy
 
-  /** Exponential backoff per `(nodeId, alias)`: the health-tick interval, doubling to a ceiling. A
-    * never-attempted pair always retries.
+  /** Exponential backoff per `(node incarnation, alias)`: the health-tick interval, doubling to a
+    * ceiling. A never-attempted pair always retries.
     */
   def shouldRetry(
       nodeId: String,
+      startedAtMs: Long,
       alias: String,
       nowMs: Long = System.currentTimeMillis()
   ): Boolean =
-    Option(failures.get((nodeId, alias))) match
+    Option(failures.get(((nodeId, startedAtMs), normalize(alias)))) match
       case None    => true
       case Some(e) =>
         val shift = math.min(e.attempts - 1, 20)
         val delay = math.min(baseBackoffMs * (1L << shift), maxBackoffMs)
         nowMs - e.lastAttemptMs >= delay
 
-  def latched(nodeId: String): Boolean  = complete.contains(nodeId)
-  def markLatched(nodeId: String): Unit = complete.add(nodeId)
+  def latched(nodeId: String, startedAtMs: Long): Boolean = complete.contains((nodeId, startedAtMs))
+  def markLatched(nodeId: String, startedAtMs: Long): Unit = complete.add((nodeId, startedAtMs))
 
-  /** Drop every trace of a node that is gone, so a scaled-down pool leaves nothing behind. */
-  def forgetNode(nodeId: String): Unit =
-    complete.remove(nodeId)
-    failures.keySet().asScala.filter(_._1 == nodeId).foreach(failures.remove)
-    attached.asScala.filter(_._1 == nodeId).toList.foreach(attached.remove)
+  /** Drops every entry that belongs to a DIFFERENT incarnation of this node id. A caller passing
+    * its own (fresh) incarnation here is proof the old one is gone -- this is what keeps the
+    * registry bounded across respawns, scale-in/out, and pool resumes, without needing an explicit
+    * node-stop hook (there is no such hook to wire: `PoolSupervisor`'s node ids are deterministic
+    * slot ids reused by `respawnSpec`, so "this slot restarted" is the only signal a caller could
+    * give, and this is that same signal observed from the read side, once per incarnation).
+    */
+  def pruneOtherIncarnations(nodeId: String, startedAtMs: Long): Unit =
+    val current = (nodeId, startedAtMs)
+    complete.asScala.filter(k => k._1 == nodeId && k != current).toList.foreach(complete.remove)
+    failures
+      .keySet()
+      .asScala
+      .filter(k => k._1._1 == nodeId && k._1 != current)
+      .toList
+      .foreach(failures.remove)
+    attached.asScala
+      .filter(k => k._1._1 == nodeId && k._1 != current)
+      .toList
+      .foreach(attached.remove)
 
-  def failuresFor(nodeId: String): List[CatalogAttachFailure] =
+  def failuresFor(nodeId: String, startedAtMs: Long): List[CatalogAttachFailure] =
+    val key = (nodeId, startedAtMs)
     failures.asScala.toList
       .collect {
-        case ((n, alias), e) if n == nodeId =>
+        case ((k, alias), e) if k == key =>
           CatalogAttachFailure(alias, e.error, e.at, e.attempts)
       }
       .sortBy(_.alias)
 
   /** Operator-facing summary of one alias across a pool's nodes: `attached`, `unknown`, or
-    * `failed on N of M nodes`.
+    * `failed on N of M nodes`. Matches by node id alone -- once a node's successor incarnation has
+    * been verified at least once, [[pruneOtherIncarnations]] guarantees at most one incarnation's
+    * entries survive per node id, so this does not need `startedAt` from the caller.
     */
   def aliasSummary(alias: String, nodeIds: Set[String]): Option[String] =
     if nodeIds.isEmpty then Some("unknown")
     else
-      val failing = nodeIds.count(n => failures.containsKey((n, alias)))
-      val ok      = nodeIds.count(n => attached.contains((n, alias)))
+      val a       = normalize(alias)
+      val failing =
+        nodeIds.count(n => failures.keySet().asScala.exists(k => k._1._1 == n && k._2 == a))
+      val ok = nodeIds.count(n => attached.asScala.exists(k => k._1._1 == n && k._2 == a))
       if failing > 0 then Some(s"failed on $failing of ${nodeIds.size} nodes")
       else if ok == nodeIds.size then Some("attached")
       else Some("unknown")

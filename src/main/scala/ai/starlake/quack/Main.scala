@@ -780,27 +780,17 @@ object Main extends IOApp with LazyLogging:
 
     val attachRegistry = new ai.starlake.quack.ondemand.federation.iceberg.AttachStatusRegistry()
 
-    // Reads one node's attached catalogs. The quack wire can emit a schema-only first batch, so
-    // batches are drained rather than assuming the first carries rows (same reason EngineStats
-    // loops). Fail-soft: any surprise becomes a Left, never an exception.
+    // Reads one node's attached catalogs. Decoding (batch draining, schema-only first batch,
+    // close-on-every-path) lives in IcebergAttachVerifier.decodeCatalogNames, which is unit
+    // tested; this is wiring only. Fail-soft: any surprise becomes a Left, never an exception.
     def nodeCatalogs(n: RunningNode): IO[Either[String, Set[String]]] =
       adapter
         .send(n, "SELECT database_name FROM duckdb_databases()", session = None, recordLoad = false)
         .map {
           case QuackResponse.Failed(err, _)     => Left(err.toString)
           case QuackResponse.Ok(rows, _, close) =>
-            try
-              val acc = scala.collection.mutable.Set.empty[String]
-              while rows.loadNextBatch() do
-                val root = rows.getVectorSchemaRoot
-                val vec  = root.getFieldVectors.get(0)
-                var i    = 0
-                while i < root.getRowCount do
-                  Option(vec.getObject(i)).foreach(v => acc += v.toString)
-                  i += 1
-              Right(acc.toSet)
-            catch case t: Throwable => Left(s"could not decode duckdb_databases(): ${t.getMessage}")
-            finally close()
+            ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier
+              .decodeCatalogNames(rows, close)
         }
         .handleError(t => Left(t.getMessage))
 
@@ -814,10 +804,17 @@ object Main extends IOApp with LazyLogging:
         Some(
           new ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier(
             sourcesOf = key =>
-              sup
-                .findTenantDb(key.tenant, key.tenantDb)
-                .map(td => fedStore.listEnabledSources(td.id))
-                .getOrElse(Nil),
+              sup.findTenantDb(key.tenant, key.tenantDb) match
+                case Some(td) => IO.blocking(fedStore.listEnabledSources(td.id))
+                case None     =>
+                  // Distinguish "lookup failed" from "nothing declared": a missing tenant-db here
+                  // is a cache-population race, not proof the pool has no Iceberg source, and must
+                  // not latch the node. IO.raiseError routes it through verify's own Left arm.
+                  IO.raiseError(
+                    new NoSuchElementException(
+                      s"no tenant-db for ${key.tenant}/${key.tenantDb}"
+                    )
+                  ),
             renderOne = src => builder.buildOne(src),
             runOnNode = (n, sql) =>
               adapter.send(n, sql, session = None, recordLoad = false).map {

@@ -4,6 +4,7 @@ import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, PoolKey, R
 import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
+import org.apache.arrow.vector.ipc.ArrowReader
 
 /** Makes a silently-failed Iceberg ATTACH visible, and heals it when it was transient.
   *
@@ -13,16 +14,23 @@ import com.typesafe.scalalogging.LazyLogging
   * health probe and is routed to like any other, with the catalog simply absent, and users get
   * `Catalog 'x' does not exist` instead of "expired credentials" or "catalog unreachable".
   *
-  * Per health tick, until the node latches:
+  * Per health tick, until the node's incarnation latches:
   *   1. list the node's attached catalogs
   *   2. diff against the enabled `iceberg_rest` aliases declared for its pool
   *   3. re-issue THAT ONE source's rendered block for each missing alias
   *
   * Step 3 heals and diagnoses at once: a returned catalog attaches with no node restart, and a
   * still-broken one yields the real DuckDB error.
+  *
+  * `sourcesOf` returns an `IO`, not a plain value: the lookup makes a real Postgres round trip, and
+  * everything in [[verify]] has to run inside the returned `IO` -- including calling `sourcesOf`
+  * itself -- so a throw from it becomes a failed `IO` the caller's `handleErrorWith` can see,
+  * instead of a synchronous exception that would kill the whole HealthProbe fiber (nobody joins
+  * that fiber, so cats-effect would drop the failure silently and health probing would stop for
+  * every node in the manager).
   */
 final class IcebergAttachVerifier(
-    sourcesOf: PoolKey => List[FederatedSource],
+    sourcesOf: PoolKey => IO[List[FederatedSource]],
     renderOne: FederatedSource => IO[String],
     runOnNode: (RunningNode, String) => IO[Either[String, Unit]],
     listCatalogs: RunningNode => IO[Either[String, Set[String]]],
@@ -30,52 +38,78 @@ final class IcebergAttachVerifier(
 ) extends LazyLogging:
 
   def verify(node: RunningNode): IO[Unit] =
-    if registry.latched(node.nodeId) then IO.unit
-    else
-      val declared = sourcesOf(node.poolKey).filter { s =>
-        s.sourceType == FederatedSourceType.IcebergRest && !s.disabled
-      }
-      // Nothing declared: latch without ever touching the node, so the overwhelmingly common
-      // pool (no Iceberg catalog at all) costs exactly zero round-trips.
-      if declared.isEmpty then IO.delay(registry.markLatched(node.nodeId))
+    IO.defer {
+      val startedAtMs = node.startedAt.toEpochMilli
+      registry.pruneOtherIncarnations(node.nodeId, startedAtMs)
+      if registry.latched(node.nodeId, startedAtMs) then IO.unit
       else
-        listCatalogs(node).flatMap {
-          case Left(err) =>
-            // The node itself is unreachable or answered nonsense. Stay unlatched and say
-            // nothing: the health probe already owns node liveness.
-            IO.delay(logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err"))
-          case Right(present) =>
-            val lower   = present.map(_.toLowerCase)
-            val missing = declared.filterNot(s => lower.contains(s.alias.toLowerCase))
-            missing.traverse_(reattach(node, _)) *> IO.delay {
-              if registry.failuresFor(node.nodeId).isEmpty then registry.markLatched(node.nodeId)
+        sourcesOf(node.poolKey).attempt.flatMap {
+          case Left(t) =>
+            // The lookup itself failed -- a missing tenant-db in the supervisor's cache, or a
+            // Postgres blip. That is NOT the same as "this pool declares no Iceberg source": stay
+            // unlatched and say nothing at info/warn, so the next tick retries.
+            IO.delay(
+              logger.debug(s"attach verify ${node.nodeId}: source lookup failed: ${t.getMessage}")
+            )
+          case Right(sources) =>
+            val declared = sources.filter { s =>
+              s.sourceType == FederatedSourceType.IcebergRest && !s.disabled
             }
+            // Nothing declared: latch without ever touching the node, so the overwhelmingly common
+            // pool (no Iceberg catalog at all) costs exactly zero round-trips.
+            if declared.isEmpty then IO.delay(registry.markLatched(node.nodeId, startedAtMs))
+            else
+              listCatalogs(node).flatMap {
+                case Left(err) =>
+                  // The node itself is unreachable or answered nonsense. Stay unlatched and say
+                  // nothing: the health probe already owns node liveness.
+                  IO.delay(
+                    logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
+                  )
+                case Right(present) =>
+                  val lower            = present.map(_.toLowerCase)
+                  val (found, missing) =
+                    declared.partition(s => lower.contains(s.alias.toLowerCase))
+                  found.traverse_(s =>
+                    IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
+                  ) *>
+                    missing.traverse_(reattach(node, startedAtMs, _)) *> IO.delay {
+                      if registry.failuresFor(node.nodeId, startedAtMs).isEmpty then
+                        registry.markLatched(node.nodeId, startedAtMs)
+                    }
+              }
         }
+    }
 
-  private def reattach(node: RunningNode, src: FederatedSource): IO[Unit] =
-    if !registry.shouldRetry(node.nodeId, src.alias) then IO.unit
+  private def reattach(node: RunningNode, startedAtMs: Long, src: FederatedSource): IO[Unit] =
+    if !registry.shouldRetry(node.nodeId, startedAtMs, src.alias) then IO.unit
     else
       renderOne(src).attempt.flatMap {
         case Left(t) =>
           // A config that will not render is a control-plane bug, not a catalog outage. Record
           // it the same way so it surfaces on the node and the source.
-          note(node, src, s"could not render attach SQL: ${t.getMessage}")
+          note(node, startedAtMs, src, s"could not render attach SQL: ${t.getMessage}")
         case Right(sql) =>
           runOnNode(node, sql).flatMap {
             case Right(_) =>
               IO.delay {
-                registry.recordAttached(node.nodeId, src.alias)
+                registry.recordAttached(node.nodeId, startedAtMs, src.alias)
                 logger.info(
                   s"attach verify ${node.nodeId}: catalog '${src.alias}' attached on retry"
                 )
               }
-            case Left(err) => note(node, src, err)
+            case Left(err) => note(node, startedAtMs, src, err)
           }
       }
 
-  private def note(node: RunningNode, src: FederatedSource, err: String): IO[Unit] =
+  private def note(
+      node: RunningNode,
+      startedAtMs: Long,
+      src: FederatedSource,
+      err: String
+  ): IO[Unit] =
     IO.delay {
-      val noteworthy = registry.recordFailure(node.nodeId, src.alias, err)
+      val noteworthy = registry.recordFailure(node.nodeId, startedAtMs, src.alias, err)
       if noteworthy then
         logger.warn(
           s"iceberg catalog '${src.alias}' is NOT attached on node ${node.nodeId} " +
@@ -83,3 +117,24 @@ final class IcebergAttachVerifier(
             s"pool=${node.poolKey.pool}): $err"
         )
     }
+
+object IcebergAttachVerifier:
+
+  /** Decodes `duckdb_databases()` batches into the set of attached catalog names, and always closes
+    * the reader. The quack wire can emit a schema-only first batch, so batches are drained rather
+    * than assuming the first carries rows (same reason `EngineStats.fromReader` loops); any
+    * surprise, including a `close()` that itself throws, becomes a `Left`, never an exception.
+    */
+  def decodeCatalogNames(rows: ArrowReader, close: () => Unit): Either[String, Set[String]] =
+    try
+      val acc = scala.collection.mutable.Set.empty[String]
+      while rows.loadNextBatch() do
+        val root = rows.getVectorSchemaRoot
+        val vec  = root.getFieldVectors.get(0)
+        var i    = 0
+        while i < root.getRowCount do
+          Option(vec.getObject(i)).foreach(v => acc += v.toString)
+          i += 1
+      Right(acc.toSet)
+    catch case t: Throwable => Left(s"could not decode duckdb_databases(): ${t.getMessage}")
+    finally close()
