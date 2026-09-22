@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.sql
 
+import java.util.Locale
 import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -192,7 +193,7 @@ final class PostgresAclValidator(
             ta.verb == Verb.Read &&
             ta.table.schema.equalsIgnoreCase("information_schema") &&
             ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableTables
-              .contains(ta.table.table.toLowerCase) &&
+              .contains(ta.table.table.toLowerCase(Locale.ROOT)) &&
             ta.table.database.equalsIgnoreCase(sessionCatalog)
           }
 
@@ -250,7 +251,7 @@ final class PostgresAclValidator(
     * Write); DDL stays separate because CREATE/DROP/ALTER are deliberately higher-privilege.
     */
   private def verbCovers(grantVerb: String, access: Verb): Boolean =
-    val gu = grantVerb.toUpperCase
+    val gu = grantVerb.toUpperCase(Locale.ROOT)
     if gu == "ALL" then true
     else
       access match

@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
+import java.util.Locale
 import cats.effect.IO
 import cats.effect.unsafe.IORuntime
 import com.typesafe.scalalogging.LazyLogging
@@ -327,7 +328,7 @@ open class QuackHttpClient(
     * so we sniff the message.
     */
   private def isTransient(sql: SQLException): Boolean =
-    val msg = Option(sql.getMessage).getOrElse("").toLowerCase
+    val msg = Option(sql.getMessage).getOrElse("").toLowerCase(Locale.ROOT)
     msg.contains("connection refused") ||
     msg.contains("timed out") ||
     msg.contains("timeout") ||

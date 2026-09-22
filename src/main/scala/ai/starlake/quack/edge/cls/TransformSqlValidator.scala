@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.cls
 
+import java.util.Locale
 import ai.starlake.quack.edge.rls.SqlCommentScan
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.{Function => SqlFunction}
@@ -81,7 +82,7 @@ object TransformSqlValidator:
       case _: net.sf.jsqlparser.expression.operators.relational.ExistsExpression =>
         violations += "EXISTS subqueries are not allowed in transformSql"
       case fn: SqlFunction =>
-        val name = Option(fn.getName).getOrElse("").toLowerCase
+        val name = Option(fn.getName).getOrElse("").toLowerCase(Locale.ROOT)
         if Denylist.contains(name) || name.startsWith("pragma_") then
           violations += s"function '$name' is not allowed in transformSql"
       case _ => ()

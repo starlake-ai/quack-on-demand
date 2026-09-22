@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.rls
 
+import java.util.Locale
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
 
@@ -86,7 +87,7 @@ object RowPredicateValidator:
 
     // Scan the canonical, literal-stripped form. Lower-cased so keyword/function matching is
     // case-insensitive; literals removed so their contents can never trip a keyword check.
-    val scan = StringLiteral.replaceAllIn(expr.toString, "''").toLowerCase
+    val scan = StringLiteral.replaceAllIn(expr.toString, "''").toLowerCase(Locale.ROOT)
 
     if "(?<![a-z0-9_])(?:select|exists)(?![a-z0-9_])".r.findFirstIn(scan).isDefined then
       return Invalid("subqueries are not allowed in predicateSql")

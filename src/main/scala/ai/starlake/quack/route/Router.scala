@@ -1,5 +1,6 @@
 package ai.starlake.quack.route
 
+import java.util.Locale
 import ai.starlake.quack.model.{Role, StatementKind}
 
 object Router:
@@ -35,7 +36,8 @@ object Router:
           val availableRoles = routable.map(_.role).toSet
           val acceptable     = RoleMatcher.fallback(kind, availableRoles)
           if acceptable.isEmpty then
-            val want = RoleMatcher.preferred(kind).map(_.toString.toUpperCase).mkString(" or ")
+            val want =
+              RoleMatcher.preferred(kind).map(_.toString.toUpperCase(Locale.ROOT)).mkString(" or ")
             RoutingDecision.Unavailable(s"no node with role $want")
           else
             val roleCompatible = routable.filter(n => acceptable.contains(n.role))

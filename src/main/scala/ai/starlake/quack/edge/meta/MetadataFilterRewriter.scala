@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.meta
 
+import java.util.Locale
 import ai.starlake.quack.edge.cls.SchemaContext
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
@@ -223,7 +224,7 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
   private def readGrants(eff: EffectiveSet, ctx: SchemaContext): List[RolePermission] =
     val sessionCat = ctx.defaultDatabase.getOrElse("")
     eff.permissions.filter { p =>
-      ReadCoveringVerbs.contains(p.verb.toUpperCase) &&
+      ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
       (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
     }
 
@@ -377,8 +378,8 @@ object MetadataFilterRewriter:
     val name   = Option(t.getName).getOrElse("")
     val catOk  = cat.isEmpty || cat.equalsIgnoreCase(sessionCat)
     if catOk && schema.equalsIgnoreCase(InformationSchema) &&
-      FilterableTables.contains(name.toLowerCase)
-    then Some(name.toLowerCase)
+      FilterableTables.contains(name.toLowerCase(Locale.ROOT))
+    then Some(name.toLowerCase(Locale.ROOT))
     else None
 
   /** Counts filterable table OCCURRENCES by riding jsqlparser's own complete traversal and tallying
@@ -414,7 +415,9 @@ object MetadataFilterRewriter:
     val cat    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
     val name   = Option(t.getName).getOrElse("")
     cat.nonEmpty && !cat.equalsIgnoreCase(sessionCat) &&
-    schema.equalsIgnoreCase(InformationSchema) && FilterableTables.contains(name.toLowerCase)
+    schema.equalsIgnoreCase(InformationSchema) && FilterableTables.contains(
+      name.toLowerCase(Locale.ROOT)
+    )
 
   private final case class RefCounts(nodes: Int, crossCatalog: Int)
 

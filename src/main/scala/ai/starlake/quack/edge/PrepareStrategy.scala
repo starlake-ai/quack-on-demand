@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import java.util.Locale
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.sql.SqlCommentStripper
 
@@ -35,7 +36,7 @@ object PrepareStrategy:
       case StatementKind.Other                                                 => FullExecute
       case StatementKind.Select                                                =>
         val stripped = SqlCommentStripper.stripComments(sql).trim
-        val verb     = firstToken(stripped).map(_.toUpperCase).getOrElse("")
+        val verb     = firstToken(stripped).map(_.toUpperCase(Locale.ROOT)).getOrElse("")
         if NotSubquerySafe.contains(verb) then FullExecute
         else if isMultiStatement(stripped) then FullExecute
         else

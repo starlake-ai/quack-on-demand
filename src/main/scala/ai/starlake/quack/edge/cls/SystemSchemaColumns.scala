@@ -1,26 +1,27 @@
 package ai.starlake.quack.edge.cls
 
+import java.util.Locale
+
 /** Static column lists for DuckDB's system-catalog tables (`information_schema.*` and
   * `pg_catalog.*`), so the CLS resolver can resolve metadata queries without asking the tenant
-  * catalog (which only knows user tables and returns Nil for system schemas, tripping the
-  * STRICT resolver into a fail-closed deny).
+  * catalog (which only knows user tables and returns Nil for system schemas, tripping the STRICT
+  * resolver into a fail-closed deny).
   *
-  * These are DuckDB's FIXED system-catalog shapes: unlike user tables they do not vary per
-  * tenant or per database, only per DuckDB version. Every list below was obtained by probing a
-  * real DuckDB (v1.5.4) with
+  * These are DuckDB's FIXED system-catalog shapes: unlike user tables they do not vary per tenant
+  * or per database, only per DuckDB version. Every list below was obtained by probing a real DuckDB
+  * (v1.5.4) with
   * {{{
   *   duckdb :memory: -c "CREATE TABLE _x(a int); DESCRIBE SELECT * FROM <schema>.<table>"
   * }}}
   * and copying the column names in order. Names not present in that build (e.g.
-  * `information_schema.tables_extensions`, `information_schema.routines`) are deliberately
-  * omitted.
+  * `information_schema.tables_extensions`, `information_schema.routines`) are deliberately omitted.
   *
   * Soundness: column policies only ever target user-schema tables, so resolving a system-schema
   * table can never unmask a user column; the rewrite over a pure metadata query is a no-op
   * passthrough. A system table that is NOT in this map simply stays absent from the resolver's
-  * schema, and the STRICT resolver denies: OMISSIONS FAIL CLOSED (worst case is a denied
-  * metadata query, never a data leak). Keep it that way: never add a fallback that passes
-  * unknown system tables through unresolved.
+  * schema, and the STRICT resolver denies: OMISSIONS FAIL CLOSED (worst case is a denied metadata
+  * query, never a data leak). Keep it that way: never add a fallback that passes unknown system
+  * tables through unresolved.
   */
 object SystemSchemaColumns:
 
@@ -28,15 +29,15 @@ object SystemSchemaColumns:
   private val systemSchemas: Set[String] = Set("information_schema", "pg_catalog")
 
   def isSystemSchema(schema: String): Boolean =
-    systemSchemas.contains(schema.toLowerCase)
+    systemSchemas.contains(schema.toLowerCase(Locale.ROOT))
 
-  /** Ordered column list for `schema.table`, case-insensitive on both parts. `None` when the
-    * schema is not a system schema or the table is not a known system table of this DuckDB
-    * build (callers then fall back to their normal fail-closed path).
+  /** Ordered column list for `schema.table`, case-insensitive on both parts. `None` when the schema
+    * is not a system schema or the table is not a known system table of this DuckDB build (callers
+    * then fall back to their normal fail-closed path).
     */
   def columnsOf(schema: String, table: String): Option[List[String]] =
     if !isSystemSchema(schema) then None
-    else tables.get((schema.toLowerCase, table.toLowerCase))
+    else tables.get((schema.toLowerCase(Locale.ROOT), table.toLowerCase(Locale.ROOT)))
 
   /** Every known system table as ((schema, table) -> ordered columns), for seeding a resolver's
     * metadata with schema-qualified entries.
@@ -310,11 +311,11 @@ object SystemSchemaColumns:
       "typdefault",
       "typacl"
     ),
-    "pg_database" -> List("oid", "datname", "datallowconn", "datistemplate"),
-    "pg_settings" -> List("name", "setting", "short_desc", "vartype"),
-    "pg_views"    -> List("schemaname", "viewname", "viewowner", "definition"),
-    "pg_am"       -> List("oid", "amname", "amhandler", "amtype"),
-    "pg_attrdef"  -> List("oid", "adrelid", "adnum", "adbin"),
+    "pg_database"   -> List("oid", "datname", "datallowconn", "datistemplate"),
+    "pg_settings"   -> List("name", "setting", "short_desc", "vartype"),
+    "pg_views"      -> List("schemaname", "viewname", "viewowner", "definition"),
+    "pg_am"         -> List("oid", "amname", "amhandler", "amtype"),
+    "pg_attrdef"    -> List("oid", "adrelid", "adnum", "adbin"),
     "pg_constraint" -> List(
       "oid",
       "conname",
@@ -353,7 +354,7 @@ object SystemSchemaColumns:
     ),
     "pg_description" -> List("objoid", "classoid", "objsubid", "description"),
     "pg_enum"        -> List("oid", "enumtypid", "enumsortorder", "enumlabel"),
-    "pg_index" -> List(
+    "pg_index"       -> List(
       "indexrelid",
       "indrelid",
       "indnatts",
@@ -376,7 +377,7 @@ object SystemSchemaColumns:
       "indpred"
     ),
     "pg_indexes" -> List("schemaname", "tablename", "indexname", "tablespace", "indexdef"),
-    "pg_proc" -> List(
+    "pg_proc"    -> List(
       "oid",
       "proname",
       "pronamespace",

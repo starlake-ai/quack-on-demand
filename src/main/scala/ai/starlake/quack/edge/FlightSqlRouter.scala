@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import java.util.Locale
 import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{
@@ -273,7 +274,7 @@ final class FlightSqlRouter(
       Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty).map { db =>
         val author   = s"tenant:$tenant/user:$user"
         val stripped = SqlCommentStripper.stripComments(sql)
-        val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase
+        val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase(Locale.ROOT)
         s"BEGIN; CALL ducklake_set_commit_message(" +
           s"${SqlLiterals.duckdbLiteral(db)}, " +
           s"${SqlLiterals.duckdbLiteral(author)}, " +
@@ -826,7 +827,7 @@ final class FlightSqlRouter(
       state: Option[ai.starlake.quack.ondemand.PoolState],
       sql: String
   ): String =
-    val trimmed = sql.trim.toUpperCase
+    val trimmed = sql.trim.toUpperCase(Locale.ROOT)
     val skip    = trimmed.startsWith("USE ") || trimmed.startsWith("SET ") ||
       trimmed.startsWith("BEGIN") || trimmed.startsWith("COMMIT") ||
       trimmed.startsWith("ROLLBACK") || trimmed.startsWith("ATTACH") ||
@@ -930,7 +931,7 @@ final class FlightSqlRouter(
     * rest BadRequest. The "permanent failure:" prefix is preserved for operators.
     */
   private def classifyPermanent(message: String): RouterFailure =
-    val lower    = message.toLowerCase
+    val lower    = message.toLowerCase(Locale.ROOT)
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $message"

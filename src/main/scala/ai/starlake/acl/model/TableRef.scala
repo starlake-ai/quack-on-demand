@@ -1,5 +1,7 @@
 package ai.starlake.acl.model
 
+import java.util.Locale
+
 final case class TableRef private (
     database: String,
     schema: String,
@@ -30,9 +32,9 @@ object TableRef {
 
   def apply(database: String, schema: String, table: String): TableRef =
     new TableRef(
-      database = database.toLowerCase,
-      schema = schema.toLowerCase,
-      table = table.toLowerCase,
+      database = database.toLowerCase(Locale.ROOT),
+      schema = schema.toLowerCase(Locale.ROOT),
+      table = table.toLowerCase(Locale.ROOT),
       originalDatabase = database,
       originalSchema = schema,
       originalTable = table

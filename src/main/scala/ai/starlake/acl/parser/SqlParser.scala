@@ -1,5 +1,6 @@
 package ai.starlake.acl.parser
 
+import java.util.Locale
 import ai.starlake.acl.model.Config
 import net.sf.jsqlparser.JSQLParserException
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
@@ -76,7 +77,7 @@ object SqlParser:
       while k < n && sql(k).isWhitespace do k += 1
       var w = k
       while w < n && isWordChar(sql(w)) do w += 1
-      val kw = sql.substring(k, w).toUpperCase
+      val kw = sql.substring(k, w).toUpperCase(Locale.ROOT)
       if kw != "VERSION" && kw != "TIMESTAMP" then false
       else
         var a = w
@@ -366,7 +367,8 @@ object SqlParser:
         val (qTgt, errs) = TableQualifier.qualify(List(new Table(sc.getTableName)), config)
         StatementResult
           .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)
-      case sh: ShowStatement if !ShowKeywordForms.contains(sh.getName.trim.toUpperCase) =>
+      case sh: ShowStatement
+          if !ShowKeywordForms.contains(sh.getName.trim.toUpperCase(Locale.ROOT)) =>
         val (qTgt, errs) = TableQualifier.qualify(List(new Table(sh.getName)), config)
         StatementResult
           .Extracted(index, snippet, qTgt.map(t => TableAccess(t, Verb.Read)), errs)

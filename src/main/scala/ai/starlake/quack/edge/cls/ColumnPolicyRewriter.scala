@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.cls
 
+import java.util.Locale
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import cats.effect.IO
@@ -41,7 +42,7 @@ object ColumnPolicyRewriter:
     * declared", or "unknown". Anything else falls through to a regular policy-driven [[Denied]].
     */
   private[cls] def looksUnresolvedTable(reason: String): Boolean =
-    val r = reason.toLowerCase
+    val r = reason.toLowerCase(Locale.ROOT)
     r.contains("not found") || r.contains("not declared") || r.contains("unknown")
 
 /** Thin facade around a [[SchemaAwareSqlRewriter]]. Handles the IO surface (catalog lookups for the

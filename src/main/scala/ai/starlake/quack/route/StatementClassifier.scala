@@ -1,5 +1,6 @@
 package ai.starlake.quack.route
 
+import java.util.Locale
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.sql.SqlCommentStripper
 
@@ -23,12 +24,12 @@ final case class StatementClassifierConfig(
     * `normalized` is idempotent.
     */
   lazy val normalized: StatementClassifierConfig = copy(
-    select = select.map(_.toUpperCase),
-    dml = dml.map(_.toUpperCase),
-    ddl = ddl.map(_.toUpperCase),
-    begin = begin.map(_.toUpperCase),
-    commit = commit.map(_.toUpperCase),
-    rollback = rollback.map(_.toUpperCase)
+    select = select.map(_.toUpperCase(Locale.ROOT)),
+    dml = dml.map(_.toUpperCase(Locale.ROOT)),
+    ddl = ddl.map(_.toUpperCase(Locale.ROOT)),
+    begin = begin.map(_.toUpperCase(Locale.ROOT)),
+    commit = commit.map(_.toUpperCase(Locale.ROOT)),
+    rollback = rollback.map(_.toUpperCase(Locale.ROOT))
   )
 
 object StatementClassifierConfig:
@@ -88,7 +89,7 @@ final class StatementClassifier(
     classifyStripped(SqlCommentStripper.stripComments(sql))
 
   private def classifyStripped(sql: String): StatementKind =
-    firstToken(sql).map(_.toUpperCase) match
+    firstToken(sql).map(_.toUpperCase(Locale.ROOT)) match
       // A WITH prefix says nothing about what the statement DOES: the verb after the
       // CTE list decides. First-token classification put WITH ... INSERT in the select
       // bucket, which routed the write to a reader node and let it skip
@@ -107,7 +108,7 @@ final class StatementClassifier(
       // EXPLAIN ANALYZE WITH ... INSERT resolves too.
       case Some("EXPLAIN") if cfg.select.contains("EXPLAIN") =>
         val rest = sql.trim.drop("EXPLAIN".length)
-        firstToken(rest).map(_.toUpperCase) match
+        firstToken(rest).map(_.toUpperCase(Locale.ROOT)) match
           case Some("ANALYZE") => classifyStripped(rest.trim.drop("ANALYZE".length))
           case _               => StatementKind.Select
       case Some(tok) => kindOf(tok)
@@ -186,7 +187,7 @@ final class StatementClassifier(
       else if depth == 0 && isWordChar(c) then
         var w = i
         while w < n && isWordChar(s(w)) do w += 1
-        val word = s.substring(i, w).toUpperCase
+        val word = s.substring(i, w).toUpperCase(Locale.ROOT)
         if kindOf(word) != StatementKind.Other then return Some(word)
         i = w
       else i += 1

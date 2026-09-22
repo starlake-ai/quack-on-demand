@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import java.util.Locale
 import com.typesafe.scalalogging.LazyLogging
 
 import java.nio.file.{Files, Path}
@@ -43,7 +44,8 @@ object CertGen extends LazyLogging:
   /** The JRE's keytool, if this runtime ships one. */
   private def keytoolBinary: Option[Path] =
     val name =
-      if sys.props.getOrElse("os.name", "").toLowerCase.contains("win") then "keytool.exe"
+      if sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win") then
+        "keytool.exe"
       else "keytool"
     Option(System.getProperty("java.home"))
       .map(home => Path.of(home, "bin", name))

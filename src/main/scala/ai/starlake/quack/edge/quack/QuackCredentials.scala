@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.quack
 
+import java.util.Locale
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets.UTF_8
 
@@ -37,7 +38,7 @@ object QuackCredentials:
             kv.indexOf('=') match
               case -1 => Left(s"expected key=value but found '${kv.take(32)}'")
               case i  =>
-                val k = URLDecoder.decode(kv.substring(0, i), UTF_8).trim.toLowerCase
+                val k = URLDecoder.decode(kv.substring(0, i), UTF_8).trim.toLowerCase(Locale.ROOT)
                 val v = URLDecoder.decode(kv.substring(i + 1), UTF_8)
                 if !Known.contains(k) then Left(s"unknown key '$k' in token")
                 else Right(done :+ (k -> v))

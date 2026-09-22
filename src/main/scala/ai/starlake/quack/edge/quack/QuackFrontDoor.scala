@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.quack
 
+import java.util.Locale
 import ai.starlake.quack.edge.{
   EdgeHandshake,
   FlightSqlRouter,
@@ -165,7 +166,7 @@ final class QuackFrontDoor(
           case Right((link, r)) =>
             link.close().as(Right(Some(r.serverDuckdbVersion).filter(_.nonEmpty)))
           case Left(LinkFailure.Permanent(m))
-              if m.toLowerCase.contains("unsupported quack version") =>
+              if m.toLowerCase(Locale.ROOT).contains("unsupported quack version") =>
             IO.pure(Left(m))
           case Left(_) => IO.pure(Right(None))
         }
@@ -342,7 +343,7 @@ final class QuackFrontDoor(
               // the table in the pool's catalog exactly as a relayed statement would.
               val usePrefix: Option[String] =
                 Option(wrappedSql.trim)
-                  .filter(_.toUpperCase.startsWith("USE "))
+                  .filter(_.toUpperCase(Locale.ROOT).startsWith("USE "))
                   .map(w =>
                     w.indexOf(';') match
                       case -1 => w
@@ -543,7 +544,7 @@ final class QuackFrontDoor(
       case None            => IO.unit
 
   private def commitMessage(m: String): String =
-    if m.toLowerCase.contains("conflict") then
+    if m.toLowerCase(Locale.ROOT).contains("conflict") then
       "concurrent write conflict committing the transaction; retry the statement"
     else s"commit failed: $m"
 

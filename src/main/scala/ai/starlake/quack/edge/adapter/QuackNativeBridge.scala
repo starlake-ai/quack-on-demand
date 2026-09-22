@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
+import java.util.Locale
 import scala.util.Using
 
 object QuackNativeBridge:
@@ -184,8 +185,8 @@ object QuackNativeSupport extends com.typesafe.scalalogging.LazyLogging:
 
 private object NativeLoader:
   def platformDir(): String =
-    val os    = sys.props("os.name").toLowerCase
-    val arch  = sys.props("os.arch").toLowerCase
+    val os    = sys.props("os.name").toLowerCase(Locale.ROOT)
+    val arch  = sys.props("os.arch").toLowerCase(Locale.ROOT)
     val osTag =
       if os.contains("mac") then "osx"
       else if os.contains("linux") then "linux"

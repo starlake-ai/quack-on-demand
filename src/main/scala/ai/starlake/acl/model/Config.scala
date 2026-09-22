@@ -1,5 +1,7 @@
 package ai.starlake.acl.model
 
+import java.util.Locale
+
 enum CaseSensitivity {
   case CaseInsensitive
 }
@@ -23,9 +25,9 @@ final case class Config(
     // two-part heads then always take the schema interpretation.
     attachedCatalogs: Set[String] = Set.empty
 ) {
-  val normalizedDefaultDatabase: Option[String] = defaultDatabase.map(_.toLowerCase)
-  val normalizedDefaultSchema: Option[String]   = defaultSchema.map(_.toLowerCase)
-  val normalizedAttachedCatalogs: Set[String]   = attachedCatalogs.map(_.toLowerCase)
+  val normalizedDefaultDatabase: Option[String] = defaultDatabase.map(_.toLowerCase(Locale.ROOT))
+  val normalizedDefaultSchema: Option[String]   = defaultSchema.map(_.toLowerCase(Locale.ROOT))
+  val normalizedAttachedCatalogs: Set[String]   = attachedCatalogs.map(_.toLowerCase(Locale.ROOT))
 }
 
 object Config {

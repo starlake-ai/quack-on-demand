@@ -1,5 +1,6 @@
 package ai.starlake.acl.parser
 
+import java.util.Locale
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import net.sf.jsqlparser.schema.Table
 
@@ -11,7 +12,7 @@ object DialectMapper:
   val duckdb: DialectMapper = DuckDBDialectMapper
 
   def forConfig(config: Config): DialectMapper =
-    config.dialect.name.toLowerCase match
+    config.dialect.name.toLowerCase(Locale.ROOT) match
       case "duckdb" => duckdb
       case _        => ansi
 
@@ -72,7 +73,8 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     val schemaName = Option(table.getUnquotedSchemaName)
     val dbName     = Option(table.getUnquotedDatabaseName)
     (dbName, schemaName) match
-      case (None, Some(head)) if config.normalizedAttachedCatalogs.contains(head.toLowerCase) =>
+      case (None, Some(head))
+          if config.normalizedAttachedCatalogs.contains(head.toLowerCase(Locale.ROOT)) =>
         Left(DenyReason.AmbiguousCatalogRef(s"$head.$tableName", head))
       case _ =>
         AnsiDialectMapper.toTableRef(table, config)

@@ -1,5 +1,6 @@
 package ai.starlake.acl.parser
 
+import java.util.Locale
 import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.select.*
 import net.sf.jsqlparser.expression.*
@@ -69,7 +70,7 @@ private[parser] class TableExtractorVisitor:
       // Collect CTE names first, so a CTE body referencing a later CTE is not extracted either.
       withItems.asScala.foreach { wi =>
         val aliasName = wi.getUnquotedAliasName
-        if aliasName != null then cteNames += aliasName.toLowerCase
+        if aliasName != null then cteNames += aliasName.toLowerCase(Locale.ROOT)
       }
       withItems.asScala.foreach { wi =>
         val cteSelect = wi.getSelect
@@ -170,7 +171,7 @@ private[parser] class TableExtractorVisitor:
     if withItems != null then
       withItems.asScala.foreach { wi =>
         val aliasName = wi.getUnquotedAliasName
-        if aliasName != null then cteNames += aliasName.toLowerCase
+        if aliasName != null then cteNames += aliasName.toLowerCase(Locale.ROOT)
         val cteSelect = wi.getSelect
         if cteSelect != null then visitSelect(cteSelect)
       }
@@ -193,7 +194,7 @@ private[parser] class TableExtractorVisitor:
           // be extracted or the shadowing CTE would launder the access away.
           val isQualified = table.getSchemaName != null ||
             (table.getDatabase != null && table.getDatabase.getDatabaseName != null)
-          val isCteName = !isQualified && cteNames.contains(name.toLowerCase)
+          val isCteName = !isQualified && cteNames.contains(name.toLowerCase(Locale.ROOT))
           val isFileRef = table.getName != null && table.getName.startsWith("'")
           if isFileRef then
             // DuckDB `FROM 'file.parquet'` reads straight from storage, escaping

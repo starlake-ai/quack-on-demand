@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge
 
+import java.util.Locale
 import cats.effect.unsafe.implicits.global
 import com.google.protobuf.{Any => ProtoAny, ByteString}
 import com.typesafe.scalalogging.LazyLogging
@@ -252,7 +253,7 @@ final class FlightProducerImpl(
     */
   private[edge] def commitConflictOrInternal(context: String, t: Throwable): Throwable =
     val msg = Option(t.getMessage).getOrElse("")
-    if msg.toLowerCase.contains("conflict") then
+    if msg.toLowerCase(Locale.ROOT).contains("conflict") then
       val errorId = java.util.UUID.randomUUID().toString.take(8)
       logger.error(
         s"$context: DuckLake write conflict [errorId=$errorId], client should retry: $msg",

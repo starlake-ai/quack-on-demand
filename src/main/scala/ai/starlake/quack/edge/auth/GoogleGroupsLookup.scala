@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.auth
 
+import java.util.Locale
 import com.nimbusds.jose.crypto.RSASSASigner
 import com.nimbusds.jose.{JWSAlgorithm, JWSHeader}
 import com.nimbusds.jwt.{JWTClaimsSet, SignedJWT}
@@ -57,7 +58,7 @@ class GoogleGroupsLookup(
     * cacheTtlSeconds. Returns an empty set on failure (non-blocking).
     */
   def getGroupsForUser(userEmail: String): Set[String] =
-    val key    = userEmail.toLowerCase
+    val key    = userEmail.toLowerCase(Locale.ROOT)
     val cached = groupsCache.getIfPresent(key)
     if cached != null then cached
     else
@@ -138,7 +139,7 @@ class GoogleGroupsLookup(
   /** Parse group emails from Directory API JSON response. */
   private def parseGroupEmails(json: String): Set[String] =
     // Extract all "email" values from the "groups" array
-    JsonField.all(json, "email").map(_.toLowerCase).toSet
+    JsonField.all(json, "email").map(_.toLowerCase(Locale.ROOT)).toSet
 
   private def loadServiceAccountKey(): (String, RSAPrivateKey, String) =
     val content =

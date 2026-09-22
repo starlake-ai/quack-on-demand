@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.sql
 
+import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
 
 import scala.collection.mutable.ListBuffer
@@ -108,7 +109,7 @@ object LockdownScreen:
     splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
   private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
-    val lower = stripLeadingTrivia(stmt.toLowerCase)
+    val lower = stripLeadingTrivia(stmt.toLowerCase(Locale.ROOT))
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
       case some @ Some(_) => some

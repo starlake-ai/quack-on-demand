@@ -1,5 +1,6 @@
 package ai.starlake.quack.route
 
+import java.util.Locale
 import ai.starlake.quack.model.PoolKey
 
 import scala.collection.concurrent.TrieMap
@@ -137,4 +138,4 @@ object PlacementDirectory:
     */
   def isObjectStorePath(dataPath: String): Boolean =
     ObjectStoreScheme.findPrefixOf(dataPath).isDefined &&
-      !dataPath.toLowerCase.startsWith("file://")
+      !dataPath.toLowerCase(Locale.ROOT).startsWith("file://")
