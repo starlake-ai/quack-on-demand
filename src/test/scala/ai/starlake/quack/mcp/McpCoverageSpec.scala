@@ -280,7 +280,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
       snapshotsExist = (_, _, ids) => ids
     )
     val audit     = new AuditHandlers(NoopTelemetryStore)
-    val tenantDbs = new TenantDbHandlers(sup)
+    val tenantDbs = new TenantDbHandlers(sup, requireEncryption = false)
     new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, noScope)
 
   /** Builds a bare McpPlatformTools over a fresh throwaway (migrated) Postgres database: `pats` is
@@ -340,7 +340,13 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
       )
       val undropH =
         new ai.starlake.quack.ondemand.api.CatalogUndropHandlers(sup, boom, reader, cfg, _ => None)
-      val manifest = new ManifestHandlers(store, sup, managerVersion = "test", hostname = "host")
+      val manifest = new ManifestHandlers(
+        store,
+        sup,
+        managerVersion = "test",
+        hostname = "host",
+        requireEncryption = false
+      )
       val cfgH     = new ConfigHandlers(ConfigFactory.load(), ConfigRegistry.collect(Nil))
       val historyH = new HistoryHandlers(NoopTelemetryStore)
       val usageH   = new UsageHandlers(NoopTelemetryStore)

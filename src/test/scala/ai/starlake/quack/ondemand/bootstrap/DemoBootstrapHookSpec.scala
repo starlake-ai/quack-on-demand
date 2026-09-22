@@ -34,7 +34,9 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
 
   "DemoBootstrapHook.run" should "no-op when QOD_BOOTSTRAP_YAML is unset" in {
     val store = new InMemoryControlPlaneStore()
-    DemoBootstrapHook.run(emptyEnv, _ => Success(""), store).unsafeRunSync()
+    DemoBootstrapHook
+      .run(emptyEnv, _ => Success(""), store, requireEncryption = false)
+      .unsafeRunSync()
     store.listTenants() shouldBe empty
   }
 
@@ -42,7 +44,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val env   = envWith("QOD_BOOTSTRAP_YAML", "/does/not/exist")
     val read  = (_: String) => Failure(new java.nio.file.NoSuchFileException("/does/not/exist"))
-    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    DemoBootstrapHook.run(env, read, store, requireEncryption = false).unsafeRunSync()
     store.listTenants() shouldBe empty
   }
 
@@ -50,7 +52,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val env   = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read  = (_: String) => Success("not: : valid: yaml:")
-    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    DemoBootstrapHook.run(env, read, store, requireEncryption = false).unsafeRunSync()
     store.listTenants() shouldBe empty
   }
 
@@ -58,7 +60,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val env   = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read  = (_: String) => Success(ValidYaml)
-    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    DemoBootstrapHook.run(env, read, store, requireEncryption = false).unsafeRunSync()
     store.listTenants().map(_.id).toSet shouldBe Set("acme", "globex")
   }
 
@@ -69,7 +71,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     store.upsertTenant(Tenant(id = "acme", displayName = "Acme"))
     val env  = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read = (_: String) => Success(ValidYaml)
-    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    DemoBootstrapHook.run(env, read, store, requireEncryption = false).unsafeRunSync()
     // 'globex' from the manifest must NOT have been added because the guard tripped on 'acme'.
     store.listTenants().map(_.id).toSet shouldBe Set("acme")
   }
@@ -84,7 +86,7 @@ class DemoBootstrapHookSpec extends AnyFlatSpec with Matchers:
     store.upsertTenant(Tenant(id = "wonka", displayName = "Wonka Industries"))
     val env  = envWith("QOD_BOOTSTRAP_YAML", "/p")
     val read = (_: String) => Success(ValidYaml)
-    DemoBootstrapHook.run(env, read, store).unsafeRunSync()
+    DemoBootstrapHook.run(env, read, store, requireEncryption = false).unsafeRunSync()
     // Neither "acme" nor "globex" must have been imported, and "wonka" must
     // be left exactly as it was.
     store.listTenants().map(_.id).toSet shouldBe Set("wonka")

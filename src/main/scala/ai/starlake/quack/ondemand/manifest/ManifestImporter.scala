@@ -178,7 +178,7 @@ object ManifestImporter:
       m: ConfigManifest,
       store: ControlPlaneStore,
       federatedStore: Option[FederatedSourceStore] = None,
-      requireEncryption: Boolean = false
+      requireEncryption: Boolean
   ): ValidationResult =
     validate(m, store).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]

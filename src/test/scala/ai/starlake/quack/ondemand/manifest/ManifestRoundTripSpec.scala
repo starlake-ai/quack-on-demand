@@ -165,7 +165,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     // Step 6: import into a fresh store
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(withPasswords, dst) shouldBe Right(())
+    ManifestImporter.apply(withPasswords, dst, requireEncryption = false) shouldBe Right(())
 
     // Verify initSql is preserved after import
     val restored = dst.listTenantDbs("tpch").head
@@ -228,13 +228,13 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       }
     )
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(withPasswords, dst) shouldBe Right(())
+    ManifestImporter.apply(withPasswords, dst, requireEncryption = false) shouldBe Right(())
 
     // Verify passwords landed correctly after the first import
     dst.getPasswordHash(None, "admin").get shouldBe adminHash
 
     // Second import: use the original parsed manifest which has NO password fields
-    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
 
     // Passwords must be unchanged after the password-less second import.
     // The importer normalizes the user's tenant to the surrogate id it minted
@@ -317,7 +317,12 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     val dstCp  = new InMemoryControlPlaneStore()
     val dstFed = new InMemoryFederatedSourceStore()
-    ManifestImporter.apply(manifest1WithReal, dstCp, Some(dstFed)) shouldBe Right(())
+    ManifestImporter.apply(
+      manifest1WithReal,
+      dstCp,
+      Some(dstFed),
+      requireEncryption = false
+    ) shouldBe Right(())
 
     // Verify the real value landed.
     val tdId    = dstCp.listTenants().flatMap(t => dstCp.listTenantDbs(t.id)).head.id
@@ -338,7 +343,12 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         u.copy(password = Some(hash))
       }
     )
-    ManifestImporter.apply(parsedWithPasswords, dstCp, Some(dstFed)) shouldBe Right(())
+    ManifestImporter.apply(
+      parsedWithPasswords,
+      dstCp,
+      Some(dstFed),
+      requireEncryption = false
+    ) shouldBe Right(())
 
     // The secret value must have been reused.
     val srcList2 = dstFed.listSources(tdId)
@@ -377,7 +387,8 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       manifest1.copy(users = manifest1.users.map { u =>
         if u.username == "alice" then u.copy(password = Some(aliceHash)) else u
       }),
-      dst
+      dst,
+      requireEncryption = false
     ) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
@@ -413,7 +424,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // the passwordHash field alone must be enough to carry the credential
     // forward.
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+    ManifestImporter.apply(manifest1, dst, requireEncryption = false) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     val storedHash    = dst.getPasswordHash(Some(aliceTenantId), "alice").get
@@ -460,7 +471,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     adminManifest.mustChangePassword shouldBe true
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+    ManifestImporter.apply(manifest1, dst, requireEncryption = false) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.findUser(Some(aliceTenantId), "alice").get.mustChangePassword shouldBe true
@@ -484,7 +495,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val stripped = strippedJson.as[ConfigManifest].toOption.get
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(stripped, dst) shouldBe Right(())
+    ManifestImporter.apply(stripped, dst, requireEncryption = false) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.findUser(Some(aliceTenantId), "alice").get.mustChangePassword shouldBe false
@@ -525,7 +536,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     adminManifest.email shouldBe Some("admin@x.io")
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(manifest1, dst) shouldBe Right(())
+    ManifestImporter.apply(manifest1, dst, requireEncryption = false) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.findUser(Some(aliceTenantId), "alice").get.email shouldBe Some("alice@x.io")
@@ -556,7 +567,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val stripped = strippedJson.as[ConfigManifest].toOption.get
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(stripped, dst) shouldBe Right(())
+    ManifestImporter.apply(stripped, dst, requireEncryption = false) shouldBe Right(())
 
     val aliceTenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     dst.findUser(Some(aliceTenantId), "alice").get.email shouldBe None
@@ -625,7 +636,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       u.copy(password = Some(if u.username == "admin" then adminHash else aliceHash))
     })
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(withPasswords, dst) shouldBe Right(())
+    ManifestImporter.apply(withPasswords, dst, requireEncryption = false) shouldBe Right(())
 
     val manifest2 = ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)
     manifest2.users.find(_.username == "admin").get.poolGrants shouldBe
@@ -665,7 +676,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     parsed.tenants.head.pools.head.lockdown shouldBe "inherit"
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
 
     val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
@@ -695,7 +706,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         |""".stripMargin
     val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
     val dst    = new InMemoryControlPlaneStore()
-    val result = ManifestImporter.apply(parsed, dst)
+    val result = ManifestImporter.apply(parsed, dst, requireEncryption = false)
     result.isLeft shouldBe true
     result.left.toOption.get.exists(_.contains("lockdown")) shouldBe true
   }
@@ -725,7 +736,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     parsed.tenants.head.pools.head.suspended shouldBe false
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
 
     val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
@@ -758,7 +769,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     parsed.tenants.head.pools.head.maxNodes shouldBe None
 
     val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(parsed, dst) shouldBe Right(())
+    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
 
     val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
     val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
@@ -790,7 +801,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         |""".stripMargin
     val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
     val dst    = new InMemoryControlPlaneStore()
-    val result = ManifestImporter.apply(parsed, dst)
+    val result = ManifestImporter.apply(parsed, dst, requireEncryption = false)
     result.isLeft shouldBe true
     result.left.toOption.get.exists(_.contains("set together")) shouldBe true
   }

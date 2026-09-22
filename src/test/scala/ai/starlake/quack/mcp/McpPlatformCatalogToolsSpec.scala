@@ -241,7 +241,13 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
         _ => None
       )
 
-      val manifest = new ManifestHandlers(store, sup, managerVersion = "test", hostname = "host")
+      val manifest = new ManifestHandlers(
+        store,
+        sup,
+        managerVersion = "test",
+        hostname = "host",
+        requireEncryption = false
+      )
       val cfgH     = new ConfigHandlers(ConfigFactory.load(), liveConfigEntries)
       val historyH = new HistoryHandlers(NoopTelemetryStore)
       val usageH   = new UsageHandlers(NoopTelemetryStore)

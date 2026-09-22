@@ -34,7 +34,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         ManifestUser(tenant = None, username = "admin", password = Some("hunter2"), role = "admin")
       )
     )
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     val stored = s.getPasswordHash(None, "admin").get
     BCrypt.verifyer().verify("hunter2".toCharArray, stored).verified shouldBe true
   }
@@ -45,7 +45,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val m   = base.copy(users =
       List(ManifestUser(tenant = None, username = "admin", password = Some(pre), role = "admin"))
     )
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.getPasswordHash(None, "admin").get shouldBe pre
   }
 
@@ -55,7 +55,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val m   = base.copy(users =
       List(ManifestUser(tenant = None, username = "admin", password = None, role = "admin"))
     )
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.getPasswordHash(None, "admin").get shouldBe pre
   }
 
@@ -72,7 +72,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
 
     // The tenant id IS the slug "acme" (no separate surrogate). qodstate_user.tenant
     // holds that id, which is what listUsers / findUserForLogin and `?tenant=acme`
@@ -88,7 +88,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val m = base.copy(users =
       List(ManifestUser(tenant = None, username = "newbie", password = None, role = "user"))
     )
-    val err = ManifestImporter.apply(m, s).left.toOption.get
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
     err.exists(_.contains("newbie")) shouldBe true
   }
 
@@ -105,7 +105,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    val err = ManifestImporter.apply(m, s).left.toOption.get
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
     err.exists(_.contains("alice@example.com")) shouldBe true
     s.findUser(None, "alice@example.com") shouldBe empty
   }
@@ -130,7 +130,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.findUser(None, "bob@example.com").get.email shouldBe Some("bob@example.com")
     s.findUser(None, "carol@example.com").get.email shouldBe Some("carol@example.com")
   }
@@ -138,7 +138,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
   it should "leave tenants absent from the YAML untouched" in {
     val s = new InMemoryControlPlaneStore()
     s.upsertTenant(Tenant(id = "t-untouched", displayName = "untouched"))
-    ManifestImporter.apply(base, s) shouldBe Right(())
+    ManifestImporter.apply(base, s, requireEncryption = false) shouldBe Right(())
     s.listTenants().map(_.displayName) should contain("untouched")
   }
 
@@ -157,7 +157,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     )
 
     val m = base.copy(tenants = List(ManifestTenant(name = "tpch", tenantDbs = Nil)))
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
 
     // Registry row gone. (We never call `dbAdmin.dropDatabase` -- the importer
     // has no DbAdmin handle at all, so there is nothing to assert beyond the
@@ -181,7 +181,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       dataPath = "/tmp/d"
     )
     val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    val res = ManifestImporter.apply(m, s)
+    val res = ManifestImporter.apply(m, s, requireEncryption = false)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include("pgPassword")
     // The offending row was NOT persisted.
@@ -204,7 +204,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       dataPath = "/tmp/d'); ATTACH 'evil' AS e --"
     )
     val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    val res = ManifestImporter.apply(m, s)
+    val res = ManifestImporter.apply(m, s, requireEncryption = false)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include("dataPath")
   }
@@ -226,7 +226,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       objectStore = Map("azure_account_key" -> "key;BlobEndpoint=https://evil")
     )
     val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    val res = ManifestImporter.apply(m, s)
+    val res = ManifestImporter.apply(m, s, requireEncryption = false)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include("azure_account_key")
     // The offending row was NOT persisted.
@@ -243,7 +243,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = true
     )
     val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.listTenantDbs("acme").find(_.name == "acme_secure").get.encrypted shouldBe true
   }
 
@@ -277,7 +277,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = true
     )
     val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.listTenantDbs("acme")
       .find(_.name == "acme_secure")
       .get
@@ -301,7 +301,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = true
     )
     val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     val mintedKey = s
       .listTenantDbs("acme")
       .find(_.name == "acme_fresh")
@@ -344,7 +344,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = true
     )
     val m = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    ManifestImporter.apply(m, s) shouldBe Right(())
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     s.listTenantDbs("acme")
       .find(_.name == "acme_secure")
       .get
@@ -378,7 +378,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = false
     )
     val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    val res = ManifestImporter.apply(m, s)
+    val res = ManifestImporter.apply(m, s, requireEncryption = false)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include(
       "encryption cannot be turned off for an existing database"
@@ -417,7 +417,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       encrypted = true
     )
     val m   = base.copy(tenants = List(ManifestTenant(name = "acme", tenantDbs = List(mtd))))
-    val res = ManifestImporter.apply(m, s)
+    val res = ManifestImporter.apply(m, s, requireEncryption = false)
     res.isLeft shouldBe true
     res.swap.getOrElse(Nil).mkString("\n") should include(
       "encryption cannot be turned on for an existing database"
@@ -529,7 +529,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(m1, s) shouldBe Right(())
+    ManifestImporter.apply(m1, s, requireEncryption = false) shouldBe Right(())
     val db  = s.snapshot().tenantDbs.find(_.name == "acme_default").get
     val pid = s.listPools(db.id).head.id
     s.upsertNode(
@@ -556,7 +556,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(m2, s) shouldBe Right(())
+    ManifestImporter.apply(m2, s, requireEncryption = false) shouldBe Right(())
     s.listNodes(pid) shouldBe Nil
     s.snapshot().pools shouldBe Nil
   }
@@ -578,7 +578,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(m1, s) shouldBe Right(())
+    ManifestImporter.apply(m1, s, requireEncryption = false) shouldBe Right(())
     val db  = s.snapshot().tenantDbs.find(_.name == "acme_default").get
     val pid = s.listPools(db.id).head.id
     s.upsertNode(
@@ -599,7 +599,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     // Re-import with the tenant but WITHOUT the tenant-db: today this hits the
     // tenant-db FK because pools do NOT cascade.
     val m2 = base.copy(tenants = List(ManifestTenant(name = "acme")))
-    ManifestImporter.apply(m2, s) shouldBe Right(())
+    ManifestImporter.apply(m2, s, requireEncryption = false) shouldBe Right(())
     s.snapshot().tenantDbs shouldBe Nil
     s.snapshot().pools shouldBe Nil
   }

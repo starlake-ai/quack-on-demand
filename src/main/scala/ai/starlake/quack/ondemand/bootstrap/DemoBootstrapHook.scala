@@ -44,7 +44,7 @@ object DemoBootstrapHook:
       readFile: String => Try[String],
       store: ControlPlaneStore,
       fedStore: Option[FederatedSourceStore] = None,
-      requireEncryption: Boolean = false
+      requireEncryption: Boolean
   ): IO[Unit] = IO.blocking {
     env(EnvKey) match
       case None =>

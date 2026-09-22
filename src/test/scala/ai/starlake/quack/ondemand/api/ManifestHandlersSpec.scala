@@ -14,20 +14,28 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
 
   private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
-  private def newHandlers(store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore()): ManifestHandlers =
+  private def newHandlers(
+      store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore()
+  ): ManifestHandlers =
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
-    new ManifestHandlers(store, sup, managerVersion = "test", hostname = "host")
+    new ManifestHandlers(
+      store,
+      sup,
+      managerVersion = "test",
+      hostname = "host",
+      requireEncryption = false
+    )
 
   "ManifestHandlers.export" should "return a v1 YAML manifest" in {
     val handlers = newHandlers()
     val yaml     = handlers.exportYaml(None)((_: String) => None).unsafeRunSync().toOption.get
-    yaml should include ("apiVersion: quack-on-demand/v1")
-    yaml should include ("kind: ConfigManifest")
+    yaml should include("apiVersion: quack-on-demand/v1")
+    yaml should include("kind: ConfigManifest")
   }
 
   "ManifestHandlers.import" should "reject invalid apiVersion with 400" in {
     val handlers = newHandlers()
-    val bad =
+    val bad      =
       """apiVersion: quack-on-demand/v99
         |kind: ConfigManifest
         |exportedAt: '2026-06-05T12:00:00Z'
@@ -41,7 +49,13 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
   it should "reload the supervisor cache after a successful import" in {
     val store    = new InMemoryControlPlaneStore()
     val sup      = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
-    val handlers = new ManifestHandlers(store, sup, managerVersion = "test", hostname = "host")
+    val handlers = new ManifestHandlers(
+      store,
+      sup,
+      managerVersion = "test",
+      hostname = "host",
+      requireEncryption = false
+    )
     val yaml =
       """apiVersion: quack-on-demand/v1
         |kind: ConfigManifest
@@ -52,5 +66,5 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
         |""".stripMargin
     sup.listTenants() shouldBe empty
     handlers.importYaml(yaml, None)((_: String) => None).unsafeRunSync().isRight shouldBe true
-    sup.listTenants().map(_.displayName) should contain ("demo")
+    sup.listTenants().map(_.displayName) should contain("demo")
   }

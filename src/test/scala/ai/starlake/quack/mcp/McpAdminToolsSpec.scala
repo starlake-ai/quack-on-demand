@@ -99,7 +99,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       snapshotsExist = (_, _, ids) => ids
     )
     val audit     = new AuditHandlers(NoopTelemetryStore)
-    val tenantDbs = new TenantDbHandlers(sup)
+    val tenantDbs = new TenantDbHandlers(sup, requireEncryption = false)
 
     val tools =
       new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, scopeOf)

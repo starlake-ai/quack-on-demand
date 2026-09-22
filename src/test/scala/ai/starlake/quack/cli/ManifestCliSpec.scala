@@ -12,7 +12,7 @@ class ManifestCliSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     val out   = new ByteArrayOutputStream()
     ManifestCli.exportTo(store, new PrintStream(out)) shouldBe 0
-    out.toString should include ("apiVersion: quack-on-demand/v1")
+    out.toString should include("apiVersion: quack-on-demand/v1")
   }
 
   "ManifestCli.importFrom" should "apply a manifest from an input stream" in {
@@ -25,6 +25,10 @@ class ManifestCliSpec extends AnyFlatSpec with Matchers:
         |exportedFrom: { managerVersion: test, hostname: test }
         |""".stripMargin
     val store = new InMemoryControlPlaneStore()
-    val rc = ManifestCli.importFrom(store, new ByteArrayInputStream(yaml.getBytes))
+    val rc    = ManifestCli.importFrom(
+      store,
+      new ByteArrayInputStream(yaml.getBytes),
+      requireEncryption = false
+    )
     rc shouldBe 0
   }

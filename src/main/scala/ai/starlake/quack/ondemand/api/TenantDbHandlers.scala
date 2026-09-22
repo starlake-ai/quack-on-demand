@@ -28,7 +28,7 @@ final class TenantDbHandlers(
       * can guarantee no plaintext database exists in the deployment. Gates creates only; existing
       * databases are untouched, so enabling it never bricks a running deployment.
       */
-    requireEncryption: Boolean = false
+    requireEncryption: Boolean
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)

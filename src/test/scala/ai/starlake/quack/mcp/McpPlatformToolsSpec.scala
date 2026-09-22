@@ -162,7 +162,13 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       val store               = new InMemoryControlPlaneStore()
       val sup                 = new PoolSupervisor(stubBackend, new NodeLoadTracker, store)
       val (restoreH, undropH) = unexercisedCatalogHandlers(store, sup)
-      val manifest = new ManifestHandlers(store, sup, managerVersion = "test", hostname = "host")
+      val manifest            = new ManifestHandlers(
+        store,
+        sup,
+        managerVersion = "test",
+        hostname = "host",
+        requireEncryption = false
+      )
       val cfgH     = new ConfigHandlers(ConfigFactory.load(), liveConfigEntries)
       val historyH = new HistoryHandlers(NoopTelemetryStore)
       val usageH   = new UsageHandlers(NoopTelemetryStore)

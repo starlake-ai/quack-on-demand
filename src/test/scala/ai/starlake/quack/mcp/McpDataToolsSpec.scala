@@ -130,8 +130,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       snapshotExists = (_, _, _) => true,
       snapshotsExist = (_, _, ids) => ids
     )
-    val tenantDbs = new TenantDbHandlers(sup, federatedStore = None, catalog = None)
-    val profile   = new ProfileHandlers(
+    val tenantDbs =
+      new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
+    val profile = new ProfileHandlers(
       _ => None,
       NoopTelemetryStore,
       new StatementHistoryStore(),

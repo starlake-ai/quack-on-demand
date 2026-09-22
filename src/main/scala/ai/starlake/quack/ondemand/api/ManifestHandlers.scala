@@ -23,7 +23,7 @@ final class ManifestHandlers(
       * database/create. An import is the other way a tenant-db row is created, so it has to honour
       * the policy or the deployment-wide guarantee is not one.
       */
-    requireEncryption: Boolean = false
+    requireEncryption: Boolean
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 

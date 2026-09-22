@@ -374,8 +374,9 @@ object ManagerServerHarness:
     val nodes =
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     val tenants   = new TenantHandlers(sup)
-    val tenantDbs = new TenantDbHandlers(sup, federatedStore = None, catalog = None)
-    val health    = new HealthHandler(sup)
+    val tenantDbs =
+      new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
+    val health = new HealthHandler(sup)
 
     val tagHandlers = new TagHandlers(
       sup,
@@ -486,7 +487,8 @@ object ManagerServerHarness:
       store = store,
       supervisor = sup,
       managerVersion = "test-harness",
-      hostname = "localhost"
+      hostname = "localhost",
+      requireEncryption = false
     )
 
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())

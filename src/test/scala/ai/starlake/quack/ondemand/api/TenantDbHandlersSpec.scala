@@ -22,7 +22,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    new TenantDbHandlers(sup)
+    new TenantDbHandlers(sup, requireEncryption = false)
 
   /** Same fixture, plus the supervisor handle so a test can install a mutation gate. */
   private def freshHandlersWithSupervisor(): (PoolSupervisor, TenantDbHandlers) =
@@ -32,7 +32,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    (sup, new TenantDbHandlers(sup))
+    (sup, new TenantDbHandlers(sup, requireEncryption = false))
 
   /** Same fixture as [[freshHandlers]] but with `managedEnabled = true`, for the arms of
     * `validateManagedStorage` that only fire once the deployment-level gate is open. */
@@ -43,7 +43,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    new TenantDbHandlers(sup, managedEnabled = true)
+    new TenantDbHandlers(sup, managedEnabled = true, requireEncryption = false)
 
   private val denyingGate = new ai.starlake.quack.spi.MutationGate:
     def check(
@@ -479,7 +479,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         "schemaName" -> "main"
       )
     )
-    val h   = new TenantDbHandlers(sup)
+    val h   = new TenantDbHandlers(sup, requireEncryption = false)
     val out = h.metastoreDefaults(None)((_: String) => None).unsafeRunSync()
     out shouldBe Right(MetastoreDefaultsResponse("localhost", "5432", "postgres", "main"))
 
@@ -490,7 +490,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore(),
       defaultMetastore = Map.empty
     )
-    new TenantDbHandlers(sup).metastoreDefaults(None)((_: String) => None).unsafeRunSync() shouldBe
+    new TenantDbHandlers(sup, requireEncryption = false).metastoreDefaults(None)((_: String) => None).unsafeRunSync() shouldBe
       Right(MetastoreDefaultsResponse())
 
   "TenantDbHandlers.createTenantDb" should
@@ -509,7 +509,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       )
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
-    val h   = new TenantDbHandlers(sup)
+    val h   = new TenantDbHandlers(sup, requireEncryption = false)
     val out = h.createTenantDb(
       TenantDbRequest(
         tenant   = "acme",

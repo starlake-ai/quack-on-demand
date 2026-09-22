@@ -25,7 +25,7 @@ object ManifestCli:
   def importFrom(
       store: ControlPlaneStore,
       in: InputStream,
-      requireEncryption: Boolean = false
+      requireEncryption: Boolean
   ): Int =
     val body = new String(in.readAllBytes(), StandardCharsets.UTF_8)
     parser.parse(body).flatMap(_.as[ConfigManifest]) match

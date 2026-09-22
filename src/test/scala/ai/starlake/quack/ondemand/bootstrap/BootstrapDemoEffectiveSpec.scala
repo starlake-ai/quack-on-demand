@@ -39,7 +39,7 @@ class BootstrapDemoEffectiveSpec extends AnyFlatSpec with Matchers:
       .flatMap(_.as[ConfigManifest])
       .toOption
       .getOrElse(fail("bootstrap-demo.yaml failed to parse"))
-    ManifestImporter.apply(manifest, s) match
+    ManifestImporter.apply(manifest, s, requireEncryption = false) match
       case Left(errs) => fail(s"importer rejected the demo YAML: ${errs.mkString("; ")}")
       case Right(())  => ()
     val supervisor = new PoolSupervisor(stubBackend, new NodeLoadTracker, s)
