@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.4
 
 - **External Iceberg REST catalogs as a typed federated source.** A tenant-db can now attach an
   Iceberg REST catalog (`qod federation create TENANT DB --alias icelake --type iceberg-rest --uri
