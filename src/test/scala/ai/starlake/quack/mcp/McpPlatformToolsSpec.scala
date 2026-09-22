@@ -293,6 +293,121 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       ).isRight shouldBe true
     }
 
+  private def icebergArgs(alias: String, extra: (String, Json)*): Seq[(String, Json)] =
+    Seq(
+      "tenant"      -> Json.fromString(Tenant0),
+      "database"    -> Json.fromString(TenantDb),
+      "alias"       -> Json.fromString(alias),
+      "source_type" -> Json.fromString("iceberg_rest"),
+      "config"      -> Json.obj(
+        "warehouse" -> Json.fromString("sales"),
+        "uri"       -> Json.fromString("https://catalog.example.com/api/catalog"),
+        "authType"  -> Json.fromString("none")
+      )
+    ) ++ extra
+
+  private def onlySource(tools: McpPlatformTools): io.circe.ACursor =
+    val listed = call(
+      tools,
+      "list_federated_sources",
+      McpPrincipal.StaticKey,
+      "tenant"   -> Json.fromString(Tenant0),
+      "database" -> Json.fromString(TenantDb)
+    )
+    withClue(listed)(listed.isRight shouldBe true)
+    val sources = listed.toOption.get.hcursor.downField("sources").values.get.toList
+    withClue(sources)(sources should have size 1)
+    sources.head.hcursor
+
+  it should "create an iceberg_rest source from typed arguments" in
+    withTools(withFederation = true) { (tools, _) =>
+      val created = call(
+        tools,
+        "upsert_federated_source",
+        McpPrincipal.StaticKey,
+        icebergArgs("sales_lake", "read_only" -> Json.fromBoolean(true))*
+      )
+      withClue(created)(created.isRight shouldBe true)
+
+      // Read the row back rather than trusting the create response: createSource answers from the
+      // FederatedSource it has just built, so only a second read proves the typed arguments were
+      // persisted as a typed source instead of being ignored.
+      val cur = onlySource(tools)
+      cur.get[String]("alias").toOption shouldBe Some("sales_lake")
+      cur.get[String]("sourceType").toOption shouldBe Some("iceberg_rest")
+      // No setup_sql was passed, so the argument is genuinely optional now: a 'sql' source would
+      // have been rejected for the missing setupSql before reaching the store.
+      cur.get[Option[String]]("setupSql").toOption.flatten shouldBe None
+      val cfg = cur.downField("config")
+      cfg.get[String]("uri").toOption shouldBe Some("https://catalog.example.com/api/catalog")
+      cfg.get[String]("warehouse").toOption shouldBe Some("sales")
+      cfg.get[String]("authType").toOption shouldBe Some("none")
+      // read_only=true above is NOT what this asserts: the handler defaults an iceberg_rest source
+      // to read-only, so true would hold with the argument dropped entirely. The next test passes
+      // false, which is the only value that distinguishes plumbing from the default.
+      cur.get[Boolean]("readOnly").toOption shouldBe Some(true)
+    }
+
+  it should "carry read_only=false through to the stored iceberg_rest source" in
+    withTools(withFederation = true) { (tools, _) =>
+      val created = call(
+        tools,
+        "upsert_federated_source",
+        McpPrincipal.StaticKey,
+        icebergArgs("sales_lake", "read_only" -> Json.fromBoolean(false))*
+      )
+      withClue(created)(created.isRight shouldBe true)
+      onlySource(tools).get[Boolean]("readOnly").toOption shouldBe Some(false)
+    }
+
+  it should "reject a malformed config argument instead of dropping it" in
+    withTools(withFederation = true) { (tools, _) =>
+      val out = call(
+        tools,
+        "upsert_federated_source",
+        McpPrincipal.StaticKey,
+        "tenant"      -> Json.fromString(Tenant0),
+        "database"    -> Json.fromString(TenantDb),
+        "alias"       -> Json.fromString("sales_lake"),
+        "source_type" -> Json.fromString("iceberg_rest"),
+        "config"      -> Json.obj(
+          "warehouse" -> Json.fromString("sales"),
+          "uri"       -> Json.fromString("https://catalog.example.com/api/catalog"),
+          "authType"  -> Json.fromString("kerberos")
+        )
+      )
+      withClue(out)(out.isLeft shouldBe true)
+      // The decode failure names the offending field; swallowing it would instead surface the
+      // handler's "config is required for sourceType 'iceberg_rest'", which points nowhere.
+      out.swap.toOption.get should include("authType")
+    }
+
+  /** Alias normalization (Task 5) lives in FederatedSourceHandlers, and the MCP tool inherits it
+    * only for as long as it keeps building a FederatedSourceCreateRequest and calling that handler.
+    * This pins the inherited behaviour so that giving the MCP path its own request-building code
+    * fails here rather than silently storing a mixed-case alias DuckDB then treats as a duplicate
+    * of its lowercase twin.
+    */
+  it should "normalize a mixed-case alias on the MCP path" in
+    withTools(withFederation = true) { (tools, _) =>
+      val created =
+        call(tools, "upsert_federated_source", McpPrincipal.StaticKey, icebergArgs("Sales_Lake")*)
+      withClue(created)(created.isRight shouldBe true)
+      created.toOption.get.hcursor.get[String]("alias").toOption shouldBe Some("sales_lake")
+      onlySource(tools).get[String]("alias").toOption shouldBe Some("sales_lake")
+
+      // ... and a follow-up upsert under the normalized spelling updates that same row rather than
+      // minting a second one: `onlySource` fails on a second source.
+      val updated = call(
+        tools,
+        "upsert_federated_source",
+        McpPrincipal.StaticKey,
+        icebergArgs("sales_lake", "description" -> Json.fromString("the lake"))*
+      )
+      withClue(updated)(updated.isRight shouldBe true)
+      onlySource(tools).get[String]("description").toOption shouldBe Some("the lake")
+    }
+
   "federation tools" should "return federation_disabled when the handler is absent" in
     withTools(withFederation = false) { (tools, _) =>
       val fedToolNames = List(

@@ -19,6 +19,7 @@ import ai.starlake.quack.ondemand.api.{
 }
 import ai.starlake.quack.ondemand.api.Dtos.given
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import cats.effect.IO
 import io.circe.{Json, JsonObject}
 import io.circe.syntax._
@@ -208,15 +209,42 @@ final class McpPlatformTools(
           h.listSources(tenant, database).map(res => bridge(res).map(_.asJson))
   )
 
+  /** The `config` argument as the typed Iceberg declaration the request carries.
+    *
+    * A malformed object is a tool-level error rather than a dropped argument: decoding to `Option`
+    * and swallowing the failure would reach the handler as "no config at all" and come back as
+    * `config is required for sourceType 'iceberg_rest'`, which names neither the field the agent
+    * got wrong nor the reason.
+    */
+  private def icebergConfig(args: JsonObject): Either[String, Option[IcebergRestConfig]] =
+    args("config").filterNot(_.isNull) match
+      case None       => Right(None)
+      case Some(json) =>
+        json.as[IcebergRestConfig] match
+          case Left(e) =>
+            Left(s"the 'config' argument is not a valid iceberg_rest declaration: ${e.getMessage}")
+          case Right(cfg) => Right(Some(cfg))
+
   private val upsertFederatedSourceTool = fedTool(
     "upsert_federated_source",
-    "Create or update a federated source by alias: setup_sql runs at node attach to " +
-      "connect the external system. Reference secrets as {{secret_name}}.",
+    "Create or update a federated source by alias. A 'sql' source runs setup_sql at node attach; " +
+      "an 'iceberg_rest' source is declared through config (uri, warehouse, authType, ...). " +
+      "Reference secrets as {{secret.NAME}}.",
     objectSchema(
-      required = List("database", "alias", "setup_sql"),
+      required = List("database", "alias"),
       props = "database" -> strProp("Database (tenant-db) name."),
       "alias"       -> strProp("Source alias (stable key)."),
-      "setup_sql"   -> strProp("ATTACH / CREATE SECRET setup SQL."),
+      "source_type" -> strProp("sql (default) or iceberg_rest."),
+      "setup_sql"   -> strProp("ATTACH / CREATE SECRET setup SQL; required for a 'sql' source."),
+      "config"      -> objProp(
+        "Iceberg REST catalog declaration; required for an 'iceberg_rest' source. Fields: uri, " +
+          "warehouse, authType (none | oauth2 | token | sigv4), endpointType (glue | s3_tables), " +
+          "clientId, clientSecret, oauth2ServerUri, oauth2Scope, oauth2GrantType, token. " +
+          "clientSecret and token must be {{secret.NAME}} placeholders, never literals."
+      ),
+      "read_only" -> boolProp(
+        "Refuse writes through this catalog; defaults to true for iceberg_rest, false for sql."
+      ),
       "description" -> strProp("Optional description."),
       "disabled"    -> boolProp("Create disabled."),
       tenantProp
@@ -226,18 +254,24 @@ final class McpPlatformTools(
         tenant   <- tenantOf(principal, args)
         database <- required(args, "database")
         alias    <- required(args, "alias")
-        setupSql <- required(args, "setup_sql")
-      yield (tenant, database, alias, setupSql)) match
-        case Left(err)                                  => IO.pure(Left(err))
-        case Right((tenant, database, alias, setupSql)) =>
+        config   <- icebergConfig(args)
+      yield (tenant, database, alias, config)) match
+        case Left(err)                                => IO.pure(Left(err))
+        case Right((tenant, database, alias, config)) =>
           h.createSource(
             tenant,
             database,
+            // Every remaining rule (alias normalization, type/shape validation, the iceberg
+            // config gate) stays in the handler, so an MCP caller gets the same answer a REST
+            // caller does rather than a second copy that can drift.
             FederatedSourceCreateRequest(
               alias = alias,
-              setupSql = Some(setupSql),
+              setupSql = str(args, "setup_sql"),
               description = str(args, "description"),
-              disabled = bool(args, "disabled").getOrElse(false)
+              disabled = bool(args, "disabled").getOrElse(false),
+              sourceType = str(args, "source_type"),
+              config = config,
+              readOnly = bool(args, "read_only")
             ),
             keyOf(principal)
           ).map(res => bridge(res).map(_.asJson))
