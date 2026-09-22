@@ -863,7 +863,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val reparsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
 
     val target = new InMemoryFederatedSourceStore()
-    ManifestImporter.apply(reparsed, cp, Some(target)) shouldBe Right(())
+    ManifestImporter.apply(reparsed, cp, Some(target), requireEncryption = false) shouldBe Right(())
 
     val back = target.listSources("td-1")
     back should have size 1
@@ -906,7 +906,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
 
     val cp  = buildSrc()
     val fed = new InMemoryFederatedSourceStore()
-    ManifestImporter.apply(parsed, cp, Some(fed)) shouldBe Right(())
+    ManifestImporter.apply(parsed, cp, Some(fed), requireEncryption = false) shouldBe Right(())
     val stored = fed.listSources("td-1")
     stored should have size 1
     stored.head.sourceType shouldBe FederatedSourceType.Sql
@@ -932,7 +932,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         ManifestFederatedSource(alias = tooLong, setupSql = "ATTACH 'y' AS {{alias}};")
       )
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     res.left.toOption.get.exists(_.contains(s"invalid alias '$tooLong'")) shouldBe true
@@ -964,7 +964,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val exported = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
     exported.tenants.head.tenantDbs.head.federatedSources.head.secrets shouldBe Nil
 
-    ManifestImporter.apply(exported, cp, Some(fed)) shouldBe Right(())
+    ManifestImporter.apply(exported, cp, Some(fed), requireEncryption = false) shouldBe Right(())
 
     val rows = fed.listSources("td-1")
     rows should have size 1
@@ -1016,7 +1016,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    ManifestImporter.apply(withFed, cp, Some(fed)) shouldBe Right(())
+    ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false) shouldBe Right(())
 
     val rows = fed.listSources("td-1")
     rows should have size 1
@@ -1054,7 +1054,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         ManifestFederatedSource(alias = "empty_sql", setupSql = "   ")
       )
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     val msgs = res.left.toOption.get
@@ -1089,7 +1089,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     res.left.toOption.get.exists(_.contains("has a blank value")) shouldBe true
@@ -1122,7 +1122,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       base,
       List(ManifestFederatedSource(alias = "bad-alias", setupSql = "ATTACH 'new' AS {{alias}};"))
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     res.left.toOption.get.exists(_.contains("invalid alias 'bad-alias'")) shouldBe true
@@ -1160,7 +1160,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       base,
       List(ManifestFederatedSource(alias = "ice", sourceType = "iceberg_rest"))
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     val rows = fed.listSources("td-1")
@@ -1195,7 +1195,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         ManifestFederatedSource(alias = "sales", setupSql = "ATTACH 'b' AS {{alias}};")
       )
     )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+    val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
     res.isLeft shouldBe true
     res.left.toOption.get.exists(_.contains("duplicate alias 'sales' in payload")) shouldBe true
@@ -1247,7 +1247,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       base,
       List(ManifestFederatedSource(alias = "sales", setupSql = "ATTACH 'new' AS {{alias}};"))
     )
-    ManifestImporter.apply(withFed, cp, Some(fed)) shouldBe Right(())
+    ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false) shouldBe Right(())
 
     val rows = fed.listSources("td-1")
     rows should have size 1
