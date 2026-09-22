@@ -63,7 +63,12 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       attached: Set[String],
       run: (RunningNode, String) => IO[Either[String, Unit]],
       registry: AttachStatusRegistry = new AttachStatusRegistry(),
-      ownAlias: Option[String] = Some("acme_db")
+      ownAlias: Option[String] = Some("acme_db"),
+      // Default direction, again deliberate: the fixture node is the ONLY live one, i.e. the
+      // retired-slot reconcile is fully ON. A default listing every node a test happens to
+      // mention would turn it off at the call sites that forgot it, which is the shape of the
+      // leak this pins. A test that models a second live node says so.
+      liveNodes: () => List[RunningNode] = () => List(node)
   ) = (
     new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(sources),
@@ -71,6 +76,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = s => IO.pure(ResolvedFederationBlock(s"-- rendered ${s.alias}", Set.empty)),
       runOnNode = run,
       listCatalogs = _ => IO.pure(Right(attached)),
+      liveNodes = liveNodes,
       registry = registry
     ),
     registry
@@ -159,6 +165,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Left("node unreachable")),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -229,6 +236,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
           )
         ),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -265,6 +273,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
         ),
       runOnNode = (_, _) => IO.pure(Left(s"HTTP Unauthorized_401 - echoed $resolved")),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -367,6 +376,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },
+      liveNodes = () => List(node),
       registry = new AttachStatusRegistry()
     )
     v.verify(node).unsafeRunSync()
@@ -383,6 +393,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Left("node unreachable")),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -403,6 +414,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -422,6 +434,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = (_, _) => IO.pure(Right(())),
       listCatalogs = _ => IO.pure(Right(Set.empty)),
+      liveNodes = () => List(node),
       registry = new AttachStatusRegistry()
     )
     val effect = v.verify(node) // must not throw here
@@ -499,12 +512,19 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       reg.recordFailure("n-1", 1000L, "sales_lake", "boom")
       reg.recordFailure("n-2", 1000L, "sales_lake", "boom")
 
-      val gen2   = node.copy(startedAt = Instant.ofEpochMilli(2000L))
+      val gen1  = node.copy(startedAt = Instant.ofEpochMilli(1000L))
+      val gen2  = node.copy(startedAt = Instant.ofEpochMilli(2000L))
+      val other = node.copy(nodeId = "n-2", startedAt = Instant.ofEpochMilli(1000L))
+      // BOTH pre-existing incarnations are declared live here, so `retainOnly` has nothing to do
+      // and the n-1@1000 assertion below stays attributed to `pruneOtherIncarnations` alone.
+      // Without this, reverting prune would still leave the test green: the reconcile would drop
+      // n-1@1000 for not being live, and the two cleanups would mask each other.
       val (v, _) = verifier(
         List(iceSrc("sales_lake")),
         Set("acme_db", "sales_lake"),
         new Recorder().run(Right(())),
-        reg
+        reg,
+        liveNodes = () => List(gen1, gen2, other)
       )
       v.verify(gen2).unsafeRunSync()
 
@@ -512,6 +532,93 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       reg.failuresFor("n-1", 1000L) shouldBe empty
       reg.failuresFor("n-2", 1000L) should not be empty
     }
+
+  // `pruneOtherIncarnations` only ever reaches another incarnation of the node id being verified,
+  // so a slot retired for good (its pool, tenant-db or tenant deleted and never recreated under
+  // the same names -- `PoolSupervisor.nodeId` is deterministic in those names) kept its entries,
+  // each holding an operator-visible error string, for the life of the manager process.
+  //
+  // Attribution: the retired slot here is a DIFFERENT node id from the one being verified, which
+  // is exactly what `pruneOtherIncarnations` cannot touch, so only the live-set reconcile can
+  // account for the assertions below. The surviving-node half is asserted in the same test, so a
+  // reconcile mutated into "drop everything" fails here rather than looking like success.
+  it should "drop a retired node slot's entries against the supervisor's live node set" in {
+    val reg = new AttachStatusRegistry()
+    // A slot that no longer exists: failed, attached and latched state, all three indexes.
+    reg.recordFailure("n-9", 1000L, "sales_lake", "boom")
+    reg.recordAttached("n-9", 1000L, "other_lake")
+    reg.markLatched("n-9", 1000L)
+    // And a second live node, which must come through untouched.
+    reg.recordFailure("n-2", 1000L, "sales_lake", "boom")
+    val other = node.copy(nodeId = "n-2", startedAt = Instant.ofEpochMilli(1000L))
+
+    // Precondition, so "gone" below cannot be satisfied by an entry that was never there.
+    reg.failuresFor("n-9", 1000L) should not be empty
+    reg.aliasSummary("other_lake", Set("n-9")).value shouldBe "attached"
+    reg.latched("n-9", 1000L) shouldBe true
+
+    val (v, _) = verifier(
+      List(iceSrc("sales_lake")),
+      Set("acme_db", "sales_lake"),
+      new Recorder().run(Right(())),
+      reg,
+      liveNodes = () => List(node, other)
+    )
+    v.verify(node).unsafeRunSync()
+
+    // All three indexes reclaimed. `aliasSummary` reads the raw index rather than a per-node
+    // lookup, so "attached" -> "unknown" is the entry itself being gone, not a lookup answering
+    // empty for a node id it happens not to know.
+    reg.failuresFor("n-9", 1000L) shouldBe empty
+    reg.aliasSummary("other_lake", Set("n-9")).value shouldBe "unknown"
+    reg.latched("n-9", 1000L) shouldBe false
+    // GUARD: the live node's entry is untouched.
+    reg.failuresFor("n-2", 1000L) should not be empty
+  }
+
+  it should "keep the incarnation it was handed even when the live set has not caught up" in {
+    // A scale operation can have this pass racing the supervisor's own bookkeeping. The node in
+    // hand came out of that same enumeration, so losing its backoff state on such a tick would be
+    // the reconcile fighting the feature rather than bounding it.
+    val reg = new AttachStatusRegistry(baseBackoffMs = 600000L, maxBackoffMs = 600000L)
+    reg.recordFailure(node.nodeId, startedAtMs, "sales_lake", "boom")
+    val rec    = new Recorder
+    val (v, _) = verifier(
+      List(iceSrc("sales_lake")),
+      Set("acme_db"),
+      rec.run(Left("boom")),
+      reg,
+      liveNodes = () => Nil
+    )
+    v.verify(node).unsafeRunSync()
+    // "Still one attempt, and nothing re-sent" rather than "still non-empty": a reconcile that
+    // DID drop the current incarnation would clear the backoff state, the whole pass would run
+    // again, and the re-attach would record a second failure -- leaving `failuresFor` non-empty
+    // either way. The attempt count and the recorder are what tell the two apart.
+    rec.sent.get() shouldBe empty
+    reg.failuresFor(node.nodeId, startedAtMs).map(_.attempts) shouldBe List(1)
+  }
+
+  "retainOnly" should "reclaim every index for an absent incarnation and no other" in {
+    // The registry-level half of the same contract, driven directly so a future caller change
+    // cannot quietly leave the method itself uncovered.
+    val reg = new AttachStatusRegistry()
+    reg.recordFailure("n-1", 1000L, "sales_lake", "boom")
+    reg.recordAttached("n-1", 1000L, "other_lake")
+    reg.markLatched("n-1", 1000L)
+    reg.recordFailure("n-1", 2000L, "sales_lake", "boom")
+    reg.recordAttached("n-2", 1000L, "sales_lake")
+    reg.markLatched("n-2", 1000L)
+
+    reg.retainOnly(Set(("n-1", 2000L), ("n-2", 1000L)))
+
+    reg.failuresFor("n-1", 1000L) shouldBe empty
+    reg.latched("n-1", 1000L) shouldBe false
+    reg.aliasSummary("other_lake", Set("n-1")).value shouldBe "unknown"
+    reg.failuresFor("n-1", 2000L) should not be empty
+    reg.latched("n-2", 1000L) shouldBe true
+    reg.aliasSummary("sales_lake", Set("n-2")).value shouldBe "attached"
+  }
 
   // Important 4 (fix review): the exponential backoff used to gate only the re-attach inside
   // `reattach`, not the lookup that precedes it -- a permanently broken catalog paid one Postgres
@@ -529,6 +636,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
         renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
         runOnNode = (_, _) => IO.pure(Left("boom")),
         listCatalogs = _ => IO.delay { listCalls += 1; Right(Set("acme_db")) },
+        liveNodes = () => List(node),
         registry = reg
       )
       v.verify(node).unsafeRunSync() // first tick: fails, records a failure, enters backoff
@@ -551,6 +659,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.raiseError(new RuntimeException("bad config")),
       runOnNode = (_, _) => IO.pure(Right(())),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      liveNodes = () => List(node),
       registry = reg
     )
     v.verify(node).unsafeRunSync()
@@ -569,6 +678,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },
+      liveNodes = () => List(node),
       registry = new AttachStatusRegistry()
     )
     v.verify(node).unsafeRunSync()

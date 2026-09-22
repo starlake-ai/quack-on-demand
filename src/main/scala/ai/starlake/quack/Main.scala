@@ -853,6 +853,10 @@ object Main extends IOApp with LazyLogging:
             case QuackResponse.Failed(err, _)  => Left(err.toString)
           },
         listCatalogs = nodeCatalogs,
+        // The SAME enumeration the health probe itself ticks over (see `healthProbe.start`
+        // below), so the registry is reconciled against the supervisor's own view of the fleet
+        // rather than against a second list that could disagree with it.
+        liveNodes = () => sup.list().flatMap(_.nodes),
         registry = attachRegistry
       )
     }

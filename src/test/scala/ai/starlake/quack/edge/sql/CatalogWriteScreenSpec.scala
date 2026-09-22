@@ -588,6 +588,31 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     ) shouldBe None
   }
 
+  // ---- the SPLITTER had the same carriage-return hole, on the CHEAP admit path ----
+  //
+  // Different arm from every CHECKPOINT witness above. Those force the fragment-list fallback
+  // precisely because CHECKPOINT is not read-shaped. Here every fragment the splitter produces IS
+  // read-shaped, so `screen` takes its `fragments.forall(...)` cheap admit path and never parses
+  // at all -- and `LockdownScreen.splitStatements` is that path's ONLY per-statement isolation.
+  // Its line-comment state was cleared by a line feed alone, so a bare CR left the comment open
+  // to end of input, the top-level `;` behind it never split, and the whole batch came back as
+  // one `Select` fragment. DuckDB 1.5.4 ends the comment at the CR and runs the INSERT.
+  it should "deny a write hidden behind a bare carriage return on the cheap admit path" in {
+    val batch = "SELECT 1 -- c" + "\r" + "; INSERT INTO sales_lake.main.orders VALUES (1)"
+    // The splitter is what is actually broken, so it is asserted directly as well: without this
+    // line a future change that denies the batch for some unrelated reason would read as this
+    // hole still being closed.
+    LockdownScreen.splitStatements(batch).length shouldBe 2
+    val r = screen(batch)
+    r.value should include("sales_lake")
+    r.value should include("read-only")
+  }
+
+  it should "still admit a read behind the same bare carriage return (over-denial guard)" in {
+    // GUARD: same shape, same code path, but nothing behind the CR is a write.
+    screen("SELECT 1 -- c" + "\r" + "; SELECT * FROM sales_lake.main.orders") shouldBe None
+  }
+
   // ---- the denied set must not be folded with the JVM's default locale ----
   //
   // `screen` compares `denied.contains(catalogOf(access.table.canonical))`: exact string equality,

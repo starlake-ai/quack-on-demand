@@ -30,6 +30,8 @@ final case class CatalogAttachFailure(
   * Bounded by construction: one entry per (live node incarnation, declared alias), and
   * [[pruneOtherIncarnations]] drops a slot's previous incarnation the first time its successor is
   * verified, so a long-lived manager cycling nodes through the same slot does not leak entries.
+  * That covers a REUSED slot only; [[retainOnly]] is what covers a slot that is retired for good,
+  * by reconciling the whole registry against the supervisor's live node set once per verify pass.
   */
 final class AttachStatusRegistry(
     baseBackoffMs: Long = 30000L,
@@ -125,6 +127,27 @@ final class AttachStatusRegistry(
       .filter(k => k._1._1 == nodeId && k._1 != current)
       .toList
       .foreach(attached.remove)
+
+  /** Drops every entry whose node incarnation is absent from `live`.
+    *
+    * [[pruneOtherIncarnations]] only ever reaches another incarnation of a node id that is being
+    * verified AGAIN, so it cannot reclaim a SLOT that is retired for good. `PoolSupervisor.nodeId`
+    * is deterministic in `(tenant, tenantDb, pool, index)`, so a pool, tenant-db or tenant that is
+    * deleted and never recreated under the same names leaves its entries -- each holding an
+    * operator-visible error string -- in the manager process for as long as it runs. Slow, but
+    * unbounded over the process lifetime.
+    *
+    * Reconciling against the supervisor's live node set is what bounds this by the CURRENT fleet
+    * rather than by the history of the fleet. It is deliberately a reconcile rather than a hook on
+    * the three delete paths: the supervisor stays the only source of truth for which nodes exist,
+    * and a leak from any cause (a delete, a crash midway through one, an HA replica that never saw
+    * it, a pod adopted after a manager restart) heals on the next pass instead of only the causes
+    * someone remembered to hook.
+    */
+  def retainOnly(live: Set[(String, Long)]): Unit =
+    complete.asScala.filterNot(live.contains).toList.foreach(complete.remove)
+    failures.keySet().asScala.filterNot(k => live.contains(k._1)).toList.foreach(failures.remove)
+    attached.asScala.filterNot(k => live.contains(k._1)).toList.foreach(attached.remove)
 
   def failuresFor(nodeId: String, startedAtMs: Long): List[CatalogAttachFailure] =
     val key = (nodeId, startedAtMs)

@@ -3,12 +3,12 @@
 ## Unreleased
 
 - **External Iceberg REST catalogs as a typed federated source.** A tenant-db can now attach an
-  Iceberg REST catalog (`qod federation create --source-type iceberg_rest --uri ... --warehouse
-  ...`, REST `federation/source/create` with a typed `config`, the admin console's federation
-  section, or `sourceType: iceberg_rest` in a control-plane manifest) instead of hand-written
-  `setupSql`. QoD renders the `ATTACH` itself, so the catalog is governed like any other: ACL
-  grants reference it as the first segment of a three-part table ref, and every statement goes
-  through the usual routing pipeline. A new `iceberg_rest` source defaults to **read-only**, which
+  Iceberg REST catalog (`qod federation create TENANT DB --alias icelake --type iceberg-rest --uri
+  ... --warehouse ...`, `POST /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources` with a
+  typed `config`, the admin console's federation section, or `sourceType: iceberg_rest` in a
+  control-plane manifest) instead of hand-written `setupSql`. QoD renders the `ATTACH` itself, so
+  the catalog is governed like any other: ACL grants reference it as the first segment of a
+  three-part table ref, and every statement goes through the usual routing pipeline. A new `iceberg_rest` source defaults to **read-only**, which
   is enforced twice: `READ_ONLY` on the rendered `ATTACH` (engine-level, from the next node spawn)
   and a new edge screen that refuses a write it can resolve against a read-only catalog before it
   reaches a node. Credentials stay in the federation secret store, never in the rendered SQL a

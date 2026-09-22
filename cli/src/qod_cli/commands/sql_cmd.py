@@ -56,7 +56,13 @@ def split_statements(text: str) -> list[tuple[int, str]]:
                 i += 1
             i += 1
         elif c == "-" and i + 1 < n and text[i + 1] == "-":
-            while i < n and text[i] != "\n":
+            # A line comment ends at a line feed OR at a bare carriage return: that is what
+            # DuckDB 1.5.4 does, and what the manager's own scanners (SqlTrivia.stripLeading,
+            # SqlCommentStripper, LockdownScreen.splitStatements) agree on. Scanning to a line
+            # feed alone meant a CR-terminated comment stayed open to end of file, so every
+            # remaining `;` stopped splitting and the rest of the script was submitted as one
+            # statement with wrong line numbers.
+            while i < n and text[i] not in ("\n", "\r"):
                 i += 1
         elif c == "/" and i + 1 < n and text[i + 1] == "*":
             depth = 1
@@ -101,7 +107,7 @@ def _comment_only(stmt: str) -> bool:
     drop-empty-chunk case: comment markers inside string literals cannot
     reach here as the WHOLE remaining text, because a statement containing
     a string literal also contains non-comment content around it."""
-    return not re.sub(r"--[^\n]*|/\*.*?\*/", "", stmt, flags=re.S).strip()
+    return not re.sub(r"--[^\n\r]*|/\*.*?\*/", "", stmt, flags=re.S).strip()
 
 
 def run_file(client, path: Path, mode: str) -> None:

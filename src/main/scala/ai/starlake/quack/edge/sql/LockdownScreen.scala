@@ -178,6 +178,17 @@ object LockdownScreen:
     *
     * `private[sql]`, not `private`, so `CatalogWriteScreen` can reuse the same quote- and
     * comment-aware splitter to judge a batch statement by statement instead of by its first token.
+    *
+    * The line-comment arm ends at a line feed OR at a bare carriage return, the same pair
+    * `SqlTrivia.stripLeading` and `SqlCommentStripper.stripComments` already end one at (verified
+    * against a real DuckDB 1.5.4). Ending it at a line feed alone was NOT a cosmetic divergence
+    * here: with no line feed anywhere after the `--`, the comment stayed open to end of input, so a
+    * top-level `;` behind the carriage return never split and the whole batch came back as ONE
+    * fragment. `CatalogWriteScreen` reads that fragment's first token on its cheap admit path, so
+    * `SELECT 1 -- c<CR>; INSERT INTO <read-only>.t VALUES (1)` classified `Select`, screened clean,
+    * and reached a node where DuckDB ends the comment at the carriage return and runs the INSERT.
+    * (The engine-level `READ_ONLY` on the ATTACH still refused that write; this screen is the layer
+    * that must refuse it BEFORE a node ever sees it.)
     */
   private[sql] def splitStatements(sql: String): List[String] =
     val out        = ListBuffer.empty[String]
@@ -199,7 +210,7 @@ object LockdownScreen:
         i += 1
       else if inLine then
         buf.append(c)
-        if c == '\n' then inLine = false
+        if c == '\n' || c == '\r' then inLine = false
         i += 1
       else if blockDepth > 0 then
         if i + 1 < sql.length && c == '/' && sql(i + 1) == '*' then

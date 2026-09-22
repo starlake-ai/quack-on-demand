@@ -96,8 +96,15 @@ object AdminSqlParser:
     val n = sql.length
     val c = sql(i)
     if c == '-' && i + 1 < n && sql(i + 1) == '-' then
+      // Ends at a line feed OR at a bare carriage return, the same pair
+      // `SqlTrivia.stripLeading` and `SqlCommentStripper.stripComments` end one at (verified
+      // against a real DuckDB 1.5.4). Scanning to a line feed alone made this tokenizer disagree
+      // with the engine about where the comment stops: with no line feed after the `--`, every
+      // token behind the carriage return was swallowed, so `-- x<CR>GRANT ...` tokenized empty,
+      // `claims` said no, and a statement whose engine-visible first token IS `GRANT` was
+      // forwarded to a node instead of being answered (or refused) by the dialect.
       var j = i
-      while j < n && sql(j) != '\n' do j += 1
+      while j < n && sql(j) != '\n' && sql(j) != '\r' do j += 1
       Some(Right((j, ScanKind.Comment)))
     else if c == '/' && i + 1 < n && sql(i + 1) == '*' then
       var depth = 1

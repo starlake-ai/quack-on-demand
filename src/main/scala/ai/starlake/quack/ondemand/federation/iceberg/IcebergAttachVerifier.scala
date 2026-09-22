@@ -47,6 +47,18 @@ import org.apache.arrow.vector.ipc.ArrowReader
   * -- the one outcome this component exists to prevent. A caller that genuinely cannot resolve the
   * alias has to say so in its own words.
   *
+  * `liveNodes` is REQUIRED for the same reason, and it is the whole of the registry's bound on a
+  * RETIRED node slot. [[AttachStatusRegistry.pruneOtherIncarnations]] only reaches another
+  * incarnation of a node id that is verified again, and `PoolSupervisor.nodeId` is deterministic in
+  * `(tenant, tenantDb, pool, index)`, so a deleted pool / tenant-db / tenant that is never
+  * recreated under the same names leaves its entries in the process forever. Every pass therefore
+  * reconciles the registry against this live set. A default of `() => Nil` would prune everything
+  * and a default of `() => List(node)` would prune nothing that matters: either way the direction
+  * of the default, not the caller, would decide, which is why there is none. The supervisor is
+  * asked rather than hooked at `deletePool` / `deleteTenantDb` / `deleteTenant`, so this stays free
+  * of a second source of truth for which nodes exist and heals a leak from any cause, not only from
+  * the three delete paths.
+  *
   * Once every alias this incarnation has ever tried has failed, and none of them is due for a retry
   * per [[AttachStatusRegistry.shouldRetry]], the WHOLE pass is skipped -- `sourcesOf` and
   * `listCatalogs` are not called at all, not just the re-attach. Without this, a catalog that is
@@ -62,12 +74,19 @@ final class IcebergAttachVerifier(
     renderOne: FederatedSource => IO[ResolvedFederationBlock],
     runOnNode: (RunningNode, String) => IO[Either[String, Unit]],
     listCatalogs: RunningNode => IO[Either[String, Set[String]]],
+    liveNodes: () => List[RunningNode],
     registry: AttachStatusRegistry
 ) extends LazyLogging:
 
   def verify(node: RunningNode): IO[Unit] =
     IO.defer {
       val startedAtMs = node.startedAt.toEpochMilli
+      // The node in hand came out of the same enumeration `liveNodes` reads, so it is unioned in
+      // rather than trusted to be there: a scale operation that has this pass racing the
+      // supervisor's own bookkeeping must not cost the incarnation being verified its backoff
+      // state on that one tick.
+      val live = liveNodes().map(n => (n.nodeId, n.startedAt.toEpochMilli)).toSet
+      registry.retainOnly(live + ((node.nodeId, startedAtMs)))
       registry.pruneOtherIncarnations(node.nodeId, startedAtMs)
       if registry.latched(node.nodeId, startedAtMs) then IO.unit
       else
