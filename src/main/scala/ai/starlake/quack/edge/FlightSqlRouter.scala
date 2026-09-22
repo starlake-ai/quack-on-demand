@@ -818,10 +818,12 @@ final class FlightSqlRouter(
       }
     else resultIO
 
-  /** Prepend `USE <dbName>.<schemaName>;` so unqualified and 2-part names resolve in the remote
-    * session. schemaName MUST differ from the catalog name (same-named catalog+schema is ambiguous
-    * in DuckDB). The schema itself is pre-created by HealthProbe's first successful probe per node.
-    * Skipped for USE / SET / txn control / ATTACH / DETACH so the operator can escape the default.
+  /** Prepend `USE <dbName>.<schema>;` so unqualified and 2-part names resolve in the remote
+    * session, where `schema` is the tenant-db's `defaultSchema` when set and its metastore
+    * `schemaName` otherwise. It MUST differ from the catalog name (same-named catalog+schema is
+    * ambiguous in DuckDB). The schema itself is pre-created by HealthProbe's first successful probe
+    * per node. Skipped for USE / SET / txn control / ATTACH / DETACH so the operator can escape the
+    * default.
     */
   private def wrapWithDefaultSchema(
       state: Option[ai.starlake.quack.ondemand.PoolState],
@@ -834,15 +836,28 @@ final class FlightSqlRouter(
       trimmed.startsWith("DETACH")
     // The alias is `catalogAlias` when set (branch catalogs attach under their parent's alias),
     // else `dbName`: see TenantDb.catalogAlias.
-    state.map(_.metastore) match
-      case Some(meta) if !skip =>
-        Option(TenantDb.catalogAlias(meta)).filter(_.nonEmpty) match
+    state match
+      case Some(st) if !skip =>
+        Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty) match
           case Some(db) =>
-            val schema = meta.get("schemaName").filter(_.nonEmpty).getOrElse("main")
+            // The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`.
+            // `execute` already builds ValidationContext.defaultSchema from the same field, so
+            // reading a different one here made the ACL validator and the engine disagree about
+            // which schema is current for the same statement: the validator qualified unqualified
+            // refs against `defaultSchema` while the engine ran `USE <db>.<schemaName>`. With the
+            // demo's settings (defaultSchema=tpch1, schemaName=main) that surfaced as issue #112,
+            // where a native `quack:` client pushes down a schema-relative name and the node could
+            // not resolve it. Where two schemas hold a same-named table it would instead let the
+            // validator check one table while the engine read the other.
+            val schema = st.defaultSchema
+              .filter(_.nonEmpty)
+              .orElse(st.metastore.get("schemaName").filter(_.nonEmpty))
+              .getOrElse("main")
             s"USE $db.$schema; $sql"
           case None => sql
-      case Some(meta) if trimmed.startsWith("USE ") =>
-        FlightSqlRouter.qualifyBareUse(Option(TenantDb.catalogAlias(meta)).filter(_.nonEmpty), sql)
+      case Some(st) if trimmed.startsWith("USE ") =>
+        FlightSqlRouter
+          .qualifyBareUse(Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty), sql)
       case _ => sql
 
   /** Resolve the routing snapshot, waking a suspended (never a disabled) pool first: fire

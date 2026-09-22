@@ -805,7 +805,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // schema equals ctx.defaultSchema. As of this writing it fails with
   // "main" != "tpch1" (see .superpowers/sdd/pin-tests-report.md for the
   // captured run output). Un-ignore when fixing.
-  ignore should "keep the USE-statement schema in sync with ValidationContext.defaultSchema (KNOWN GAP)" in:
+  it should "keep the USE-statement schema in sync with ValidationContext.defaultSchema" in:
     val sup   = freshSupervisorAndBackend()
     val key   = PoolKey("epsilon", "epsilon_lake", "p4")
     val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
@@ -892,6 +892,35 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .map(_.group(1))
       .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
     useSchema shouldBe capturer.lastCtx.defaultSchema.get
+
+    // The other half of the precedence chain: with no tenant-db `defaultSchema`, BOTH sides must
+    // fall back to the metastore's `schemaName`. Without this the two could agree only in the
+    // case above and silently diverge again whenever the override is absent.
+    sup2
+      .createTenantDb(
+        tenantName = "epsilon",
+        suffix = "plain",
+        kind = TenantDbKind.DuckLake,
+        metastore = Map(
+          "pgHost"     -> "127.0.0.1",
+          "pgPort"     -> "0",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p",
+          "schemaName" -> "curated"
+        ),
+        dataPath = "/tmp/qod-schema-fallback-test"
+      )
+      .unsafeRunSync()
+    val key2 = PoolKey("epsilon", "epsilon_plain", "p5")
+    sup2.createPool(key2, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    router.execute("skew-2", "alice", key2, "SELECT 1 FROM t").unsafeRunSync()
+
+    capturer.lastCtx.defaultSchema shouldBe Some("curated")
+    val useSchema2 = """USE\s+\S+?\.(\S+?);""".r
+      .findFirstMatchIn(capturedSql)
+      .map(_.group(1))
+      .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
+    useSchema2 shouldBe capturer.lastCtx.defaultSchema.get
 
   // ---- ColumnPolicyRewriter integration tests ----
 
