@@ -17,6 +17,8 @@ import org.scalatest.matchers.should.Matchers
 
 import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
+import org.scalatest.OptionValues
+
 import java.sql.DriverManager
 
 /** Handler-level audit spec. Tests that [[RoleHandlers]] records control-plane audit events on the
@@ -26,7 +28,7 @@ import java.sql.DriverManager
   *
   * Uses the same in-memory fixture stack as [[RbacTenantScopeSpec]] (no HTTP, no Postgres).
   */
-class HandlerAuditSpec extends AnyFlatSpec with Matchers:
+class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
 
   // ---------------------------------------------------------------------------
   // Stub QuackBackend: no real child processes (mirrors ManagerServerHarness).
@@ -187,6 +189,29 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers:
       e.tenant shouldBe Some(SecurityFixtures.TenantId)
       e.target shouldBe Some("ext_s3")
     }
+
+  it should "audit the STORED alias, not the raw request alias" in {
+    // The row is written under the alias `toSource` resolved (normalized here, or a grandfathered
+    // legacy spelling), so auditing `req.alias` would leave the trail naming something that is
+    // not in the table. `Ext_S3` and `ext_s3` are one row to DuckDB and to the store.
+    val store = new RecordingTelemetryStore
+    val audit = new AuditRecorder(store, _ => None)
+    val h     = buildFederatedHandlers(audit)
+    val out   = h
+      .createSource(
+        SecurityFixtures.TenantName,
+        SecurityFixtures.TenantDbName,
+        FederatedSourceCreateRequest(alias = "Ext_S3", setupSql = Some("ATTACH ..."), None, false),
+        Some("any-static-key")
+      )
+      .unsafeRunSync()
+      .toOption
+      .value
+    // Pinned against the handler's OWN response rather than a hand-copied string, so the two
+    // cannot drift: whatever alias the row got is what the audit line must name.
+    out.alias shouldBe "ext_s3"
+    store.events.head.target shouldBe Some(out.alias)
+  }
 
   // ---------------------------------------------------------------------------
   // AuthHandlers fixture

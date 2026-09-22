@@ -539,6 +539,153 @@ class FederatedSourceHandlersSpec
       row.id shouldBe "fs-legacy-2"
     }
 
+  // --- a legacy alias the identifier rule REJECTS stays editable under its stored spelling ---
+  //
+  // `Names.normalizeOrError` now runs on every federated alias, `sql` sources included. A row
+  // created before that (`ext-s3`, a hyphen) has no normalized form, so without a grandfather
+  // clause it could not be updated through REST, CLI, MCP or manifest import at all -- and since
+  // the alias is the catalog segment of every RolePermission, delete-and-recreate also means
+  // re-granting. The clause is deliberately narrow: it only ever RESOLVES to a stored row's own
+  // spelling, so it cannot mint a new invalid alias (the "not a plain identifier" case above,
+  // which has no stored row, is the arm that pins that and still 400s).
+
+  it should "update a legacy hyphenated row in place, keeping its stored alias" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-hyphen",
+          tenantDbId = tdId,
+          alias = "ext-s3",
+          setupSql = "ATTACH 'x';"
+        )
+      )
+      val out = h
+        .createSource(
+          "acme",
+          "acme_prod",
+          FederatedSourceCreateRequest(alias = "ext-s3", setupSql = Some("ATTACH 'y';")),
+          None
+        )
+        .unsafeRunSync()
+        .toOption
+        .value
+      // The response and the stored row both, and the EDIT actually landed: a handler that
+      // returned 200 without writing would satisfy the alias assertion alone.
+      out.alias shouldBe "ext-s3"
+      val sources = fs.listSources(tdId)
+      sources.map(_.alias) shouldBe List("ext-s3")
+      val row = sources.head
+      row.id shouldBe "fs-legacy-hyphen"
+      row.setupSql shouldBe "ATTACH 'y';"
+    }
+
+  it should "keep the STORED spelling when a legacy invalid alias is re-POSTed in another case" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-legacy-hyphen-2",
+          tenantDbId = tdId,
+          alias = "Ext-S3",
+          setupSql = "ATTACH 'x';"
+        )
+      )
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(alias = "ext-s3", setupSql = Some("ATTACH 'y';")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      // The request's spelling must NOT win: letting it would rename the row to a second invalid
+      // alias, which is creating one by the back door.
+      val sources = fs.listSources(tdId)
+      sources.map(_.alias) shouldBe List("Ext-S3")
+      sources.head.id shouldBe "fs-legacy-hyphen-2"
+    }
+
+  it should "still 400 a hyphenated alias for a `sql` source when no stored row carries it" in
+    withEnv { (fs, resolver, _) =>
+      // The sibling of the iceberg case above, on the `sql` path this branch changed for
+      // everybody: the grandfather clause must not have reopened the rule for new rows.
+      val h             = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val (code, error) = h
+        .createSource(
+          "acme",
+          "acme_prod",
+          FederatedSourceCreateRequest(alias = "ext-s3", setupSql = Some("ATTACH 'x';")),
+          None
+        )
+        .unsafeRunSync()
+        .left
+        .value
+      code shouldBe StatusCode.BadRequest
+      error.message should include("ext-s3")
+    }
+
+  // --- an omitted readOnly is a declarative reset, not a preserve ---
+
+  it should "reset readOnly to the type default when the upsert omits it" in
+    withEnv { (fs, resolver, tdId) =>
+      // This endpoint is a create-request-as-upsert, so every omitted field falls back to its
+      // default rather than to the stored value. For a read-only `sql` source that default is
+      // false, i.e. the catalog is unlocked by an edit that never mentioned readOnly. The
+      // behaviour is deliberate (declarative replacement) and is pinned here rather than left to
+      // be discovered; the handler WARNs on this exact transition, which is the audit line the
+      // manifest path already had for its own version of the same downgrade.
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-ro",
+          tenantDbId = tdId,
+          alias = "locked",
+          setupSql = "ATTACH 'x';",
+          readOnly = true
+        )
+      )
+      val out = h
+        .createSource(
+          "acme",
+          "acme_prod",
+          FederatedSourceCreateRequest(alias = "locked", setupSql = Some("ATTACH 'y';")),
+          None
+        )
+        .unsafeRunSync()
+        .toOption
+        .value
+      out.readOnly shouldBe false
+      fs.listSources(tdId).find(_.alias == "locked").value.readOnly shouldBe false
+    }
+
+  it should "keep readOnly when the upsert passes it explicitly" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-ro-2",
+          tenantDbId = tdId,
+          alias = "locked",
+          setupSql = "ATTACH 'x';",
+          readOnly = true
+        )
+      )
+      h.createSource(
+        "acme",
+        "acme_prod",
+        FederatedSourceCreateRequest(
+          alias = "locked",
+          setupSql = Some("ATTACH 'y';"),
+          readOnly = Some(true)
+        ),
+        None
+      ).unsafeRunSync()
+        .toOption
+        .value
+        .readOnly shouldBe true
+      fs.listSources(tdId).find(_.alias == "locked").value.readOnly shouldBe true
+    }
+
   it should "400 naming the sourceType clash (not the reserved-alias rule) for a legacy row" in
     withEnv { (fs, resolver, tdId) =>
       val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)

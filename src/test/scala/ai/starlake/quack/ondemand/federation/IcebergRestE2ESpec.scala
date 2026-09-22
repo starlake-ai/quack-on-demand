@@ -221,6 +221,101 @@ class IcebergRestE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     }
   }
 
+  it should "create and drop a schema in the live catalog" in {
+    requireFixture()
+    // A schema of this case's own, so the spec's own `$schema` (created in beforeAll, dropped in
+    // afterAll) is never the thing under test here.
+    val own     = schema + "_sc"
+    val present = (label: String) =>
+      s"SELECT '$label=' || count(*) FROM duckdb_schemas() " +
+        s"WHERE database_name = '$alias' AND schema_name = '$own';"
+    val r = run(
+      s"""CREATE SCHEMA "$alias"."$own";""",
+      present("created"),
+      s"""DROP SCHEMA "$alias"."$own";""",
+      present("dropped")
+    )
+    withClue(r.clue) {
+      r.code shouldBe 0
+      // The leading 1 is what keeps the trailing 0 meaningful: a lookup that matched nothing
+      // either way (wrong catalog, wrong column) would report 0 without either statement having
+      // done anything. Note `DROP SCHEMA ... CASCADE` is NOT what is asserted -- DuckDB v1.5.4
+      // answers "Not implemented Error: DROP SCHEMA <schema_name> CASCADE is not supported for
+      // Iceberg schemas currently" and, over stdin, carries on -- so this case drops an EMPTY
+      // schema, which is the shape that works. See afterAll for the same finding.
+      r.values shouldBe List("created=1", "dropped=0")
+    }
+  }
+
+  it should "read an earlier snapshot by timestamp" in {
+    requireFixture()
+    val t         = table("t_tt_ts")
+    val qualified = s"$alias.$schema.t_tt_ts"
+    val setup     = run(
+      s"CREATE TABLE $t (id INTEGER);",
+      s"INSERT INTO $t VALUES (1);",
+      s"INSERT INTO $t VALUES (2);",
+      s"SELECT timestamp_ms FROM iceberg_snapshots('$qualified') " +
+        s"ORDER BY sequence_number LIMIT 1;"
+    )
+    withClue(setup.clue)(setup.code shouldBe 0)
+    // The catalog's OWN recorded commit time for the first snapshot, not a clock read in this
+    // process: a midpoint computed here would depend on the fixture's clock agreeing with the
+    // test host's, and on the two inserts being far enough apart to have a midpoint at all.
+    val firstAt = setup.values match
+      case one :: Nil => one
+      case other      => fail(s"expected one snapshot timestamp, got $other in: ${setup.clue}")
+
+    val r = run(
+      s"SELECT 'at_first=' || count(*) FROM $t AT (TIMESTAMP => TIMESTAMP '$firstAt');",
+      s"SELECT 'latest=' || count(*) FROM $t;"
+    )
+    withClue(r.clue) {
+      r.code shouldBe 0
+      // Real time travel by timestamp, distinct from the by-id case above: the table held one row
+      // as of the first commit's timestamp and holds two now.
+      r.values shouldBe List("at_first=1", "latest=2")
+    }
+  }
+
+  it should "map Iceberg column types back to the DuckDB types they were written as" in {
+    requireFixture()
+    val t = table("t_types")
+    // Written and read back in SEPARATE duckdb sessions on purpose. In the writing session the
+    // types are simply what CREATE TABLE said; only a fresh ATTACH forces DuckDB to derive them
+    // from the Iceberg table metadata the catalog stored, which is the mapping under test.
+    val setup = run(
+      s"CREATE TABLE $t (" +
+        "b BOOLEAN, i INTEGER, l BIGINT, f FLOAT, d DOUBLE, n DECIMAL(10,2), " +
+        "s VARCHAR, dt DATE, ts TIMESTAMP, bin BLOB);",
+      s"INSERT INTO $t VALUES (true, 42, 9000000000, 1.5, 2.5, 3.25, 'x', " +
+        "DATE '2026-01-02', TIMESTAMP '2026-01-02 03:04:05', 'ab'::BLOB);"
+    )
+    withClue(setup.clue)(setup.code shouldBe 0)
+
+    val r = run(
+      s"SELECT typeof(b) || ',' || typeof(i) || ',' || typeof(l) || ',' || typeof(f) || ',' || " +
+        s"typeof(d) || ',' || typeof(n) || ',' || typeof(s) || ',' || typeof(dt) || ',' || " +
+        s"typeof(ts) || ',' || typeof(bin) FROM $t;",
+      s"SELECT b || '|' || i || '|' || l || '|' || f || '|' || d || '|' || n || '|' || s || " +
+        s"'|' || dt || '|' || ts || '|' || bin FROM $t;"
+    )
+    withClue(r.clue) {
+      r.code shouldBe 0
+      // `typeof` on the scan, not `duckdb_columns()`: on a fresh attach `duckdb_columns()` reports
+      // a single `__` column of type UNKNOWN for an Iceberg table nothing has read yet, which is a
+      // lazy placeholder rather than the mapping, and a case asserting against it would have been
+      // asserting on DuckDB's catalog laziness.
+      //
+      // Both lines matter. The types alone would pass if every value came back NULL; the values
+      // alone would pass if DECIMAL(10,2) had degenerated to DOUBLE, since 3.25 prints the same.
+      r.values shouldBe List(
+        "BOOLEAN,INTEGER,BIGINT,FLOAT,DOUBLE,DECIMAL(10,2),VARCHAR,DATE,TIMESTAMP,BLOB",
+        "true|42|9000000000|1.5|2.5|3.25|x|2026-01-02|2026-01-02 03:04:05|ab"
+      )
+    }
+  }
+
   "a read-only rendered attach" should "still serve reads" in {
     requireFixture()
     val t     = table("t_ro_read")

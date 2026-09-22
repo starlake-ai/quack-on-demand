@@ -1,6 +1,5 @@
 package ai.starlake.quack.edge.sql
 
-import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
 import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 

@@ -1058,6 +1058,28 @@ Placeholders:
 - `{{alias}}` - replaced with the source's `alias` field.
 - `{{secret.NAME}}` - replaced with the resolved value of the secret named `NAME`.
 
+Alias rules, for **every** source type (`sql` as well as `iceberg-rest`):
+
+- **An alias must be a plain lowercase identifier**: ASCII letters, digits and
+  underscore, starting with a letter or underscore, 1..63 chars. `--alias ext-s3`
+  (hyphen, dot, or over-length) is a `400`; use `ext_s3`. DuckDB treats catalog
+  and secret names case-insensitively, so a mixed-case alias is stored lowercase
+  and `Sales_Lake` and `sales_lake` are one row, not two.
+- **A source already stored under an alias that rule rejects stays editable.**
+  Re-`create` it naming that same alias and the edit applies under the stored
+  spelling. Its NAME is frozen, though: renaming it means delete and recreate,
+  and since the alias is the catalog segment of every role permission, that also
+  means re-granting.
+- The manager lists every stored alias it would reject or rewrite at boot, at
+  ERROR level, so an upgrade names the affected rows for you.
+- An alias must not collide with the tenant-db's own catalog alias, with a
+  sibling federated alias, or with a DuckDB builtin (`memory`, `system`, `temp`).
+- **`create` upserts, and an omitted field is RESET, not preserved.** Re-POST the
+  same alias to edit a source in place (there is no `qod federation update`). Every
+  field the request leaves out goes back to its default, so a re-`create` that
+  omits `--read-only` on a read-only source makes it writable again; the manager
+  WARNs when that happens. Pass the flags you want kept.
+
 ### Add a Postgres-backed secret
 
 ```bash
@@ -1123,11 +1145,11 @@ Rules worth knowing before the first create:
   step 1 must precede step 2. Step 1 does not check that the secret exists; an
   unresolved `{{secret.NAME}}` fails the whole tenant-db federation blob at node
   spawn, not just this catalog.
-- **`create` upserts.** Re-POST the same alias to edit a source in place. There
-  is no `qod federation update`. Changing an alias between `sql` and
+- **`create` upserts**, with the reset-on-omit behaviour described under
+  "Register a federated source" above. Changing an alias between `sql` and
   `iceberg-rest` is refused: delete it first.
-- **The alias is lowercased** and must not collide with the tenant-db's own
-  catalog alias or with a sibling federated alias.
+- **The alias rules are not Iceberg-specific.** See "Register a federated
+  source" above: they apply to every source type.
 
 ### Check whether an Iceberg catalog actually attached
 

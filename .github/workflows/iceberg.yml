@@ -1,7 +1,15 @@
-# The repository's first Scala CI channel. Scoped to the Iceberg and federation specs
-# deliberately: putting the full ~2800-test suite on CI's critical path in the same change
-# would surface unrelated pre-existing failures and environment flakes, which is its own
-# project. See docs/superpowers/specs/2026-09-20-external-iceberg-catalog-design.md.
+# The repository's first Scala CI channel. Scoped to the Iceberg and federation specs plus the
+# statement-screening code they sit behind, deliberately: putting the full ~2800-test suite on
+# CI's critical path in the same change would surface unrelated pre-existing failures and
+# environment flakes, which is its own project.
+# See docs/superpowers/specs/2026-09-20-external-iceberg-catalog-design.md.
+#
+# The `paths:` filters and SPECS below are one decision, not two: a filter that fires no spec is
+# noise, and a spec whose code has no filter never runs when that code changes. So the four
+# screening gates (SqlTrivia / SqlCommentStripper, StatementClassifier, LockdownScreen,
+# CatalogWriteScreen) and the two readers built on them (FlightSqlRouter, PrepareStrategy) are
+# listed on BOTH sides -- CatalogWriteScreen's read-only denial is only as good as the trivia
+# and comment handling underneath it, and that is shared code a change elsewhere can move.
 #
 # Specs are named one by one rather than matched with a glob. `sbt "testOnly *Iceberg*"`
 # reports success when the pattern matches NOTHING, so a renamed or deleted spec would turn
@@ -14,18 +22,58 @@ on:
     branches: [main]
     paths:
       - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
-      - "src/main/scala/ai/starlake/quack/edge/sql/CatalogWriteScreen.scala"
       - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
-      - "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+      - "src/main/scala/ai/starlake/quack/edge/sql/**"
+      - "src/test/scala/ai/starlake/quack/edge/sql/**"
+      - "src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala"
+      - "src/main/scala/ai/starlake/quack/edge/PrepareStrategy.scala"
+      - "src/test/scala/ai/starlake/quack/edge/FlightSqlRouterSpec.scala"
+      - "src/test/scala/ai/starlake/quack/edge/PrepareStrategySpec.scala"
+      - "src/main/scala/ai/starlake/sql/**"
+      - "src/test/scala/ai/starlake/sql/**"
+      - "src/main/scala/ai/starlake/quack/route/StatementClassifier.scala"
+      - "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+      - "src/main/scala/ai/starlake/quack/ondemand/api/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/api/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/manifest/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/manifest/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/state/FederatedSourceStore.scala"
+      - "src/test/scala/ai/starlake/quack/ondemand/state/FederatedSourceStore*.scala"
+      - "src/main/scala/ai/starlake/quack/boot/BootPreflight.scala"
+      - "src/test/scala/ai/starlake/quack/boot/BootPreflightFederatedAliasesSpec.scala"
+      - "src/main/scala/ai/starlake/quack/model/Federated*.scala"
+      - "src/test/scala/ai/starlake/quack/model/FederatedAliasSpec.scala"
+      - "src/test/scala/ai/starlake/quack/route/LocaleIndependenceSpec.scala"
+      - "src/main/scala/ai/starlake/quack/model/Names.scala"
       - "src/main/resources/db/changelog/**"
       - "scripts/iceberg-fixture.yml"
       - ".github/workflows/iceberg.yml"
   pull_request:
     paths:
       - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
-      - "src/main/scala/ai/starlake/quack/edge/sql/CatalogWriteScreen.scala"
       - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
-      - "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+      - "src/main/scala/ai/starlake/quack/edge/sql/**"
+      - "src/test/scala/ai/starlake/quack/edge/sql/**"
+      - "src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala"
+      - "src/main/scala/ai/starlake/quack/edge/PrepareStrategy.scala"
+      - "src/test/scala/ai/starlake/quack/edge/FlightSqlRouterSpec.scala"
+      - "src/test/scala/ai/starlake/quack/edge/PrepareStrategySpec.scala"
+      - "src/main/scala/ai/starlake/sql/**"
+      - "src/test/scala/ai/starlake/sql/**"
+      - "src/main/scala/ai/starlake/quack/route/StatementClassifier.scala"
+      - "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+      - "src/main/scala/ai/starlake/quack/ondemand/api/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/api/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/manifest/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/manifest/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/state/FederatedSourceStore.scala"
+      - "src/test/scala/ai/starlake/quack/ondemand/state/FederatedSourceStore*.scala"
+      - "src/main/scala/ai/starlake/quack/boot/BootPreflight.scala"
+      - "src/test/scala/ai/starlake/quack/boot/BootPreflightFederatedAliasesSpec.scala"
+      - "src/main/scala/ai/starlake/quack/model/Federated*.scala"
+      - "src/test/scala/ai/starlake/quack/model/FederatedAliasSpec.scala"
+      - "src/test/scala/ai/starlake/quack/route/LocaleIndependenceSpec.scala"
+      - "src/main/scala/ai/starlake/quack/model/Names.scala"
       - "src/main/resources/db/changelog/**"
       - "scripts/iceberg-fixture.yml"
       - ".github/workflows/iceberg.yml"
@@ -67,9 +115,19 @@ jobs:
         ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifierSpec
         ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactorSpec
         ai.starlake.quack.edge.sql.CatalogWriteScreenSpec
+        ai.starlake.quack.edge.sql.LockdownScreenSpec
+        ai.starlake.quack.edge.FlightSqlRouterSpec
+        ai.starlake.quack.edge.PrepareStrategySpec
+        ai.starlake.quack.route.StatementClassifierSpec
+        ai.starlake.sql.SqlTriviaSpec
+        ai.starlake.sql.SqlCommentStripperSpec
         ai.starlake.quack.ondemand.state.FederatedSourceStoreSpec
         ai.starlake.quack.ondemand.state.FederatedSourceStoreUrlSpec
         ai.starlake.quack.ondemand.api.FederatedSourceHandlersSpec
+        ai.starlake.quack.ondemand.manifest.ManifestRoundTripSpec
+        ai.starlake.quack.boot.BootPreflightFederatedAliasesSpec
+        ai.starlake.quack.model.FederatedAliasSpec
+        ai.starlake.quack.route.LocaleIndependenceSpec
     steps:
       - uses: actions/checkout@v7
 

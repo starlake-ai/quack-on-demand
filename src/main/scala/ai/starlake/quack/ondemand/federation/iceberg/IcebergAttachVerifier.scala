@@ -200,11 +200,12 @@ final class IcebergAttachVerifier(
           }
       }
 
-  /** Locale-independent case fold, used on BOTH sides of the present-versus-declared match above.
-    * `AttachStatusRegistry` folds its keys the same way, so a failure cannot be recorded under one
-    * spelling and looked up under another. Same reasoning as `AttachErrorRedactor.foldCase`.
+  /** The one alias fold, [[ai.starlake.quack.model.FederatedAlias.fold]], used on BOTH sides of the
+    * present-versus-declared match above. `AttachStatusRegistry` folds its keys through the same
+    * helper, so a failure cannot be recorded under one spelling and looked up under another.
     */
-  private def foldAlias(alias: String): String = alias.toLowerCase(java.util.Locale.ROOT)
+  private def foldAlias(alias: String): String =
+    ai.starlake.quack.model.FederatedAlias.fold(alias)
 
   /** The ONE funnel every STORED attach error goes through, which is why the redaction lives here
     * rather than at the REST rendering sites: `AttachStatusRegistry.recordFailure` has no other
@@ -237,12 +238,19 @@ final class IcebergAttachVerifier(
         )
     }
 
-object IcebergAttachVerifier:
+object IcebergAttachVerifier extends LazyLogging:
 
   /** Decodes `duckdb_databases()` batches into the set of attached catalog names, and always closes
     * the reader. The quack wire can emit a schema-only first batch, so batches are drained rather
-    * than assuming the first carries rows (same reason `EngineStats.fromReader` loops); any
-    * surprise, including a `close()` that itself throws, becomes a `Left`, never an exception.
+    * than assuming the first carries rows (same reason `EngineStats.fromReader` loops).
+    *
+    * Total: this never throws. A decoding surprise becomes a `Left`. A `close()` that itself throws
+    * is caught and logged, NOT turned into a `Left` -- a bare `finally close()` would have let it
+    * propagate out and replace the value this method was about to return, which is the one way a
+    * helper whose whole point is an `Either` still hands its caller an exception. It is not a
+    * `Left` either, because by then the catalog names have already been decoded correctly and a
+    * reader that failed to close is not a reason to discard them; only `Main.nodeCatalogs`'s
+    * `.handleError` stood between that and a crash before, and a helper should not need one.
     */
   def decodeCatalogNames(rows: ArrowReader, close: () => Unit): Either[String, Set[String]] =
     try
@@ -256,4 +264,8 @@ object IcebergAttachVerifier:
           i += 1
       Right(acc.toSet)
     catch case t: Throwable => Left(s"could not decode duckdb_databases(): ${t.getMessage}")
-    finally close()
+    finally
+      try close()
+      catch
+        case t: Throwable =>
+          logger.debug(s"closing the duckdb_databases() reader failed: ${t.getMessage}")

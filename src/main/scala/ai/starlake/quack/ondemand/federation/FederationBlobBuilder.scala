@@ -128,12 +128,12 @@ final class FederationBlobBuilder(
   ): Set[String] =
     sources.filterNot(_.id == selfId).map(s => fold(s.alias)).toSet ++ ownAlias
 
-  /** Locale-independent case fold. `validated` compares case-insensitively, so what is reserved has
-    * to be folded the same way no matter what default locale the manager's JVM happens to carry:
-    * under a Turkish or Azeri default, `"I".toLowerCase` is the dotless `i`. Same reasoning as
-    * `AttachErrorRedactor.foldCase`, which folds per character for the same reason.
+  /** The one alias fold, [[ai.starlake.quack.model.FederatedAlias.fold]]. `validated` compares
+    * case-insensitively, so what is reserved has to be folded the same way no matter what default
+    * locale the manager's JVM happens to carry. Aliased locally only to keep the call sites below
+    * short.
     */
-  private def fold(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
+  private def fold(s: String): String = ai.starlake.quack.model.FederatedAlias.fold(s)
 
   private def renderOne(
       src: FederatedSource,

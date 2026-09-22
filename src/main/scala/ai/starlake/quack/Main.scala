@@ -1066,7 +1066,10 @@ object Main extends IOApp with LazyLogging:
         cached.getOrElse {
           val result = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
             case (Some(td), Some(fedStore)) =>
-              fedStore.listSources(td.id).filter(_.readOnly).map(_.alias.toLowerCase).toSet
+              // Through `FederatedAlias.readOnlySet`, not an inline map: this set is matched by
+              // `CatalogWriteScreen` against refs the ACL parser lowercased with `Locale.ROOT`,
+              // by exact equality, so a default-locale fold here fails OPEN on a `tr`/`az` JVM.
+              ai.starlake.quack.model.FederatedAlias.readOnlySet(fedStore.listSources(td.id))
             case _ => Set.empty[String]
           readOnlyCatalogsCache.put(key, (now, result))
           result

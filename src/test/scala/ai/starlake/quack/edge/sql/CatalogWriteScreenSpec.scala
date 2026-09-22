@@ -8,6 +8,8 @@ import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.util.Locale
+
 class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues:
 
   private val attached = Set("acme_db", "sales_lake", "memory", "system", "temp")
@@ -584,6 +586,75 @@ class CatalogWriteScreenSpec extends AnyFlatSpec with Matchers with OptionValues
     screen(
       "CHECKPOINT; EXPLAIN /* a /* b */ c */ SELECT * FROM sales_lake.main.orders"
     ) shouldBe None
+  }
+
+  // ---- the denied set must not be folded with the JVM's default locale ----
+  //
+  // `screen` compares `denied.contains(catalogOf(access.table.canonical))`: exact string equality,
+  // with no `equalsIgnoreCase` behind it. The right-hand side comes out of the ACL parser, which
+  // lowercases canonical refs with `Locale.ROOT` (`Config.normalizedAttachedCatalogs`,
+  // `TableExtractor`). If THIS side folds with the default locale instead, then on a `tr` or `az`
+  // JVM an alias holding an ASCII `I` folds to the dotless form on one side only, the set match
+  // never happens, and the write is ADMITTED. This is the fail-OPEN direction: the screen answers
+  // None, which reads exactly like "nothing to deny here".
+  //
+  // Reachable rather than theoretical: new aliases are normalized to lowercase ASCII at write
+  // time, but a row created before that rule, or imported from a manifest, can still carry an
+  // uppercase `I` -- which is the population `BootPreflight.checkFederatedAliases` exists to
+  // report.
+
+  /** Runs `body` with the JVM default locale forced to Turkish, restoring the previous default on
+    * every path. `Locale.setDefault` is process-global, so the restore is not optional. Same shape
+    * as `route.LocaleIndependenceSpec` and `IcebergAttachVerifierSpec`.
+    */
+  private def withTurkishLocale[A](body: => A): A =
+    val previous = Locale.getDefault
+    Locale.setDefault(Locale.forLanguageTag("tr-TR"))
+    try body
+    finally Locale.setDefault(previous)
+
+  "the read-only denial" should "deny a write to an alias holding an I under a Turkish locale" in
+    withTurkishLocale {
+      withClue("the forced default locale must fold the ASCII i, or this test proves nothing: ") {
+        "I".toLowerCase should not be "i"
+        "I".toLowerCase(Locale.ROOT) shouldBe "i"
+      }
+      // The alias as a legacy row stores it: uppercase I, which the write path would reject today
+      // but which BootPreflight only REPORTS on an existing row.
+      val alias     = "sales_I"
+      val attachedI = Set("acme_db", alias, "memory", "system", "temp")
+      val cfgI      = Config.forDuckDB(Some("acme_db"), Some("main"), attachedI)
+      val denial    = CatalogWriteScreen.screen(
+        "INSERT INTO sales_I.main.orders VALUES (1)",
+        StatementClassifier.default.classify,
+        Set(alias),
+        cfgI
+      )
+      withClue("a write to a read-only catalog was ADMITTED under a Turkish default locale: ") {
+        denial should not be None
+      }
+      denial.value should include("read-only")
+    }
+
+  it should "reach the same verdict under the default locale and under Turkish" in {
+    // The pair, not just the Turkish run: a screen that denied EVERYTHING would satisfy the case
+    // above on its own. This one pins that the two locales agree on an admit as well as a deny.
+    val alias     = "sales_I"
+    val attachedI = Set("acme_db", alias, "memory", "system", "temp")
+    val cfgI      = Config.forDuckDB(Some("acme_db"), Some("main"), attachedI)
+    def verdicts  = List(
+      "INSERT INTO sales_I.main.orders VALUES (1)",
+      "SELECT * FROM sales_I.main.orders",
+      "INSERT INTO acme_db.main.orders VALUES (1)"
+    ).map(sql =>
+      CatalogWriteScreen
+        .screen(sql, StatementClassifier.default.classify, Set(alias), cfgI)
+        .isDefined
+    )
+    val underDefault = verdicts
+    val underTurkish = withTurkishLocale(verdicts)
+    underDefault shouldBe List(true, false, false)
+    underTurkish shouldBe underDefault
   }
 
   // ---- escape hygiene of this file's own invisible-character test literals ----

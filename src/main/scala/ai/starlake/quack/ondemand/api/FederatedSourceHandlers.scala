@@ -1,6 +1,12 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
+import ai.starlake.quack.model.{
+  FederatedAlias,
+  FederatedSecret,
+  FederatedSource,
+  FederatedSourceType,
+  Names
+}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
@@ -39,6 +45,8 @@ final class FederatedSourceHandlers(
     catalogAliasOf: String => Option[String],
     attachStatusOf: (String, String) => Option[String] = (_, _) => None
 ):
+
+  private val logger = org.slf4j.LoggerFactory.getLogger(getClass)
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -106,10 +114,28 @@ final class FederatedSourceHandlers(
     // ATTACH failed at node spawn; normalizing here closes that for new rows. This CHANGES existing
     // behaviour for sql sources (a mixed-case alias is now stored lowercase, an over-length one is
     // a 400); the ACL parser already lowercases canonical refs, so grants are unaffected.
-    val aliasOrError = ai.starlake.quack.model.Names
-      .normalizeOrError(req.alias, "alias")
-      .left
-      .map(badRequest)
+    //
+    // ONE exception, and it is about the rows that already exist rather than about the rule: a
+    // STORED alias the rule rejects (`ext-s3`, created before this branch) is grandfathered for an
+    // in-place edit under its own stored spelling. Without this, such a row could not be updated
+    // through REST, CLI, MCP or manifest import at all, and since the alias is the catalog segment
+    // of every RolePermission, delete-and-recreate also means re-granting. Refusing NEW invalid
+    // aliases is the point of the rule; stranding a row its owner can neither edit nor fix is not.
+    // The stored spelling wins over the request's, so a re-POST cannot rename a legacy row into
+    // some other invalid spelling, and the row still cannot be created this way -- only updated.
+    // A valid-but-uppercase alias is deliberately NOT grandfathered: it normalizes, so it keeps
+    // being rewritten in place to lowercase, which is what `BootPreflight.checkFederatedAliases`
+    // tells the operator will happen.
+    val aliasOrError: Either[(StatusCode, ErrorResponse), String] =
+      Names.normalizeOrError(req.alias, "alias") match
+        case Right(normalized) => Right(normalized)
+        case Left(rejection)   =>
+          val grandfathered = existing.filter(row =>
+            req.alias != null && FederatedAlias.fold(row.alias) == FederatedAlias.fold(req.alias)
+          )
+          grandfathered match
+            case Some(row) => Right(row.alias)
+            case None      => Left(badRequest(rejection))
 
     typeOrError.flatMap { sourceType =>
       aliasOrError.flatMap { alias =>
@@ -166,13 +192,32 @@ final class FederatedSourceHandlers(
                     fedStore
                       .listSources(tenantDbId)
                       .filterNot(s => selfId.contains(s.id))
-                      .map(_.alias.toLowerCase)
+                      .map(s => FederatedAlias.fold(s.alias))
                       .toSet
                 IcebergRestConfig.validated(cfg, alias, reserved).left.getOrElse(Nil)
               case _ => Nil
 
             val all = shapeErrors ++ configErrors
-            if all.isEmpty then Right(source) else Left(badRequest(all.mkString("; ")))
+            if all.nonEmpty then Left(badRequest(all.mkString("; ")))
+            else
+              // This endpoint is a create-request-as-upsert: every field is replaced by what the
+              // request carries, so an OMITTED readOnly falls back to the type default rather
+              // than to the stored value -- and for a `sql` source explicitly marked read-only
+              // that default is false, i.e. a re-POST that only meant to edit `setupSql` silently
+              // unlocks the catalog. The CLI and the MCP tool both omit the field unless
+              // `--read-only`/`--no-read-only` was passed, so this is reachable without anyone
+              // typing the word. Declarative replacement is this endpoint's contract and is not
+              // being changed here, but it must not be SILENT: `ManifestImporter` WARNs on
+              // exactly this class of downgrade (a sourceType flip carrying readOnly with it) and
+              // this is the matching line for the REST path. Logged only on the true -> false
+              // direction, and only once the upsert is actually going to be written.
+              if existing.exists(_.readOnly) && !source.readOnly && req.readOnly.isEmpty then
+                logger.warn(
+                  s"federated source '$alias' (tenant-db $tenantDbId) was read-only and this " +
+                    "upsert omitted readOnly, so it becomes WRITABLE; pass readOnly=true to " +
+                    "keep it read-only"
+                )
+              Right(source)
       }
     }
 
@@ -213,7 +258,7 @@ final class FederatedSourceHandlers(
               // normalized lookup can still miss a legacy mixed-case row; fall back to a
               // case-insensitive scan of the tenant-db's sources so that row is rewritten in place
               // under its normalized alias instead of minting a silent duplicate.
-              val lookupAlias = ai.starlake.quack.model.Names
+              val lookupAlias = Names
                 .normalizeOrError(req.alias, "alias")
                 .getOrElse(req.alias)
               val existing = fedStore
@@ -222,7 +267,7 @@ final class FederatedSourceHandlers(
                   fedStore.listSources(tenantDbId).find(_.alias.equalsIgnoreCase(lookupAlias))
                 )
               val id =
-                existing.map(_.id).getOrElse(ai.starlake.quack.model.Names.newSurrogateId("fs"))
+                existing.map(_.id).getOrElse(Names.newSurrogateId("fs"))
               toSource(id, tenantDbId, req, existing) match
                 case Left(e)       => Left(e)
                 case Right(source) =>
@@ -234,7 +279,11 @@ final class FederatedSourceHandlers(
                     AuditActions.FederationSourceUpsert,
                     "ok",
                     tenant = tenantIdResolver(tenantName),
-                    target = Some(req.alias)
+                    // `source.alias`, not `req.alias`: the row is written under the alias
+                    // `toSource` resolved (normalized, or a grandfathered legacy spelling), so
+                    // auditing the raw request would record `Sales_Lake` for a row stored as
+                    // `sales_lake` and leave the trail naming something that is not in the table.
+                    target = Some(source.alias)
                   )
                   Right(toSourceResponse(source))
     }

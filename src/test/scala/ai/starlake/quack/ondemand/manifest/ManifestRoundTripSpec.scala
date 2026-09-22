@@ -1102,10 +1102,20 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   // ------------------------------------------------------------------
   // Test 19: a stored row whose alias the manifest repeats VERBATIM but
   // which cannot be normalized (a legacy row from before aliases were
-  // normalized) is reported and left alone, not deleted.
+  // normalized) is GRANDFATHERED: updated in place under its own stored
+  // spelling, never deleted, never renamed.
+  //
+  // This is the same clause `FederatedSourceHandlers.toSource` applies, and
+  // the two write paths have to agree: a manifest-driven install holding a
+  // pre-normalization `bad-alias` row would otherwise fail EVERY apply (the
+  // rejection is accumulated into the returned Left), with no way to edit
+  // the row and no way to rename it short of delete-and-re-grant. Refusing
+  // NEW invalid aliases is the point of the rule -- Test 14's over-length
+  // alias, which no stored row carries, is the arm that still pins that and
+  // is still rejected and still never written.
   // ------------------------------------------------------------------
 
-  it should "keep a stored source whose alias the manifest repeats but cannot normalize" in {
+  it should "update in place a stored source whose alias the manifest repeats but cannot normalize" in {
     val cp  = buildSrc()
     val fed = new InMemoryFederatedSourceStore()
     fed.upsertSource(
@@ -1124,14 +1134,44 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     )
     val res = ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false)
 
-    res.isLeft shouldBe true
-    res.left.toOption.get.exists(_.contains("invalid alias 'bad-alias'")) shouldBe true
+    res shouldBe Right(())
 
     val rows = fed.listSources("td-1")
     rows should have size 1
     rows.head.id shouldBe "fs-legacy-name"
+    // The stored spelling survives (the manifest cannot rename a row into a second invalid
+    // alias) and the EDIT landed, which is the whole point of the clause.
     rows.head.alias shouldBe "bad-alias"
-    rows.head.setupSql shouldBe "ATTACH 'old' AS \"bad-alias\";"
+    rows.head.setupSql shouldBe "ATTACH 'new' AS {{alias}};"
+  }
+
+  it should "keep the stored spelling when the manifest repeats a legacy alias in another case" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-legacy-case",
+        tenantDbId = "td-1",
+        alias = "Bad-Alias",
+        setupSql = "ATTACH 'old' AS \"Bad-Alias\";"
+      )
+    )
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(ManifestFederatedSource(alias = "bad-alias", setupSql = "ATTACH 'new' AS {{alias}};"))
+    )
+    ManifestImporter.apply(withFed, cp, Some(fed), requireEncryption = false) shouldBe Right(())
+
+    val rows = fed.listSources("td-1")
+    // One row, still under its OWN spelling, and still the same row id: a lookup keyed on the
+    // raw resolved alias instead of the folded one would miss this row, mint a fresh id and
+    // (on Postgres) violate uq_fedsrc_tenant_db_alias.
+    rows should have size 1
+    rows.head.id shouldBe "fs-legacy-case"
+    rows.head.alias shouldBe "Bad-Alias"
+    rows.head.setupSql shouldBe "ATTACH 'new' AS {{alias}};"
   }
 
   // ------------------------------------------------------------------

@@ -706,16 +706,28 @@ object ManifestImporter:
     if federatedStore.isDefined && mtd.federatedSources.nonEmpty then
       val fs = federatedStore.get
 
+      val existingSources: List[FederatedSource] = fs.listSources(tdId)
+
       // OWNER DECISION (session audit): every imported alias is normalized exactly as on REST
       // create -- lowercase, 1..63 chars, identifier pattern. A source whose alias does not
       // normalize is reported and skipped; it is never written.
+      //
+      // Same grandfather clause as `FederatedSourceHandlers.toSource`, for the same reason and
+      // with the same narrowness: an alias the rule rejects is still accepted when a STORED row
+      // already carries it, and it resolves to that row's OWN spelling. Without it a manifest-
+      // driven install holding a pre-normalization `ext-s3` row could not import AT ALL -- the
+      // error below is accumulated, so it fails the whole apply, every time, with no edit path to
+      // fix it. A new invalid alias (no stored row) is still reported and never written.
       val resolvedAliases: List[(ManifestFederatedSource, Option[String])] =
         mtd.federatedSources.map { msrc =>
           Names.normalizeOrError(msrc.alias, "alias") match
             case Right(a) => (msrc, Some(a))
             case Left(e)  =>
-              errs += s"tenant-db '${mtd.name}': $e"
-              (msrc, None)
+              existingSources.find(s => fold(s.alias) == fold(msrc.alias)) match
+                case Some(row) => (msrc, Some(row.alias))
+                case None      =>
+                  errs += s"tenant-db '${mtd.name}': $e"
+                  (msrc, None)
         }
 
       // Reject duplicate aliases in payload, on the NORMALIZED form: `Sales` and `sales` are one
@@ -737,8 +749,6 @@ object ManifestImporter:
       duplicateAliases.toList.sorted.foreach { a =>
         errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
       }
-
-      val existingSources: List[FederatedSource] = fs.listSources(tdId)
 
       // The stored row for an incoming alias, matched case-insensitively. This is where the id of
       // an existing source is recovered, from the SOURCE rows rather than (as before) from a map
@@ -766,23 +776,23 @@ object ManifestImporter:
       // that was rejected above still counts as named: a rejected source is an error to fix, not a
       // reason to destroy the stored row.
       //
-      // What each arm defends, measured rather than assumed:
-      //   - `msrc.alias` (the RAW incoming alias) is the load-bearing one. It is the only arm that
-      //     matches a legacy stored row whose alias `Names.normalizeOrError` REJECTS, where
-      //     `normalized` is None and contributes nothing. Test 19 ("keep a stored source whose
-      //     alias the manifest repeats but cannot normalize") is the one test that kills it:
-      //     dropping this arm deletes that row outright. Do not remove it on the theory that the
-      //     normalized arm covers it.
-      //   - `normalized` currently kills NO test, and that was verified by mutation, not inferred:
-      //     `normalizeOrError` lowercases and this arm re-folds with `Locale.ROOT`, so under any
-      //     ASCII-lowercasing default locale it resolves to the same map entry the raw arm does.
-      //     It is kept because the two folds are NOT the same call (`Names.scala` uses the default
-      //     locale, `fold` uses `Locale.ROOT`), so under a Turkish or Azeri default they diverge
-      //     for a single-letter `I` alias and only this arm matches the normalized row. Retiring
-      //     it is safe only once that divergence is closed in `Names`.
+      // Matched on the RAW incoming alias, folded. This arm IS load-bearing -- emptying `keepIds`
+      // deletes rows Test 20 and the shape-rejection test both check are kept -- but it is no
+      // longer the ONLY form that would work: with the grandfather clause above, a legacy row's
+      // resolved alias is the stored spelling, which folds to this same key, so matching on the
+      // resolved alias instead would pick the same entry. Mutating one INTO the other therefore
+      // kills nothing, and that is a proven equivalence rather than a hole.
+      //
+      // The resolved alias used to be carried here as a SECOND arm. It was retained on the stated
+      // grounds that `Names` folds with the DEFAULT locale while `fold` here uses `Locale.ROOT`,
+      // so a `tr`/`az` JVM would diverge on a single-letter `I` alias and only that arm would
+      // match. That was never true: `Names.normalize` and `Names.normalizeOrError` both fold with
+      // `Locale.ROOT` (Names.scala:45,49), which is why mutating that arm killed no test. Removed
+      // rather than re-justified; the raw form is kept because it does not depend on the
+      // resolution step at all.
       val keepIds: Set[String] =
-        resolvedAliases.flatMap { case (msrc, normalized) =>
-          (msrc.alias :: normalized.toList).flatMap(a => sourceByAlias.get(fold(a))).map(_.id)
+        resolvedAliases.flatMap { case (msrc, _) =>
+          sourceByAlias.get(fold(msrc.alias)).map(_.id)
         }.toSet
       existingSources.filterNot(s => keepIds.contains(s.id)).foreach(s => fs.deleteSource(s.id))
 
@@ -790,7 +800,12 @@ object ManifestImporter:
       // reported above, and writing it twice is the constraint violation described there.
       resolvedAliases.foreach { case (msrc, normalized) =>
         normalized.filterNot(duplicateAliases.contains).foreach { alias =>
-          val srcId  = sourceByAlias.get(alias).map(_.id).getOrElse(Names.newSurrogateId("fs"))
+          // Keyed through `fold`, not on `alias` raw: a grandfathered legacy alias resolves to
+          // the stored row's OWN spelling, which need not already be lowercase, while the map is
+          // keyed on the folded form. A raw lookup would miss that row, mint a fresh id and issue
+          // a second INSERT under the same (tenant_db, alias). No-op for a normalized alias,
+          // which folds to itself.
+          val srcId = sourceByAlias.get(fold(alias)).map(_.id).getOrElse(Names.newSurrogateId("fs"))
           val source = FederatedSource(
             id = srcId,
             tenantDbId = tdId,
@@ -818,7 +833,7 @@ object ManifestImporter:
             // stale manifest replayed after the alias was converted through REST does exactly
             // that, and rewrites `readOnly` to the manifest's value along with it. It must not be
             // silent: this WARN is the only audit line the downgrade leaves.
-            sourceByAlias.get(alias).map(_.sourceType).filter(_ != source.sourceType).foreach {
+            sourceByAlias.get(fold(alias)).map(_.sourceType).filter(_ != source.sourceType).foreach {
               was =>
                 logger.warn(
                   s"manifest import: tenant-db '${mtd.name}' federated source '$alias' changes " +
@@ -871,9 +886,8 @@ object ManifestImporter:
         }
       }
 
-  /** Locale-independent case fold, for matching a manifest alias against a stored one. Same
-    * reasoning as `FederationBlobBuilder.fold`: under a Turkish or Azeri default locale,
-    * `"I".toLowerCase` is the dotless `i`, so the default locale must not decide what two aliases
-    * are the same row.
+  /** The one alias fold, [[ai.starlake.quack.model.FederatedAlias.fold]], for matching a manifest
+    * alias against a stored one: the default locale must not decide what two aliases are the same
+    * row. Aliased locally only to keep the call sites above short.
     */
-  private def fold(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
+  private def fold(s: String): String = ai.starlake.quack.model.FederatedAlias.fold(s)

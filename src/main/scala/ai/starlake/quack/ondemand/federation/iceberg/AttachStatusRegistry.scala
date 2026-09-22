@@ -58,7 +58,8 @@ final class AttachStatusRegistry(
   // Every alias key is normalized here, once, so callers can pass the alias however the source
   // declared it (manifest imports do not normalize) and every lookup -- including a caller's own
   // -- agrees on what it is looking up.
-  private def normalize(alias: String): String = alias.toLowerCase(java.util.Locale.ROOT)
+  private def normalize(alias: String): String =
+    ai.starlake.quack.model.FederatedAlias.fold(alias)
 
   def recordAttached(nodeId: String, startedAtMs: Long, alias: String): Unit =
     val key = ((nodeId, startedAtMs), normalize(alias))

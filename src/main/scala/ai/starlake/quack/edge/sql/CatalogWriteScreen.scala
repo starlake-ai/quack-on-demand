@@ -2,9 +2,11 @@ package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
-import ai.starlake.quack.model.StatementKind
+import ai.starlake.quack.model.{FederatedAlias, StatementKind}
 import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 import com.typesafe.scalalogging.LazyLogging
+
+import java.util.Locale
 
 /** Per-catalog write kill switch. Denies WRITE and DDL whose target sits in a catalog an operator
   * marked read-only (`qodstate_federated_source.read_only`), independently of the principal's
@@ -147,7 +149,13 @@ object CatalogWriteScreen extends LazyLogging:
         // An empty fragment list (blank submission) also lands here vacuously.
         None
       else
-        val denied     = readOnlyCatalogs.map(_.toLowerCase)
+        // `FederatedAlias.fold`, NOT `toLowerCase`: the other side of the `denied.contains` below
+        // is `TableAccess.table.canonical`, which the ACL parser lowercased with `Locale.ROOT`.
+        // The match is exact string equality with no `equalsIgnoreCase` behind it, so a default
+        // locale on THIS side is a fail-OPEN -- under `-Duser.language=tr` a legacy alias holding
+        // an `I` folds to the dotless i (U+0131) here, matches nothing, and the write is
+        // admitted.
+        val denied     = readOnlyCatalogs.map(FederatedAlias.fold)
         val deniedList = denied.toList.sorted.mkString(", ")
         val result     = SqlParser.extract(sql, config)
 
@@ -159,9 +167,12 @@ object CatalogWriteScreen extends LazyLogging:
         // `classify` arm below judge the exact same head; `normalized` has already been through
         // the same three passes in `isWriteShaped`, so `firstToken`'s own are no-ops on it.
         // `.takeWhile(_ != ';')` is this call site's own extra (a bare `EXECUTE;`), not universal
-        // to the shared primitive.
+        // to the shared primitive. `Locale.ROOT` on the uppercasing for the same reason every
+        // other keyword fold in the manager carries it (`StatementClassifier`, `LockdownScreen`):
+        // latent here, since neither PREPARE nor EXECUTE holds an `i`, but the next keyword added
+        // to this list need not be so lucky.
         def isPrepareOrExecute(normalized: String): Boolean =
-          val head = SqlTrivia.firstToken(normalized).takeWhile(_ != ';').toUpperCase
+          val head = SqlTrivia.firstToken(normalized).takeWhile(_ != ';').toUpperCase(Locale.ROOT)
           head == "PREPARE" || head == "EXECUTE"
 
         // jsqlparser's `UnsupportedStatement` (the node `Feature.allowUnsupportedStatements`

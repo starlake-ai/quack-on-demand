@@ -5,7 +5,7 @@ import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.ManagerConfig
 import ai.starlake.quack.edge.auth.AuthQueryPreconditions
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
-import ai.starlake.quack.model.Names
+import ai.starlake.quack.model.{FederatedAlias, Names}
 import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.quack.ondemand.state.{EmailFormat, FederatedSourceOps, UserStore}
 import com.typesafe.scalalogging.LazyLogging
@@ -222,13 +222,19 @@ object BootPreflight extends LazyLogging:
     * Pure and total: a store failure yields `Nil` rather than throwing, because a legacy alias must
     * never prevent boot. Kept separate from [[checkFederatedAliases]] so the decision (what counts
     * as invalid) is testable directly, without a logging harness.
+    *
+    * The lowercase test folds through [[FederatedAlias]] rather than `toLowerCase` because it is
+    * predicting what `Names.normalizeOrError` (which folds with `Locale.ROOT`) will store on the
+    * next upsert. A default-locale fold here would report a `tr`/`az` JVM's single-`I` alias as
+    * already-normalized when it is not, and the message below would name a rewrite target the write
+    * path never produces.
     */
   private[boot] def invalidFederatedAliases(fedStore: FederatedSourceOps): List[(String, String)] =
     try
       for
         tenantDbId <- fedStore.tenantDbIdsWithSources().toList
         source     <- fedStore.listSources(tenantDbId)
-        if !Names.isValid(source.alias) || source.alias != source.alias.toLowerCase
+        if !Names.isValid(source.alias) || source.alias != FederatedAlias.fold(source.alias)
       yield (tenantDbId, source.alias)
     catch
       case e: Exception =>
@@ -269,8 +275,8 @@ object BootPreflight extends LazyLogging:
             "failing silently at every node spawn already."
         else
           s"is not lowercase (stored as '$alias'). It will be rewritten to " +
-            s"'${alias.toLowerCase}' in place the next time it is updated; until then its ATTACH " +
-            "may already be colliding with a sibling alias differing only by case, since DuckDB " +
-            "treats catalog names case-insensitively."
+            s"'${FederatedAlias.fold(alias)}' in place the next time it is updated; until then " +
+            "its ATTACH may already be colliding with a sibling alias differing only by case, " +
+            "since DuckDB treats catalog names case-insensitively."
       logger.error(s"tenant-db '$tenantDbId': federated source alias '$alias' $detail")
     }
