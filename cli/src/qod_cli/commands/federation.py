@@ -1,3 +1,5 @@
+import json
+
 import typer
 
 from ..registry import covers
@@ -36,6 +38,63 @@ def get(ctx: typer.Context, tenant: str = TENANT, db: str = DB, alias: str = ALI
     call(ctx, "GET", f"{_base(tenant, db)}/{alias}")
 
 
+_TYPE_WIRE = {"sql": "sql", "iceberg-rest": "iceberg_rest", "iceberg_rest": "iceberg_rest"}
+
+
+def _iceberg_config(
+    raw: str | None,
+    uri: str | None,
+    warehouse: str | None,
+    auth: str | None,
+    endpoint_type: str | None,
+    client_id: str | None,
+    client_secret: str | None,
+    oauth2_server_uri: str | None,
+    oauth2_scope: str | None,
+    oauth2_grant_type: str | None,
+    token: str | None,
+) -> dict:
+    """Assemble the typed config. --config wins whole; otherwise build it from the flags.
+
+    Credential flags are meant to carry {{secret.NAME}} placeholders, not literal values: the
+    manager resolves those against the source's secrets at node spawn, so a real secret never
+    lands in a shell history or a CI log.
+    """
+    if raw is not None:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"--config is not valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise typer.BadParameter("--config must be a JSON object")
+        return parsed
+
+    cfg: dict = {}
+    if uri is not None:
+        cfg["uri"] = uri
+    if warehouse is not None:
+        cfg["warehouse"] = warehouse
+    if auth is not None:
+        cfg["authType"] = auth
+    if endpoint_type is not None:
+        cfg["endpointType"] = endpoint_type
+    for key, value in (
+        ("clientId", client_id),
+        ("clientSecret", client_secret),
+        ("oauth2ServerUri", oauth2_server_uri),
+        ("oauth2Scope", oauth2_scope),
+        ("oauth2GrantType", oauth2_grant_type),
+        ("token", token),
+    ):
+        if value is not None:
+            cfg[key] = value
+    if not cfg.get("warehouse"):
+        raise typer.BadParameter(
+            "--warehouse is required for --type iceberg-rest (or pass the whole --config JSON)"
+        )
+    return cfg
+
+
 @app.command()
 @covers(
     "POST",
@@ -47,6 +106,9 @@ def get(ctx: typer.Context, tenant: str = TENANT, db: str = DB, alias: str = ALI
         "setupSql": "--setup-sql",
         "description": "--description",
         "disabled": "--disabled",
+        "sourceType": "--type",
+        "config": "--config",
+        "readOnly": "--read-only",
     },
 )
 def create(
@@ -54,13 +116,49 @@ def create(
     tenant: str = TENANT,
     db: str = DB,
     alias: str = typer.Option(..., "--alias"),
-    setup_sql: str = typer.Option(..., "--setup-sql"),
+    setup_sql: str = typer.Option(None, "--setup-sql", help="sql sources only."),
     description: str = typer.Option(None, "--description"),
     disabled: bool = typer.Option(False, "--disabled"),
+    source_type: str = typer.Option("sql", "--type", help="sql | iceberg-rest"),
+    config: str = typer.Option(None, "--config", help="Whole typed config as JSON."),
+    read_only: bool = typer.Option(
+        None, "--read-only/--no-read-only",
+        help="Deny writes to this catalog. Defaults on for iceberg-rest.",
+    ),
+    uri: str = typer.Option(None, "--uri", help="Iceberg REST endpoint."),
+    warehouse: str = typer.Option(None, "--warehouse"),
+    auth: str = typer.Option(None, "--auth", help="none | oauth2 | token | sigv4"),
+    endpoint_type: str = typer.Option(None, "--endpoint-type", help="glue | s3_tables"),
+    client_id: str = typer.Option(None, "--client-id"),
+    client_secret: str = typer.Option(None, "--client-secret"),
+    oauth2_server_uri: str = typer.Option(None, "--oauth2-server-uri"),
+    oauth2_scope: str = typer.Option(None, "--oauth2-scope"),
+    oauth2_grant_type: str = typer.Option(None, "--oauth2-grant-type"),
+    token: str = typer.Option(None, "--token"),
 ):
-    body: dict = {"alias": alias, "setupSql": setup_sql, "disabled": disabled}
+    wire = _TYPE_WIRE.get(source_type)
+    if wire is None:
+        raise typer.BadParameter(f"--type must be sql or iceberg-rest, got '{source_type}'")
+
+    body: dict = {"alias": alias, "disabled": disabled}
     if description is not None:
         body["description"] = description
+    if read_only is not None:
+        body["readOnly"] = read_only
+
+    if wire == "iceberg_rest":
+        if setup_sql is not None:
+            raise typer.BadParameter("--setup-sql is for --type sql; use the iceberg flags")
+        body["sourceType"] = "iceberg_rest"
+        body["config"] = _iceberg_config(
+            config, uri, warehouse, auth, endpoint_type, client_id, client_secret,
+            oauth2_server_uri, oauth2_scope, oauth2_grant_type, token,
+        )
+    else:
+        if setup_sql is None:
+            raise typer.BadParameter("--setup-sql is required for --type sql")
+        body["setupSql"] = setup_sql
+
     call(ctx, "POST", _base(tenant, db), body=body)
 
 
