@@ -37,15 +37,16 @@ import java.time.Instant
   *
   * Enforcement is a two-layer split by `sourceType`, and the layers are NOT equally strong, NOT
   * equally proven, and NOT synchronized with each other:
-  *   - `IcebergRest`: engine-level, conditionally. QoD writes the ATTACH itself
+  *   - `IcebergRest`: engine-level. QoD writes the ATTACH itself
   *     ([[ai.starlake.quack.ondemand.federation.iceberg.IcebergSetupSql.render]]), so a true value
-  *     here is threaded onto the ATTACH as a bare `READ_ONLY` option. What is proven today: DuckDB
-  *     accepts `READ_ONLY` as a recognized Iceberg ATTACH option (a bogus option fails ATTACH
-  *     outright) and enforces read-only below SQL parsing for a FILE-BACKED attach. Whether the
-  *     `iceberg` extension itself honours that bit against a live REST catalog is NOT yet proven
-  *     end to end - that verification is still pending, so treat this layer as the intended primary
-  *     gate rather than a confirmed one until it lands, and keep relying on `CatalogWriteScreen` as
-  *     defence in depth regardless. This layer also binds only at ATTACH time (node spawn, via
+  *     here is threaded onto the ATTACH as a bare `READ_ONLY` option, and the `iceberg` extension
+  *     honours that bit against a LIVE REST catalog: `IcebergRestE2ESpec` attaches an
+  *     `apache/iceberg-rest-fixture` catalog with the renderer's own output and gets INSERT,
+  *     UPDATE, DELETE, CREATE TABLE and DROP TABLE each refused with "which is attached in
+  *     read-only mode", reads still serving and the row count unchanged. That evidence is DuckDB
+  *     v1.5.4 against an unauthenticated fixture (`authType = none`); a credentialed catalog gets
+  *     the identical ATTACH option but is not itself covered. Keep relying on `CatalogWriteScreen`
+  *     as defence in depth regardless. This layer also binds only at ATTACH time (node spawn, via
   *     `FederationBlobBuilder`'s rendered startup SQL): flipping `readOnly` on a live pool does NOT
   *     change an already-attached node's engine-level enforcement until the pool's nodes recycle,
   *     even though `CatalogWriteScreen` picks the new value up within its ~60s cache. Concretely,
@@ -53,7 +54,8 @@ import java.time.Instant
   *     leaves the catalog engine-read-only (raw DuckDB read-only-mode errors, not this screen's
   *     denial) until an operator recycles the pool. A mutating `CALL` is the one shape this layer
   *     closes that the screen alone cannot (`CatalogWriteScreen` cannot resolve `CALL` and admits
-  *     it) - but only once both the extension enforcement above is real and the pool has recycled.
+  *     it) - though the live spec above covers those DML/DDL verbs rather than `CALL` itself, and
+  *     this layer binds only once the pool has recycled.
   *   - `Sql`: edge-screen-only. The operator writes the ATTACH text (`setupSql`), so QoD has no
   *     rendering step to add the flag to; `CatalogWriteScreen` is the ONLY enforcement for these
   *     sources, with every gap documented above PLUS a mutating `CALL`, which the screen cannot

@@ -237,7 +237,7 @@ class IcebergRestE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
   /** The Task 6 MUST VERIFY. Before this, `READ_ONLY` was known only to be a recognized Iceberg
     * ATTACH option (a bogus option fails ATTACH with "Unhandled options found"; this one does not)
     * and to be enforced for a FILE-BACKED attach. Whether the iceberg extension honoured it against
-    * a live REST catalog was unproven, which is why `IcebergSetupSql.render`'s scaladoc calls it
+    * a live REST catalog was unproven, which is why `IcebergSetupSql.render`'s scaladoc called it
     * the INTENDED rather than the confirmed enforcement. It does: every write verb below is refused
     * by the engine, above the extension and below SQL parsing.
     *
