@@ -31,7 +31,7 @@ bundled automatically whenever `libquackwire/binaries/windows-x86_64/quackwire.d
 exists in the checkout; without it (or on Windows ARM64, where the dll is
 x86_64-only) `QuackNativeSupport.effectiveNativeClient` probes the jar at boot
 and falls back to the embedded client with a WARN, so no env flag is needed --
-`QOD_NATIVE_CLIENT=false` only forces that path. See guides/RUNNING.md "Path 1 on Windows".
+`QOD_NATIVE_CLIENT=false` only forces that path.
 
 UI dev loop (proxies `/api/*` to `localhost:20900`):
 
@@ -69,6 +69,51 @@ The legacy `file` mode (single JSON blob) was dropped 2026-06-12 along with the 
 A DuckLake database can be created with `managedStorage: true` (REST `database/create`, CLI `qod database create --managed-storage`, admin UI storage mode "Managed (QoD-provisioned)") instead of a caller-supplied `dataPath`/`objectStore`. The manager then resolves `dataPath = s3://<bucket>/<tenant>_<dbname>-<id8>/` (`ManagedPrefix` in `ondemand/storage/`, `id8` = first 8 chars of the tenant-db surrogate id, so recreating a deleted name lands on a fresh empty prefix) and fills the database's `objectStore` map from the `quack-on-demand.managedObjectStore` config block (`QOD_MANAGED_STORE_ENABLED / _ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _URL_STYLE / _RETAIN_DAYS / _PURGE_SWEEP_SEC`, disabled by default), so every downstream mechanism (node `CREATE SECRET`, `SecretKeys` redaction, spawn env, manifest export) applies unchanged. `managedStorage` is exclusive with `dataPath`/`objectStore`, requires `kind=ducklake`, and 400s naming the env when the block is off; `database/update` has no `managedStorage` field, so there is no BYO-to-managed migration.
 
 Every managed create writes a tombstone row in `qodstate_managed_prefix` (Liquibase `0027`); `database/delete` stamps `deleted_at` + `purge_eligible_at` (`+retainDays`, or now with `purgeManagedData: true` / `--purge-managed-data`). `ManagedStoreWiring` (in `boot/`) sweeps due rows every `purgeSweepSec` (60s floor), HA-leader-gated inside `IO.defer`, listing and batch-deleting objects in bounded batches per prefix per tick and stamping `purged_at` when a listing comes back empty; the retained window doubles as the undrop window. The root bucket is created if missing by a boot probe that only ever WARNs. **The managed bucket must have versioning OFF**: on a versioned bucket deletes write delete markers, listings go empty, and the worker stamps a prefix purged while non-current versions keep billing.
+
+### Encryption at rest (create-time, per tenant-db)
+
+`TenantDb.encrypted` (Liquibase `0039`) turns on at-rest encryption for one database. It is
+**create-time only in both directions, and so is the key**: neither engine can encrypt, decrypt or
+re-key in place, so `database/update` refuses a changed *or emptied* `encryptionKey`, and
+`ManifestImporter` refuses any change of the flag itself (the only path in the system that could
+flip it, since the update DTO has no such field).
+
+- `kind=ducklake`: `ENCRYPTED` rides every ATTACH. DuckLake mints a key per Parquet file into
+  `ducklake_data_file.encryption_key`; QoD holds no key material. Repeating `ENCRYPTED` on a
+  non-creating attach is legal, and an unencrypted catalog records `encrypted='false'` explicitly.
+- `kind=duckdb-file`: `ENCRYPTION_KEY` from `metastore.encryptionKey`, minted by `EncryptionKeyGen`
+  when the caller supplies none. In `TenantDb.SecretKeys`, so it never round-trips through any
+  response.
+- `kind=memory`: refused, nothing is at rest.
+
+The catalog-creating ATTACH is [DuckLakeInitializer.scala](src/main/scala/ai/starlake/quack/ondemand/DuckLakeInitializer.scala),
+and it is the site that decides a DuckLake catalog's encryption **permanently**. `guardEncryption`
+compares `ducklake_metadata.encrypted` against the row and throws a typed
+`EncryptionMismatchException` (blocking, like `DataPathMismatchException`) rather than letting
+DuckLake's raw error repeat once per spawn forever. Both metadata keys are read in one statement:
+the guard runs before the advisory lock, so a two-statement read could observe a concurrent
+initializer mid-write and block a pool until manager restart.
+
+**`INSTALL httpfs; LOAD httpfs;` is forced whenever encryption is on**, regardless of dataPath
+scheme. Encryption needs OpenSSL, which httpfs provides; under mbedtls DuckDB 1.4.1+ silently
+REFUSES WRITES to an encrypted database. `STORAGE_SQL` only loads httpfs for remote paths, so a
+local encrypted file would otherwise come up read-only with no error.
+
+Asymmetry worth knowing: DuckLake errors when attaching an unencrypted catalog WITH `ENCRYPTED`,
+but attaching an encrypted catalog WITHOUT the flag silently succeeds, so `guardEncryption` is the
+only thing catching an `encrypted=false` row on an encrypted catalog.
+
+Surfaces: REST `database/create`, `qod database create --encrypted [--encryption-key]`, the MCP
+admin tool, manifest round-trip, admin UI. `QOD_REQUIRE_ENCRYPTION` (`quack-on-demand.requireEncryption`,
+default false) refuses an unencrypted create on **both** the REST and manifest-import paths. Branches
+inherit `parent.encrypted`; `BranchCloner` copies `ducklake_metadata` wholesale so the clone is
+already correct. An exported manifest redacts `encryptionKey`, so it cannot recreate an encrypted
+`duckdb-file` database: deliberate, the key must not leave the control plane.
+
+**Trust boundary:** encryption at rest moves the boundary to the control plane. Whoever can read the
+control-plane Postgres can decrypt the data, for both kinds, and no design at this layer changes
+that. Note an exported manifest still carries `pgPassword` verbatim, which for an encrypted DuckLake
+database opens the catalog holding every per-file key. Design: docs/superpowers/specs/2026-09-21-encryption-at-rest-design.md.
 
 ### Branches (Epic 1, writable zero-copy clones)
 
@@ -234,11 +279,15 @@ When the username itself is in email format, `email` is auto-set to it and immut
 
 ### K8s backend - per-pod and per-pool Secrets
 
-`KubernetesQuackBackend` creates one Pod + one Service per node, plus two Secrets:
+`KubernetesQuackBackend` creates one Pod + one Service per node, plus three Secrets:
 - **Per-pod token Secret** `qod-token-${nodeId}`. Holds the manager-minted bearer (`QOD_NODE_TOKEN`) the manager presents on calls to that pod's `/quack` endpoint. The pod env injects it via `env.valueFrom.secretKeyRef` -- `kubectl describe pod` shows the ref, not the value. `discoverExisting` reads the Secret on manager restart to repopulate the in-memory token cache, so adopted pods don't 401 after a redeploy.
 - **Per-pool federation Secret** `qod-fedsql-${tenant}-${tenantDb}-${pool}` (tenantDb hyphenized for RFC-1123). Holds the resolved federation SQL when `spec.extraSetupSql` is non-empty; all pods of the pool reference the same Secret via `env.valueFrom.secretKeyRef`. GC'd when the last pod of the pool stops; rotation = update the Secret once, restart pods.
 
-Both Secrets must exist BEFORE pod create (kubelet rejects pods referencing missing Secrets), so `start(spec)` runs `ensureTokenSecret` and `ensureFederationSecret` first, then creates the pod.
+- **Per-pool node-env Secret** `qod-nodeenv-${tenant}-${tenantDb}-${pool}` (all three segments hyphenized for RFC-1123: a slug may carry `_`). Holds the sensitive metastore values, `TenantDb.NodeSecretEnvKeys` = `pgPassword` + `encryptionKey`, which used to be plain `EnvVar`s readable via `kubectl get pod -o yaml`. `pgPassword` is in scope alongside the encryption key deliberately: the pod needs it to attach a DuckLake catalog, and that catalog holds every per-file key, so moving only `encryptionKey` would buy nothing. The strip and the Secret's contents derive from ONE filtered map, so a pod can never reference a key the Secret lacks. GC'd with the last pod of the pool.
+
+All three Secrets must exist BEFORE pod create (kubelet rejects pods referencing missing Secrets), so `start(spec)` runs `ensureTokenSecret`, `ensureFederationSecret` and `ensureNodeEnvSecret` first, then creates the pod.
+
+**Upgrading:** pods created by an earlier manager keep `pgPassword` as a plain env var and are NOT migrated in place. Restart every node after upgrading, for example by scaling each pool down and back up.
 
 ### Manager module SPI (hosted-service plug-in)
 
@@ -267,5 +316,6 @@ Two security-critical knobs should be pinned before any non-localhost deploy: `Q
 
 - **Don't disable JVM forking** in build.sbt - see "JVM forking" above.
 - **Don't invoke `scripts/spawn-quack-node.sh` directly** - it's spawned by `LocalQuackBackend` with the right port + token + env contract. Manual invocation will leak ports and confuse the supervisor.
+- **Refresh the bundled copies whenever you touch `scripts/` or the operator skill.** The CLI wheel ships its own copies at `cli/src/qod_cli/scripts/spawn-quack-node.{sh,ps1}` and `cli/src/qod_cli/skills/quack-on-demand/SKILL.md`. Nothing generates them: a plain `cp` is the mechanism, and `cli/tests/test_demo.py` / `test_skill_freshness.py` are the only enforcement. Editing a canonical script without refreshing its copy fails those tests in a way that reads like an unrelated pre-existing failure.
 - **Don't edit the bundled `application.conf` for local tweaks** - set the `QOD_*` env var instead, or the change vanishes on the next `sbt assembly`.
 - **Always tear the manager down with `scripts/stop-jar.sh`, never an IDE/JVM kill** (or a bare `kill` of the java PID). The spawn script keeps each DuckDB node alive via a held-open FIFO/stdin, so an unclean manager exit orphans the `duckdb` grandchildren (reparented to PID 1) and they keep holding node ports `21900+`. The next manager then spawns onto an occupied port, its node never passes the `SELECT 1` health probe, and it shows `healthy=false` / `served=0`. Recovery: kill the orphans (blunt reset: `scripts/kill-quack-nodes.sh`), then `POST /api/node/restart` (or scale the pool) so the node re-binds a free port. `stop-jar.sh` does SIGTERM -> wait -> SIGKILL and reaps the children, so it never leaves orphans. Ctrl-C on a foreground `run-jar.sh` (or `qod start`) is safe: both supervise the JVM in its own process group and turn the interrupt into that same teardown.
