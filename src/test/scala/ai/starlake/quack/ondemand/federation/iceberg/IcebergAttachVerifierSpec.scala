@@ -54,14 +54,20 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     def run(reply: Either[String, Unit]): (RunningNode, String) => IO[Either[String, Unit]] =
       (_, sql) => IO.delay { sent.updateAndGet(sql :: _); reply }
 
+  /** `ownAlias` defaults to the tenant-db's own catalog alias, i.e. collision detection ON. The
+    * default direction is deliberate: a helper defaulting to `None` would turn the check off at
+    * every call site that forgot it, which is the shape of the bug this spec pins.
+    */
   private def verifier(
       sources: List[FederatedSource],
       attached: Set[String],
       run: (RunningNode, String) => IO[Either[String, Unit]],
-      registry: AttachStatusRegistry = new AttachStatusRegistry()
+      registry: AttachStatusRegistry = new AttachStatusRegistry(),
+      ownAlias: Option[String] = Some("acme_db")
   ) = (
     new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(sources),
+      ownCatalogAliasOf = _ => IO.pure(ownAlias),
       renderOne = s => IO.pure(ResolvedFederationBlock(s"-- rendered ${s.alias}", Set.empty)),
       runOnNode = run,
       listCatalogs = _ => IO.pure(Right(attached)),
@@ -95,6 +101,88 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.latched(node.nodeId, startedAtMs) shouldBe true
   }
 
+  // ---------- collision with the tenant-db's OWN catalog alias ----------
+  // The one thing a catalog listing cannot answer. `FederationBlobBuilder` refuses to render a
+  // source aliased the same as its own tenant-db's catalog, so the node never ran that ATTACH --
+  // but the name IS in duckdb_databases(), because it is the tenant-db's own DuckLake catalog.
+  // Matched against the listing, the source lands in `found` and the incarnation latches: the
+  // operator is told the Iceberg catalog is attached when it was never attached at all. Reachable
+  // through ManifestImporter, which bypasses the REST-time collision check.
+  //
+  // Asserting the verifier "works" on a NON-colliding alias reproduces exactly this blind spot,
+  // so every assertion below is about the colliding alias itself.
+  it should "report a failure naming the collision, not an attach, when a declared alias is the " +
+    "tenant-db's own catalog alias" in {
+      val rec = new Recorder
+      // "acme_db" is both the declared iceberg alias and the tenant-db's own catalog alias, and
+      // the node reports it present for the latter reason.
+      val (v, reg) = verifier(List(iceSrc("acme_db")), Set("acme_db"), rec.run(Right(())))
+      v.verify(node).unsafeRunSync()
+
+      // The operator-facing verdict: NOT "attached".
+      reg.aliasSummary("acme_db", Set(node.nodeId)).value shouldBe "failed on 1 of 1 nodes"
+      val f = reg.failuresFor(node.nodeId, startedAtMs)
+      f.map(_.alias) shouldBe List("acme_db")
+      f.head.error should include("collides with the tenant-db's own catalog alias")
+      // Actionable, not just non-silent: the operator has to know what to do about it.
+      f.head.error should include("rename")
+      reg.latched(node.nodeId, startedAtMs) shouldBe false
+      // And the ATTACH is not re-issued: the builder raises on this exact case, so the node would
+      // only be handed a statement its own startup script already refused.
+      rec.sent.get() shouldBe empty
+    }
+
+  // Arm attribution for the fold: this case survives a revert of the collision partition's
+  // case-folding (raw string equality) while the previous test does not, because there the two
+  // spellings already match byte for byte.
+  it should "detect the collision when the declared alias differs only in case from the " +
+    "tenant-db's own catalog alias" in {
+      val rec      = new Recorder
+      val (v, reg) = verifier(List(iceSrc("ACME_DB")), Set("acme_db"), rec.run(Right(())))
+      v.verify(node).unsafeRunSync()
+      reg.aliasSummary("acme_db", Set(node.nodeId)).value shouldBe "failed on 1 of 1 nodes"
+      reg.failuresFor(node.nodeId, startedAtMs).head.error should
+        include("collides with the tenant-db's own catalog alias")
+      reg.latched(node.nodeId, startedAtMs) shouldBe false
+      rec.sent.get() shouldBe empty
+    }
+
+  // The collision is decided entirely by the control plane, so it must be recorded BEFORE the node
+  // is asked anything. Moving the record into the listing's success arm loses the diagnosis for
+  // exactly the node that is also unreachable.
+  it should "record the collision even when the node's catalog listing fails" in {
+    val rec = new Recorder
+    val reg = new AttachStatusRegistry()
+    val v   = new IcebergAttachVerifier(
+      sourcesOf = _ => IO.pure(List(iceSrc("acme_db"))),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
+      runOnNode = rec.run(Right(())),
+      listCatalogs = _ => IO.pure(Left("node unreachable")),
+      registry = reg
+    )
+    v.verify(node).unsafeRunSync()
+    reg.failuresFor(node.nodeId, startedAtMs).head.error should
+      include("collides with the tenant-db's own catalog alias")
+    reg.latched(node.nodeId, startedAtMs) shouldBe false
+    rec.sent.get() shouldBe empty
+  }
+
+  // The colliding source must not take its healthy siblings down with it: the other alias is
+  // still matched, re-attached and recorded normally in the same pass.
+  it should "still verify the other declared aliases in a pass that found a collision" in {
+    val rec      = new Recorder
+    val (v, reg) = verifier(
+      List(iceSrc("acme_db"), iceSrc("sales_lake")),
+      Set("acme_db"),
+      rec.run(Right(()))
+    )
+    v.verify(node).unsafeRunSync()
+    rec.sent.get() shouldBe List("-- rendered sales_lake")
+    reg.aliasSummary("sales_lake", Set(node.nodeId)).value shouldBe "attached"
+    reg.failuresFor(node.nodeId, startedAtMs).map(_.alias) shouldBe List("acme_db")
+  }
+
   it should "record the node's real error when the re-attach fails" in {
     val rec      = new Recorder
     val (v, reg) = verifier(
@@ -124,6 +212,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ =>
         IO.pure(
           ResolvedFederationBlock(
@@ -166,6 +255,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg      = new AttachStatusRegistry()
     val v        = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ =>
         IO.pure(
           ResolvedFederationBlock(
@@ -264,6 +354,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     var listed = 0
     val v      = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(Nil),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },
@@ -279,6 +370,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Left("node unreachable")),
@@ -298,6 +390,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.raiseError(new RuntimeException("postgres unreachable")),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
@@ -316,6 +409,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
   it should "not throw synchronously when sourcesOf itself throws, only fail the returned IO" in {
     val v = new IcebergAttachVerifier(
       sourcesOf = _ => throw new RuntimeException("boom"),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = (_, _) => IO.pure(Right(())),
       listCatalogs = _ => IO.pure(Right(Set.empty)),
@@ -422,6 +516,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       var listCalls   = 0
       val v           = new IcebergAttachVerifier(
         sourcesOf = _ => IO.delay { sourceCalls += 1; List(iceSrc("sales_lake")) },
+        ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
         renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
         runOnNode = (_, _) => IO.pure(Left("boom")),
         listCatalogs = _ => IO.delay { listCalls += 1; Right(Set("acme_db")) },
@@ -443,6 +538,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.raiseError(new RuntimeException("bad config")),
       runOnNode = (_, _) => IO.pure(Right(())),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
@@ -460,6 +556,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     var listed = 0
     val v      = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(sqlSrc)),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
       renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },

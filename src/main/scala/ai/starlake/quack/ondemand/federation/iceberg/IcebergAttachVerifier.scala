@@ -16,12 +16,24 @@ import org.apache.arrow.vector.ipc.ArrowReader
   * `Catalog 'x' does not exist` instead of "expired credentials" or "catalog unreachable".
   *
   * Per health tick, until the node's incarnation latches:
-  *   1. list the node's attached catalogs
-  *   2. diff against the enabled `iceberg_rest` aliases declared for its pool
-  *   3. re-issue THAT ONE source's rendered block for each missing alias
+  *   1. set aside every declared alias that collides with the tenant-db's OWN catalog alias
+  *   2. list the node's attached catalogs
+  *   3. diff against the remaining enabled `iceberg_rest` aliases declared for its pool
+  *   4. re-issue THAT ONE source's rendered block for each missing alias
   *
-  * Step 3 heals and diagnoses at once: a returned catalog attaches with no node restart, and a
+  * Step 4 heals and diagnoses at once: a returned catalog attaches with no node restart, and a
   * still-broken one yields the real DuckDB error.
+  *
+  * Step 1 exists because the node's catalog listing CANNOT answer the question for a colliding
+  * alias. `FederationBlobBuilder` refuses to render a source aliased the same as its own
+  * tenant-db's catalog, so the node never ran that ATTACH -- yet the name is in
+  * `duckdb_databases()` regardless, because it is the tenant-db's own DuckLake catalog. Matched
+  * against the listing, such a source lands in `found`, `recordAttached` fires and the incarnation
+  * latches: the node reports the Iceberg catalog as attached when it was never attached at all, and
+  * queries against the alias silently hit DuckLake. Reachable through `ManifestImporter`, which
+  * writes rows straight through `upsertSource` without the REST-time collision check in
+  * `FederatedSourceHandlers`. So the collision is taken out of the match and recorded as a failure
+  * naming the cause: it can never heal on its own, and the operator needs the name, not silence.
   *
   * `sourcesOf` returns an `IO`, not a plain value: the lookup makes a real Postgres round trip, and
   * everything in [[verify]] has to run inside the returned `IO` -- including calling `sourcesOf`
@@ -29,6 +41,11 @@ import org.apache.arrow.vector.ipc.ArrowReader
   * instead of a synchronous exception that would kill the whole HealthProbe fiber (nobody joins
   * that fiber, so cats-effect would drop the failure silently and health probing would stop for
   * every node in the manager).
+  *
+  * `ownCatalogAliasOf` is REQUIRED, with no default. A default of `_ => IO.pure(None)` would
+  * compile at every forgetful construction site and silently restore the false "attached" in step 1
+  * -- the one outcome this component exists to prevent. A caller that genuinely cannot resolve the
+  * alias has to say so in its own words.
   *
   * Once every alias this incarnation has ever tried has failed, and none of them is due for a retry
   * per [[AttachStatusRegistry.shouldRetry]], the WHOLE pass is skipped -- `sourcesOf` and
@@ -41,6 +58,7 @@ import org.apache.arrow.vector.ipc.ArrowReader
   */
 final class IcebergAttachVerifier(
     sourcesOf: PoolKey => IO[List[FederatedSource]],
+    ownCatalogAliasOf: PoolKey => IO[Option[String]],
     renderOne: FederatedSource => IO[ResolvedFederationBlock],
     runOnNode: (RunningNode, String) => IO[Either[String, Unit]],
     listCatalogs: RunningNode => IO[Either[String, Set[String]]],
@@ -74,31 +92,72 @@ final class IcebergAttachVerifier(
               // common pool (no Iceberg catalog at all) costs exactly zero round-trips.
               if declared.isEmpty then IO.delay(registry.markLatched(node.nodeId, startedAtMs))
               else
-                listCatalogs(node).flatMap {
-                  case Left(err) =>
-                    // The node itself is unreachable or answered nonsense. Stay unlatched and say
-                    // nothing: the health probe already owns node liveness.
-                    IO.delay(
-                      logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
-                    )
-                  case Right(present) =>
-                    // Both sides folded through the same locale-independent helper: a default
-                    // Turkish or Azeri locale folds `I` to the dotless `i`, and this match is a
-                    // set `contains`, i.e. exact string equality after the fold, with no
-                    // `equalsIgnoreCase` behind it to absorb the difference.
-                    val lower            = present.map(foldAlias)
-                    val (found, missing) =
-                      declared.partition(s => lower.contains(foldAlias(s.alias)))
-                    found.traverse_(s =>
-                      IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
-                    ) *>
-                      missing.traverse_(reattach(node, startedAtMs, _)) *> IO.delay {
-                        if registry.failuresFor(node.nodeId, startedAtMs).isEmpty then
-                          registry.markLatched(node.nodeId, startedAtMs)
-                      }
+                ownCatalogAliasOf(node.poolKey).flatMap { ownAlias =>
+                  // Folded through the same helper as everything else it is compared with. `None`
+                  // (the tenant-db could not be resolved) reserves nothing, which is parity with
+                  // the deploy path, not a suppression: `FederationBlobBuilder` reserves the own
+                  // alias from the same lookup, so a lookup that comes back empty there renders
+                  // the ATTACH rather than refusing it, and there is then no collision to report.
+                  val reserved                = ownAlias.map(foldAlias)
+                  val (colliding, candidates) =
+                    declared.partition(s => reserved.contains(foldAlias(s.alias)))
+                  // Recorded BEFORE the listing: the collision is decided entirely by the
+                  // control plane, so an unreachable node must not hide it.
+                  colliding.traverse_(noteCollision(node, startedAtMs, _)) *>
+                    listCatalogs(node).flatMap {
+                      case Left(err) =>
+                        // The node itself is unreachable or answered nonsense. Stay unlatched and
+                        // say nothing: the health probe already owns node liveness.
+                        IO.delay(
+                          logger
+                            .debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
+                        )
+                      case Right(present) =>
+                        // Both sides folded through the same locale-independent helper: a default
+                        // Turkish or Azeri locale folds `I` to the dotless `i`, and this match is
+                        // a set `contains`, i.e. exact string equality after the fold, with no
+                        // `equalsIgnoreCase` behind it to absorb the difference.
+                        val lower            = present.map(foldAlias)
+                        val (found, missing) =
+                          candidates.partition(s => lower.contains(foldAlias(s.alias)))
+                        found.traverse_(s =>
+                          IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
+                        ) *>
+                          missing.traverse_(reattach(node, startedAtMs, _)) *> IO.delay {
+                            if registry.failuresFor(node.nodeId, startedAtMs).isEmpty then
+                              registry.markLatched(node.nodeId, startedAtMs)
+                          }
+                    }
                 }
           }
     }
+
+  /** Records a source whose alias IS the tenant-db's own catalog alias as a failure naming the
+    * collision, rather than matching it against the node's catalog listing (where it would always
+    * look attached, because the tenant-db itself is attached under that name).
+    *
+    * Deliberately does NOT re-issue the ATTACH: `FederationBlobBuilder.buildOne` reserves the same
+    * alias set the deployed blob reserves and raises on this exact case, so the node would only be
+    * handed a statement its own startup script already refused. Backoff-gated like [[reattach]], so
+    * the attempt count grows on the same schedule and the whole pass can go quiet, while the stored
+    * failure keeps the incarnation unlatched for as long as the collision stands.
+    */
+  private def noteCollision(
+      node: RunningNode,
+      startedAtMs: Long,
+      src: FederatedSource
+  ): IO[Unit] =
+    if !registry.shouldRetry(node.nodeId, startedAtMs, src.alias) then IO.unit
+    else
+      note(
+        node,
+        startedAtMs,
+        src,
+        s"alias '${src.alias}' collides with the tenant-db's own catalog alias: the tenant-db " +
+          "is already attached under that name, so this source can never attach -- rename the " +
+          "source's alias",
+        Set.empty
+      )
 
   private def reattach(node: RunningNode, startedAtMs: Long, src: FederatedSource): IO[Unit] =
     if !registry.shouldRetry(node.nodeId, startedAtMs, src.alias) then IO.unit

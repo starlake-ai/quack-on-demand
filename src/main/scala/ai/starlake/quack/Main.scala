@@ -385,22 +385,27 @@ object Main extends IOApp with LazyLogging:
     // verifier's copy omitted `catalogAliasOf`, so it reserved a smaller alias set than the blob
     // deployed to the node, and re-issued an ATTACH the node's own startup script had refused.
     // Sharing the instance makes that drift unrepresentable rather than merely fixed once.
+    // The tenant-db's own DuckDB catalog alias. ONE definition, two consumers: the blob builder
+    // reserves it so an iceberg source can't claim the name its own tenant-db is ATTACHed under,
+    // and the attach verifier takes a declared alias equal to it out of the node-listing match
+    // (where it would always look attached, because the tenant-db itself is attached under that
+    // name). Mirrors attachedCatalogsOf's resolution below. Null-safe before supRef is filled
+    // (construction order) and never throws: a lookup failure just means one fewer reserved
+    // alias, not a broken blob.
+    val catalogAliasOfDbId: String => IO[Option[String]] = tdId =>
+      IO.delay(
+        Option(supRef.get())
+          .flatMap(_.getTenantDbById(tdId))
+          .map(td => TenantDb.catalogAlias(td.metastore, td.name))
+      )
+
     val federationBlobBuilder: Option[FederationBlobBuilder] =
       manifestFedStore.map { federatedStore =>
         new FederationBlobBuilder(
           loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
           loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
           resolver = secretResolver,
-          // The tenant-db's own DuckDB catalog alias, reserved so an iceberg source can't claim
-          // the name its own tenant-db is ATTACHed under. Mirrors attachedCatalogsOf's
-          // resolution below. Null-safe before supRef is filled (construction order) and never
-          // throws: a lookup failure just means one fewer reserved alias, not a broken blob.
-          catalogAliasOf = tdId =>
-            IO.delay(
-              Option(supRef.get())
-                .flatMap(_.getTenantDbById(tdId))
-                .map(td => TenantDb.catalogAlias(td.metastore, td.name))
-            )
+          catalogAliasOf = catalogAliasOfDbId
         )
       }
 
@@ -833,6 +838,14 @@ object Main extends IOApp with LazyLogging:
                   s"no tenant-db for ${key.tenant}/${key.tenantDb}"
                 )
               ),
+        // Same `catalogAliasOfDbId` the blob builder reserves with, so the verifier and the
+        // deployed blob cannot disagree about which name belongs to the tenant-db itself. Reached
+        // only after `sourcesOf` succeeded, which already required this same tenant-db lookup, so
+        // the None arm here is a cache race, not a normal state.
+        ownCatalogAliasOf = key =>
+          sup.findTenantDb(key.tenant, key.tenantDb) match
+            case Some(td) => catalogAliasOfDbId(td.id)
+            case None     => IO.pure(None),
         renderOne = src => builder.buildOne(src),
         runOnNode = (n, sql) =>
           adapter.send(n, sql, session = None, recordLoad = false).map {
