@@ -1001,11 +1001,43 @@ export interface MaintenanceRunResponse {
 
 // ----- Federation -----
 
+/** `sql` is a free-form operator-written setupSql block; `iceberg_rest` is the
+  * typed external Iceberg REST catalog whose ATTACH the manager renders itself. */
+export type FederatedSourceType = 'sql' | 'iceberg_rest';
+
+/** DuckDB's `AUTHORIZATION_TYPE`. Mutually exclusive with `endpointType`:
+  * DuckDB refuses the two ATTACH options together. */
+export type IcebergAuthType = 'none' | 'oauth2' | 'token' | 'sigv4';
+
+/** DuckDB's `ENDPOINT_TYPE`. These catalogs select their own signing, which is
+  * why they carry no `authType`. */
+export type IcebergEndpointType = 'glue' | 's3_tables';
+
+/** Typed declaration of one external Iceberg REST catalog. Mirrors the
+  * manager's `IcebergRestConfig`; `clientSecret` and `token` carry
+  * `{{secret.NAME}}` placeholders rather than values, which is why the manager
+  * echoes this back unredacted. */
+export interface IcebergRestConfig {
+  uri?: string;
+  warehouse?: string;
+  authType?: IcebergAuthType;
+  endpointType?: IcebergEndpointType;
+  clientId?: string;
+  clientSecret?: string;
+  oauth2ServerUri?: string;
+  oauth2Scope?: string;
+  oauth2GrantType?: string;
+  token?: string;
+}
+
 export interface FederatedSourceCreateRequest {
   alias: string;
   setupSql?: string;
   description?: string;
   disabled?: boolean;
+  sourceType?: FederatedSourceType;
+  config?: IcebergRestConfig;
+  readOnly?: boolean;
 }
 
 export interface FederatedSourceResponse {
@@ -1015,6 +1047,13 @@ export interface FederatedSourceResponse {
   setupSql?: string;
   description?: string;
   disabled: boolean;
+  sourceType: FederatedSourceType;
+  config?: IcebergRestConfig;
+  readOnly: boolean;
+  /** Live attach state across the pool's nodes, `iceberg_rest` rows only:
+    * "attached", "unknown", or "failed on N of M nodes". Absent for a `sql`
+    * or disabled row, which has no attach state at all. */
+  attachStatus?: string;
 }
 
 export interface FederatedSourceListResponse {
