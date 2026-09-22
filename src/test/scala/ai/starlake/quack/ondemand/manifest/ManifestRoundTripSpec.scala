@@ -1069,6 +1069,37 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
+  // Test 18: a blank inline secret value is refused on import, the way
+  // FederatedSourceHandlers.upsertSecret refuses it. Left to land, it
+  // renders `VALUE ''` into the node's piped init script and the catalog
+  // silently disappears.
+  // ------------------------------------------------------------------
+
+  it should "refuse a blank inline secret value on import" in {
+    val cp      = buildSrc()
+    val fed     = new InMemoryFederatedSourceStore()
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(
+          alias = "pg_ext",
+          setupSql = "ATTACH 'dbname=prod' AS {{alias}};",
+          secrets = List(ManifestFederatedSecret(name = "PG_PASSWORD", value = Some("   ")))
+        )
+      )
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    res.left.toOption.get.exists(_.contains("has a blank value")) shouldBe true
+
+    // The source itself is a valid shape and lands; only the secret is refused.
+    val src = fed.getSource("td-1", "pg_ext").get
+    fed.getSecret(src.id, "PG_PASSWORD") shouldBe None
+  }
+
+  // ------------------------------------------------------------------
   // Test 19: a stored row whose alias the manifest repeats VERBATIM but
   // which cannot be normalized (a legacy row from before aliases were
   // normalized) is reported and left alone, not deleted.
@@ -1104,37 +1135,6 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
-  // Test 18: a blank inline secret value is refused on import, the way
-  // FederatedSourceHandlers.upsertSecret refuses it. Left to land, it
-  // renders `VALUE ''` into the node's piped init script and the catalog
-  // silently disappears.
-  // ------------------------------------------------------------------
-
-  it should "refuse a blank inline secret value on import" in {
-    val cp      = buildSrc()
-    val fed     = new InMemoryFederatedSourceStore()
-    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
-    val withFed = withFederatedSources(
-      base,
-      List(
-        ManifestFederatedSource(
-          alias = "pg_ext",
-          setupSql = "ATTACH 'dbname=prod' AS {{alias}};",
-          secrets = List(ManifestFederatedSecret(name = "PG_PASSWORD", value = Some("   ")))
-        )
-      )
-    )
-    val res = ManifestImporter.apply(withFed, cp, Some(fed))
-
-    res.isLeft shouldBe true
-    res.left.toOption.get.exists(_.contains("has a blank value")) shouldBe true
-
-    // The source itself is a valid shape and lands; only the secret is refused.
-    val src = fed.getSource("td-1", "pg_ext").get
-    fed.getSecret(src.id, "PG_PASSWORD") shouldBe None
-  }
-
-  // ------------------------------------------------------------------
   // Test 20: delete-missing keys on the ROW ID, not on the alias string.
   //
   // A manifest entry whose alias differs from the stored one only in case
@@ -1167,4 +1167,90 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     rows should have size 1
     rows.head.id shouldBe "fs-mixed"
     rows.head.setupSql shouldBe "ATTACH 'old' AS Ice;"
+  }
+
+  // ------------------------------------------------------------------
+  // Test 21: a duplicated alias is reported AND kept out of the upsert
+  // loop.
+  //
+  // Reporting alone left both entries to be written. `sourceByAlias` is
+  // snapshotted before the loop, so with no stored row the second entry
+  // never sees the id the first one minted: it mints its own and issues
+  // a second write under the same (tenant_db, alias). In this in-memory
+  // store that lands as two rows; on Postgres it violates
+  // `uq_fedsrc_tenant_db_alias` and throws out of `apply`, so the caller
+  // gets an exception instead of the accumulated Left this code builds.
+  // The row count is what pins it -- the Left was already returned
+  // before the fix.
+  // ------------------------------------------------------------------
+
+  it should "write nothing for an alias duplicated in the payload" in {
+    val cp      = buildSrc()
+    val fed     = new InMemoryFederatedSourceStore()
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(alias = "Sales", setupSql = "ATTACH 'a' AS {{alias}};"),
+        ManifestFederatedSource(alias = "sales", setupSql = "ATTACH 'b' AS {{alias}};")
+      )
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    res.left.toOption.get.exists(_.contains("duplicate alias 'sales' in payload")) shouldBe true
+
+    // Neither entry was written: one alias, two candidate rows, no way to
+    // choose, so the operator fixes the manifest rather than the store
+    // silently keeping whichever won the race.
+    fed.listSources("td-1") shouldBe empty
+  }
+
+  // ------------------------------------------------------------------
+  // Test 22: two LEGACY stored rows whose aliases differ only in case
+  // collapse to exactly one row on import, not to one live row plus one
+  // unreachable shadow.
+  //
+  // This pins the delete sweep against the review's M-2 reading, which
+  // held that both ids reach `keepIds` and the shadowed row survives to
+  // collide inside `FederationBlobBuilder`. Both `keepIds` arms fold the
+  // incoming alias with `Locale.ROOT`, and `Names.normalizeOrError`
+  // lowercases too, so under any ASCII-lowercasing default locale the
+  // two arms resolve to the SAME map entry and only one id is kept. The
+  // survivor is rewritten under the normalized alias and the other row
+  // is deleted, which is the cleanup the pre-normalization alias-string
+  // code also did.
+  // ------------------------------------------------------------------
+
+  it should "collapse two legacy case-colliding stored rows to one row on import" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-upper",
+        tenantDbId = "td-1",
+        alias = "Sales",
+        setupSql = "ATTACH 'upper' AS Sales;"
+      )
+    )
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-lower",
+        tenantDbId = "td-1",
+        alias = "sales",
+        setupSql = "ATTACH 'lower' AS sales;"
+      )
+    )
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(ManifestFederatedSource(alias = "sales", setupSql = "ATTACH 'new' AS {{alias}};"))
+    )
+    ManifestImporter.apply(withFed, cp, Some(fed)) shouldBe Right(())
+
+    val rows = fed.listSources("td-1")
+    rows should have size 1
+    rows.head.alias shouldBe "sales"
+    rows.head.setupSql shouldBe "ATTACH 'new' AS {{alias}};"
   }

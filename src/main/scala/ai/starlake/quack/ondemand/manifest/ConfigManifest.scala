@@ -44,11 +44,20 @@ final case class ManifestFederatedSource(
     secrets: List[ManifestFederatedSecret] = Nil,
     // "sql" (default) or "iceberg_rest". Defaulted so a pre-Iceberg manifest decodes unchanged.
     sourceType: String = "sql",
-    // Typed config as raw JSON for iceberg_rest sources, carrying {{secret.NAME}} placeholders
-    // only. Mirrors FederatedSource.config, which is text because `model` is a leaf package.
-    // Exported verbatim rather than redacted: IcebergRestConfig.validate refuses a literal in
-    // either credential-bearing field (clientSecret / token), so what is stored here is a
-    // placeholder whose value lives in the source's secrets, which ARE redacted.
+    // Typed config as raw JSON for iceberg_rest sources. Mirrors FederatedSource.config, which is
+    // text because `model` is a leaf package. Exported verbatim rather than redacted.
+    //
+    // What that is guaranteed to be safe for, exactly: `IcebergRestConfig.validate` runs
+    // `placeholderErrors` over `IcebergRestConfig.CredentialFields`, which is `clientSecret` and
+    // `token` and nothing else, so those two can only hold a `{{secret.NAME}}` placeholder whose
+    // value lives in the source's secrets, and those ARE redacted. Every OTHER field is checked
+    // for stray braces only and may hold a literal: `uri` in particular MAY legitimately carry
+    // userinfo or a signed query parameter, and such a value is exported here in the clear. This
+    // is the same policy the manifest already applies to `setupSql`, which can hold a full
+    // connection string, so a manifest is a secret-bearing artifact in general and not a
+    // redacted one. Redacting `uri` was considered and rejected: the round trip has to reproduce
+    // an attachable catalog, and a redaction sentinel in `uri` imports as a source that can never
+    // attach.
     config: Option[String] = None,
     // Round-tripped verbatim from FederatedSource.readOnly. Defaulted to false for pre-Iceberg
     // manifests, which had no such field and described writable sources. The default direction

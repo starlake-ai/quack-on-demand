@@ -673,9 +673,15 @@ object ManifestImporter:
     store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
 
   /** Apply federated sources from a manifest tenant-db into the federated source store.
-    * Replace-by-alias semantics: sources not present in the manifest are deleted; each present
-    * source is upserted. Secrets follow the same delete-then-upsert pattern with reuse of existing
-    * values when the manifest carries "***REDACTED***".
+    * Replace-by-alias semantics, but only when the manifest declares at least one source: a
+    * tenant-db carrying a NON-EMPTY `federatedSources` list has its stored sources not named by
+    * that list deleted and every named one upserted, while an EMPTY list is a no-op that deletes
+    * nothing (the `nonEmpty` guard below skips the whole body). The asymmetry is pre-existing and
+    * load-bearing in at least one shape: `ManifestExporter` emits no sources at all when it is
+    * built without a federated store, so treating an empty list as "delete everything" would let
+    * such a manifest wipe the federation of the manager it is replayed against. Secrets follow the
+    * same delete-then-upsert pattern with reuse of existing values when the manifest carries
+    * "***REDACTED***".
     *
     * This is the one write path that builds a `FederatedSource` row directly instead of going
     * through `FederatedSourceHandlers`, so the guards that handler applies are applied here too:
@@ -714,8 +720,22 @@ object ManifestImporter:
 
       // Reject duplicate aliases in payload, on the NORMALIZED form: `Sales` and `sales` are one
       // catalog to DuckDB and must not both be written.
-      resolvedAliases.flatMap(_._2).groupBy(identity).foreach { case (a, vs) =>
-        if vs.size > 1 then errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
+      //
+      // Reporting is not enough: a duplicated alias must also be kept OUT of the upsert loop
+      // below. `sourceByAlias` is a snapshot taken before the loop, so with no stored row the
+      // second entry does not see the id the first one minted; it mints its own and issues a
+      // second INSERT under the same (tenant_db, alias). On `InMemoryFederatedSourceStore` that
+      // lands as two rows; on Postgres it violates `uq_fedsrc_tenant_db_alias` and throws out of
+      // `apply`, so the caller gets an exception where this code means to return the accumulated
+      // `Left`. Skipping them writes nothing and leaves the error as the only outcome.
+      val duplicateAliases: Set[String] =
+        resolvedAliases
+          .flatMap(_._2)
+          .groupBy(identity)
+          .collect { case (a, vs) if vs.size > 1 => a }
+          .toSet
+      duplicateAliases.toList.sorted.foreach { a =>
+        errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
       }
 
       val existingSources: List[FederatedSource] = fs.listSources(tdId)
@@ -725,6 +745,13 @@ object ManifestImporter:
       // flat-mapped over each source's SECRETS: a source with zero secrets contributed no entry
       // there, so its re-import minted a fresh id and hit `uq_fedsrc_tenant_db_alias` against the
       // alias the tenant-db already held.
+      //
+      // `.toMap` collapses two legacy rows whose aliases differ only in case (`Sales` and
+      // `sales`, both writable before REST normalized aliases) onto one entry, last one wins.
+      // That is not a leak: only the surviving row's id reaches `keepIds`, so the delete sweep
+      // below removes the other one, which is the cleanup the alias-string code also did. Which
+      // of the two survives is `listSources` order, and the survivor is rewritten with the
+      // normalized alias, so the tenant-db ends with exactly one row under one alias either way.
       val sourceByAlias: Map[String, FederatedSource] =
         existingSources.map(s => fold(s.alias) -> s).toMap
 
@@ -738,15 +765,31 @@ object ManifestImporter:
       // Delete sources not in the incoming payload, by row id. A source the manifest DOES name but
       // that was rejected above still counts as named: a rejected source is an error to fix, not a
       // reason to destroy the stored row.
+      //
+      // What each arm defends, measured rather than assumed:
+      //   - `msrc.alias` (the RAW incoming alias) is the load-bearing one. It is the only arm that
+      //     matches a legacy stored row whose alias `Names.normalizeOrError` REJECTS, where
+      //     `normalized` is None and contributes nothing. Test 19 ("keep a stored source whose
+      //     alias the manifest repeats but cannot normalize") is the one test that kills it:
+      //     dropping this arm deletes that row outright. Do not remove it on the theory that the
+      //     normalized arm covers it.
+      //   - `normalized` currently kills NO test, and that was verified by mutation, not inferred:
+      //     `normalizeOrError` lowercases and this arm re-folds with `Locale.ROOT`, so under any
+      //     ASCII-lowercasing default locale it resolves to the same map entry the raw arm does.
+      //     It is kept because the two folds are NOT the same call (`Names.scala` uses the default
+      //     locale, `fold` uses `Locale.ROOT`), so under a Turkish or Azeri default they diverge
+      //     for a single-letter `I` alias and only this arm matches the normalized row. Retiring
+      //     it is safe only once that divergence is closed in `Names`.
       val keepIds: Set[String] =
         resolvedAliases.flatMap { case (msrc, normalized) =>
           (msrc.alias :: normalized.toList).flatMap(a => sourceByAlias.get(fold(a))).map(_.id)
         }.toSet
       existingSources.filterNot(s => keepIds.contains(s.id)).foreach(s => fs.deleteSource(s.id))
 
-      // Upsert each source and its secrets.
+      // Upsert each source and its secrets. A duplicated alias is skipped: it was already
+      // reported above, and writing it twice is the constraint violation described there.
       resolvedAliases.foreach { case (msrc, normalized) =>
-        normalized.foreach { alias =>
+        normalized.filterNot(duplicateAliases.contains).foreach { alias =>
           val srcId  = sourceByAlias.get(alias).map(_.id).getOrElse(Names.newSurrogateId("fs"))
           val source = FederatedSource(
             id = srcId,
@@ -768,6 +811,21 @@ object ManifestImporter:
           if shapeErrors.nonEmpty then
             errs += s"tenant-db '${mtd.name}' source '$alias': ${shapeErrors.mkString("; ")}"
           else
+            // `FederatedSourceHandlers.toSource` REFUSES an in-place flip between `sql` and
+            // `iceberg_rest`; this path applies it, because a manifest is a declarative statement
+            // of desired state rather than an incremental edit. That is intended, but it is the
+            // one place a read-only iceberg_rest catalog can become a writable sql source -- a
+            // stale manifest replayed after the alias was converted through REST does exactly
+            // that, and rewrites `readOnly` to the manifest's value along with it. It must not be
+            // silent: this WARN is the only audit line the downgrade leaves.
+            sourceByAlias.get(alias).map(_.sourceType).filter(_ != source.sourceType).foreach {
+              was =>
+                logger.warn(
+                  s"manifest import: tenant-db '${mtd.name}' federated source '$alias' changes " +
+                    s"sourceType '${was.wire}' -> '${source.sourceType.wire}' (readOnly " +
+                    s"becomes ${source.readOnly}); REST refuses this transition in place"
+                )
+            }
             fs.upsertSource(source)
 
             val incomingSecretNames = msrc.secrets.map(_.name).toSet

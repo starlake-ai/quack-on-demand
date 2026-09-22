@@ -285,10 +285,19 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
   // This sets the JVM default locale and restores it in `finally`. Tests in this build run
   // sequentially inside one forked JVM (`Test / fork := true`, `testForkedParallel` unset), so
   // nothing else observes the window.
+  // The `setDefault` is the whole experiment, and a test whose setup quietly stops taking effect
+  // passes vacuously: under an ASCII-lowercasing default, `Locale.ROOT` and the default agree and
+  // the assertion below holds whichever fold the production code uses. So the first thing asserted
+  // is that the forced default GENUINELY folds differently, and the test fails loudly rather than
+  // proving nothing if a JVM flag, a security manager or a future JDK stops honouring it.
   it should "order attach failures by a locale-independent fold of the alias" in {
     val previous = java.util.Locale.getDefault
     try
       java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr"))
+      withClue("the forced Turkish default locale is not folding; this test would prove nothing") {
+        "I".toLowerCase should not be "i"
+        "I".toLowerCase(java.util.Locale.ROOT) shouldBe "i"
+      }
       val reg = new AttachStatusRegistry()
       reg.recordFailure("n-loc", 1000L, "SALES_I", "boom")
       reg.recordFailure("n-loc", 1000L, "sales_z", "boom")
