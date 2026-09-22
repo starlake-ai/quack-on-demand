@@ -1,5 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
+import java.util.Locale
+
 /** Authors the per-database object-store CREATE SECRET, single source of truth (like NodeLockdown).
   * Reads the tenant-db `objectStore` map (keys per the UI's DataPathEditor: s3_*, azure_*, gcs_*)
   * and emits a SCOPE'd DuckDB secret named `qod_db_store`, distinct from the global
@@ -14,7 +16,7 @@ object ObjectStoreSecret:
 
   private def scheme(dataPath: String): String =
     val i = dataPath.indexOf("://")
-    if i < 0 then "" else dataPath.substring(0, i).toLowerCase
+    if i < 0 then "" else dataPath.substring(0, i).toLowerCase(Locale.ROOT)
 
   def sql(objectStore: Map[String, String], dataPath: String): String =
     if objectStore.isEmpty then ""

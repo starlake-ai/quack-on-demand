@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.auth
 
+import java.util.Locale
 import java.time.Instant
 
 /** The scope carried by one personal access token, always relative to its owner's grants.
@@ -40,7 +41,7 @@ object TokenRestriction:
     * This is a lattice ordered by subset, NOT a chain: `DDL` does not cover `Read`, so there is no
     * valid `DDL > RW > RO` ranking and none must be introduced.
     */
-  def covers(verb: String): Set[String] = verb.toUpperCase match
+  def covers(verb: String): Set[String] = verb.toUpperCase(Locale.ROOT) match
     case "RO"  => Set("Read")
     case "RW"  => Set("Read", "Write")
     case "DDL" => Set("Ddl")

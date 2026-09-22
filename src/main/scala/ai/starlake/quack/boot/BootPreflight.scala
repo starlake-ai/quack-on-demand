@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.util.Locale
 import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.ManagerConfig
 import ai.starlake.quack.edge.auth.AuthQueryPreconditions
@@ -157,7 +158,7 @@ object BootPreflight extends LazyLogging:
   private def checkLockoutColumns(conn: java.sql.Connection): Either[String, Unit] =
     val rs      = conn.getMetaData.getColumns(null, null, "qodstate_user", null)
     val present = scala.collection.mutable.Set.empty[String]
-    try while rs.next() do present += rs.getString("COLUMN_NAME").toLowerCase
+    try while rs.next() do present += rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT)
     finally rs.close()
     val missing = LockoutRequiredColumns.diff(present.toSet)
     if missing.nonEmpty then

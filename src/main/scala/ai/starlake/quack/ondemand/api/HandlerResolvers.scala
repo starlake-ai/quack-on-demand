@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.model.TenantDb
 import ai.starlake.quack.ondemand.PoolSupervisor
 
@@ -20,7 +21,7 @@ object HandlerResolvers:
     tenants
       .find(_.id == raw)
       .map(_.id)
-      .orElse(tenants.find(_.displayName == raw.toLowerCase).map(_.id))
+      .orElse(tenants.find(_.displayName == raw.toLowerCase(Locale.ROOT)).map(_.id))
 
   /** Keys that must never round-trip in an API response: see [[TenantDb.SecretKeys]], the single
     * source of truth shared with `PoolSupervisor.mergeSecretKeys` so the two sites cannot drift.

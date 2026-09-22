@@ -179,6 +179,28 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
     back.statusCode() shouldBe 200
     fix.store.findUser(Some(TenantId), "carol@example.com").map(_.enabled) shouldBe Some(true)
 
+  it should "apply an externalId PATCH under a Turkish default locale" in:
+    // externalId is the RFC 7644 canonical spelling, camelCase with a capital I. The handler
+    // lowercases the incoming path and matches "externalid", so under a Turkish or Azeri default
+    // locale the fold emits a dotless i, no match arm fires, and the operation is silently
+    // dropped while SCIM still answers 200. That is the normal case for a conforming IdP, not an
+    // edge case, so the connector drifts out of sync on its stable user identifier.
+    val previous = java.util.Locale.getDefault
+    java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+    try
+      // Guard: if the JVM does not actually fold here, the rest of this test proves nothing.
+      "externalId".toLowerCase should not be "externalid"
+      val id = fix.store.findUser(Some(TenantId), "carol@example.com").map(_.id).get
+      val r  = scim(
+        "PATCH",
+        scimUrl(s"Users/$id"),
+        Some("""{"Operations":[{"op":"replace","path":"externalId","value":"okta-tr-1"}]}""")
+      )
+      r.statusCode() shouldBe 200
+      fix.store.findUser(Some(TenantId), "carol@example.com").flatMap(_.externalId) shouldBe
+        Some("okta-tr-1")
+    finally java.util.Locale.setDefault(previous)
+
   it should "refuse a userName rename with scimType mutability" in:
     val id = fix.store.findUser(Some(TenantId), "carol@example.com").map(_.id).get
     val r  = scim("PUT", scimUrl(s"Users/$id"), Some("""{"userName":"renamed"}"""))

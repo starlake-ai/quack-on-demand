@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.state.{PatRecord, PatStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -167,7 +168,7 @@ final class PatHandlers(
       databases = req.databases,
       pools = req.pools,
       tools = req.tools,
-      verbCeiling = req.verbCeiling.map(_.toUpperCase),
+      verbCeiling = req.verbCeiling.map(_.toUpperCase(Locale.ROOT)),
       dropAdmin = req.dropAdmin,
       stmtTimeoutMs = req.stmtTimeoutMs,
       maxRows = req.maxRows,

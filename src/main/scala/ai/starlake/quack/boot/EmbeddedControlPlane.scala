@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.util.Locale
 import ai.starlake.quack.{EmbeddedPostgresConfig, ManagerConfig}
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres
@@ -75,7 +76,7 @@ object EmbeddedControlPlane:
     if trimmed.nonEmpty then Paths.get(trimmed)
     else
       val home = System.getProperty("user.home")
-      val base = System.getProperty("os.name").toLowerCase match
+      val base = System.getProperty("os.name").toLowerCase(Locale.ROOT) match
         case os if os.contains("mac") => Paths.get(home, "Library", "Application Support", "qod")
         case os if os.contains("win") =>
           // platformdirs on Windows appends appauthor/appname, and appauthor defaults to the

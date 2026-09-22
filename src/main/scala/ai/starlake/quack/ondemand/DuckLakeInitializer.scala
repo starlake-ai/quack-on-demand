@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand
 
+import java.util.Locale
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 
@@ -236,7 +237,7 @@ object DuckLakeInitializer extends LazyLogging:
     * Returns Nil for local-filesystem `dataPath` values - no extension needed.
     */
   private def storageSqlFor(dataPath: String): List[String] =
-    val lower = dataPath.toLowerCase
+    val lower = dataPath.toLowerCase(Locale.ROOT)
     if lower.startsWith("s3://") || lower.startsWith("s3a://") ||
       lower.startsWith("gs://") || lower.startsWith("r2://")
     then
@@ -326,7 +327,7 @@ object DuckLakeInitializer extends LazyLogging:
       recorded: Option[String],
       wanted: Boolean
   ): Option[String] =
-    recorded.map(_.trim.toLowerCase) match
+    recorded.map(_.trim.toLowerCase(Locale.ROOT)) match
       case Some("true") if !wanted =>
         Some(
           "this DuckLake catalog was created encrypted (ducklake_metadata.encrypted='true') but the " +

@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.telemetry
 
+import java.util.Locale
 import java.time.Instant
 
 /** One audit event. Construction rejects detail keys that look like secrets so passwords, tokens,
@@ -30,7 +31,7 @@ final case class AuditEvent(
 object AuditEvent:
   private val Forbidden                  = List("password", "secret", "token", "jwt", "credential")
   def forbiddenKey(key: String): Boolean =
-    val k = key.toLowerCase
+    val k = key.toLowerCase(Locale.ROOT)
     Forbidden.exists(k.contains)
 
 /** Filterable audit read. `tenants = None` means no tenant restriction (superuser);

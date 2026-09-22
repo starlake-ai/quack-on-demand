@@ -1,5 +1,6 @@
 package ai.starlake.quack
 
+import java.util.Locale
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
@@ -1001,7 +1002,7 @@ object Main extends IOApp with LazyLogging:
           sup.duckLakeBuckets() ++
             Option
               .when(mgrCfg.managedObjectStore.enabled)(
-                mgrCfg.managedObjectStore.bucket.toLowerCase
+                mgrCfg.managedObjectStore.bucket.toLowerCase(Locale.ROOT)
               )
               .toSet,
         routingRefs = routingRefsCache,
@@ -1433,7 +1434,7 @@ object Main extends IOApp with LazyLogging:
         )
       branchLookup = (tenant, parentDb, branch) =>
         branchService
-          .resolveTarget(tenant.toLowerCase, parentDb, branch)
+          .resolveTarget(tenant.toLowerCase(Locale.ROOT), parentDb, branch)
           .left
           .map(_.message)
           .map(_._2)

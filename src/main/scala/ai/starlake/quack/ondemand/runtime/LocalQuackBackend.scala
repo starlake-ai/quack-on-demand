@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
+import java.util.Locale
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import cats.effect.IO
 
@@ -215,7 +216,7 @@ object LocalQuackBackend:
     * script) and process teardown (`taskkill /T` vs POSIX signals).
     */
   private[runtime] val isWindows: Boolean =
-    sys.props.getOrElse("os.name", "").toLowerCase.contains("win")
+    sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win")
 
   /** Default command. Invokes `script` (the bundled spawn script in production), which starts
     * DuckDB, attaches the DuckLake catalog, and calls `quack_serve(...)`.

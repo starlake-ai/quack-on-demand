@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.util.Locale
 import ai.starlake.quack.ManagerConfig
 import ai.starlake.quack.edge.config.AclConfig
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
@@ -22,29 +23,31 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootFactories extends LazyLogging:
 
-  def quackBackend(mgrCfg: ManagerConfig): QuackBackend = mgrCfg.runtimeType.toLowerCase match
-    case "local" =>
-      new LocalQuackBackend(
-        mgrCfg.minPort,
-        mgrCfg.maxPort,
-        commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
-      )
-    case "kubernetes" | "k8s" =>
-      val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
-      new KubernetesQuackBackend(
-        k8s,
-        mgrCfg.k8s.namespace,
-        mgrCfg.k8s.image,
-        mgrCfg.k8s.quackPort,
-        mgrCfg.k8s.podLabel,
-        mgrCfg.k8s.startupTimeoutSec,
-        podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
-        serviceAccount = mgrCfg.k8s.serviceAccount,
-        serviceType = mgrCfg.k8s.serviceType,
-        runAsUser = mgrCfg.k8s.runAsUser,
-        stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
-      )
-    case other => sys.error(s"unknown runtime: $other")
+  def quackBackend(mgrCfg: ManagerConfig): QuackBackend =
+    mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
+      case "local" =>
+        new LocalQuackBackend(
+          mgrCfg.minPort,
+          mgrCfg.maxPort,
+          commandFor =
+            LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
+        )
+      case "kubernetes" | "k8s" =>
+        val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
+        new KubernetesQuackBackend(
+          k8s,
+          mgrCfg.k8s.namespace,
+          mgrCfg.k8s.image,
+          mgrCfg.k8s.quackPort,
+          mgrCfg.k8s.podLabel,
+          mgrCfg.k8s.startupTimeoutSec,
+          podTemplateEnabled = mgrCfg.k8s.podTemplateEnabled,
+          serviceAccount = mgrCfg.k8s.serviceAccount,
+          serviceType = mgrCfg.k8s.serviceType,
+          runAsUser = mgrCfg.k8s.runAsUser,
+          stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
+        )
+      case other => sys.error(s"unknown runtime: $other")
 
   /** `dispatch` routes per-secret based on the row's shape (value -> Postgres, externalRef prefix
     * -> matching cloud / env / vault resolver). Other values force a single backend; useful only

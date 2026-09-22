@@ -1,5 +1,7 @@
 package ai.starlake.quack.ondemand.ha
 
+import java.util.Locale
+
 /** Config-load-time gates for HA mode. HA requires the Kubernetes backend (the local backend's port
   * allocator and child processes are per-JVM), an explicit session JWT secret (sessions must verify
   * on every replica, so the boot-generated per-replica fallback is refused), and an external
@@ -20,7 +22,10 @@ object HaPreconditions:
           "process cannot be the shared control plane for multiple replicas. Point the replicas " +
           "at an external Postgres instead"
       )
-    else if runtimeType.toLowerCase != "kubernetes" && runtimeType.toLowerCase != "k8s" then
+    else if runtimeType.toLowerCase(Locale.ROOT) != "kubernetes" && runtimeType.toLowerCase(
+        Locale.ROOT
+      ) != "k8s"
+    then
       Left(
         s"ha.enabled=true requires runtimeType=kubernetes, got '$runtimeType': the local " +
           "backend cannot run multi-manager (in-JVM port allocator, child processes)"

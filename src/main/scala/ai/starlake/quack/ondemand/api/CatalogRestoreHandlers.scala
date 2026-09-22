@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -358,7 +359,8 @@ final class CatalogRestoreHandlers(
         // Heuristic pinned by Task 1's live probe: DuckLake's optimistic-concurrency loser error
         // mentions a conflict. A false negative surfaces as 502 instead of 409 (retry guidance is
         // the same); a false positive requires "conflict" in an unrelated engine error.
-        def isConflict(reason: String): Boolean = reason.toLowerCase.contains("conflict")
+        def isConflict(reason: String): Boolean =
+          reason.toLowerCase(Locale.ROOT).contains("conflict")
         writeExecutor(
           ExecCaller.unrestricted(s"restore-$tid-$db", identityOf(apiKey)),
           poolKey,

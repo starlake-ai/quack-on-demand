@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.auth
 
+import java.util.Locale
 import ai.starlake.quack.ondemand.state.UserGrant
 
 /** Source of truth for management-plane authorization.
@@ -15,7 +16,7 @@ object ManagementIdentitySource:
   case object Oidc extends ManagementIdentitySource
 
   def fromConfig(raw: String): ManagementIdentitySource =
-    raw.trim.toLowerCase match
+    raw.trim.toLowerCase(Locale.ROOT) match
       case "db"   => Db
       case "oidc" => Oidc
       case other  =>

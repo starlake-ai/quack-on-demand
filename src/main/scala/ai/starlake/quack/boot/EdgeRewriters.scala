@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.util.Locale
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
   ColumnPolicyRewriter,
@@ -53,7 +54,7 @@ object EdgeRewriters extends LazyLogging:
           "Every statement bypasses the rewriter."
       )
     val unresolvedTableMode: UnresolvedMode =
-      clsConfig.getString("unresolvedTable").toLowerCase match
+      clsConfig.getString("unresolvedTable").toLowerCase(Locale.ROOT) match
         case "deny" => UnresolvedMode.Deny
         case "pass" => UnresolvedMode.Pass
         case other  =>

@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.branch
 
+import java.util.Locale
 import ai.starlake.quack.BranchingConfig
 import ai.starlake.quack.model.{
   Branch,
@@ -678,7 +679,7 @@ final class BranchService(
                   case None       =>
                     val reason = outcome.left.getOrElse("committed snapshot not found")
                     val f      =
-                      if reason.toLowerCase.contains("conflict") then
+                      if reason.toLowerCase(Locale.ROOT).contains("conflict") then
                         BranchFailure.conflict(
                           "concurrent_write",
                           s"merge lost a commit race: $reason"

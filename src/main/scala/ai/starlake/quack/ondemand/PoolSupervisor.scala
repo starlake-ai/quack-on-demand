@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand
 
+import java.util.Locale
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   BranchStatus,
@@ -1006,7 +1007,7 @@ final class PoolSupervisor(
 
   def listTenants(): List[Tenant]             = tenants.values.toList.sortBy(_.displayName)
   def getTenant(name: String): Option[Tenant] =
-    val n = name.toLowerCase
+    val n = name.toLowerCase(Locale.ROOT)
     tenants.values.find(_.id == n)
 
   /** Lookup by surrogate id (`qodstate_tenant.id`). The `tenants` map is keyed by id: a direct hit.
@@ -1014,7 +1015,7 @@ final class PoolSupervisor(
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
 
   def listPoolsOfTenant(name: String): List[String] =
-    pools.values.filter(_.key.tenant == name.toLowerCase).map(_.key.pool).toList.sorted
+    pools.values.filter(_.key.tenant == name.toLowerCase(Locale.ROOT)).map(_.key.pool).toList.sorted
 
   def listTenantDbsByTenant(tenantName: String): List[TenantDb] =
     getTenant(tenantName)
@@ -1035,7 +1036,7 @@ final class PoolSupervisor(
 
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>
-      val nm = tenantDbName.toLowerCase
+      val nm = tenantDbName.toLowerCase(Locale.ROOT)
       tenantDbs.values.find(td => td.tenantId == t.id && td.name == nm)
     }
 
@@ -1053,7 +1054,7 @@ final class PoolSupervisor(
     * `tenant` + `pool`. Pool names are unique within a tenant, so at most one match exists.
     */
   def findPoolKeyByTenantAndPoolName(tenant: String, poolName: String): Option[PoolKey] =
-    val t = tenant.toLowerCase
+    val t = tenant.toLowerCase(Locale.ROOT)
     pools.keys.find(k => k.tenant == t && k.pool == poolName)
 
   /** Effective metastore for a tenant-db (defaults + td params + per-tenant-db naming). Used by the
@@ -1218,7 +1219,7 @@ final class PoolSupervisor(
               // managed prefix un-eligible, or its objects would be billed forever.
               stampManagedPrefixDeleted(td.id, td.name, purgeManagedData = false)
               tenantDbs.remove(td.id)
-              try onTenantDbDeleted(name.toLowerCase, td.name)
+              try onTenantDbDeleted(name.toLowerCase(Locale.ROOT), td.name)
               catch case _: Throwable => ()
               dbAdmin.dropDatabase(td.name) match
                 case Right(_)  => ()
@@ -1265,7 +1266,7 @@ final class PoolSupervisor(
       gateBypass: Boolean = false
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
-      ai.starlake.quack.spi.StructureMutation.CreateTenantDb(tenantName.toLowerCase),
+      ai.starlake.quack.spi.StructureMutation.CreateTenantDb(tenantName.toLowerCase(Locale.ROOT)),
       gateBypass
     ).flatMap {
       case Left(reason) => IO.pure(Left(SupervisorError.QuotaExceeded(reason)))
@@ -1275,7 +1276,7 @@ final class PoolSupervisor(
             Names.normalizeTenantDbName(tenantName, suffix) match
               case Left(err)   => Left(SupervisorError.InvalidName(err))
               case Right(full) =>
-                val tn = tenantName.toLowerCase
+                val tn = tenantName.toLowerCase(Locale.ROOT)
                 getTenant(tn) match
                   case None => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
                   case Some(_) if managedStorage && managedStore.forall(!_.enabled) =>
@@ -1453,7 +1454,7 @@ final class PoolSupervisor(
   ): IO[Either[SupervisorError, Unit]] =
     IO.blocking {
       withCacheRecovery("deleteTenantDb") {
-        val tn = tenantName.toLowerCase
+        val tn = tenantName.toLowerCase(Locale.ROOT)
         getTenant(tn) match
           case None    => Left(SupervisorError.NotFound(s"tenant not found: $tn"))
           case Some(t) =>
@@ -1590,7 +1591,10 @@ final class PoolSupervisor(
                   if nodeAffecting then dataPathBlocked.remove(merged.id)
                   // Unlocked read-modify-write; self-heals via restore()/NOTIFY.
                   pools.foreach { case (key, state) =>
-                    if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name then
+                    if key.tenant == tenantName.toLowerCase(
+                        Locale.ROOT
+                      ) && key.tenantDb == merged.name
+                    then
                       pools.put(
                         key,
                         state.copy(
@@ -1603,7 +1607,7 @@ final class PoolSupervisor(
                       )
                   }
                   if merged.metastore != td.metastore then
-                    try onTenantDbChanged(tenantName.toLowerCase, merged.name)
+                    try onTenantDbChanged(tenantName.toLowerCase(Locale.ROOT), merged.name)
                     catch case _: Throwable => ()
                   publish.topologyChanged()
                 }
@@ -1614,7 +1618,9 @@ final class PoolSupervisor(
                   IO.delay {
                     pools.toList.collect {
                       case (key, state)
-                          if key.tenant == tenantName.toLowerCase && key.tenantDb == merged.name =>
+                          if key.tenant == tenantName.toLowerCase(
+                            Locale.ROOT
+                          ) && key.tenantDb == merged.name =>
                         state.nodes.map(n => (key, n.nodeId))
                     }.flatten
                   }.flatMap { targets =>
@@ -2419,11 +2425,14 @@ final class PoolSupervisor(
               SupervisorError.InvalidArgument("tenant must be non-empty (use None for superuser)")
             )
           case Some(t)
-              if !tenants.values.exists(x => x.id == t || x.displayName == t.toLowerCase) =>
+              if !tenants.values
+                .exists(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT)) =>
             Left(SupervisorError.NotFound(s"tenant not found: $t"))
           case _ =>
             val resolvedTenantId = tenant.flatMap { t =>
-              tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase).map(_.id)
+              tenants.values
+                .find(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT))
+                .map(_.id)
             }
             // An email-format username IS its own email: derive/verify it here so a
             // conflicting supplied value is refused instead of persisted.
@@ -2584,7 +2593,7 @@ final class PoolSupervisor(
 
   def listUsers(tenant: Option[String]): List[RbacUser] = tenant match
     case Some(t) =>
-      tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase) match
+      tenants.values.find(x => x.id == t || x.displayName == t.toLowerCase(Locale.ROOT)) match
         case Some(tn) => store.listUsers(Some(tn.id))
         case None     => Nil
     case None => store.listUsers(None)
@@ -2633,7 +2642,7 @@ final class PoolSupervisor(
       verb: String
   ): IO[Either[SupervisorError, RolePermission]] = IO.blocking {
     withCacheRecovery("grantRolePermission") {
-      val upper = verb.toUpperCase
+      val upper = verb.toUpperCase(Locale.ROOT)
       if !RolePermission.ValidVerbs.contains(upper) then
         Left(
           SupervisorError.InvalidArgument(

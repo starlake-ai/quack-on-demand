@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.util.Locale
 import ai.starlake.quack.ManagerConfig
 import ai.starlake.quack.edge.auth.{
   OidcBearerAuthenticator,
@@ -53,7 +54,7 @@ object ManagementAuthWiring extends LazyLogging:
     // -> explicit override. Unknown values fall back to auto with a warning so a typo in the env
     // var doesn't accidentally weaken the cookie.
     val cookieSecureOverride: Option[Boolean] =
-      mgrCfg.auth.management.sessionCookieSecure.trim.toLowerCase match
+      mgrCfg.auth.management.sessionCookieSecure.trim.toLowerCase(Locale.ROOT) match
         case "auto"  => None
         case "true"  => Some(true)
         case "false" => Some(false)

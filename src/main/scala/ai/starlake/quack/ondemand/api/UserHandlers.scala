@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -97,7 +98,7 @@ final class UserHandlers(
         // check matches `manageableTenants`.
         val canonical = sup
           .listTenants()
-          .find(t => t.id == raw || t.displayName == raw.toLowerCase)
+          .find(t => t.id == raw || t.displayName == raw.toLowerCase(Locale.ROOT))
           .map(_.id)
           .getOrElse(raw)
         TenantScopeCheck.reject(apiKey, canonical)(scopeOf)
@@ -105,7 +106,10 @@ final class UserHandlers(
       case Some(err) =>
         // Record denied with tenant from the resolved canonical if available.
         val deniedTenant = req.tenant.flatMap(raw =>
-          sup.listTenants().find(t => t.id == raw || t.displayName == raw.toLowerCase).map(_.id)
+          sup
+            .listTenants()
+            .find(t => t.id == raw || t.displayName == raw.toLowerCase(Locale.ROOT))
+            .map(_.id)
         )
         audit.rest(
           apiKey,

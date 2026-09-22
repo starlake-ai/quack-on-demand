@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
+import java.util.Locale
 import ai.starlake.quack.model.{
   Branch,
   BranchMerge,
@@ -159,7 +160,7 @@ final class PostgresControlPlaneStore(
         pps.setString(3, adminPermission.catalogName)
         pps.setString(4, adminPermission.schemaName)
         pps.setString(5, adminPermission.tableName)
-        pps.setString(6, adminPermission.verb.toUpperCase)
+        pps.setString(6, adminPermission.verb.toUpperCase(Locale.ROOT))
         pps.executeUpdate()
       finally pps.close()
 
@@ -862,7 +863,7 @@ final class PostgresControlPlaneStore(
       ps.setString(3, p.catalogName)
       ps.setString(4, p.schemaName)
       ps.setString(5, p.tableName)
-      ps.setString(6, p.verb.toUpperCase)
+      ps.setString(6, p.verb.toUpperCase(Locale.ROOT))
       val rs = ps.executeQuery()
       try
         rs.next()
