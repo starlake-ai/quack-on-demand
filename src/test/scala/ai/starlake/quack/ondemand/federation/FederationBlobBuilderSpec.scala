@@ -278,11 +278,42 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     blob should include("-- BEGIN federation: fedpg")
   }
 
-  it should "not reserve any alias in buildOne, since collision is already settled at write time" in {
+  // ---------- build / buildOne parity ----------
+  // `build` is what gets deployed to the node; `buildOne` is what the Iceberg attach verifier
+  // re-issues onto a live node. They are two views of ONE thing, so these compare the two real
+  // producers against each other rather than asserting either one looks right on its own: the
+  // defect they pin was two internally-consistent paths that were never compared. `buildOne` used
+  // to reserve nothing, on the reasoning that a stored row's collisions were settled at write
+  // time -- true of the REST/MCP path only, since `ManifestImporter` writes rows straight through
+  // `upsertSource`. The result was the verifier re-issuing an ATTACH the node's own startup script
+  // had deliberately refused to run.
+
+  it should "refuse in buildOne exactly what build refuses, on an own-catalog-alias collision" in {
+    val ice = iceSrc(alias = "sales")
+    val b   = builderWith(List(ice), iceSecrets(ice), catalogAliasOf = _ => IO.pure(Some("sales")))
+    val deployed = intercept[RuntimeException](b.build("td-1").unsafeRunSync()).getMessage
+    val reissued = intercept[RuntimeException](b.buildOne(ice).unsafeRunSync()).getMessage
+    reissued shouldBe deployed
+    reissued should include("sales")
+  }
+
+  it should "refuse in buildOne exactly what build refuses, on a sibling-alias collision" in {
+    val ice      = iceSrc(alias = "sales_lake")
+    val other    = src("sales_lake", "ATTACH 'x' AS {{alias}};").copy(id = "other-1")
+    val b        = builderWith(List(ice, other), iceSecrets(ice))
+    val deployed = intercept[RuntimeException](b.build("td-1").unsafeRunSync()).getMessage
+    val reissued = intercept[RuntimeException](b.buildOne(ice).unsafeRunSync()).getMessage
+    reissued shouldBe deployed
+  }
+
+  it should "re-issue in buildOne the very block build deploys for that source" in {
     val ice   = iceSrc(alias = "sales_lake")
-    val other = src("sales_lake", "ATTACH 'x' AS {{alias}};")
-    val out   = builderWith(List(ice, other), iceSecrets(ice)).buildOne(ice).unsafeRunSync()
-    out.sql should include("-- BEGIN federation: sales_lake")
+    val other = src("fedpg", "ATTACH 'x' AS {{alias}};")
+    val b     =
+      builderWith(List(ice, other), iceSecrets(ice), catalogAliasOf = _ => IO.pure(Some("sales")))
+    val deployed = b.build("td-1").unsafeRunSync().value
+    val reissued = b.buildOne(ice).unsafeRunSync().sql
+    deployed should include(reissued)
   }
 
   // ---------- tenant-db's own catalog alias reservation ----------

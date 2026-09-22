@@ -47,7 +47,10 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
     new FederationBlobBuilder(
       loadEnabled = _ => IO.pure(List(src)),
       loadSecrets = _ => IO.pure(rows),
-      resolver = new PostgresSecretResolver()
+      resolver = new PostgresSecretResolver(),
+      // This spec is about redaction, not alias reservation: the one source has no sibling and
+      // this fixture declares no tenant-db catalog alias, so nothing is reserved.
+      catalogAliasOf = _ => IO.pure(None)
     ).buildOne(src).unsafeRunSync()
 
   private def secretName(field: String): String  = "S_" + field.toUpperCase

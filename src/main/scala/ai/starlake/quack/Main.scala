@@ -379,27 +379,35 @@ object Main extends IOApp with LazyLogging:
     // get() only runs at request time, never during construction.
     val supRef = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
 
+    // ONE builder instance, shared by the spawn-time blob (`federationBlobOf`, what the node
+    // actually runs) and the Iceberg attach verifier's re-attach (`buildOne`, what the verifier
+    // re-issues onto a live node). These were two separate constructions and they drifted: the
+    // verifier's copy omitted `catalogAliasOf`, so it reserved a smaller alias set than the blob
+    // deployed to the node, and re-issued an ATTACH the node's own startup script had refused.
+    // Sharing the instance makes that drift unrepresentable rather than merely fixed once.
+    val federationBlobBuilder: Option[FederationBlobBuilder] =
+      manifestFedStore.map { federatedStore =>
+        new FederationBlobBuilder(
+          loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
+          loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
+          resolver = secretResolver,
+          // The tenant-db's own DuckDB catalog alias, reserved so an iceberg source can't claim
+          // the name its own tenant-db is ATTACHed under. Mirrors attachedCatalogsOf's
+          // resolution below. Null-safe before supRef is filled (construction order) and never
+          // throws: a lookup failure just means one fewer reserved alias, not a broken blob.
+          catalogAliasOf = tdId =>
+            IO.delay(
+              Option(supRef.get())
+                .flatMap(_.getTenantDbById(tdId))
+                .map(td => TenantDb.catalogAlias(td.metastore, td.name))
+            )
+        )
+      }
+
     val federationBlobOf: String => IO[Option[String]] =
-      manifestFedStore match
-        case Some(federatedStore) =>
-          val builder = new FederationBlobBuilder(
-            loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
-            loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
-            resolver = secretResolver,
-            // The tenant-db's own DuckDB catalog alias, reserved so an iceberg source can't claim
-            // the name its own tenant-db is ATTACHed under. Mirrors attachedCatalogsOf's
-            // resolution below. Null-safe before supRef is filled (construction order) and never
-            // throws: a lookup failure just means one fewer reserved alias, not a broken blob.
-            catalogAliasOf = tdId =>
-              IO.delay(
-                Option(supRef.get())
-                  .flatMap(_.getTenantDbById(tdId))
-                  .map(td => TenantDb.catalogAlias(td.metastore, td.name))
-              )
-          )
-          tdId => builder.build(tdId)
-        case None =>
-          _ => IO.pure(None)
+      federationBlobBuilder match
+        case Some(builder) => tdId => builder.build(tdId)
+        case None          => _ => IO.pure(None)
 
     // Cached per-tenant-db DuckLake catalog readers (contract in CatalogReaders).
     // Construction cycle with `sup`: readers need the supervisor's metastore
@@ -809,38 +817,32 @@ object Main extends IOApp with LazyLogging:
         }
         .handleError(t => Left(t.getMessage))
 
-    val attachVerifier = manifestFedStore match
-      case Some(fedStore) =>
-        val builder = new FederationBlobBuilder(
-          loadEnabled = tdId => IO.blocking(fedStore.listEnabledSources(tdId)),
-          loadSecrets = sid => IO.blocking(fedStore.listSecrets(sid)),
-          resolver = secretResolver
-        )
-        Some(
-          new ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier(
-            sourcesOf = key =>
-              sup.findTenantDb(key.tenant, key.tenantDb) match
-                case Some(td) => IO.blocking(fedStore.listEnabledSources(td.id))
-                case None     =>
-                  // Distinguish "lookup failed" from "nothing declared": a missing tenant-db here
-                  // is a cache-population race, not proof the pool has no Iceberg source, and must
-                  // not latch the node. IO.raiseError routes it through verify's own Left arm.
-                  IO.raiseError(
-                    new NoSuchElementException(
-                      s"no tenant-db for ${key.tenant}/${key.tenantDb}"
-                    )
-                  ),
-            renderOne = src => builder.buildOne(src),
-            runOnNode = (n, sql) =>
-              adapter.send(n, sql, session = None, recordLoad = false).map {
-                case QuackResponse.Ok(_, _, close) => close(); Right(())
-                case QuackResponse.Failed(err, _)  => Left(err.toString)
-              },
-            listCatalogs = nodeCatalogs,
-            registry = attachRegistry
-          )
-        )
-      case None => None
+    // Both halves come from the same `manifestFedStore`, so this is all-or-nothing in practice;
+    // zipping says so to the compiler instead of re-deriving a second builder here.
+    val attachVerifier = manifestFedStore.zip(federationBlobBuilder).map { (fedStore, builder) =>
+      new ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier(
+        sourcesOf = key =>
+          sup.findTenantDb(key.tenant, key.tenantDb) match
+            case Some(td) => IO.blocking(fedStore.listEnabledSources(td.id))
+            case None     =>
+              // Distinguish "lookup failed" from "nothing declared": a missing tenant-db here
+              // is a cache-population race, not proof the pool has no Iceberg source, and must
+              // not latch the node. IO.raiseError routes it through verify's own Left arm.
+              IO.raiseError(
+                new NoSuchElementException(
+                  s"no tenant-db for ${key.tenant}/${key.tenantDb}"
+                )
+              ),
+        renderOne = src => builder.buildOne(src),
+        runOnNode = (n, sql) =>
+          adapter.send(n, sql, session = None, recordLoad = false).map {
+            case QuackResponse.Ok(_, _, close) => close(); Right(())
+            case QuackResponse.Failed(err, _)  => Left(err.toString)
+          },
+        listCatalogs = nodeCatalogs,
+        registry = attachRegistry
+      )
+    }
 
     val healthProbe = new HealthProbe(
       tracker,

@@ -185,6 +185,27 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     ) shouldBe empty
   }
 
+  // ---------- locale-independent alias folding ----------
+  // Every alias fold in this package goes through Locale.ROOT. This is the ONE place a revert of
+  // that is observable: `failuresFor` sorts on the folded alias, and under a Turkish default
+  // locale `"I".toLowerCase` is the dotless `i` (U+0131), which sorts AFTER `z` instead of before
+  // it. The package's other folded sites fold both sides of their comparison with the same call,
+  // so reverting those changes no outcome and no honest test can pin them.
+  //
+  // This sets the JVM default locale and restores it in `finally`. Tests in this build run
+  // sequentially inside one forked JVM (`Test / fork := true`, `testForkedParallel` unset), so
+  // nothing else observes the window.
+  it should "order attach failures by a locale-independent fold of the alias" in {
+    val previous = java.util.Locale.getDefault
+    try
+      java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr"))
+      val reg = new AttachStatusRegistry()
+      reg.recordFailure("n-loc", 1000L, "SALES_I", "boom")
+      reg.recordFailure("n-loc", 1000L, "sales_z", "boom")
+      reg.failuresFor("n-loc", 1000L).map(_.alias) shouldBe List("SALES_I", "sales_z")
+    finally java.util.Locale.setDefault(previous)
+  }
+
   it should "report a legacy mixed-case alias as declared, not lowercased" in {
     val rec      = new Recorder
     val (v, reg) = verifier(List(iceSrc("Sales_Lake")), Set("acme_db"), rec.run(Left("boom")))

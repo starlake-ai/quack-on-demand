@@ -82,9 +82,13 @@ final class IcebergAttachVerifier(
                       logger.debug(s"attach verify ${node.nodeId}: catalog listing failed: $err")
                     )
                   case Right(present) =>
-                    val lower            = present.map(_.toLowerCase)
+                    // Both sides folded through the same locale-independent helper: a default
+                    // Turkish or Azeri locale folds `I` to the dotless `i`, and this match is a
+                    // set `contains`, i.e. exact string equality after the fold, with no
+                    // `equalsIgnoreCase` behind it to absorb the difference.
+                    val lower            = present.map(foldAlias)
                     val (found, missing) =
-                      declared.partition(s => lower.contains(s.alias.toLowerCase))
+                      declared.partition(s => lower.contains(foldAlias(s.alias)))
                     found.traverse_(s =>
                       IO.delay(registry.recordAttached(node.nodeId, startedAtMs, s.alias))
                     ) *>
@@ -136,6 +140,12 @@ final class IcebergAttachVerifier(
               )
           }
       }
+
+  /** Locale-independent case fold, used on BOTH sides of the present-versus-declared match above.
+    * `AttachStatusRegistry` folds its keys the same way, so a failure cannot be recorded under one
+    * spelling and looked up under another. Same reasoning as `AttachErrorRedactor.foldCase`.
+    */
+  private def foldAlias(alias: String): String = alias.toLowerCase(java.util.Locale.ROOT)
 
   /** The ONE funnel every STORED attach error goes through, which is why the redaction lives here
     * rather than at the REST rendering sites: `AttachStatusRegistry.recordFailure` has no other

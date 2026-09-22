@@ -56,7 +56,7 @@ final class FederationBlobBuilder(
     loadEnabled: String => IO[List[FederatedSource]],
     loadSecrets: String => IO[List[FederatedSecret]],
     resolver: SecretResolver,
-    catalogAliasOf: String => IO[Option[String]] = _ => IO.pure(None)
+    catalogAliasOf: String => IO[Option[String]]
 ) {
 
   private val PlaceholderRegex = """\{\{[^}]*\}\}""".r
@@ -75,35 +75,72 @@ final class FederationBlobBuilder(
     * live node: re-running the whole blob would re-execute every other source's CREATE SECRET and
     * ATTACH. The verifier feeds `secretValues` straight to
     * [[ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactor]]. NEVER log `sql`.
+    *
+    * Reserves the SAME alias set [[assemble]] reserves for this source, resolved from
+    * `src.tenantDbId` rather than inherited, because the two are two views of one thing: what the
+    * node is supposed to be running. An earlier version reserved nothing here, on the reasoning
+    * that a stored row's collisions were settled at write time -- which is true only of the
+    * REST/MCP path. `ManifestImporter` writes rows straight through `upsertSource`, so a
+    * manifest-imported alias colliding with its own tenant-db's catalog (or with a sibling) is
+    * refused by the deployed blob and was accepted here, leaving the verifier re-issuing an ATTACH
+    * the node's own startup script had deliberately refused to run.
+    *
+    * Costs one extra `loadEnabled` round trip per re-attempt. That is on the verifier's
+    * backoff-gated retry path (at most once per alias per backoff window), not per health tick.
     */
-  def buildOne(src: FederatedSource): IO[ResolvedFederationBlock] =
-    renderOne(src, redactSecrets = false)
+  def buildOne(src: FederatedSource): IO[ResolvedFederationBlock] = for {
+    siblings <- loadEnabled(src.tenantDbId)
+    ownAlias <- ownAliasOf(src.tenantDbId)
+    block    <- renderOne(src, redactSecrets = false, reservedFor(siblings, src.id, ownAlias))
+  } yield block
 
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
-    sources <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
-    // Resolved once per blob (not per source): the tenant-db's own DuckDB catalog alias, if this
-    // tenant-db is known to the caller. Reserved alongside the sibling aliases below so an
-    // iceberg source can't claim the name the tenant-db itself is ATTACHed under -- e.g. a
-    // manifest-imported source aliased the same as its own tenant-db, which never goes through
-    // `FederatedSourceHandlers.toSource`'s REST/MCP-time check.
-    ownAlias <- catalogAliasOf(tenantDbId).map(_.map(_.toLowerCase))
+    sources  <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
+    ownAlias <- ownAliasOf(tenantDbId)
     blobs    <- sources.traverse { src =>
-      // Every OTHER source's alias (by id, NOT by alias equality -- two rows can already share an
-      // alias, which is exactly the case this is meant to catch), lowercased since `validated`
-      // compares case-insensitively. Passed as `extraReserved` so an iceberg source can't claim a
-      // DuckDB catalog name a sibling in this same tenant-db already holds, or the tenant-db's own
-      // catalog alias -- see `bodyTemplate`.
-      val siblingAliases = sources.filterNot(_.id == src.id).map(_.alias.toLowerCase).toSet
-      renderOne(src, redactSecrets, siblingAliases ++ ownAlias).map(_.sql)
+      renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias)).map(_.sql)
     }
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
+
+  /** The tenant-db's own DuckDB catalog alias, if the caller can resolve it, folded once here so
+    * every reserved entry is folded the same way. Reserved alongside the sibling aliases in
+    * [[reservedFor]] so an iceberg source can't claim the name the tenant-db itself is ATTACHed
+    * under -- e.g. a manifest-imported source aliased the same as its own tenant-db, which never
+    * goes through `FederatedSourceHandlers.toSource`'s REST/MCP-time check.
+    */
+  private def ownAliasOf(tenantDbId: String): IO[Option[String]] =
+    catalogAliasOf(tenantDbId).map(_.map(fold))
+
+  /** Every DuckDB catalog name the source `selfId` must not claim: every OTHER enabled source's
+    * alias in the same tenant-db (by id, NOT by alias equality -- two rows can already share an
+    * alias, which is exactly the case this is meant to catch), plus the tenant-db's own catalog
+    * alias.
+    *
+    * This is the ONE producer of that set. [[assemble]] (what gets deployed to the node) and
+    * [[buildOne]] (what the attach verifier re-issues onto a live node) both go through it, so the
+    * two cannot model different things; they diverged exactly once, and that is the defect this
+    * shape removes.
+    */
+  private def reservedFor(
+      sources: List[FederatedSource],
+      selfId: String,
+      ownAlias: Option[String]
+  ): Set[String] =
+    sources.filterNot(_.id == selfId).map(s => fold(s.alias)).toSet ++ ownAlias
+
+  /** Locale-independent case fold. `validated` compares case-insensitively, so what is reserved has
+    * to be folded the same way no matter what default locale the manager's JVM happens to carry:
+    * under a Turkish or Azeri default, `"I".toLowerCase` is the dotless `i`. Same reasoning as
+    * `AttachErrorRedactor.foldCase`, which folds per character for the same reason.
+    */
+  private def fold(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
 
   private def renderOne(
       src: FederatedSource,
       redactSecrets: Boolean,
-      siblingAliases: Set[String] = Set.empty
+      reservedAliases: Set[String]
   ): IO[ResolvedFederationBlock] = for {
-    template <- bodyTemplate(src, siblingAliases)
+    template <- bodyTemplate(src, reservedAliases)
     secrets  <- loadSecrets(src.id)
     byName = secrets.map(s => s.name -> s).toMap
     resolved <- substitute(src, template, byName, redactSecrets)
@@ -121,13 +158,13 @@ final class FederationBlobBuilder(
     * bring a node up with the catalog missing, which is exactly the failure the attach verifier
     * exists to make visible.
     *
-    * `siblingAliases` reserves every OTHER enabled source's alias in the same tenant-db, PLUS (via
-    * `assemble`'s `catalogAliasOf`) the tenant-db's own DuckDB catalog alias; default empty for
-    * [[buildOne]], which re-issues one already-stored source whose collisions were already settled
-    * when that row was created. `FederatedSourceHandlers.toSource` runs the same check at REST/MCP
-    * write time, but `ManifestImporter` builds `FederatedSource` rows directly and calls
-    * `upsertSource` without going through that handler, so this is the layer that check reaches for
-    * every write path -- for `IcebergRest` sources only. Only the `IcebergRest` arm below calls
+    * `reservedAliases` comes from [[reservedFor]]: every OTHER enabled source's alias in the same
+    * tenant-db, PLUS the tenant-db's own DuckDB catalog alias. Both callers pass it (there is no
+    * default -- a defaulted reserved set is how [[buildOne]] came to reserve nothing).
+    * `FederatedSourceHandlers.toSource` runs the same check at REST/MCP write time, but
+    * `ManifestImporter` builds `FederatedSource` rows directly and calls `upsertSource` without
+    * going through that handler, so this is the layer that check reaches for every write path --
+    * for `IcebergRest` sources only. Only the `IcebergRest` arm below calls
     * `IcebergRestConfig.validated`; two colliding `Sql` sources (or a `Sql` source colliding with
     * the tenant-db's own alias) are never checked here, since a `Sql` source's setup SQL is
     * operator-written and unparsed.
@@ -141,7 +178,7 @@ final class FederationBlobBuilder(
     * previous blob (or `""`), and logs -- degrading that tenant-db's WHOLE federation blob, not
     * just the offending source.
     */
-  private def bodyTemplate(src: FederatedSource, siblingAliases: Set[String]): IO[String] =
+  private def bodyTemplate(src: FederatedSource, reservedAliases: Set[String]): IO[String] =
     src.sourceType match
       case FederatedSourceType.Sql         => IO.pure(src.setupSql)
       case FederatedSourceType.IcebergRest =>
@@ -160,7 +197,7 @@ final class FederationBlobBuilder(
               // `render` accepts ONLY a ValidatedIcebergConfig (owner decision after the session
               // audit): the illegal state is unrepresentable, so this arm cannot forget to validate.
               case Right(cfg) =>
-                IcebergRestConfig.validated(cfg, src.alias, siblingAliases) match
+                IcebergRestConfig.validated(cfg, src.alias, reservedAliases) match
                   case Left(errs) =>
                     IO.raiseError(
                       new RuntimeException(

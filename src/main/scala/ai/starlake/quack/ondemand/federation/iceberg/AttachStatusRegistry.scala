@@ -58,7 +58,7 @@ final class AttachStatusRegistry(
   // Every alias key is normalized here, once, so callers can pass the alias however the source
   // declared it (manifest imports do not normalize) and every lookup -- including a caller's own
   // -- agrees on what it is looking up.
-  private def normalize(alias: String): String = alias.toLowerCase
+  private def normalize(alias: String): String = alias.toLowerCase(java.util.Locale.ROOT)
 
   def recordAttached(nodeId: String, startedAtMs: Long, alias: String): Unit =
     val key = ((nodeId, startedAtMs), normalize(alias))
@@ -136,7 +136,7 @@ final class AttachStatusRegistry(
       // the source declared, so sorting on it would put a legacy "Sales_Lake" before "analytics"
       // in ASCII and after it once the row is normalized, i.e. the operator-visible order would
       // depend on the case of a name that is compared case-insensitively everywhere else.
-      .sortBy(_.alias.toLowerCase)
+      .sortBy(_.alias.toLowerCase(java.util.Locale.ROOT))
 
   /** Operator-facing summary of one alias across a pool's nodes: `attached`, `unknown`, or
     * `failed on N of M nodes`. Matches by node id alone -- once a node's successor incarnation has
