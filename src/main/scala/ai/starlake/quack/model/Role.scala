@@ -1,10 +1,12 @@
 package ai.starlake.quack.model
 
+import java.util.Locale
+
 enum Role:
   case ReadOnly, WriteOnly, Dual
 
 object Role:
-  def parse(s: String): Either[String, Role] = s.toUpperCase match
+  def parse(s: String): Either[String, Role] = s.toUpperCase(Locale.ROOT) match
     case "READONLY"  => Right(ReadOnly)
     case "WRITEONLY" => Right(WriteOnly)
     case "DUAL"      => Right(Dual)

@@ -1,5 +1,7 @@
 package ai.starlake.quack.model
 
+import java.util.Locale
+
 /** Extracts the bucket (or Azure container) key of an object-store URL, lowercased. The key is the
   * unit the LockdownScreen's DuckLake bucket denial matches on: scheme families are deliberately
   * NOT distinguished, so a DuckLake bucket named B is denied under every scheme (cross-family
@@ -12,7 +14,7 @@ object BucketKeys:
     * part before '@'); None for anything else (http(s), local paths, bare names).
     */
   def of(url: String): Option[String] =
-    val lower = url.trim.toLowerCase
+    val lower = url.trim.toLowerCase(Locale.ROOT)
     if lower.startsWith("abfss://") then
       val rest = lower.stripPrefix("abfss://")
       val end  = rest.indexWhere(c => c == '@' || c == '/')

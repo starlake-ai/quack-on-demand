@@ -1,5 +1,7 @@
 package ai.starlake.quack.model
 
+import java.util.Locale
+
 /** Naming policy for human-supplied identifiers (tenant displayName, tenant-db suffix, pool name).
   *
   * Names follow **Postgres-identifier rules** so they can serve as Postgres object names without
@@ -40,11 +42,11 @@ object Names:
     */
   def normalize(raw: String, label: String = "name"): String =
     if !isValid(raw) then throw new IllegalArgumentException(reject(raw, label))
-    else raw.toLowerCase
+    else raw.toLowerCase(Locale.ROOT)
 
   /** Either-flavour for REST handlers that want to surface the error. */
   def normalizeOrError(raw: String, label: String = "name"): Either[String, String] =
-    if !isValid(raw) then Left(reject(raw, label)) else Right(raw.toLowerCase)
+    if !isValid(raw) then Left(reject(raw, label)) else Right(raw.toLowerCase(Locale.ROOT))
 
   /** Compose a tenant-db name from a tenant + a user-supplied suffix. The output is the actual
     * Postgres database name on the shared server, so we always insert a `_` between tenant and

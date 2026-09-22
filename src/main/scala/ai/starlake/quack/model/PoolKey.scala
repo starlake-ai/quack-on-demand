@@ -1,5 +1,7 @@
 package ai.starlake.quack.model
 
+import java.util.Locale
+
 /** Three-part naistural addressing key. Pools are owned by a tenant-db, so two pools with the same
   * `pool` name under different tenant-dbs of the same tenant are distinct -- the per-`(tenantDb_id,
   * name)` UNIQUE on `qodstate_pool` enforces it. Segments are lowercased on input to keep equality
@@ -11,7 +13,11 @@ final case class PoolKey private (tenant: String, tenantDb: String, pool: String
 object PoolKey:
 
   def apply(tenant: String, tenantDb: String, pool: String): PoolKey =
-    new PoolKey(tenant.toLowerCase, tenantDb.toLowerCase, pool.toLowerCase)
+    new PoolKey(
+      tenant.toLowerCase(Locale.ROOT),
+      tenantDb.toLowerCase(Locale.ROOT),
+      pool.toLowerCase(Locale.ROOT)
+    )
 
   def parse(s: String): Either[String, PoolKey] = s.split("/", 3) match
     case Array(t, td, p) if t.nonEmpty && td.nonEmpty && p.nonEmpty =>
