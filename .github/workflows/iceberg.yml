@@ -1,0 +1,151 @@
+# The repository's first Scala CI channel. Scoped to the Iceberg and federation specs
+# deliberately: putting the full ~2800-test suite on CI's critical path in the same change
+# would surface unrelated pre-existing failures and environment flakes, which is its own
+# project. See docs/superpowers/specs/2026-09-20-external-iceberg-catalog-design.md.
+#
+# Specs are named one by one rather than matched with a glob. `sbt "testOnly *Iceberg*"`
+# reports success when the pattern matches NOTHING, so a renamed or deleted spec would turn
+# this channel green by disappearing from it. The verify step below closes the same hole from
+# the other side: it fails unless every spec listed here is actually named in the run output.
+name: iceberg
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/main/scala/ai/starlake/quack/edge/sql/CatalogWriteScreen.scala"
+      - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+      - "src/main/resources/db/changelog/**"
+      - "scripts/iceberg-fixture.yml"
+      - ".github/workflows/iceberg.yml"
+  pull_request:
+    paths:
+      - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/main/scala/ai/starlake/quack/edge/sql/CatalogWriteScreen.scala"
+      - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/test/scala/ai/starlake/quack/edge/sql/CatalogWriteScreenSpec.scala"
+      - "src/main/resources/db/changelog/**"
+      - "scripts/iceberg-fixture.yml"
+      - ".github/workflows/iceberg.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: iceberg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: azizam
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SL_TEST_PG_HOST: localhost
+      SL_TEST_PG_PORT: "5432"
+      SL_TEST_PG_USER: postgres
+      SL_TEST_PG_PASSWORD: azizam
+      SBT_OPTS: -Xmx4G
+      # Kept in one place so the run step and the verify step cannot drift apart.
+      SPECS: >-
+        ai.starlake.quack.ondemand.federation.IcebergRestE2ESpec
+        ai.starlake.quack.ondemand.federation.IcebergAttachRecoverySpec
+        ai.starlake.quack.ondemand.federation.FederationBlobBuilderSpec
+        ai.starlake.quack.ondemand.federation.iceberg.IcebergSetupSqlSpec
+        ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfigSpec
+        ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifierSpec
+        ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactorSpec
+        ai.starlake.quack.edge.sql.CatalogWriteScreenSpec
+        ai.starlake.quack.ondemand.state.FederatedSourceStoreSpec
+        ai.starlake.quack.ondemand.state.FederatedSourceStoreUrlSpec
+        ai.starlake.quack.ondemand.api.FederatedSourceHandlersSpec
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Temurin 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+
+      - name: Setup sbt launcher
+        uses: sbt/setup-sbt@v1
+
+      # v1.5.4 is the build the end-to-end specs were verified against locally. Bumping it is
+      # fine but is a behaviour change, not a version bump: the specs pin engine behaviour
+      # (READ_ONLY enforcement, continue-past-a-failed-ATTACH) that a new DuckDB could alter.
+      - name: Install the duckdb CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o duckdb.zip \
+            https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-linux-amd64.zip
+          unzip -o duckdb.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/duckdb"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/duckdb" -noheader -list -c "select version();"
+
+      - name: Start the Iceberg REST fixture
+        run: docker compose -f scripts/iceberg-fixture.yml up -d --wait
+
+      - name: Wait for the catalog
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:8181/v1/config?warehouse=warehouse" >/dev/null; then
+              echo "catalog ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "catalog never became ready"
+          exit 1
+
+      - name: Run the Iceberg and federation specs
+        run: |
+          set -euo pipefail
+          sbt "testOnly $SPECS" 2>&1 | tee /tmp/iceberg-specs.log
+
+      # A spec that matched nothing, or one that cancelled because the fixture was not actually
+      # reachable, both leave a green bar behind: ScalaTest counts a cancellation separately from
+      # a pass and prints nothing at all for a spec it never found. On this channel the fixture is
+      # present by construction, so either is a failure.
+      - name: Verify every spec ran, and none cancelled
+        if: always()
+        run: |
+          set -euo pipefail
+          test -s /tmp/iceberg-specs.log || { echo "no sbt output captured"; exit 1; }
+          missing=0
+          for fqn in $SPECS; do
+            simple="${fqn##*.}"
+            if ! grep -q "^\[info\] ${simple}:" /tmp/iceberg-specs.log; then
+              echo "spec never ran: $fqn"
+              missing=1
+            fi
+          done
+          if grep -q "CANCELED" /tmp/iceberg-specs.log; then
+            echo "a spec cancelled, which on this channel means the fixture was not reachable:"
+            grep -n "CANCELED" /tmp/iceberg-specs.log
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Fixture logs on failure
+        if: failure()
+        run: docker compose -f scripts/iceberg-fixture.yml logs --no-color
+
+      - name: Tear the fixture down
+        if: always()
+        run: docker compose -f scripts/iceberg-fixture.yml down -v
