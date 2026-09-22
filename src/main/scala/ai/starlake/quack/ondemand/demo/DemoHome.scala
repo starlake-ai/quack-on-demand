@@ -51,12 +51,29 @@ object DemoHome:
     // home -- two concurrent `qod start --demo` share `${TMPDIR}/qod-demo` by default. Postgres's
     // own `postmaster.pid` names the process holding the data directory; a dead pid is exactly the
     // crashed run the clean exists for, so it falls through.
-    livePostmaster(pgDir).foreach(pid =>
-      sys.error(
-        s"a demo is already running on $root (postgres pid $pid) - stop it first, " +
-          "or give this run its own QOD_DEMO_HOME"
-      )
-    )
+    // A live postmaster alone does not mean a live demo. A manager killed without reaping its
+    // embedded Postgres (SIGKILL, crash, machine sleep) leaves the postmaster running with nobody
+    // using it, and that orphan then blocked every later run on this home with no recovery short
+    // of finding and killing the pid by hand. So the pair is what decides:
+    //   manager alive  -> a real demo holds this home, refuse and name what to stop
+    //   manager gone   -> our own orphan, reclaim it, but only once the process proves to be ours
+    // Ownership is proven from the process itself (its command line names this home's pgdata),
+    // never assumed from the absent manager.pid: an unrelated process that happens to hold a
+    // recycled pid must be refused, not killed.
+    livePostmaster(pgDir).foreach { pgPid =>
+      liveManager(root) match
+        case Some(mgrPid) =>
+          sys.error(
+            s"a demo is already running on $root (manager pid $mgrPid, postgres pid $pgPid) - " +
+              s"stop it with `kill $mgrPid`, or give this run its own QOD_DEMO_HOME"
+          )
+        case None if !ownsPgData(pgPid, pgDir) =>
+          sys.error(
+            s"a demo is already running on $root (postgres pid $pgPid) - stop it first with " +
+              s"`kill $pgPid`, or give this run its own QOD_DEMO_HOME"
+          )
+        case None => reclaimOrphan(pgPid, root)
+    }
     // Teardown normally empties the home, but a run killed before it (SIGKILL, machine sleep, OOM)
     // leaves `pg/pgdata` populated -- and the next run's `initdb` then refuses with `directory
     // "..." exists but is not empty`, which zonky reports only as the opaque
@@ -75,6 +92,11 @@ object DemoHome:
           "and it could not be removed - delete it by hand, or point QOD_DEMO_HOME elsewhere"
       )
     List(root, pgDir, dataPath, nativeDir).foreach(Files.createDirectories(_))
+    // Written in `root`, which the wipe above deliberately never touches, so it outlives the
+    // owned subdirs and is what the next run reads to tell a live demo from an orphan. Recorded
+    // BEFORE Postgres starts: a concurrent run must see this pid and back off rather than find a
+    // postmaster with no manager and mistake a starting demo for a dead one.
+    Files.writeString(managerPidFile(root), s"${ProcessHandle.current().pid()}\n")
     DemoHome(root, pgDir, dataPath, nativeDir)
 
   /** The pid from `pgdata/postmaster.pid` when that process is still alive, else `None` (no file,
@@ -88,6 +110,66 @@ object DemoHome:
         .Try(Files.readString(pidFile).linesIterator.next().trim.toLong)
         .toOption
         .filter(pid => ProcessHandle.of(pid).filter(_.isAlive).isPresent)
+
+  /** Where a run records its own pid, in `root` rather than a wiped subdir so it survives the
+    * pre-flight clean and is readable by the next run.
+    */
+  private def managerPidFile(root: Path): Path = root.resolve("manager.pid")
+
+  /** The pid from `manager.pid` when that process is still alive, else `None`. Same tolerance as
+    * [[livePostmaster]]: a missing, unreadable, unparseable or dead pid all read as "no manager".
+    */
+  private def liveManager(root: Path): Option[Long] =
+    val f = managerPidFile(root)
+    if !Files.exists(f) then None
+    else
+      scala.util
+        .Try(Files.readString(f).trim.toLong)
+        .toOption
+        .filter(pid => ProcessHandle.of(pid).filter(_.isAlive).isPresent)
+
+  /** Whether `pid` is a process this demo home owns, proven by its command line naming this home's
+    * `pgdata` (Postgres runs as `postgres -D <pgdata>`). Both the absolute and the real path are
+    * checked because macOS reports `/var/folders/...` on the command line for a directory whose
+    * real path is `/private/var/folders/...`. A process whose command line cannot be read (another
+    * user, tightened permissions) is NOT ours as far as this check is concerned, so the caller
+    * refuses instead of killing it.
+    */
+  private def ownsPgData(pid: Long, pgDir: Path): Boolean =
+    val pgData = pgDir.resolve("pgdata")
+    val names  = Set(
+      scala.util.Try(pgData.toAbsolutePath.toString).toOption,
+      scala.util.Try(pgData.toRealPath().toString).toOption
+    ).flatten.filter(_.nonEmpty)
+    val handle = ProcessHandle.of(pid)
+    handle.isPresent && {
+      val cmd = handle.get().info().commandLine().orElse("")
+      names.exists(cmd.contains)
+    }
+
+  /** Stop an orphaned postgres this home owns: SIGTERM, then SIGKILL if it will not go, then give
+    * up loudly rather than fall through to a destructive wipe of a directory something still holds
+    * open.
+    */
+  private def reclaimOrphan(pid: Long, root: Path): Unit =
+    val handle = ProcessHandle.of(pid)
+    if handle.isPresent then
+      val h = handle.get()
+      h.destroy()
+      awaitExit(h, 10000)
+      if h.isAlive then
+        h.destroyForcibly()
+        awaitExit(h, 5000)
+    if ProcessHandle.of(pid).filter(_.isAlive).isPresent then
+      sys.error(
+        s"an orphaned postgres (pid $pid) holds $root and would not stop - kill it by hand " +
+          s"with `kill -9 $pid`, or give this run its own QOD_DEMO_HOME"
+      )
+
+  /** Poll until the process exits or the budget runs out. */
+  private def awaitExit(h: ProcessHandle, budgetMs: Long): Unit =
+    val deadline = System.currentTimeMillis() + budgetMs
+    while h.isAlive && System.currentTimeMillis() < deadline do Thread.sleep(50)
 
   /** Best-effort recursive delete of one subtree, deepest-first. Never throws: it runs both on the
     * teardown path (which must not mask the real failure) and on the pre-flight clean above.

@@ -64,6 +64,70 @@ class DemoHomeSpec extends AnyFlatSpec with Matchers:
     Files.exists(pgData.resolve("postmaster.pid")) shouldBe true // not wiped
   }
 
+  // Both halves of the pair alive is a genuinely live demo: refuse, and name the manager pid so
+  // the operator knows what to stop rather than being told only that something is in the way.
+  it should "refuse, naming the manager, when both the manager and its postgres are alive" in {
+    val base   = Files.createTempDirectory("demo-home-pair")
+    val root   = base.resolve("qod-demo")
+    val pgData = root.resolve("pg").resolve("pgdata")
+    Files.createDirectories(pgData)
+    val self = ProcessHandle.current().pid()
+    Files.writeString(pgData.resolve("postmaster.pid"), s"$self\n/tmp\n")
+    Files.writeString(root.resolve("manager.pid"), s"$self\n")
+
+    val ex = intercept[RuntimeException](DemoHome.create(Some(root.toString)))
+    ex.getMessage should include("a demo is already running")
+    ex.getMessage should include(s"manager pid $self")
+    Files.exists(pgData.resolve("postmaster.pid")) shouldBe true // not wiped
+  }
+
+  // The case this guard could not previously distinguish: postgres alive, manager gone. That is
+  // not a live demo, it is our own orphan, and it blocked every later run on the default home
+  // with no self-service recovery. Reclaim it - but only after proving the process is ours.
+  it should "reclaim an orphaned postgres whose manager is gone" in {
+    val base   = Files.createTempDirectory("demo-home-orphan")
+    val root   = base.resolve("qod-demo")
+    val pgData = root.resolve("pg").resolve("pgdata")
+    Files.createDirectories(pgData)
+    // A real, killable stand-in whose command line names THIS home's pgdata, which is how
+    // `create` proves the process belongs to this demo. `sh -c <cmd> <arg0>` puts the extra
+    // operand on the command line without changing what runs.
+    val victim = new ProcessBuilder("/bin/sh", "-c", "sleep 600", pgData.toString).start()
+    try
+      Files.writeString(pgData.resolve("postmaster.pid"), s"${victim.pid()}\n/tmp\n")
+      // No manager.pid: the manager that owned this postgres is gone.
+
+      val home = DemoHome.create(Some(root.toString))
+
+      victim.isAlive shouldBe false
+      Files.exists(pgData.resolve("postmaster.pid")) shouldBe false // wiped after reclaim
+      Files.isDirectory(home.pgDir) shouldBe true
+      home.deleteRecursively()
+    finally victim.destroyForcibly()
+  }
+
+  // Ownership is proven from the process, never assumed from a missing manager.pid: an unrelated
+  // live process holding that pid must be refused, not killed. This JVM stands in for it.
+  it should "refuse rather than kill a live process it cannot prove it owns" in {
+    val base   = Files.createTempDirectory("demo-home-notours")
+    val root   = base.resolve("qod-demo")
+    val pgData = root.resolve("pg").resolve("pgdata")
+    Files.createDirectories(pgData)
+    Files.writeString(pgData.resolve("postmaster.pid"), s"${ProcessHandle.current().pid()}\n/tmp\n")
+
+    val ex = intercept[RuntimeException](DemoHome.create(Some(root.toString)))
+    ex.getMessage should include("a demo is already running")
+    ProcessHandle.current().isAlive shouldBe true
+  }
+
+  it should "record its own pid so a later run can tell a live demo from an orphan" in {
+    val base     = Files.createTempDirectory("demo-home-pidfile")
+    val home     = DemoHome.create(Some(base.resolve("qod-demo").toString))
+    val recorded = Files.readString(home.root.resolve("manager.pid")).trim.toLong
+    recorded shouldBe ProcessHandle.current().pid()
+    home.deleteRecursively()
+  }
+
   it should "clean past a postmaster.pid whose process is gone" in {
     val base   = Files.createTempDirectory("demo-home-deadpid")
     val root   = base.resolve("qod-demo")
