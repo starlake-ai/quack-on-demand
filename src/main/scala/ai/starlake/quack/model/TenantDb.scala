@@ -24,10 +24,21 @@ final case class TenantDb(
     // tenant-db. Branch rows attach on their nodes under the PARENT's catalog alias (metastore
     // key `catalogAlias`), are excluded from maintenance scheduling, and are torn down through
     // the branch lifecycle rather than database/delete.
-    branchOf: Option[String] = None
+    branchOf: Option[String] = None,
+    // Encrypt this database's data at rest. kind=ducklake passes ENCRYPTED on every ATTACH and
+    // DuckLake mints a key per Parquet file into its own catalog; kind=duckdb-file passes
+    // ENCRYPTION_KEY from `metastore(EncryptionKeyName)`. Create-time only: neither engine can
+    // encrypt an existing database in place, so there is no update path and no field to refuse
+    // on one.
+    encrypted: Boolean = false
 )
 
 object TenantDb {
+
+  /** Metastore key holding the per-database DuckDB file encryption key. Only ever set for
+    * `kind=duckdb-file`: DuckLake keeps its own per-file keys in `ducklake_data_file`.
+    */
+  val EncryptionKeyName: String = "encryptionKey"
 
   /** Keys that must never round-trip in an API response, and that
     * [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] carries over from the stored map
@@ -39,7 +50,21 @@ object TenantDb {
     * (update merge) so the two sites cannot drift out of sync.
     */
   val SecretKeys: Set[String] =
-    Set("pgPassword", "s3_secret_access_key", "azure_account_key", "gcs_hmac_secret")
+    Set(
+      "pgPassword",
+      "s3_secret_access_key",
+      "azure_account_key",
+      "gcs_hmac_secret",
+      EncryptionKeyName
+    )
+
+  /** Metastore keys that must never reach a Kubernetes pod spec as a plain `EnvVar`. Read by both
+    * the strip in `KubernetesQuackBackend.buildPod` and the contents of the per-pool node-env
+    * Secret, so the two cannot drift. Deliberately distinct from [[SecretKeys]], which answers a
+    * different question (what must never round-trip through an API response) and spans the
+    * `objectStore` map as well.
+    */
+  val NodeSecretEnvKeys: Set[String] = Set("pgPassword", EncryptionKeyName)
 
   /** Optional metastore key naming the DuckDB catalog alias the node ATTACHes the database under.
     * Absent (every ordinary tenant-db), the alias is `dbName`. Branch catalogs set it to their
@@ -174,8 +199,25 @@ object TenantDb {
         )
       case _ => None
 
+  /** The encryption contract, checked for every kind. `encryptionKey` is interpolated into a
+    * single-quoted DuckDB string literal by the spawn scripts, exactly like `pgPassword`, so it
+    * obeys the same metacharacter denial.
+    */
+  private def encryptionError(td: TenantDb): Option[String] =
+    val key = td.metastore.get(EncryptionKeyName).filter(_.nonEmpty)
+    if td.encrypted && td.kind == TenantDbKind.InMemory then
+      Some("kind=memory cannot be encrypted: nothing is stored at rest")
+    else if key.isDefined && td.kind == TenantDbKind.DuckLake then
+      Some("kind=ducklake manages its own per-file encryption keys: remove encryptionKey")
+    else if key.isDefined && !td.encrypted then
+      Some("encryptionKey requires encrypted=true: one intent per call")
+    else if key.exists(_.exists(ConnParamForbiddenChars.contains)) then
+      Some("invalid encryptionKey: must not contain any of ' ; \\ or a newline")
+    else None
+
   def validateSafety(td: TenantDb): Option[String] =
-    schemaNameError(td.metastore)
+    encryptionError(td)
+      .orElse(schemaNameError(td.metastore))
       .orElse(dbNameError(td.metastore))
       .orElse(catalogAliasError(td.metastore))
       .orElse(connParamError(td.metastore, "pgHost"))

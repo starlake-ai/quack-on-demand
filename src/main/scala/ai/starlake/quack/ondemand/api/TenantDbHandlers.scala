@@ -6,6 +6,7 @@ import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
+import org.slf4j.LoggerFactory
 import sttp.model.StatusCode
 
 /** REST handlers for the `qodstate_tenant_db` rows owned by each tenant. Identified by the natural
@@ -22,8 +23,15 @@ final class TenantDbHandlers(
     /** Mirrors `manager.managedObjectStore.enabled`: gates `managedStorage` requests here so the
       * caller gets a 400 naming the env var instead of a supervisor-level refusal.
       */
-    managedEnabled: Boolean = false
+    managedEnabled: Boolean = false,
+    /** Mirrors `quack-on-demand.requireEncryption`: refuses an unencrypted create so an operator
+      * can guarantee no plaintext database exists in the deployment. Gates creates only; existing
+      * databases are untouched, so enabling it never bricks a running deployment.
+      */
+    requireEncryption: Boolean = false
 ):
+
+  private val logger = LoggerFactory.getLogger(getClass)
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -51,6 +59,29 @@ final class TenantDbHandlers(
       Some("managedStorage is exclusive with dataPath/objectStore: one intent per call")
     else if TenantDbKind.fromWire(req.kind).toOption.exists(_ != TenantDbKind.DuckLake) then
       Some("managedStorage requires kind=ducklake")
+    else None
+
+  /** The encryption refusals, all 400 `invalid`. The per-kind rules duplicate `TenantDb`'s own
+    * encryption checks deliberately: the model check runs on the constructed row and would reject
+    * with the same message, but catching it here gives the caller a 400 with the field named rather
+    * than a supervisor-level refusal, exactly as `validateManagedStorage` does.
+    */
+  private[api] def validateEncryption(req: TenantDbRequest): Option[String] =
+    val kind = TenantDbKind.fromWire(req.kind).toOption
+    val key  = req.encryptionKey.filter(_.nonEmpty)
+    if key.isDefined && kind.contains(TenantDbKind.DuckLake) then
+      Some("kind=ducklake manages its own per-file encryption keys: remove encryptionKey")
+    else if key.isDefined && !req.encrypted then
+      Some("encryptionKey requires encrypted=true: one intent per call")
+    else if requireEncryption && kind.contains(TenantDbKind.InMemory) then
+      Some(
+        "this deployment requires encryption at rest (QOD_REQUIRE_ENCRYPTION): kind=memory " +
+          "cannot satisfy it"
+      )
+    else if requireEncryption && !req.encrypted then
+      Some(
+        "this deployment requires encryption at rest (QOD_REQUIRE_ENCRYPTION): pass encrypted=true"
+      )
     else None
 
   private def federatedCount(tenantDbId: String): Int =
@@ -83,7 +114,8 @@ final class TenantDbHandlers(
       federatedSourceCount = federatedCount(td.id),
       initSql = td.initSql,
       effectiveDataPath = sup.effectiveMetastoreFor(tenantName, td.name).getOrElse("dataPath", ""),
-      tableCount = tableCountFor(tenantName, td)
+      tableCount = tableCountFor(tenantName, td),
+      encrypted = td.encrypted
     )
 
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
@@ -107,7 +139,9 @@ final class TenantDbHandlers(
             )
           )
         else
-          validateObjectStore(req.objectStore).orElse(validateManagedStorage(req)) match
+          validateObjectStore(req.objectStore)
+            .orElse(validateManagedStorage(req))
+            .orElse(validateEncryption(req)) match
             case Some(msg) =>
               IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
             case None =>
@@ -121,17 +155,26 @@ final class TenantDbHandlers(
                       tenantName = req.tenant,
                       suffix = req.name,
                       kind = kind,
-                      metastore = req.metastore,
+                      metastore = req.encryptionKey.filter(_.nonEmpty).fold(req.metastore) { k =>
+                        req.metastore.updated(TenantDb.EncryptionKeyName, k)
+                      },
                       dataPath = req.dataPath,
                       objectStore = req.objectStore,
                       defaultDatabase = req.defaultDatabase,
                       defaultSchema = req.defaultSchema,
                       initSql = req.initSql,
                       managedStorage = req.managedStorage,
+                      encrypted = req.encrypted,
                       gateBypass = gateBypass
                     )
                     .flatMap {
                       case Right(td) =>
+                        if req.encryptionKey.exists(_.nonEmpty) then
+                          logger.warn(
+                            s"tenant-db ${td.name} was created with a caller-supplied encryption " +
+                              "key. QoD will never return it: if it is lost the database cannot " +
+                              "be opened."
+                          )
                         audit.rest(
                           apiKey,
                           "control-plane",

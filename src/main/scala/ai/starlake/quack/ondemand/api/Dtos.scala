@@ -350,7 +350,16 @@ final case class TenantDbRequest(
     // supplying it: exclusive with `dataPath` / `objectStore`, requires
     // kind=ducklake and an enabled managed-store config. The resolved
     // location comes back on the response's `dataPath`.
-    managedStorage: Boolean = false
+    managedStorage: Boolean = false,
+    /** Encrypt this database's data at rest. Create-time only: neither DuckLake nor DuckDB can
+      * encrypt an existing database in place, so there is no field for it on the update request.
+      */
+    encrypted: Boolean = false,
+    /** BYO key for `kind=duckdb-file`. Omit and QoD mints one. Refused for `kind=ducklake`, which
+      * manages its own per-file keys, and refused without `encrypted`. Never returned by any
+      * endpoint: `TenantDb.SecretKeys` keeps it out of every response.
+      */
+    encryptionKey: Option[String] = None
 )
 final case class TenantDbResponse(
     id: String,
@@ -370,7 +379,8 @@ final case class TenantDbResponse(
     effectiveDataPath: String = "",
     // Tables across all schemas via the DuckLake catalog reader; None for
     // non-DuckLake kinds or when the catalog is unreachable.
-    tableCount: Option[Int] = None
+    tableCount: Option[Int] = None,
+    encrypted: Boolean = false
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 

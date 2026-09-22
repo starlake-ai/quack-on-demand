@@ -33,12 +33,18 @@ object DemoBootstrapHook:
     * @param fedStore
     *   optional federated-source store; when provided, any federatedSources in the manifest are
     *   persisted too. Pass None to silently drop federation entries (the unit-test path uses this).
+    * @param requireEncryption
+    *   mirrors `quack-on-demand.requireEncryption`. A bootstrap manifest creates tenant-db rows
+    *   like any other import, so it is gated by the same policy; with the knob on, a demo manifest
+    *   full of plaintext databases logs its refusals and the manager boots without them, rather
+    *   than quietly seeding the one thing the knob exists to prevent.
     */
   def run(
       env: String => Option[String],
       readFile: String => Try[String],
       store: ControlPlaneStore,
-      fedStore: Option[FederatedSourceStore] = None
+      fedStore: Option[FederatedSourceStore] = None,
+      requireEncryption: Boolean = false
   ): IO[Unit] = IO.blocking {
     env(EnvKey) match
       case None =>
@@ -52,14 +58,15 @@ object DemoBootstrapHook:
               case Left(parseErr) =>
                 logger.warn(s"bootstrap: failed to parse manifest '$path': ${parseErr.getMessage}")
               case Right(manifest) =>
-                applyIfFresh(manifest, store, fedStore, path)
+                applyIfFresh(manifest, store, fedStore, path, requireEncryption)
   }
 
   private def applyIfFresh(
       manifest: ConfigManifest,
       store: ControlPlaneStore,
       fedStore: Option[FederatedSourceStore],
-      path: String
+      path: String,
+      requireEncryption: Boolean
   ): Unit =
     val existingCount = store.listTenants().size
     if existingCount > 0 then
@@ -72,7 +79,7 @@ object DemoBootstrapHook:
           s"skipping demo bootstrap import of '$path'"
       )
     else
-      ManifestImporter.apply(manifest, store, fedStore) match
+      ManifestImporter.apply(manifest, store, fedStore, requireEncryption) match
         case Left(errs) =>
           errs.foreach(e => logger.warn(s"bootstrap: import error: $e"))
         case Right(()) =>

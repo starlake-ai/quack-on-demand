@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, LockdownTriState}
+import ai.starlake.quack.model.{FederatedSecret, LockdownTriState, TenantDb}
 import ai.starlake.quack.ondemand.state.{ControlPlaneStore, FederatedSourceStore}
 
 import java.time.Instant
@@ -98,13 +98,22 @@ object ManifestExporter:
         ManifestTenantDb(
           name = d.name,
           kind = d.kind.wireValue,
-          metastore = d.metastore,
+          // `encryptionKey` exports redacted like every other SecretKeys member, which means a
+          // redacted manifest can never recreate an encrypted duckdb-file database: without the
+          // original key, the imported row cannot be made to open the same encrypted file on
+          // disk. That is deliberate, not a gap to close -- the key must not leave the control
+          // plane in a backup/replay artifact. (README.md may document this for operators; this
+          // comment does not depend on that.) Unlike `pgPassword` (also a SecretKeys member but
+          // carried verbatim here so a manifest replay can still connect), this key is minted or
+          // caller-supplied per database and has no legitimate reason to travel with a backup.
+          metastore = d.metastore - TenantDb.EncryptionKeyName,
           dataPath = d.dataPath,
           objectStore = d.objectStore,
           defaultDatabase = d.defaultDatabase,
           defaultSchema = d.defaultSchema,
           initSql = d.initSql,
-          federatedSources = fedSources
+          federatedSources = fedSources,
+          encrypted = d.encrypted
         )
       }
 

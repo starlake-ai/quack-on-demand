@@ -18,14 +18,22 @@ object ManifestCli:
     out.print(Yaml.pretty(m.asJson))
     0
 
-  def importFrom(store: ControlPlaneStore, in: InputStream): Int =
+  /** `requireEncryption` mirrors `quack-on-demand.requireEncryption`: this offline path creates
+    * tenant-db rows against the very same control plane the manager serves, so it honours the same
+    * policy as database/create and the REST import.
+    */
+  def importFrom(
+      store: ControlPlaneStore,
+      in: InputStream,
+      requireEncryption: Boolean = false
+  ): Int =
     val body = new String(in.readAllBytes(), StandardCharsets.UTF_8)
     parser.parse(body).flatMap(_.as[ConfigManifest]) match
       case Left(e) =>
         System.err.println(s"invalid yaml: ${e.getMessage}")
         1
       case Right(m) =>
-        ManifestImporter.apply(m, store) match
+        ManifestImporter.apply(m, store, requireEncryption = requireEncryption) match
           case Left(errs) =>
             errs.foreach(e => System.err.println(s"error: $e"))
             1

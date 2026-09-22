@@ -50,7 +50,11 @@ final case class ManifestTenantDb(
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
     initSql: String = "",
-    federatedSources: List[ManifestFederatedSource] = Nil
+    federatedSources: List[ManifestFederatedSource] = Nil,
+    // Round-tripped verbatim from TenantDb.encrypted. Not a live toggle: the underlying
+    // database is never re-encrypted by an import, this only keeps the stored row's flag in
+    // sync with the manifest (matching how every other field here is applied).
+    encrypted: Boolean = false
 )
 
 final case class ManifestPool(

@@ -27,6 +27,8 @@ def list_(ctx: typer.Context, tenant: str = typer.Option(..., "--tenant")):
         "defaultSchema": "--default-schema",
         "initSql": "--init-sql",
         "managedStorage": "--managed-storage",
+        "encrypted": "--encrypted",
+        "encryptionKey": "--encryption-key",
     },
 )
 def create(
@@ -44,6 +46,19 @@ def create(
         False,
         "--managed-storage",
         help="Provision a managed data path (exclusive with --data-path/--object-store)",
+    ),
+    encrypted: bool = typer.Option(
+        False,
+        "--encrypted",
+        help="Encrypt data at rest. Cannot be changed later: create a new database to change it.",
+    ),
+    encryption_key: str = typer.Option(
+        None,
+        "--encryption-key",
+        help=(
+            "duckdb-file only: supply your own key instead of letting QoD mint one. "
+            "It is never readable back through the API. Lose it and the database is unreadable."
+        ),
     ),
 ):
     meta = kv_pairs(metastore)
@@ -73,6 +88,10 @@ def create(
         body["defaultSchema"] = default_schema
     if managed_storage:
         body["managedStorage"] = True
+    if encrypted:
+        body["encrypted"] = True
+    if encryption_key:
+        body["encryptionKey"] = encryption_key
     call(ctx, "POST", "/api/database/create", body=body)
 
 

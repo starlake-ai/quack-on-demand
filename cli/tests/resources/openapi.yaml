@@ -8986,6 +8986,7 @@ components:
       - objectStore
       - initSql
       - managedStorage
+      - encrypted
       properties:
         tenant:
           type: string
@@ -9007,6 +9008,10 @@ components:
           type: string
         managedStorage:
           type: boolean
+        encrypted:
+          type: boolean
+        encryptionKey:
+          type: string
     TenantDbResponse:
       title: TenantDbResponse
       type: object
@@ -9022,6 +9027,7 @@ components:
       - federatedSourceCount
       - initSql
       - effectiveDataPath
+      - encrypted
       properties:
         id:
           type: string
@@ -9053,6 +9059,8 @@ components:
         tableCount:
           type: integer
           format: int32
+        encrypted:
+          type: boolean
     TenantListResponse:
       title: TenantListResponse
       type: object

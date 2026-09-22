@@ -309,6 +309,13 @@ export interface TenantDbRequest {
   // DuckLake only; exclusive with dataPath/objectStore. When true the
   // server provisions and resolves the dataPath itself.
   managedStorage?: boolean;
+  // Encrypt this database's data at rest. Create-time only: neither DuckLake
+  // nor DuckDB can encrypt an existing database in place. Refused for kind=memory.
+  encrypted?: boolean;
+  // BYO key for kind=duckdb-file only. Omit and the server mints one. Refused
+  // for kind=ducklake (which manages its own per-file keys) and without
+  // encrypted=true. Never returned by any endpoint -- the server never echoes it back.
+  encryptionKey?: string;
 }
 
 // Resolved manager defaults for the database-create form's metastore section.
@@ -341,6 +348,7 @@ export interface TenantDbResponse {
   /** Total table count in the DuckLake catalog; null when unavailable
     * (memory kind, duckdb-file without a live pool, etc.). */
   tableCount: number | null;
+  encrypted: boolean;
 }
 
 export interface TenantDbListResponse {

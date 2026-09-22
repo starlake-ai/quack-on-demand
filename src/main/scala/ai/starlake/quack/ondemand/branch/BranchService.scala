@@ -292,7 +292,12 @@ final class BranchService(
           defaultDatabase = parent.defaultDatabase,
           defaultSchema = parent.defaultSchema,
           initSql = parent.initSql,
-          branchOf = Some(parent.id)
+          branchOf = Some(parent.id),
+          // A branch is a clone of the parent's catalog: BranchCloner copies ducklake_metadata
+          // wholesale, so the clone is already encrypted or not exactly as the parent is. Carry the
+          // same value onto the control-plane row so the branch pool's own nodes pass the matching
+          // flag on their ATTACHes.
+          encrypted = parent.encrypted
         )
         IO.blocking(sup.registerBranchTenantDb(td)).flatMap {
           case Left(err) =>

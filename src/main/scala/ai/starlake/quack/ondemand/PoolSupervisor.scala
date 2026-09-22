@@ -128,7 +128,7 @@ final class PoolSupervisor(
       * stamps on the tombstone row.
       */
     managedStore: Option[ai.starlake.quack.ManagedObjectStoreConfig] = None,
-    duckLakeInitializer: Map[String, String] => Unit = DuckLakeInitializer.initBlocking
+    duckLakeInitializer: (Map[String, String], Boolean) => Unit = DuckLakeInitializer.initBlocking
 ):
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -143,11 +143,12 @@ final class PoolSupervisor(
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
 
-  // tenant-db.id -> the DataPathMismatchException message that blocked it. Populated by
-  // ensureDuckLakeInitialized when the guard refuses a pre-existing dataPath at boot; consulted by
+  // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
+  // encryption disagreement between the control-plane row and the catalog's own metadata).
+  // Populated by ensureDuckLakeInitialized when a pre-init guard refuses at boot; consulted by
   // reconcile() to skip that tenant-db's pools instead of failing every node spawn with the same
-  // DuckDB DATA_PATH error. Cleared by updateTenantDb (remediation) and deleteTenantDb. In-memory
-  // only: a restart also clears it and re-attempts on the next boot.
+  // DuckDB error. Cleared by updateTenantDb (remediation) and deleteTenantDb. In-memory only: a
+  // restart also clears it and re-attempts on the next boot.
   private val dataPathBlocked = TrieMap.empty[String, String]
 
   /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
@@ -252,8 +253,8 @@ final class PoolSupervisor(
     * `schemaName` is left as the merge yields it for every kind (the default `main` is correct).
     */
   private def effectiveMetastoreFor(td: TenantDb): Map[String, String] =
-    val merged = defaultMetastore ++ td.metastore
-    td.kind match
+    val merged  = defaultMetastore ++ td.metastore
+    val perKind = td.kind match
       case TenantDbKind.DuckLake =>
         val withDb   = merged.updated("dbName", td.metastore.getOrElse("dbName", td.name))
         val rootData = defaultMetastore.getOrElse("dataPath", "")
@@ -280,6 +281,14 @@ final class PoolSupervisor(
         if td.dataPath.nonEmpty then withDb.updated("dataPath", td.dataPath)
         else withDb.removed("dataPath")
 
+    // `encrypted` reaches both spawn scripts as a plain env var through the metastore-to-env
+    // plumbing every backend already has (LocalQuackBackend.scala:55,
+    // KubernetesQuackBackend.buildPod), the same indirection `catalogAlias` uses. Emitted only
+    // when true, and never for InMemory, which has nothing at rest: the scripts treat an absent
+    // value as false.
+    if td.encrypted && td.kind != TenantDbKind.InMemory then perKind.updated("encrypted", "true")
+    else perKind.removed("encrypted")
+
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a
     * boot-time DuckLakeInitializer failure.
@@ -294,6 +303,10 @@ final class PoolSupervisor(
   /** Test-only seam: read back [[dataPathBlocked]] membership. */
   private[ondemand] def isDataPathBlockedForTest(tenantDbId: String): Boolean =
     dataPathBlocked.contains(tenantDbId)
+
+  /** Test-only seam: run the per-kind metastore resolution without spawning anything. */
+  private[ondemand] def effectiveMetastoreForTest(td: TenantDb): Map[String, String] =
+    effectiveMetastoreFor(td)
 
   def restore(): Unit =
     val snap = store.snapshot()
@@ -491,12 +504,12 @@ final class PoolSupervisor(
     tenantDbs.values.toList.foreach { td =>
       if td.kind == TenantDbKind.DuckLake then
         try
-          DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td))
+          DuckLakeInitializer.initBlocking(effectiveMetastoreFor(td), td.encrypted)
           dataPathBlocked.remove(td.id)
         catch
-          case t: DuckLakeInitializer.DataPathMismatchException =>
-            // Not transient: every future node spawn hits the same DuckDB DATA_PATH error, so log
-            // loudly and block this tenant-db's pools from reconcile()'s spawns (see
+          case t: DuckLakeInitializer.PreInitMismatchException =>
+            // Not transient: every future node spawn hits the same DuckDB DATA_PATH or encryption
+            // error, so log loudly and block this tenant-db's pools from reconcile()'s spawns (see
             // isDataPathBlocked). The loop continues: one bad tenant-db must not abort boot.
             dataPathBlocked.put(td.id, t.getMessage)
             logger.error(s"ensureDuckLakeInitialized: '${td.name}' ${t.getMessage}")
@@ -756,13 +769,25 @@ final class PoolSupervisor(
       val key   = PoolKey(tenantName, parentDbName, "__merge")
       val m     = base.metastore
       val alias = ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias
+      // The branch is a clone of the parent's catalog, so it carries the same encryption flag
+      // (BranchService inherits parent.encrypted onto the branch row). Resolved from the
+      // TenantDb row, not the metastore map: the map at this call site does not carry the
+      // derived "encrypted" stamp. Scoped by tenant, not just by name: TenantDb.name is only
+      // unique WITHIN a tenant (Names.normalizeTenantDbName can compose the same string from
+      // two different tenants), so an unscoped scan could match an unrelated tenant's db.
+      val parentEncrypted =
+        findTenantDb(tenantName, parentDbName).exists(_.encrypted)
+      val opts =
+        if parentEncrypted then
+          s"DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY, ENCRYPTED"
+        else s"DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY"
       // Same unquoted connection-string shape as spawn-quack-node.sh: every value passed
       // TenantDb.validateSafety (no quote, semicolon, backslash or newline).
       val attach =
         s"ATTACH 'ducklake:postgres:host=${m.getOrElse("pgHost", "localhost")} " +
           s"port=${m.getOrElse("pgPort", "5432")} dbname=$branchDbName " +
           s"user=${m.getOrElse("pgUser", "postgres")} password=${m.getOrElse("pgPassword", "")}' " +
-          s"AS $alias (DATA_PATH ${SqlLiterals.duckdbLiteral(branchDataPath)}, READ_ONLY);"
+          s"AS $alias ($opts);"
       base.copy(
         poolKey = key,
         nodeId = s"merge-${branchDbName.takeRight(8)}-${System.nanoTime()}",
@@ -1230,6 +1255,13 @@ final class PoolSupervisor(
         * together with a caller-supplied dataPath/objectStore and on non-DuckLake kinds.
         */
       managedStorage: Boolean = false,
+      /** Encrypt this database's data at rest. For `kind=ducklake` the flag alone is enough:
+        * DuckLake mints a key per Parquet file into its own catalog. For `kind=duckdb-file` a
+        * single key is needed on every ATTACH, so one is minted here when the caller supplied none,
+        * and stored in the metastore map where `TenantDb.SecretKeys` keeps it out of every
+        * response. Create-time only: neither engine can encrypt an existing database in place.
+        */
+      encrypted: Boolean = false,
       gateBypass: Boolean = false
   ): IO[Either[SupervisorError, TenantDb]] =
     gateCheck(
@@ -1265,8 +1297,17 @@ final class PoolSupervisor(
                     // database + metadata tables; DuckDbFile and InMemory skip both.
                     val effectiveMeta = kind match
                       case TenantDbKind.DuckLake   => metastore.updated("dbName", full)
-                      case TenantDbKind.DuckDbFile => metastore
-                      case TenantDbKind.InMemory   => metastore
+                      case TenantDbKind.DuckDbFile =>
+                        // A DuckDB file needs the same key on every ATTACH forever. Mint one when
+                        // the caller supplied none (path A); keep theirs when they did (path B).
+                        // Validation has already refused a key without `encrypted`, and refused a
+                        // key carrying a literal-breaking metacharacter.
+                        if encrypted && !metastore
+                            .get(TenantDb.EncryptionKeyName)
+                            .exists(_.nonEmpty)
+                        then metastore.updated(TenantDb.EncryptionKeyName, EncryptionKeyGen.mint())
+                        else metastore
+                      case TenantDbKind.InMemory => metastore
 
                     // Minted up front: a managed prefix is keyed by this id, so a recreated
                     // database of the same name never lands on its predecessor's data.
@@ -1308,7 +1349,8 @@ final class PoolSupervisor(
                       objectStore = effectiveObjectStore,
                       defaultDatabase = defaultDatabase,
                       defaultSchema = defaultSchema,
-                      initSql = initSql
+                      initSql = initSql,
+                      encrypted = encrypted
                     )
 
                     TenantDb.validate(td, defaultMetastore) match
@@ -1332,7 +1374,8 @@ final class PoolSupervisor(
                                 try
                                   duckLakeInitializer(
                                     (defaultMetastore ++ effectiveMeta)
-                                      .updated("dataPath", effectiveDataPath)
+                                      .updated("dataPath", effectiveDataPath),
+                                    encrypted
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
@@ -1341,10 +1384,11 @@ final class PoolSupervisor(
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
                                 catch
-                                  case t: DuckLakeInitializer.DataPathMismatchException =>
-                                    // Not transient: retrying reproduces the DATA_PATH error on
-                                    // every future node spawn, so refuse to create the tenant-db
-                                    // instead of the swallow-and-retry handling below.
+                                  case t: DuckLakeInitializer.PreInitMismatchException =>
+                                    // Not transient: retrying reproduces the DATA_PATH or
+                                    // encryption error on every future node spawn, so refuse to
+                                    // create the tenant-db instead of the swallow-and-retry
+                                    // handling below.
                                     logger.error(
                                       s"createTenantDb: DuckLake pre-init for '$full' refused: " +
                                         t.getMessage
@@ -1500,12 +1544,34 @@ final class PoolSupervisor(
             val droppedRequired =
               (td.metastore.keySet & TenantDb.requiredMetastoreKeys(merged.kind)) --
                 merged.metastore.keySet -- defaultedKeys
+            // A duckdb-file database is encrypted with ONE key, fixed when the file was created,
+            // and neither DuckDB nor the manager can re-key or decrypt it in place: a row whose
+            // stored key no longer matches the file's is a file nobody can ever open again.
+            // mergeSecretKeys preserves the key when the incoming map omits it (that is how a
+            // redacted round-trip survives), but a supplied value overwrites it and a supplied
+            // EMPTY value drops it entirely, both silently. Refuse either, here rather than in
+            // validateSafety, which only sees the merged row and cannot tell a rotation from the
+            // create that first set the key.
+            val storedEncryptionKey = encryptionKeyOf(td.metastore)
+            val mergedEncryptionKey = encryptionKeyOf(merged.metastore)
             if droppedRequired.nonEmpty then
               IO.pure(
                 Left(
                   SupervisorError.InvalidArgument(
                     s"invalid: metastore update drops required key(s) ${droppedRequired.mkString(", ")}; " +
                       "send the full map (pgPassword may be omitted, it is preserved)"
+                  )
+                )
+              )
+            else if storedEncryptionKey.isDefined && mergedEncryptionKey != storedEncryptionKey then
+              IO.pure(
+                Left(
+                  SupervisorError.InvalidArgument(
+                    "invalid: encryptionKey cannot be changed on an existing database: the file " +
+                      "was encrypted with the stored key when it was created and neither engine " +
+                      "can re-key or decrypt it in place, so a new or empty value would leave it " +
+                      "permanently unopenable. Omit encryptionKey to keep the stored one; to use " +
+                      "a different key, create a new database and copy the data."
                   )
                 )
               )
@@ -1568,6 +1634,14 @@ final class PoolSupervisor(
                 Right(TenantDbUpdateResult(merged, ok, failed))
               }
             }
+    }
+
+  /** The stored `encryptionKey` of a metastore map, matched case-insensitively like every other
+    * site that reasons about [[TenantDb.SecretKeys]]. An empty value reads as no key at all.
+    */
+  private def encryptionKeyOf(metastore: Map[String, String]): Option[String] =
+    metastore.collectFirst {
+      case (k, v) if k.equalsIgnoreCase(TenantDb.EncryptionKeyName) && v.nonEmpty => v
     }
 
   /** Empty patch value clears an Option field; non-blank sets it. */

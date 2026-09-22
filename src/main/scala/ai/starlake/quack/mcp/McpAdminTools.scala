@@ -878,6 +878,13 @@ final class McpAdminTools(
       "default_schema"   -> strProp("Default schema presented to clients."),
       "init_sql"         -> strProp("SQL run on each node at attach."),
       "managed_storage"  -> boolProp("Let the manager provision metastore + storage."),
+      "encrypted"        -> boolProp(
+        "Encrypt this database's data at rest. Create-time only: it cannot be changed later."
+      ),
+      "encryption_key" -> strProp(
+        "duckdb-file only: supply your own encryption key instead of letting QoD mint one. " +
+          "Never readable back."
+      ),
       tenantProp
     ),
     adminOnly = true,
@@ -900,7 +907,9 @@ final class McpAdminTools(
                 defaultDatabase = str(args, "default_database"),
                 defaultSchema = str(args, "default_schema"),
                 initSql = str(args, "init_sql").getOrElse(""),
-                managedStorage = bool(args, "managed_storage").getOrElse(false)
+                managedStorage = bool(args, "managed_storage").getOrElse(false),
+                encrypted = bool(args, "encrypted").getOrElse(false),
+                encryptionKey = str(args, "encryption_key").filter(_.nonEmpty)
               ),
               keyOf(principal)
             )(scopeOf)

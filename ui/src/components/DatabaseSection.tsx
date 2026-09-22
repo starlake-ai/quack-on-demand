@@ -52,6 +52,9 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
   const [defaultSchema, setDefaultSchema]     = useState('');
   const [initSql, setInitSql]               = useState('');
 
+  const [encrypted, setEncrypted]           = useState(false);
+  const [encryptionKey, setEncryptionKey]   = useState('');
+
   const [editingDb, setEditingDb]             = useState<TenantDbResponse | null>(null);
   const [editDefaultDb, setEditDefaultDb]     = useState('');
   const [editDefaultSchema, setEditDefaultSchema] = useState('');
@@ -91,9 +94,31 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
     setDefaultDatabase('');
     setDefaultSchema('');
     setInitSql('');
+    setEncrypted(false);
+    setEncryptionKey('');
     setMsMode('default');
     setMsKeys({});
     setError(null);
+  }
+
+  // Kind drives whether encryption applies at all (memory can't be
+  // encrypted) and whether a caller-supplied key is meaningful (duckdb-file
+  // only; ducklake mints its own per-file keys). Changing kind away from a
+  // state that supports the current settings clears them so the request
+  // body can never carry a combination the server would refuse.
+  function onKindChange(next: TenantDbKind) {
+    setKind(next);
+    if (next === 'memory') {
+      setEncrypted(false);
+      setEncryptionKey('');
+    } else if (next !== 'duckdb-file') {
+      setEncryptionKey('');
+    }
+  }
+
+  function onEncryptedChange(next: boolean) {
+    setEncrypted(next);
+    if (!next) setEncryptionKey('');
   }
 
   function openForm() {
@@ -162,6 +187,15 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
       if (defaultDatabase.trim()) reqBody.defaultDatabase = defaultDatabase.trim();
       if (defaultSchema.trim())   reqBody.defaultSchema   = defaultSchema.trim();
       if (initSql.trim())         reqBody.initSql         = initSql.trim();
+      if (encrypted) {
+        reqBody.encrypted = true;
+        // Only meaningful for duckdb-file; onKindChange/onEncryptedChange
+        // already clear encryptionKey whenever that stops being true, so
+        // this is a defensive re-check, not the sole guard.
+        if (kind === 'duckdb-file' && encryptionKey.trim()) {
+          reqBody.encryptionKey = encryptionKey.trim();
+        }
+      }
       await api.createTenantDb(reqBody);
       resetForm();
       setAdding(false);
@@ -319,6 +353,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
                          : d.kind === 'duckdb-file' ? '#854d0e'
                          : '#6b21a8',
                   }}>{d.kind ?? 'ducklake'}</span>
+                  {d.encrypted && <span className="subtle" style={{ marginLeft: 6 }}>encrypted</span>}
                 </td>
                 <td><code>{d.metastore.schemaName || d.defaultSchema || '-'}</code></td>
                 <td>
@@ -438,7 +473,7 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
             )}
             <label>
               Kind
-              <select value={kind} onChange={e => setKind(e.target.value as TenantDbKind)}>
+              <select value={kind} onChange={e => onKindChange(e.target.value as TenantDbKind)}>
                 <option value="ducklake">ducklake</option>
                 <option value="duckdb-file">duckdb-file</option>
                 <option value="memory">memory (federation-only sources)</option>
@@ -449,6 +484,34 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               {kind === 'duckdb-file' && 'Local .duckdb file attached as the default catalog. Single-node only.'}
               {kind === 'memory'      && 'No persistent default catalog. Only useful with federated sources.'}
             </p>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={encrypted}
+                disabled={kind === 'memory'}
+                onChange={ev => onEncryptedChange(ev.target.checked)}
+              />
+              {' '}Encrypt at rest
+            </label>
+            {kind === 'memory' ? (
+              <p className="subtle" style={{ marginTop: 0 }}>
+                In-memory databases store nothing at rest.
+              </p>
+            ) : encrypted && kind === 'duckdb-file' ? (
+              <label>
+                Encryption key (optional)
+                <input
+                  type="password"
+                  value={encryptionKey}
+                  onChange={ev => setEncryptionKey(ev.target.value)}
+                  autoComplete="new-password"
+                />
+                <p className="subtle" style={{ marginTop: 4, marginBottom: 0 }}>
+                  Leave blank and QoD generates a key. A key you supply is never shown again
+                  and cannot be recovered.
+                </p>
+              </label>
+            ) : null}
             {kind !== 'memory' && (
               <label>
                 Schema

@@ -16,9 +16,13 @@ import scala.jdk.CollectionConverters._
   * orphan-discovery pass can reconstruct [[ai.starlake.quack.model.RunningNode]] after a manager
   * restart.
   *
-  * Three Secrets accompany each pod:
+  * Four Secrets accompany each pod:
   *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
   *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
+  *   - per-pool `qod-nodeenv-${tenant}-${tenantDb}-${pool}` holds the sensitive metastore values
+  *     ([[KubernetesQuackBackend.NodeEnvSecretKeys]]: `pgPassword`, `encryptionKey`) the node needs
+  *     as env vars; all pods of the pool share it, since they all attach the same tenant-db with
+  *     the same credentials.
   *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
   *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads it
   *     back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing after a
@@ -26,6 +30,10 @@ import scala.jdk.CollectionConverters._
   *   - per-pod `qod-store-${nodeId}` holds the scoped per-database object-store `CREATE SECRET` SQL
   *     (authored by `ObjectStoreSecret.sql`, [[ai.starlake.quack.model.NodeSpec.objectStoreSql]])
   *     when non-empty; only that one node's pod references it.
+  *
+  * UPGRADE NOTE: as of this change, `pgPassword` and `encryptionKey` reach a node through the
+  * per-pool node-env Secret, not the pod's plain env. Pods created by an earlier manager still
+  * carry the old shape and are NOT healed in place: restart every node after upgrading.
   */
 final class KubernetesQuackBackend(
     client: KubernetesClient,
@@ -85,11 +93,29 @@ final class KubernetesQuackBackend(
     // would resurrect a key `effectiveMetastoreFor` deliberately removed (e.g. the
     // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
     // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
-    val merged = spec.metastore
+    // Sensitive metastore values never become plain EnvVars: a pod spec is readable by anyone with
+    // `kubectl get pod -o yaml`, and `pgPassword` alone is enough to read
+    // `ducklake_data_file.encryption_key` and decrypt every file of an encrypted DuckLake. They go
+    // through the per-pool node-env Secret instead (ensureNodeEnvSecret, called from start()).
+    // Both this strip and that Secret's contents are derived from nodeEnvSecretValues, so the pod
+    // can never reference a Secret key the Secret does not hold.
+    val secreted = nodeEnvSecretValues(spec)
+    val merged   = spec.metastore -- secreted.keySet
     merged.foreach { case (k, v) =>
       val e = new EnvVar()
       e.setName(k)
       e.setValue(v)
+      envs.add(e)
+    }
+    secreted.keys.foreach { k =>
+      val e      = new EnvVar()
+      val source = new EnvVarSource()
+      val ref    = new SecretKeySelector()
+      ref.setName(nodeEnvSecretNameFor(spec.poolKey))
+      ref.setKey(k)
+      source.setSecretKeyRef(ref)
+      e.setName(k)
+      e.setValueFrom(source)
       envs.add(e)
     }
     // Mirror the env-inheritance LocalQuackBackend gets for free (via
@@ -98,7 +124,9 @@ final class KubernetesQuackBackend(
     // s3:// / az:// / gs:// data paths. `spec.metastore` wins if it already
     // carries an explicit value for one of these keys.
     KubernetesQuackBackend.cloudCredEnvVars.foreach { name =>
-      if !merged.contains(name) then
+      // The full metastore, not `merged`: a sensitive key that also named a cloud-cred var must
+      // still suppress the forward rather than be shadowed by the manager's own env.
+      if !spec.metastore.contains(name) then
         readEnv(name).foreach { v =>
           val e = new EnvVar()
           e.setName(name)
@@ -396,6 +424,11 @@ final class KubernetesQuackBackend(
       // live credentials, e.g. a racing start against a still-running node).
       if !tokenSecretExisted then created.add("tokenSecret")
       if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+      // Per-pool like the federation Secret above, and deliberately NOT tracked in `created`: it is
+      // shared by every pod of the pool, so a partial-start rollback must not delete it out from
+      // under a live sibling. stop() GCs it with the pool's last pod.
+      val nodeEnvValues = nodeEnvSecretValues(spec)
+      if nodeEnvValues.nonEmpty then ensureNodeEnvSecret(spec.poolKey, nodeEnvValues)
       if spec.objectStoreSql.nonEmpty then
         val objectStoreSecretExisted = client.secrets
           .inNamespace(namespace)
@@ -500,10 +533,10 @@ final class KubernetesQuackBackend(
     * before that overwrite; restoring it here is what keeps `discoverExisting` matching the
     * incumbent's token after a manager restart.
     *
-    * The per-POOL federation Secret (`qod-fedsql-...`) is intentionally left out of the `created`
-    * gate and never deleted here: it is shared by every pod of the pool, so deleting it on one
-    * node's failure could break sibling pods that reference it. It is GC'd by [[stop]] when the
-    * pool's last pod goes away.
+    * The per-POOL Secrets (federation `qod-fedsql-...` and node-env `qod-nodeenv-...`) are
+    * intentionally left out of the `created` gate and never deleted here: they are shared by every
+    * pod of the pool, so deleting one on a single node's failure could break sibling pods that
+    * reference it. Both are GC'd by [[stop]] when the pool's last pod goes away.
     */
   private def cleanupPartialStart(
       spec: NodeSpec,
@@ -579,8 +612,8 @@ final class KubernetesQuackBackend(
     client.secrets.inNamespace(namespace).withName(objectStoreSecretNameFor(nodeId)).delete()
     tokens.remove(nodeId)
 
-    // Federation-Secret GC is pure bookkeeping: a failure here (apiserver blip on the
-    // label-list) must not abort a stop whose pod delete already succeeded. The pool key
+    // Per-pool Secret GC (federation + node-env) is pure bookkeeping: a failure here (apiserver
+    // blip on the label-list) must not abort a stop whose pod delete already succeeded. The pool key
     // comes from the caller, never from pod labels, so the GC works when the pod is
     // already gone; the filterNots drop the just-deleted pod (apiserver propagation lag)
     // and Terminating siblings. Only manager-owned pods count (managed-by label, matching
@@ -604,12 +637,45 @@ final class KubernetesQuackBackend(
           .inNamespace(namespace)
           .withName(secretNameFor(key))
           .delete()
+        // Same per-pool lifetime and the same idempotent-on-missing delete: a pool whose tenant-db
+        // carried neither sensitive key never had this Secret, and the delete is a no-op then.
+        client.secrets
+          .inNamespace(namespace)
+          .withName(nodeEnvSecretNameFor(key))
+          .delete()
         ()
     catch
       case e: Throwable =>
-        logger.warn(s"federation-secret GC for $key failed (non-fatal): ${e.getMessage}")
+        logger.warn(s"per-pool secret GC for $key failed (non-fatal): ${e.getMessage}")
     ()
   }
+
+  /** The sensitive subset of a spec's metastore, i.e. exactly the entries delivered through the
+    * per-pool node-env Secret. The ONE place this subset is computed: [[buildPod]] uses it to strip
+    * those keys from the plain env and to emit the matching `secretKeyRef`s, and [[start]] uses it
+    * to fill the Secret. Deriving both from here is what makes it impossible for a pod to reference
+    * a Secret key the Secret does not hold (kubelet would reject such a pod), or for an empty
+    * Secret to be created for a tenant-db that carries neither key.
+    */
+  private def nodeEnvSecretValues(spec: NodeSpec): Map[String, String] =
+    // Case-insensitive, like `HandlerResolvers.redactPassword` and
+    // `PoolSupervisor.mergeSecretKeys`: a metastore key spelled `PgPassword` is redacted from every
+    // API response by those two, so it must not be the one spelling that lands in a pod spec as a
+    // plain EnvVar. The key keeps its original spelling in the Secret and in the secretKeyRef, so
+    // the two still agree by construction.
+    spec.metastore.view
+      .filterKeys(k => KubernetesQuackBackend.NodeEnvSecretKeys.exists(_.equalsIgnoreCase(k)))
+      .toMap
+
+  /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
+    * pool attaches the same tenant-db with the same credentials. Same RFC-1123 hyphenization as
+    * [[secretNameFor]].
+    */
+  private def nodeEnvSecretNameFor(key: PoolKey): String =
+    val safeTenant = key.tenant.replace('_', '-')
+    val safeDb     = key.tenantDb.replace('_', '-')
+    val safePool   = key.pool.replace('_', '-')
+    s"qod-nodeenv-$safeTenant-$safeDb-$safePool"
 
   /** K8s Secret name for a pool's federation SQL. Hyphenizes the underscore on every segment
     * (tenant / tenantDb / pool) the same way [[ai.starlake.quack.ondemand.PoolSupervisor.nodeId]]
@@ -668,6 +734,29 @@ final class KubernetesQuackBackend(
     secret.setMetadata(meta)
     val data = new java.util.HashMap[String, String]()
     data.put(KubernetesQuackBackend.ObjectStoreSecretKey, sql)
+    secret.setStringData(data)
+    client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
+    ()
+
+  /** Create-or-replace the per-pool node-env Secret holding the sensitive metastore values. Same
+    * pattern and the same ordering constraint as [[ensureFederationSecret]]: kubelet rejects a pod
+    * referencing a missing Secret, so this MUST run before pod create. Idempotent across spawn
+    * retries. Called only when [[nodeEnvSecretValues]] is non-empty -- an in-memory tenant-db has
+    * neither key, and an empty Secret referenced by a `secretKeyRef` would fail the pod.
+    */
+  private def ensureNodeEnvSecret(key: PoolKey, values: Map[String, String]): Unit =
+    val meta = new ObjectMeta()
+    meta.setName(nodeEnvSecretNameFor(key))
+    val labels = new java.util.HashMap[String, String]()
+    labels.put(labelKey, labelValue)
+    labels.put("quack-tenant", key.tenant)
+    labels.put("quack-tenant-db", key.tenantDb)
+    labels.put("quack-pool", key.pool)
+    meta.setLabels(labels)
+    val secret = new Secret()
+    secret.setMetadata(meta)
+    val data = new java.util.HashMap[String, String]()
+    values.foreach { case (k, v) => data.put(k, v) }
     secret.setStringData(data)
     client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
     ()
@@ -771,6 +860,22 @@ final class KubernetesQuackBackend(
             s"pod $nodeId references object-store Secret ${objectStoreSecretNameFor(nodeId)}" +
               " which no longer exists; it will fail to reschedule until the node is respawned"
           )
+      // Same reasoning for the per-pool node-env Secret: a pod whose env references
+      // `qod-nodeenv-...` but finds the Secret gone fails to reschedule with
+      // CreateContainerConfigError, so surface it now. Nothing is recovered into manager memory
+      // here -- `pgPassword` / `encryptionKey` only matter to the node's own DuckDB boot, the
+      // manager never reads them back from the pod -- so a pod from an earlier manager carrying
+      // them as plain env is adopted exactly as before, just left un-healed (see the UPGRADE NOTE
+      // on the class).
+      nodeEnvSecretRefOf(p).foreach { secretName =>
+        val secretExists =
+          Option(client.secrets.inNamespace(namespace).withName(secretName).get()).isDefined
+        if !secretExists then
+          logger.warn(
+            s"pod $nodeId references node-env Secret $secretName which no longer exists;" +
+              " it will fail to reschedule until the node is respawned"
+          )
+      }
       for
         tenant   <- labels.get("quack-tenant")
         tenantDb <- labels.get("quack-tenant-db")
@@ -824,6 +929,21 @@ final class KubernetesQuackBackend(
         Option(c.getEnv).exists(_.asScala.exists(_.getName == "objectStoreSql"))
       })
 
+  /** The node-env Secret this pod's containers reference, if any. Read off the pod's own
+    * `secretKeyRef`s rather than rebuilt from labels, so it reports what the running pod actually
+    * points at. A pod spawned by an earlier manager (sensitive values inlined as plain env) has no
+    * such ref and yields None.
+    */
+  private def nodeEnvSecretRefOf(p: Pod): Option[String] =
+    Option(p.getSpec)
+      .flatMap(ps => Option(ps.getContainers))
+      .map(_.asScala.toList)
+      .getOrElse(Nil)
+      .flatMap(c => Option(c.getEnv).map(_.asScala.toList).getOrElse(Nil))
+      .flatMap(e => Option(e.getValueFrom).flatMap(vf => Option(vf.getSecretKeyRef)))
+      .map(_.getName)
+      .find(_.startsWith("qod-nodeenv-"))
+
   def cleanup(): IO[Unit] = IO.unit
 
 end KubernetesQuackBackend
@@ -847,6 +967,14 @@ object KubernetesQuackBackend:
     * `scripts/spawn-quack-node.sh` reads), mirroring [[FederationSecretKey]] / [[TokenSecretKey]].
     */
   val ObjectStoreSecretKey: String = "objectStoreSql"
+
+  /** Metastore keys delivered through the per-pool node-env Secret rather than a plain pod EnvVar.
+    * Delegates to the model so the strip in [[KubernetesQuackBackend.buildPod]] and the contents of
+    * the Secret [[KubernetesQuackBackend.start]] creates share one definition and cannot drift: a
+    * key stripped from the plain env but absent from the Secret would leave the pod referencing a
+    * Secret key that does not exist, and kubelet would refuse to start it.
+    */
+  val NodeEnvSecretKeys: Set[String] = ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys
 
   /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
     * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.

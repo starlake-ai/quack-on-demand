@@ -79,3 +79,5 @@ databaseChangeLog:
       file: db/changelog/0036-scim-external-id.yaml
   - include:
       file: db/changelog/0037-branching.yaml
+  - include:
+      file: db/changelog/0039-tenant-db-encrypted.yaml

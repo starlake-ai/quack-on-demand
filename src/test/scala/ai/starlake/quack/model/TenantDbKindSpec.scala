@@ -364,4 +364,92 @@ class TenantDbValidationSpec extends AnyFlatSpec with Matchers {
     val td = TenantDb("td-1", "t-1", "tpch1", TenantDbKind.DuckLake, Map("dbName" -> "x"), "")
     TenantDb.validate(td, fullDefaults).get should include("dataPath")
   }
+
+  // --- Encryption at rest ---
+
+  private val fileMeta = Map("dbName" -> "sales", "schemaName" -> "main")
+
+  private def fileDb(
+      metastore: Map[String, String] = fileMeta,
+      encrypted: Boolean = false
+  ): TenantDb =
+    TenantDb(
+      id = "td_1",
+      tenantId = "t_1",
+      name = "acme_sales",
+      kind = TenantDbKind.DuckDbFile,
+      metastore = metastore,
+      dataPath = "/var/lib/qod/sales.duckdb",
+      encrypted = encrypted
+    )
+
+  "validate" should "refuse encryption on kind=memory" in {
+    val td = TenantDb(
+      id = "td_2",
+      tenantId = "t_1",
+      name = "acme_scratch",
+      kind = TenantDbKind.InMemory,
+      metastore = Map.empty,
+      dataPath = "",
+      encrypted = true
+    )
+    TenantDb.validate(td) shouldBe Some(
+      "kind=memory cannot be encrypted: nothing is stored at rest"
+    )
+  }
+
+  it should "refuse a caller-supplied encryptionKey on kind=ducklake" in {
+    val td = TenantDb(
+      id = "td_3",
+      tenantId = "t_1",
+      name = "acme_lake",
+      kind = TenantDbKind.DuckLake,
+      metastore = pgMeta ++ Map("encryptionKey" -> "abc"),
+      dataPath = "/var/lib/qod/lake",
+      encrypted = true
+    )
+    TenantDb.validate(td) shouldBe Some(
+      "kind=ducklake manages its own per-file encryption keys: remove encryptionKey"
+    )
+  }
+
+  it should "refuse an encryptionKey without encrypted=true" in {
+    TenantDb.validate(fileDb(fileMeta + ("encryptionKey" -> "abc"))) shouldBe Some(
+      "encryptionKey requires encrypted=true: one intent per call"
+    )
+  }
+
+  it should "refuse an encryptionKey carrying a literal-breaking metacharacter" in {
+    val td = fileDb(fileMeta + ("encryptionKey" -> "ab'c"), encrypted = true)
+    TenantDb.validate(td) shouldBe Some(
+      "invalid encryptionKey: must not contain any of ' ; \\ or a newline"
+    )
+  }
+
+  it should "accept an encrypted duckdb-file with a clean key" in {
+    TenantDb.validate(
+      fileDb(fileMeta + ("encryptionKey" -> "c2VjcmV0"), encrypted = true)
+    ) shouldBe None
+  }
+
+  it should "accept an encrypted ducklake with no key" in {
+    val td = TenantDb(
+      id = "td_4",
+      tenantId = "t_1",
+      name = "acme_lake",
+      kind = TenantDbKind.DuckLake,
+      metastore = pgMeta,
+      dataPath = "/var/lib/qod/lake",
+      encrypted = true
+    )
+    TenantDb.validate(td) shouldBe None
+  }
+
+  "SecretKeys" should "cover encryptionKey so it never round-trips" in {
+    TenantDb.SecretKeys should contain("encryptionKey")
+  }
+
+  "NodeSecretEnvKeys" should "name exactly the metastore keys that must not sit in a pod env" in {
+    TenantDb.NodeSecretEnvKeys shouldBe Set("pgPassword", "encryptionKey")
+  }
 }
