@@ -412,10 +412,20 @@ class LockdownScreenSpec extends AnyFlatSpec with Matchers:
   // Under `-Duser.language=tr`, `"INSTALL".toLowerCase` is a dotless i followed by `nstall`, which
   // is not the key `install` in `DeniedFirstTokens`, so INSTALL is admitted on a locked-down
   // deployment. The default locale is restored in a finally so no other test in this JVM sees it.
+  //
+  // The `setDefault` IS the experiment, and a test whose setup quietly stops taking effect passes
+  // vacuously: under an ASCII-lowercasing default, the default and `Locale.ROOT` agree and the two
+  // assertions below hold whichever fold the production code uses. So the first thing asserted is
+  // that the forced default GENUINELY folds differently, and this fails loudly rather than proving
+  // nothing if a JVM flag, a security manager or a future JDK stops honouring it.
   "first-token lowercasing" should "not depend on the default locale" in {
     val previous = java.util.Locale.getDefault
     try
       java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr"))
+      withClue("the forced Turkish default locale is not folding; this test would prove nothing") {
+        "I".toLowerCase should not be "i"
+        "I".toLowerCase(java.util.Locale.ROOT) shouldBe "i"
+      }
       denied("INSTALL spatial") shouldBe true
       denied("INSERT INTO t VALUES (1)") shouldBe false
     finally java.util.Locale.setDefault(previous)

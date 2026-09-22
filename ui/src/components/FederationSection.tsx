@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
 import type {
   FederatedSourceResponse,
@@ -853,7 +853,7 @@ export default function FederationSection({
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>
-          Federation &mdash; <code>{tenantDb}</code>
+          Federation: <code>{tenantDb}</code>
         </div>
         <div className="row" style={{ gap: 8 }}>
           {!adding && (
@@ -1124,8 +1124,8 @@ export default function FederationSection({
           </thead>
           <tbody>
             {sources.map(s => (
-              <>
-                <tr key={s.id}>
+              <Fragment key={s.id}>
+                <tr>
                   <td>
                     <button
                       type="button"
@@ -1160,7 +1160,7 @@ export default function FederationSection({
                   </td>
                 </tr>
                 {expanded === s.alias && (
-                  <tr key={`${s.id}-detail`}>
+                  <tr>
                     <td colSpan={5} style={{ padding: 0, background: 'var(--bg-elev)' }}>
                       <div style={{ padding: '.75rem 1rem' }}>
                         <div className="row" style={{ gap: '1.5rem', flexWrap: 'wrap', marginBottom: '.6rem' }}>
@@ -1237,7 +1237,7 @@ export default function FederationSection({
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>

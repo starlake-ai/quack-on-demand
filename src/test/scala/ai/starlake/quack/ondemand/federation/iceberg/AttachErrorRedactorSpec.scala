@@ -486,6 +486,18 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
     out should include("rejected")
   }
 
+  it should "still remove an all-lowercase credential echoed after a '=' in a form body" in {
+    // This is precisely the shape the blanket arm gave up when `=` stopped counting mid-run: an
+    // all-lowercase run, no padding, no other shape evidence. It stays covered because every path
+    // that feeds `scrub` CATALOG-controlled text passes the resolved credential set
+    // (`IcebergAttachVerifier.reattach`'s failure arm); the two `note` call sites that pass none
+    // carry manager-authored text. `precisely` is what proves the redaction below comes from a
+    // credential-aware arm rather than from the blanket one.
+    val lower = "qodsecretlowercasevalue"
+    val err   = s"HTTP Unauthorized_401 - grant_type=client_credentials&client_secret=$lower"
+    precisely(err, lower) should not include lower
+  }
+
   it should "mask an encoded blob even when no credential is known at all" in {
     // The render-failure arm of IcebergAttachVerifier.note passes an empty credential set. With
     // the old credential-only rules that text went through untouched.
@@ -514,6 +526,26 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
     val err = "Invalid Configuration Error: Could not get token from " +
       "https://catalog.internal.example.net/iceberg/v1/oauth/tokens: HTTP Unauthorized_401"
     AttachErrorRedactor.scrub(err, Set(sentinel)) shouldBe err
+  }
+
+  it should "leave a catalog URL's warehouse query parameter intact" in {
+    // `warehouse=probe_warehouse` is 25 characters in the blanket run's alphabet, so the arm sees
+    // one run; while a MID-run `=` counted as encoding evidence the whole thing was masked and the
+    // operator lost the one field that says WHICH catalog was asked for. Nothing else about the
+    // run is value-shaped: no `+`, no `%`, no padding, no uppercase, not all-hex.
+    val err = "IO Error: Connection error for HTTP GET to " +
+      "'https://catalog.example.com/v1/config?warehouse=probe_warehouse'"
+    AttachErrorRedactor.scrub(err, Set(sentinel)) shouldBe err
+  }
+
+  it should "still mask an all-lowercase run that ends in base64 padding" in {
+    // The other half of the same rule: padding is what base64 really puts in a run, and it lands
+    // at the END. An all-lowercase blob carries no other shape evidence, so that trailing `=` is
+    // the only thing between it and the fail-safe arm. Empty credential set, so this names the
+    // blanket arm and nothing else can carry it.
+    val blob = "abcdefghijklmnopqrstuvwx="
+    AttachErrorRedactor.scrub(s"Invalid Configuration Error: rejected $blob", Set.empty) should
+      not include blob
   }
 
   it should "leave the Iceberg REST namespace separator, and the whole URL around it, intact" in {

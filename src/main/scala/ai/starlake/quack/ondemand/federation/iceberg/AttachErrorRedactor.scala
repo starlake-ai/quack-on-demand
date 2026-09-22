@@ -569,13 +569,23 @@ object AttachErrorRedactor:
     *
     * It is a SHAPE test and therefore length-bound: a short encoding (base32 of twelve bytes or
     * fewer, base64 of a short secret) is below [[MinOpaqueChars]] and invisible here by
-    * construction. Those are the precise arms' job, which is why they decode four alphabets.
+    * construction. Those are the precise arms' job, which is why they decode four alphabets. The
+    * same division of labour is why `=` is read as padding rather than as a separator below.
     */
   private def looksEncoded(run: String): Boolean =
+    // `hasSymbol` reads `=` only where base64 puts it: at the END of the run, as padding. A
+    // MID-run `=` is a key/value separator, and counting it as encoding evidence made this arm eat
+    // `warehouse=probe_warehouse` out of a catalog URL whole -- exactly the field that says WHICH
+    // catalog was asked for. The security cost of narrowing it is bounded: the shape it stops
+    // covering is an all-lowercase run carrying a `=`, and a credential of that shape is caught by
+    // the PRECISE arms, which see it through percent-decoding, case folding and separator
+    // chunking. Those arms need the credential set, and every path that feeds `scrub`
+    // CATALOG-controlled text passes one (`IcebergAttachVerifier.reattach`'s failure arm); the two
+    // `note` call sites that pass none carry manager-authored text, not the catalog's.
     val hasUpper  = run.exists(c => c >= 'A' && c <= 'Z')
     val hasLower  = run.exists(c => c >= 'a' && c <= 'z')
     val hasDigit  = run.exists(c => c >= '0' && c <= '9')
-    val hasSymbol = run.exists(c => c == '+' || c == '=' || c == '%')
+    val hasSymbol = run.exists(c => c == '+' || c == '%') || run.endsWith("=")
     hasSymbol || (hasUpper && hasDigit) || (run.forall(isHex) && run.length >= 32) ||
     (hasUpper && hasLower && run.length >= 24)
 

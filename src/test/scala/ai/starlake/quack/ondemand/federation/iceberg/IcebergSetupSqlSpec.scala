@@ -18,13 +18,13 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
   )
 
   "render" should "install and load the extension first" in {
-    IcebergSetupSql.render(v(oauth2, "sales_lake")) should startWith(
+    IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false) should startWith(
       "INSTALL iceberg; LOAD iceberg;"
     )
   }
 
   it should "emit an oauth2 secret and reference it from the attach" in {
-    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     sql should include("""CREATE OR REPLACE SECRET "qod_ice_sales_lake"""")
     sql should include("TYPE ICEBERG")
     sql should include("""CLIENT_ID '{{secret.CID}}'""")
@@ -36,11 +36,12 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "omit AUTHORIZATION_TYPE for oauth2 because it is DuckDB's default" in {
-    IcebergSetupSql.render(v(oauth2, "sales_lake")) should not include "AUTHORIZATION_TYPE"
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
+    sql should not include "AUTHORIZATION_TYPE"
   }
 
   it should "omit oauth2 options that are not set" in {
-    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     sql should not include "OAUTH2_SERVER_URI"
     sql should not include "OAUTH2_GRANT_TYPE"
   }
@@ -52,7 +53,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       authType = Some(IcebergAuthType.Token),
       token = Some("{{secret.BEARER}}")
     )
-    val sql = IcebergSetupSql.render(v(cfg, "lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "lake"), readOnly = false)
     sql should include("""TOKEN '{{secret.BEARER}}'""")
     sql should not include "AUTHORIZATION_TYPE"
     sql should include("""SECRET "qod_ice_lake"""")
@@ -63,13 +64,13 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
     // "AUTHORIZATION_TYPE is 'oauth2', yet no 'oauth2_server_uri' was provided, and no
     // 'endpoint' was provided to fall back on" even though the ATTACH itself carries ENDPOINT -
     // DuckDB only reads that fallback off the SECRET.
-    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     val secretBlock = sql.substring(0, sql.indexOf("ATTACH"))
     secretBlock should include("""ENDPOINT 'https://catalog.example.com/api/catalog'""")
   }
 
   it should "still carry ENDPOINT on the ATTACH alongside the secret's own ENDPOINT" in {
-    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql         = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     val attachBlock = sql.substring(sql.indexOf("ATTACH"))
     attachBlock should include("""ENDPOINT 'https://catalog.example.com/api/catalog'""")
   }
@@ -81,7 +82,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       authType = Some(IcebergAuthType.Token),
       token = Some("{{secret.BEARER}}")
     )
-    val sql         = IcebergSetupSql.render(v(cfg, "lake"))
+    val sql         = IcebergSetupSql.render(v(cfg, "lake"), readOnly = false)
     val secretBlock = sql.substring(0, sql.indexOf("ATTACH"))
     val attachBlock = sql.substring(sql.indexOf("ATTACH"))
     secretBlock should not include "ENDPOINT"
@@ -90,7 +91,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
 
   it should "still emit OAUTH2_SERVER_URI plus the secret ENDPOINT when oauth2ServerUri is set" in {
     val cfg = oauth2.copy(oauth2ServerUri = Some("https://auth.example.com/oauth/token"))
-    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"), readOnly = false)
     sql should include("""OAUTH2_SERVER_URI 'https://auth.example.com/oauth/token'""")
     val secretBlock = sql.substring(0, sql.indexOf("ATTACH"))
     secretBlock should include("""ENDPOINT 'https://catalog.example.com/api/catalog'""")
@@ -102,7 +103,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       warehouse = "wh",
       authType = Some(IcebergAuthType.NoAuth)
     )
-    val sql = IcebergSetupSql.render(v(cfg, "lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "lake"), readOnly = false)
     sql should include("""AUTHORIZATION_TYPE 'none'""")
     sql should not include "CREATE OR REPLACE SECRET"
     sql should not include "SECRET \"qod_ice_lake\""
@@ -114,7 +115,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       warehouse = "wh",
       authType = Some(IcebergAuthType.SigV4)
     )
-    val sql = IcebergSetupSql.render(v(cfg, "lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "lake"), readOnly = false)
     sql should include("""AUTHORIZATION_TYPE 'sigv4'""")
     sql should not include "CREATE OR REPLACE SECRET"
   }
@@ -124,7 +125,7 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       warehouse = "123456789012:mycatalog",
       endpointType = Some(IcebergEndpointType.Glue)
     )
-    val sql = IcebergSetupSql.render(v(cfg, "glue_lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "glue_lake"), readOnly = false)
     sql should include("""ENDPOINT_TYPE 'glue'""")
     sql should not include "AUTHORIZATION_TYPE"
     sql should not include "ENDPOINT '"
@@ -135,34 +136,36 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
       warehouse = "arn:aws:s3tables:eu-west-1:123456789012:bucket/b",
       endpointType = Some(IcebergEndpointType.S3Tables)
     )
-    IcebergSetupSql.render(v(cfg, "s3t")) should include("""ENDPOINT_TYPE 's3_tables'""")
+    val sql = IcebergSetupSql.render(v(cfg, "s3t"), readOnly = false)
+    sql should include("""ENDPOINT_TYPE 's3_tables'""")
   }
 
   it should "escape single quotes in literals" in {
     val cfg = oauth2.copy(warehouse = "o'brien")
-    IcebergSetupSql.render(v(cfg, "lake")) should include("""ATTACH 'o''brien'""")
+    IcebergSetupSql.render(v(cfg, "lake"), readOnly = false) should include("""ATTACH 'o''brien'""")
   }
 
   it should "render a padded clientSecret without the padding it was validated with" in {
     val cfg = oauth2.copy(clientSecret = Some(" {{secret.CSEC}} "))
-    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"), readOnly = false)
     sql should include("""CLIENT_SECRET '{{secret.CSEC}}'""")
     sql should not include "' {{secret.CSEC}} '"
   }
 
   it should "trim a padded warehouse before it lands on the ATTACH" in {
     val cfg = oauth2.copy(warehouse = " sales ")
-    IcebergSetupSql.render(v(cfg, "sales_lake")) should include("""ATTACH 'sales' AS""")
+    val sql = IcebergSetupSql.render(v(cfg, "sales_lake"), readOnly = false)
+    sql should include("""ATTACH 'sales' AS""")
   }
 
   it should "leave secret placeholders untouched so the blob builder can substitute them" in {
-    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     sql should include("{{secret.CID}}")
     sql should include("{{secret.CSEC}}")
   }
 
   it should "produce statements the DuckDB parser accepts in order" in {
-    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"))
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
     sql.indexOf("CREATE OR REPLACE SECRET") should be < sql.indexOf("ATTACH")
     sql.trim should endWith(");")
   }
@@ -191,10 +194,10 @@ class IcebergSetupSqlSpec extends AnyFlatSpec with Matchers:
     secretBlock should not include "READ_ONLY"
   }
 
-  "render with readOnly = false (the default)" should "emit no READ_ONLY anywhere" in {
-    IcebergSetupSql.render(v(oauth2, "sales_lake")) should not include "READ_ONLY"
-  }
-
-  it should "emit no READ_ONLY when explicitly passed false" in {
-    IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false) should not include "READ_ONLY"
+  // `readOnly` has no default: a forgotten argument would render an ATTACH without `READ_ONLY`,
+  // which is the dangerous direction (a source the operator marked read-only attaches writable).
+  // Every case above therefore names it, and this one pins that `false` renders nothing.
+  "render with readOnly = false" should "emit no READ_ONLY anywhere" in {
+    val sql = IcebergSetupSql.render(v(oauth2, "sales_lake"), readOnly = false)
+    sql should not include "READ_ONLY"
   }
