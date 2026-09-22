@@ -5,6 +5,20 @@ import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, Iceberg
 import cats.effect.IO
 import cats.syntax.all.*
 
+/** One source's resolved setup SQL, plus the plaintext secret VALUES that were substituted into it.
+  *
+  * `secretValues` exists so the Iceberg attach verifier does not have to re-derive the credentials
+  * by parsing the SQL back out: the builder is the component that actually resolved them, so it is
+  * the component that knows what they are. That matters for
+  * [[ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactor]], whose whole job is to
+  * keep those values out of an error string a remote catalog controls -- a parser-derived set
+  * silently stops covering a credential the day the generator grows a new option, whereas this set
+  * covers every `{{secret.NAME}}` the builder resolved regardless of where in the template it sat.
+  *
+  * Empty in `redactSecrets` (preview) mode, where nothing was resolved. NEVER log `sql`.
+  */
+final case class ResolvedFederationBlock(sql: String, secretValues: Set[String])
+
 /** Assembles the post-DuckLake setup SQL blob for a single tenant-db's federated sources. The blob
   * is what `spawn-quack-node.sh` runs in DuckDB after attaching the default catalog (or instead of,
   * for `kind = InMemory`).
@@ -49,11 +63,13 @@ final class FederationBlobBuilder(
   def logSafePreview(tenantDbId: String): IO[Option[String]] =
     assemble(tenantDbId, redactSecrets = true)
 
-  /** Resolve ONE source's block, secrets substituted. Used by the Iceberg attach verifier to
-    * re-issue a single catalog's ATTACH on a live node: re-running the whole blob would re-execute
-    * every other source's CREATE SECRET and ATTACH. NEVER log this output.
+  /** Resolve ONE source's block, secrets substituted, together with the values that were
+    * substituted. Used by the Iceberg attach verifier to re-issue a single catalog's ATTACH on a
+    * live node: re-running the whole blob would re-execute every other source's CREATE SECRET and
+    * ATTACH. The verifier feeds `secretValues` straight to
+    * [[ai.starlake.quack.ondemand.federation.iceberg.AttachErrorRedactor]]. NEVER log `sql`.
     */
-  def buildOne(src: FederatedSource): IO[String] =
+  def buildOne(src: FederatedSource): IO[ResolvedFederationBlock] =
     renderOne(src, redactSecrets = false)
 
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
@@ -71,7 +87,7 @@ final class FederationBlobBuilder(
       // DuckDB catalog name a sibling in this same tenant-db already holds, or the tenant-db's own
       // catalog alias -- see `bodyTemplate`.
       val siblingAliases = sources.filterNot(_.id == src.id).map(_.alias.toLowerCase).toSet
-      renderOne(src, redactSecrets, siblingAliases ++ ownAlias)
+      renderOne(src, redactSecrets, siblingAliases ++ ownAlias).map(_.sql)
     }
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
 
@@ -79,12 +95,15 @@ final class FederationBlobBuilder(
       src: FederatedSource,
       redactSecrets: Boolean,
       siblingAliases: Set[String] = Set.empty
-  ): IO[String] = for {
+  ): IO[ResolvedFederationBlock] = for {
     template <- bodyTemplate(src, siblingAliases)
     secrets  <- loadSecrets(src.id)
     byName = secrets.map(s => s.name -> s).toMap
-    body <- substitute(src, template, byName, redactSecrets)
-  } yield s"-- BEGIN federation: ${src.alias}\n$body\n-- END federation: ${src.alias}"
+    resolved <- substitute(src, template, byName, redactSecrets)
+  } yield ResolvedFederationBlock(
+    s"-- BEGIN federation: ${src.alias}\n${resolved._1}\n-- END federation: ${src.alias}",
+    resolved._2
+  )
 
   /** The pre-substitution SQL for one source. A `Sql` source supplies it directly; an `IcebergRest`
     * source has it rendered from typed config. The rendered form still carries `{{secret.NAME}}`
@@ -152,7 +171,7 @@ final class FederationBlobBuilder(
       template: String,
       secrets: Map[String, FederatedSecret],
       redactSecrets: Boolean
-  ): IO[String] = {
+  ): IO[(String, Set[String])] = {
     // 1. Substitute {{alias}} unconditionally. SQL-escape so an alias with
     //    an apostrophe can't break the surrounding literal context the
     //    operator wrote (`AS {{alias}}` is normally an identifier, but a
@@ -161,9 +180,12 @@ final class FederationBlobBuilder(
 
     // 2. Resolve each distinct {{secret.NAME}} via the resolver (or keep
     //    as placeholder when building the log-safe preview). Resolved
-    //    VALUES go through sqlEscapeSingleQuote so a single-quote in a
-    //    secret can't terminate the surrounding string literal (the
-    //    production template writes `PASSWORD '{{secret.PG_PWD}}'`).
+    //    VALUES go through sqlEscapeSingleQuote at SPLICE time so a single-quote
+    //    in a secret can't terminate the surrounding string literal (the
+    //    production template writes `PASSWORD '{{secret.PG_PWD}}'`); the pairs
+    //    themselves stay RAW, because the raw form is what a catalog echoing the
+    //    credential back would show, and so the form the reported set has to carry
+    //    for AttachErrorRedactor to find it.
     //    The placeholder form preserved in redactSecrets mode is intentionally
     //    NOT escaped -- it's the literal `{{secret.NAME}}` marker that the
     //    later strayPlaceholder check needs to see verbatim.
@@ -182,7 +204,7 @@ final class FederationBlobBuilder(
       else
         secretsNeeded.traverse { name =>
           secrets.get(name) match
-            case Some(s) => resolver.resolve(s).map(v => name -> sqlEscapeSingleQuote(v))
+            case Some(s) => resolver.resolve(s).map(v => name -> v)
             case None    =>
               IO.raiseError(
                 new RuntimeException(s"unresolved secret '$name' in source '${src.alias}'")
@@ -191,8 +213,10 @@ final class FederationBlobBuilder(
 
     for {
       pairs <- resolvePairs
-      lookup = pairs.toMap
-      step2  = SecretRegex.replaceAllIn(
+      lookup =
+        if redactSecrets then pairs.toMap
+        else pairs.map((name, value) => name -> sqlEscapeSingleQuote(value)).toMap
+      step2 = SecretRegex.replaceAllIn(
         step1,
         m => java.util.regex.Matcher.quoteReplacement(lookup(m.group(1)))
       )
@@ -207,7 +231,7 @@ final class FederationBlobBuilder(
             new RuntimeException(s"unsubstituted placeholder in source '${src.alias}': $context")
           )
         case None => IO.unit
-    } yield step2
+    } yield (step2, if redactSecrets then Set.empty[String] else pairs.map(_._2).toSet)
   }
 
   /** Double every embedded single quote so the value can be spliced into a SQL string literal

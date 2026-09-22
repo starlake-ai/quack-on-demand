@@ -127,8 +127,9 @@ final case class IcebergRestConfig(
         if credentialFieldsSet then
           errs += "endpointType takes no clientId, clientSecret, oauth2 or token fields"
 
-    errs ++= IcebergRestConfig.placeholderErrors("clientSecret", clientSecret)
-    errs ++= IcebergRestConfig.placeholderErrors("token", token)
+    errs ++= IcebergRestConfig.CredentialFields.flatMap { (name, read) =>
+      IcebergRestConfig.placeholderErrors(name, read(this))
+    }
 
     errs.result()
 
@@ -144,6 +145,19 @@ object IcebergRestConfig:
   val ReservedAliases: Set[String] = ai.starlake.quack.model.DuckDbCatalogs.Builtins
 
   private[iceberg] def isSet(o: Option[String]): Boolean = o.exists(_.trim.nonEmpty)
+
+  /** The credential-bearing fields of this config, declared ONCE.
+    *
+    * Three consumers read this same list instead of each carrying their own copy: [[validate]],
+    * which requires every one of them to hold a `{{secret.NAME}}` placeholder rather than a
+    * literal; [[IcebergSetupSql.CredentialOption]], which is the only way the generator can emit
+    * one; and `AttachErrorRedactorSpec`, which renders a sentinel into each and fails unless the
+    * redactor recovers it. A field added to the case class and NOT added here is a field the
+    * manager will happily store as a literal secret, so adding it here is part of adding the field,
+    * and the spec's field-inventory test says so out loud when someone forgets.
+    */
+  private[iceberg] val CredentialFields: List[(String, IcebergRestConfig => Option[String])] =
+    List("clientSecret" -> (_.clientSecret), "token" -> (_.token))
 
   private val SecretPlaceholder = "\\{\\{secret\\.[A-Za-z0-9_]+\\}\\}".r
 

@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.federation.iceberg
 
 import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, PoolKey, RunningNode}
+import ai.starlake.quack.ondemand.federation.ResolvedFederationBlock
 import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
@@ -40,7 +41,7 @@ import org.apache.arrow.vector.ipc.ArrowReader
   */
 final class IcebergAttachVerifier(
     sourcesOf: PoolKey => IO[List[FederatedSource]],
-    renderOne: FederatedSource => IO[String],
+    renderOne: FederatedSource => IO[ResolvedFederationBlock],
     runOnNode: (RunningNode, String) => IO[Either[String, Unit]],
     listCatalogs: RunningNode => IO[Either[String, Set[String]]],
     registry: AttachStatusRegistry
@@ -102,9 +103,18 @@ final class IcebergAttachVerifier(
         case Left(t) =>
           // A config that will not render is a control-plane bug, not a catalog outage. Record
           // it the same way so it surfaces on the node and the source.
-          note(node, startedAtMs, src, s"could not render attach SQL: ${t.getMessage}")
-        case Right(sql) =>
-          runOnNode(node, sql).flatMap {
+          //
+          // No credential set is passed, and that is deliberate rather than inherited: rendering
+          // failed, so nothing was resolved and there is nothing to name. Every raise on this path
+          // (FederationBlobBuilder's config, alias-collision and unresolved-secret arms) names
+          // aliases, secret NAMES and config errors, never a resolved value -- with one contrived
+          // exception, the stray-placeholder arm, which quotes the already-substituted text and so
+          // would quote a resolved secret that itself contained `{{...}}`. `scrub` is still called
+          // for that reason: its blanket arm does not need a credential set to mask an
+          // encoded-looking blob.
+          note(node, startedAtMs, src, s"could not render attach SQL: ${t.getMessage}", Set.empty)
+        case Right(block) =>
+          runOnNode(node, block.sql).flatMap {
             case Right(_) =>
               IO.delay {
                 registry.recordAttached(node.nodeId, startedAtMs, src.alias)
@@ -112,25 +122,40 @@ final class IcebergAttachVerifier(
                   s"attach verify ${node.nodeId}: catalog '${src.alias}' attached on retry"
                 )
               }
-            // The credentials come from the SQL we just rendered, so `note` can scrub the exact
-            // values this attempt handed DuckDB out of whatever the catalog echoed back.
+            // The builder reports the values it substituted into this exact block, so `note` can
+            // scrub the precise credentials this attempt handed DuckDB out of whatever the catalog
+            // echoed back. `credentialsIn` is unioned in as defence in depth, for a credential that
+            // somehow reached the SQL without passing through substitution.
             case Left(err) =>
-              note(node, startedAtMs, src, err, AttachErrorRedactor.credentialsIn(sql))
+              note(
+                node,
+                startedAtMs,
+                src,
+                err,
+                block.secretValues ++ AttachErrorRedactor.credentialsIn(block.sql)
+              )
           }
       }
 
-  /** The ONE funnel every stored attach error goes through, which is why the redaction lives here
-    * rather than at the REST rendering sites: the registry entry AND the WARN below both get the
-    * scrubbed text, so neither the API response nor the manager log can carry a credential a
-    * hostile or merely verbose catalog echoed back. See [[AttachErrorRedactor]] for the proven
-    * vector.
+  /** The ONE funnel every STORED attach error goes through, which is why the redaction lives here
+    * rather than at the REST rendering sites: `AttachStatusRegistry.recordFailure` has no other
+    * non-test caller, so the registry entry -- and therefore `NodeInfo.catalogAttachFailures` --
+    * and the WARN below both carry scrubbed text.
+    *
+    * The narrower half of that claim, stated because the broad version was wrong: this is NOT the
+    * only place the raw error can reach the MANAGER LOG. `QuackHttpClient` logs the same string
+    * verbatim at DEBUG before `note` ever sees it (`native query failed: ...` and `quack_query
+    * failed: ...`), on both transports. That is generic adapter code outside this feature and off
+    * at the default level, but a manager running at DEBUG can still have a credential in its log.
+    *
+    * See [[AttachErrorRedactor]] for the proven vector and for exactly what `scrub` guarantees.
     */
   private def note(
       node: RunningNode,
       startedAtMs: Long,
       src: FederatedSource,
       err: String,
-      credentials: Set[String] = Set.empty
+      credentials: Set[String]
   ): IO[Unit] =
     IO.delay {
       val safe       = AttachErrorRedactor.scrub(err, credentials)

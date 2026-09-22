@@ -21,6 +21,19 @@ import ai.starlake.quack.model.SqlLiterals.{duckdbIdent as ident, duckdbLiteral 
   */
 object IcebergSetupSql:
 
+  /** Every `CREATE SECRET` option whose VALUE is a credential, declared once.
+    *
+    * This exists so the redactor does not have to keep a second copy of the list:
+    * [[AttachErrorRedactor]] builds its parser from `CredentialOption.values`, and
+    * [[credentialOpt]] is the ONLY way [[secretBlock]] can emit one, so a new credential-bearing
+    * option cannot be rendered without first appearing here -- which widens the redactor in the
+    * same edit. A non-credential option (CLIENT_ID, the oauth2 knobs, ENDPOINT) goes through
+    * [[opt]] as before.
+    */
+  enum CredentialOption(val optionName: String):
+    case ClientSecret extends CredentialOption("CLIENT_SECRET")
+    case Token        extends CredentialOption("TOKEN")
+
   /** Per-alias secret name. The alias arrives already normalized (lowercase, via
     * [[IcebergRestConfig.validated]]), so no lowercasing happens here - doing it here used to let
     * "Sales" and "sales" mint the same secret name without either alias being rejected.
@@ -83,6 +96,13 @@ object IcebergSetupSql:
   private def opt(name: String, value: Option[String]): Option[String] =
     value.map(_.trim).filter(_.nonEmpty).map(v => s"$name ${lit(v)}")
 
+  /** [[opt]] for an option that carries a credential. Taking the name from [[CredentialOption]]
+    * rather than a string literal is what keeps the generator and [[AttachErrorRedactor]] from
+    * drifting apart.
+    */
+  private def credentialOpt(option: CredentialOption, value: Option[String]): Option[String] =
+    opt(option.optionName, value)
+
   /** The oauth2-server-endpoint fallback DuckDB reads off the SECRET (see [[secretBlock]]'s
     * comment) and the ATTACH's own `ENDPOINT` are textually identical but SEMANTICALLY DISTINCT -
     * DuckDB reads one for the oauth2 token exchange and the other for catalog operations - so both
@@ -99,7 +119,7 @@ object IcebergSetupSql:
           List(
             Some("TYPE ICEBERG"),
             opt("CLIENT_ID", cfg.clientId),
-            opt("CLIENT_SECRET", cfg.clientSecret),
+            credentialOpt(CredentialOption.ClientSecret, cfg.clientSecret),
             opt("OAUTH2_SERVER_URI", cfg.oauth2ServerUri),
             opt("OAUTH2_SCOPE", cfg.oauth2Scope),
             opt("OAUTH2_GRANT_TYPE", cfg.oauth2GrantType),
@@ -112,7 +132,7 @@ object IcebergSetupSql:
             endpointOpt(cfg)
           ).flatten
         case Some(IcebergAuthType.Token) =>
-          List(Some("TYPE ICEBERG"), opt("TOKEN", cfg.token)).flatten
+          List(Some("TYPE ICEBERG"), credentialOpt(CredentialOption.Token, cfg.token)).flatten
         case _ => Nil
 
       s"CREATE OR REPLACE SECRET ${ident(secretName(alias))} (\n  " +

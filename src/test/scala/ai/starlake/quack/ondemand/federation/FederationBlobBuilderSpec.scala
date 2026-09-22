@@ -204,24 +204,28 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
   "FederationBlobBuilder.buildOne" should "render one source's block with secrets resolved" in {
     val s   = iceSrc()
     val out = builderWith(List(s), iceSecrets(s)).buildOne(s).unsafeRunSync()
-    out should include("CLIENT_ID 'the-id'")
-    out should include("-- BEGIN federation: sales_lake")
+    out.sql should include("CLIENT_ID 'the-id'")
+    out.sql should include("-- BEGIN federation: sales_lake")
+    // The block reports the values it substituted, which is what AttachErrorRedactor scrubs with.
+    out.secretValues shouldBe Set("the-id", "the-secret")
   }
 
   it should "render only the named source, not its siblings" in {
     val ice   = iceSrc()
     val other = src("fedpg", "ATTACH 'x' AS {{alias}};")
     val out   = builderWith(List(ice, other), iceSecrets(ice)).buildOne(ice).unsafeRunSync()
-    out should include("sales_lake")
-    out should not include "fedpg"
+    out.sql should include("sales_lake")
+    out.sql should not include "fedpg"
   }
 
   it should "escape a single quote inside a resolved iceberg secret" in {
     val s    = iceSrc()
     val secs = Map(s.id -> List(secret(s.id, "CID", "a"), secret(s.id, "CSEC", "O'Brien")))
-    builderWith(List(s), secs).buildOne(s).unsafeRunSync() should include(
-      "CLIENT_SECRET 'O''Brien'"
-    )
+    val out  = builderWith(List(s), secs).buildOne(s).unsafeRunSync()
+    out.sql should include("CLIENT_SECRET 'O''Brien'")
+    // The reported value is the RAW secret, not its SQL-escaped form: a catalog echoing the
+    // credential back echoes what it was given, not what the SQL literal looked like.
+    out.secretValues should contain("O'Brien")
   }
 
   // ---------- sibling alias reservation ----------
@@ -262,7 +266,7 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     val ice   = iceSrc(alias = "sales_lake")
     val other = src("sales_lake", "ATTACH 'x' AS {{alias}};")
     val out   = builderWith(List(ice, other), iceSecrets(ice)).buildOne(ice).unsafeRunSync()
-    out should include("-- BEGIN federation: sales_lake")
+    out.sql should include("-- BEGIN federation: sales_lake")
   }
 
   // ---------- tenant-db's own catalog alias reservation ----------

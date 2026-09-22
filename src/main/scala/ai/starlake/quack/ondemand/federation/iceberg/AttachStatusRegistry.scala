@@ -132,7 +132,11 @@ final class AttachStatusRegistry(
         case ((k, _), e) if k == key =>
           CatalogAttachFailure(e.alias, e.error, e.at, e.attempts)
       }
-      .sortBy(_.alias)
+      // Sorted on the NORMALIZED alias, not the declared one: `Entry.alias` keeps whatever case
+      // the source declared, so sorting on it would put a legacy "Sales_Lake" before "analytics"
+      // in ASCII and after it once the row is normalized, i.e. the operator-visible order would
+      // depend on the case of a name that is compared case-insensitively everywhere else.
+      .sortBy(_.alias.toLowerCase)
 
   /** Operator-facing summary of one alias across a pool's nodes: `attached`, `unknown`, or
     * `failed on N of M nodes`. Matches by node id alone -- once a node's successor incarnation has

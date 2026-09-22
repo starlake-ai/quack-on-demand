@@ -14,6 +14,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
+import java.time.Instant
+
 class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   private def stubBackend: QuackBackend = new StubQuackBackend()
@@ -704,12 +706,22 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "the node response" should "carry the attach failures looked up for the node's OWN incarnation" in:
     val tracker = new NodeLoadTracker
-    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
+    // A DISTINCTIVE startedAt, not the testkit's default Instant.EPOCH: against EPOCH the
+    // assertion below cannot tell the node's own incarnation key from any constant-zero
+    // expression (`Instant.EPOCH`, `Instant.ofEpochMilli(0)`, a dropped argument defaulting to
+    // zero), because all of them render as "@0".
+    val sup =
+      new PoolSupervisor(
+        new StubQuackBackend(startedAt = Instant.ofEpochMilli(1_700_000_123_456L)),
+        tracker,
+        new InMemoryControlPlaneStore()
+      )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     // The injected lookup echoes BOTH its arguments back inside the alias, so the assertion below
     // pins the incarnation key (the node's own startedAt) and not merely "some timestamp": an
-    // Instant.now() at the call site, or a swapped/derived value, changes the expected string.
+    // Instant.now() at the call site, or a swapped/derived/constant value, changes the expected
+    // string.
     val h = new PoolHandlers(
       sup,
       tracker,

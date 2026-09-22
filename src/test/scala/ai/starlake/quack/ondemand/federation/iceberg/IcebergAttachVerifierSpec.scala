@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.federation.iceberg
 
 import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, PoolKey, Role, RunningNode}
+import ai.starlake.quack.ondemand.federation.ResolvedFederationBlock
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.memory.RootAllocator
@@ -61,7 +62,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
   ) = (
     new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(sources),
-      renderOne = s => IO.pure(s"-- rendered ${s.alias}"),
+      renderOne = s => IO.pure(ResolvedFederationBlock(s"-- rendered ${s.alias}", Set.empty)),
       runOnNode = run,
       listCatalogs = _ => IO.pure(Right(attached)),
       registry = registry
@@ -125,8 +126,11 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
       renderOne = _ =>
         IO.pure(
-          "CREATE OR REPLACE SECRET \"qod_ice_sales\" (\n  TYPE ICEBERG,\n" +
-            s"  CLIENT_ID 'cid',\n  CLIENT_SECRET '$secret'\n);"
+          ResolvedFederationBlock(
+            "CREATE OR REPLACE SECRET \"qod_ice_sales\" (\n  TYPE ICEBERG,\n" +
+              s"  CLIENT_ID 'cid',\n  CLIENT_SECRET '$secret'\n);",
+            Set(secret)
+          )
         ),
       runOnNode = (_, _) =>
         IO.pure(
@@ -145,6 +149,40 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     // The diagnostic itself must survive: redaction is surgical, not a blanket drop.
     stored should include("Could not get token from https://idp/v1/oauth/tokens")
     stored should include("Unauthorized_401")
+  }
+
+  // The credential set the verifier scrubs with comes from the BUILDER (the component that
+  // resolved the secrets), not from parsing the SQL back out. This pins that wiring: the secret
+  // here sits in an option the SQL parser deliberately does not treat as credential-bearing
+  // (CLIENT_ID), so it is scrubbed only because `ResolvedFederationBlock.secretValues` carried it.
+  // Reverting `note`'s credential argument to `AttachErrorRedactor.credentialsIn(block.sql)` alone
+  // leaves the value in the registry.
+  it should "scrub a substituted value the SQL parser would not classify as a credential" in {
+    // Lowercase and hyphenated on purpose: `scrub`'s blanket arm masks encoded-LOOKING runs, so a
+    // mixed-case value with digits would be redacted even with an empty credential set and this
+    // test would pass for the wrong reason. This value survives every shape rule, so the only
+    // thing that can redact it is the credential set the builder reported.
+    val resolved = "resolved-secret-value"
+    val reg      = new AttachStatusRegistry()
+    val v        = new IcebergAttachVerifier(
+      sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
+      renderOne = _ =>
+        IO.pure(
+          ResolvedFederationBlock(
+            s"CREATE OR REPLACE SECRET \"qod_ice_sales\" (\n  CLIENT_ID '$resolved'\n);",
+            Set(resolved)
+          )
+        ),
+      runOnNode = (_, _) => IO.pure(Left(s"HTTP Unauthorized_401 - echoed $resolved")),
+      listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      registry = reg
+    )
+    v.verify(node).unsafeRunSync()
+    val stored = reg.failuresFor(node.nodeId, startedAtMs).head.error
+    stored should not include resolved
+    AttachErrorRedactor.credentialsIn(
+      s"CREATE OR REPLACE SECRET \"qod_ice_sales\" (\n  CLIENT_ID '$resolved'\n);"
+    ) shouldBe empty
   }
 
   it should "report a legacy mixed-case alias as declared, not lowercased" in {
@@ -205,7 +243,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     var listed = 0
     val v      = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(Nil),
-      renderOne = s => IO.pure(""),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },
       registry = new AttachStatusRegistry()
@@ -220,7 +258,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(iceSrc("sales_lake"))),
-      renderOne = s => IO.pure(""),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Left("node unreachable")),
       registry = reg
@@ -239,7 +277,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     val reg = new AttachStatusRegistry()
     val v   = new IcebergAttachVerifier(
       sourcesOf = _ => IO.raiseError(new RuntimeException("postgres unreachable")),
-      renderOne = s => IO.pure(""),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
       registry = reg
@@ -257,7 +295,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
   it should "not throw synchronously when sourcesOf itself throws, only fail the returned IO" in {
     val v = new IcebergAttachVerifier(
       sourcesOf = _ => throw new RuntimeException("boom"),
-      renderOne = s => IO.pure(""),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = (_, _) => IO.pure(Right(())),
       listCatalogs = _ => IO.pure(Right(Set.empty)),
       registry = new AttachStatusRegistry()
@@ -363,7 +401,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
       var listCalls   = 0
       val v           = new IcebergAttachVerifier(
         sourcesOf = _ => IO.delay { sourceCalls += 1; List(iceSrc("sales_lake")) },
-        renderOne = s => IO.pure(""),
+        renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
         runOnNode = (_, _) => IO.pure(Left("boom")),
         listCatalogs = _ => IO.delay { listCalls += 1; Right(Set("acme_db")) },
         registry = reg
@@ -401,7 +439,7 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     var listed = 0
     val v      = new IcebergAttachVerifier(
       sourcesOf = _ => IO.pure(List(sqlSrc)),
-      renderOne = s => IO.pure(""),
+      renderOne = _ => IO.pure(ResolvedFederationBlock("", Set.empty)),
       runOnNode = rec.run(Right(())),
       listCatalogs = _ => IO.delay { listed += 1; Right(Set("acme_db")) },
       registry = new AttachStatusRegistry()
@@ -437,6 +475,17 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     reg.recordFailure("n", 0L, "a", "boom") shouldBe true
     reg.recordFailure("n", 0L, "a", "boom") shouldBe false
     reg.recordFailure("n", 0L, "a", "different boom") shouldBe true
+  }
+
+  it should "order failures case-insensitively on the alias" in {
+    val reg = new AttachStatusRegistry()
+    reg.recordFailure("n", 0L, "Sales_Lake", "boom")
+    reg.recordFailure("n", 0L, "analytics", "boom")
+    // The declared case is preserved in the payload, but it must not decide the order: sorting on
+    // the raw alias puts "Sales_Lake" first in ASCII and last once the same row is normalized, so
+    // the operator-visible order would depend on the case of a name compared case-insensitively
+    // everywhere else.
+    reg.failuresFor("n", 0L).map(_.alias) shouldBe List("analytics", "Sales_Lake")
   }
 
   "aliasSummary" should "report how many nodes are failing" in {
