@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
+  FederatedSourceType,
   Pool,
   RoleDistribution,
   Tenant,
@@ -12,6 +13,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.federation.iceberg.{IcebergAuthType, IcebergRestConfig}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{
@@ -130,6 +132,18 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     s.addUserRole(aliceId, "r-1")
 
     s
+
+  /** Replace every tenant-db's federated sources in an already-exported manifest. The federation
+    * tests below hand-build sources the store cannot produce (an invalid alias, a blank secret),
+    * and they all need the same three-deep rewrite.
+    */
+  private def withFederatedSources(
+      m: ConfigManifest,
+      sources: List[ManifestFederatedSource]
+  ): ConfigManifest =
+    m.copy(tenants = m.tenants.map { mt =>
+      mt.copy(tenantDbs = mt.tenantDbs.map(_.copy(federatedSources = sources)))
+    })
 
   // ------------------------------------------------------------------
   // Test 1: structural round-trip
@@ -804,4 +818,353 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     val result = ManifestImporter.apply(parsed, dst, requireEncryption = false)
     result.isLeft shouldBe true
     result.left.toOption.get.exists(_.contains("set together")) shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // Test 12: a typed (iceberg_rest) federated source survives
+  // export -> YAML -> import with sourceType, config and readOnly intact.
+  //
+  // readOnly is the load-bearing one: it is what puts READ_ONLY on the
+  // ATTACH the blob builder renders, so losing it here would re-attach the
+  // catalog WRITABLE at the next node spawn.
+  // ------------------------------------------------------------------
+
+  it should "round-trip an iceberg_rest federated source through export, YAML and import" in {
+    val cp     = buildSrc()
+    val srcFed = new InMemoryFederatedSourceStore()
+    val cfg    = IcebergRestConfig(
+      uri = "https://catalog.example.com/api/catalog",
+      warehouse = "sales",
+      authType = Some(IcebergAuthType.OAuth2),
+      clientId = Some("{{secret.CID}}"),
+      clientSecret = Some("{{secret.CSEC}}")
+    ).toJson
+    srcFed.upsertSource(
+      FederatedSource(
+        id = "fs-ice",
+        tenantDbId = "td-1",
+        alias = "sales_lake",
+        sourceType = FederatedSourceType.IcebergRest,
+        config = Some(cfg),
+        readOnly = true
+      )
+    )
+
+    val exported = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(srcFed))
+    val msrc     = exported.tenants.head.tenantDbs.head.federatedSources.head
+    msrc.sourceType shouldBe "iceberg_rest"
+    msrc.readOnly shouldBe true
+    msrc.config shouldBe Some(cfg)
+    msrc.setupSql shouldBe ""
+
+    // Through the actual wire, not only the in-memory value: a codec that dropped one of the
+    // three fields would still satisfy the assertions above.
+    val yaml     = Yaml.pretty(exported.asJson)
+    val reparsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+
+    val target = new InMemoryFederatedSourceStore()
+    ManifestImporter.apply(reparsed, cp, Some(target)) shouldBe Right(())
+
+    val back = target.listSources("td-1")
+    back should have size 1
+    back.head.alias shouldBe "sales_lake"
+    back.head.sourceType shouldBe FederatedSourceType.IcebergRest
+    back.head.config shouldBe Some(cfg)
+    back.head.readOnly shouldBe true
+    back.head.setupSql shouldBe ""
+  }
+
+  // ------------------------------------------------------------------
+  // Test 13: a pre-Iceberg manifest (no sourceType / config / readOnly)
+  // still decodes, as a WRITABLE sql source.
+  // ------------------------------------------------------------------
+
+  it should "decode a pre-Iceberg manifest with no sourceType as a writable sql source" in {
+    val direct = ManifestFederatedSource(alias = "pg", setupSql = "ATTACH 'x' AS {{alias}};")
+    direct.sourceType shouldBe "sql"
+    direct.readOnly shouldBe false
+    direct.config shouldBe None
+
+    val yaml =
+      """apiVersion: quack-on-demand/v1
+        |kind: ConfigManifest
+        |exportedAt: '2026-06-05T12:00:00Z'
+        |exportedFrom: { managerVersion: x, hostname: y }
+        |tenants:
+        |  - name: tpch
+        |    tenantDbs:
+        |      - name: tpch_tpch1
+        |        federatedSources:
+        |          - alias: pg
+        |            setupSql: ATTACH 'x' AS {{alias}};
+        |""".stripMargin
+    val parsed  = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    val decoded = parsed.tenants.head.tenantDbs.head.federatedSources.head
+    decoded.sourceType shouldBe "sql"
+    decoded.readOnly shouldBe false
+    decoded.config shouldBe None
+
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    ManifestImporter.apply(parsed, cp, Some(fed)) shouldBe Right(())
+    val stored = fed.listSources("td-1")
+    stored should have size 1
+    stored.head.sourceType shouldBe FederatedSourceType.Sql
+    stored.head.readOnly shouldBe false
+  }
+
+  // ------------------------------------------------------------------
+  // Test 14: the importer normalizes an imported alias the way REST create
+  // does, and refuses one that cannot be normalized rather than writing a
+  // name every other path rejects.
+  // ------------------------------------------------------------------
+
+  it should "normalize an imported federated alias and reject one that cannot be normalized" in {
+    val cp      = buildSrc()
+    val fed     = new InMemoryFederatedSourceStore()
+    val tooLong = "a" * 64
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(alias = "Sales_Lake", setupSql = "ATTACH 'x' AS {{alias}};"),
+        ManifestFederatedSource(alias = tooLong, setupSql = "ATTACH 'y' AS {{alias}};")
+      )
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    res.left.toOption.get.exists(_.contains(s"invalid alias '$tooLong'")) shouldBe true
+
+    // The valid one landed lowercased; the invalid one was never written.
+    fed.listSources("td-1").map(_.alias) shouldBe List("sales_lake")
+  }
+
+  // ------------------------------------------------------------------
+  // Test 15: a source with NO secrets re-imports onto its own row.
+  //
+  // The id used to be recovered from a map flat-mapped over each source's
+  // SECRETS, so a secret-less source missed the lookup, minted a fresh id,
+  // and (on Postgres) violated uq_fedsrc_tenant_db_alias.
+  // ------------------------------------------------------------------
+
+  it should "keep a secret-less source on its own row id across a re-import" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-nosec",
+        tenantDbId = "td-1",
+        alias = "pg_ext",
+        setupSql = "ATTACH 'dbname=prod' AS pg_ext (TYPE POSTGRES);"
+      )
+    )
+
+    val exported = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    exported.tenants.head.tenantDbs.head.federatedSources.head.secrets shouldBe Nil
+
+    ManifestImporter.apply(exported, cp, Some(fed)) shouldBe Right(())
+
+    val rows = fed.listSources("td-1")
+    rows should have size 1
+    rows.head.id shouldBe "fs-nosec"
+    rows.head.alias shouldBe "pg_ext"
+  }
+
+  // ------------------------------------------------------------------
+  // Test 16: a manifest alias that differs from the stored one only in case
+  // updates that row in place (id preserved, secret value reusable) instead
+  // of delete-and-recreate.
+  // ------------------------------------------------------------------
+
+  it should "update a stored source whose alias differs only in case instead of recreating it" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    // A legacy row, written before aliases were normalized at the REST layer.
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-legacy",
+        tenantDbId = "td-1",
+        alias = "Sales",
+        setupSql = "ATTACH 'old' AS Sales;"
+      )
+    )
+    fed.upsertSecret(
+      FederatedSecret(
+        id = "fsec-legacy",
+        federatedSourceId = "fs-legacy",
+        name = "PG_PASSWORD",
+        value = Some("super-secret"),
+        externalRef = None
+      )
+    )
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(
+          alias = "sales",
+          setupSql = "ATTACH 'new' AS {{alias}};",
+          secrets = List(
+            ManifestFederatedSecret(
+              name = "PG_PASSWORD",
+              value = Some(FederatedSecret.RedactedMarker)
+            )
+          )
+        )
+      )
+    )
+    ManifestImporter.apply(withFed, cp, Some(fed)) shouldBe Right(())
+
+    val rows = fed.listSources("td-1")
+    rows should have size 1
+    rows.head.id shouldBe "fs-legacy"
+    rows.head.alias shouldBe "sales"
+    rows.head.setupSql shouldBe "ATTACH 'new' AS {{alias}};"
+    // The redaction sentinel resolved against the row's existing secret, which is only reachable
+    // through the recovered row id.
+    fed.listSecrets("fs-legacy").map(_.value) shouldBe List(Some("super-secret"))
+  }
+
+  // ------------------------------------------------------------------
+  // Test 17: FederatedSource.validate runs on every imported row, so the
+  // importer cannot write a shape the REST surface refuses.
+  // ------------------------------------------------------------------
+
+  it should "refuse an imported source whose shape FederatedSource.validate rejects" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    // A stored row the rejected manifest source names. Rejecting a source is an error for the
+    // operator to fix, not a reason to destroy what is stored, so this row must survive untouched.
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-ice-old",
+        tenantDbId = "td-1",
+        alias = "ice",
+        setupSql = "ATTACH 'old' AS ice;"
+      )
+    )
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(alias = "ice", sourceType = "iceberg_rest"),
+        ManifestFederatedSource(alias = "empty_sql", setupSql = "   ")
+      )
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    val msgs = res.left.toOption.get
+    msgs.exists(_.contains("config is required for sourceType 'iceberg_rest'")) shouldBe true
+    msgs.exists(_.contains("setupSql is required for sourceType 'sql'")) shouldBe true
+
+    val kept = fed.getSource("td-1", "ice").get
+    kept.id shouldBe "fs-ice-old"
+    kept.setupSql shouldBe "ATTACH 'old' AS ice;"
+    kept.sourceType shouldBe FederatedSourceType.Sql
+    fed.getSource("td-1", "empty_sql") shouldBe None
+  }
+
+  // ------------------------------------------------------------------
+  // Test 19: a stored row whose alias the manifest repeats VERBATIM but
+  // which cannot be normalized (a legacy row from before aliases were
+  // normalized) is reported and left alone, not deleted.
+  // ------------------------------------------------------------------
+
+  it should "keep a stored source whose alias the manifest repeats but cannot normalize" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-legacy-name",
+        tenantDbId = "td-1",
+        alias = "bad-alias",
+        setupSql = "ATTACH 'old' AS \"bad-alias\";"
+      )
+    )
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(ManifestFederatedSource(alias = "bad-alias", setupSql = "ATTACH 'new' AS {{alias}};"))
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    res.left.toOption.get.exists(_.contains("invalid alias 'bad-alias'")) shouldBe true
+
+    val rows = fed.listSources("td-1")
+    rows should have size 1
+    rows.head.id shouldBe "fs-legacy-name"
+    rows.head.alias shouldBe "bad-alias"
+    rows.head.setupSql shouldBe "ATTACH 'old' AS \"bad-alias\";"
+  }
+
+  // ------------------------------------------------------------------
+  // Test 18: a blank inline secret value is refused on import, the way
+  // FederatedSourceHandlers.upsertSecret refuses it. Left to land, it
+  // renders `VALUE ''` into the node's piped init script and the catalog
+  // silently disappears.
+  // ------------------------------------------------------------------
+
+  it should "refuse a blank inline secret value on import" in {
+    val cp      = buildSrc()
+    val fed     = new InMemoryFederatedSourceStore()
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(
+        ManifestFederatedSource(
+          alias = "pg_ext",
+          setupSql = "ATTACH 'dbname=prod' AS {{alias}};",
+          secrets = List(ManifestFederatedSecret(name = "PG_PASSWORD", value = Some("   ")))
+        )
+      )
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    res.left.toOption.get.exists(_.contains("has a blank value")) shouldBe true
+
+    // The source itself is a valid shape and lands; only the secret is refused.
+    val src = fed.getSource("td-1", "pg_ext").get
+    fed.getSecret(src.id, "PG_PASSWORD") shouldBe None
+  }
+
+  // ------------------------------------------------------------------
+  // Test 20: delete-missing keys on the ROW ID, not on the alias string.
+  //
+  // A manifest entry whose alias differs from the stored one only in case
+  // and whose shape is rejected used to destroy the stored row: the alias
+  // string was not in the incoming set, so the row was deleted, and the
+  // upsert that would have recreated it never ran.
+  // ------------------------------------------------------------------
+
+  it should "not delete a stored source when a case-differing manifest entry is rejected" in {
+    val cp  = buildSrc()
+    val fed = new InMemoryFederatedSourceStore()
+    fed.upsertSource(
+      FederatedSource(
+        id = "fs-mixed",
+        tenantDbId = "td-1",
+        alias = "Ice",
+        setupSql = "ATTACH 'old' AS Ice;"
+      )
+    )
+
+    val base    = ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname, Some(fed))
+    val withFed = withFederatedSources(
+      base,
+      List(ManifestFederatedSource(alias = "ice", sourceType = "iceberg_rest"))
+    )
+    val res = ManifestImporter.apply(withFed, cp, Some(fed))
+
+    res.isLeft shouldBe true
+    val rows = fed.listSources("td-1")
+    rows should have size 1
+    rows.head.id shouldBe "fs-mixed"
+    rows.head.setupSql shouldBe "ATTACH 'old' AS Ice;"
   }

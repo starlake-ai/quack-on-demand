@@ -85,6 +85,13 @@ object ManifestExporter:
               setupSql = src.setupSql,
               description = src.description,
               disabled = src.disabled,
+              // The typed triple. Dropping any of it turned an exported iceberg_rest source back
+              // into a `sql` source with an empty setupSql on re-import (the catalog silently
+              // vanished at node spawn); dropping `readOnly` additionally re-attached the catalog
+              // WRITABLE, since that flag is what puts READ_ONLY on the rendered ATTACH.
+              sourceType = src.sourceType.wire,
+              config = src.config,
+              readOnly = src.readOnly,
               secrets = fs.listSecrets(src.id).map { sec =>
                 ManifestFederatedSecret(
                   name = sec.name,
