@@ -38,6 +38,22 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
     AdminSqlParser.parse("CREATE ROLE r -- trailing comment") shouldBe
       Right(AdminCommand.CreateRole("r"))
 
+  it should "end a line comment at a bare carriage return, like the engine does" in:
+    // DuckDB 1.5.4 ends a `--` comment at a line feed OR at a bare CR. `scanRegion` scanned to a
+    // line feed alone, so with no line feed anywhere after the `--` the comment ran to end of
+    // input: every token behind the CR was swallowed, `claims` saw no keyword and answered false,
+    // and a statement whose engine-visible first token IS an admin verb was forwarded to a node
+    // instead of being answered (or refused) by this dialect. Same defect as the one already
+    // closed in `SqlTrivia.stripLeading` and `SqlCommentStripper.stripComments`.
+    // The CR is written as an escape, never as a raw byte, so a formatting pass cannot silently
+    // rewrite the very character under test.
+    AdminSqlParser.claims("-- x" + "\r" + "CREATE ROLE r") shouldBe true
+    AdminSqlParser.parse("-- x" + "\r" + "CREATE ROLE r") shouldBe
+      Right(AdminCommand.CreateRole("r"))
+    AdminSqlParser.claims("-- x" + "\r" + "GRANT ROLE analyst TO USER alice") shouldBe true
+    // A trailing CR comment still ends the statement, exactly as a trailing line-feed one does.
+    AdminSqlParser.parse("CREATE ROLE r -- x" + "\r") shouldBe Right(AdminCommand.CreateRole("r"))
+
   "parse" should "parse CREATE ROLE and DROP ROLE [IF EXISTS]" in:
     AdminSqlParser.parse("CREATE ROLE analyst") shouldBe Right(AdminCommand.CreateRole("analyst"))
     AdminSqlParser.parse("create role \"Analyst X\";") shouldBe

@@ -1,7 +1,9 @@
 package ai.starlake.quack.edge.sql
 
-import java.util.Locale
 import ai.starlake.quack.model.BucketKeys
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
+
+import java.util.Locale
 
 import scala.collection.mutable.ListBuffer
 
@@ -13,10 +15,19 @@ import scala.collection.mutable.ListBuffer
   * Matching is token-based, deliberately not a full parse: the input is split on top-level
   * semicolons (quote- and comment-aware) and each statement is screened independently. Leading
   * trivia (whitespace, BOM, unicode spaces, line comments, nested block comments) is stripped
-  * before the first-token check. A denied function name (bare or double-quoted) followed by an open
-  * parenthesis is denied wherever it appears (subqueries included, EVERY occurrence), EXCEPT when
-  * every path argument is a string literal with an object-store scheme. Anything the tokenizer
-  * cannot prove safe is denied.
+  * before the first-token check, and every INTERIOR comment is also stripped (replaced by a
+  * separator, not deleted -- see `screenOne`) before the keyword-adjacency regexes run, so a
+  * comment sitting between a keyword and its argument cannot hide that adjacency the way an
+  * interior Unicode trivia character could. That holds for a nested comment too, and a comment
+  * marker inside any of DuckDB's quoting forms is left alone rather than opening a comment; see
+  * `ai.starlake.sql.SqlCommentStripper`, which is where both properties live and are tested. A
+  * denied function name (bare or double-quoted) followed by an open parenthesis is denied wherever
+  * it appears (subqueries included, EVERY occurrence), EXCEPT when every path argument is a string
+  * literal with an object-store scheme.
+  *
+  * What this screen does NOT claim: it is a deny-list of shapes, not a proof of safety. A statement
+  * no rule below matches is ADMITTED. The strip passes exist so a rule cannot be dodged by hiding
+  * the shape it looks for, not so that every unrecognized statement is refused.
   */
 object LockdownScreen:
 
@@ -109,7 +120,37 @@ object LockdownScreen:
     splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption()
 
   private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
-    val lower = stripLeadingTrivia(stmt.toLowerCase(Locale.ROOT))
+    // Normalized ONLY for screening, in three passes, each closing a gap the previous one leaves
+    // open -- `stmt` itself, unnormalized, is never used past this point; only `lower` is matched
+    // against, and the ORIGINAL `stmt` text is what the caller relays to the node.
+    //   1. `SqlTrivia.stripLeading` DELETES leading whitespace/trivia and any leading comment. It
+    //      is the only pass that deletes rather than rewrites, which is what `FirstToken`'s
+    //      index-0 anchor needs: `SqlTrivia.normalize` turns a leading NBSP into an ASCII space
+    //      that still sits at index 0, and `stripComments` does not touch it at all.
+    //   2. `SqlCommentStripper.stripComments` then removes every remaining (INTERIOR) `--` / `/*
+    //      */` comment, nesting and quoting handled the way DuckDB's own lexer handles them (see
+    //      that object's scaladoc, where each property is tied to the statement that proves it).
+    //      DuckDB treats a comment as a SEPARATOR, not a weld -- confirmed against a real DuckDB
+    //      1.5.4, `SELECT * FROM/*x*/'/etc/passwd.parquet'` and `read_csv/*x*/('/etc/x.parquet')`
+    //      both execute and return the target file's rows -- and a closed block comment is
+    //      replaced by a single ASCII space rather than nothing. For the three regexes that use
+    //      `\s*` (`FromLiteral`, `CopyPathLiteral`, `deniedFunctionIn`'s call regex) the space is
+    //      not what makes them match, since they already match `from'...'`: what matters there is
+    //      that the comment is GONE. The space is load-bearing for `FromEscapeLiteral`, which uses
+    //      `\s+`; `SELECT * FROM/*x*/e'/tmp/x.csv'` executes on DuckDB and is admitted without the
+    //      space, denied with it, and `LockdownScreenSpec` carries that witness.
+    //   3. `SqlTrivia.normalize` collapses every remaining trivia character (unicode space /
+    //      format, see `SqlTrivia.isTriviaSpace`) to an ASCII space across the whole statement,
+    //      matching what DuckDB's own parser front end does before tokenizing. It runs LAST
+    //      because pass 2 can re-expose a trivia character that sat next to a comment body.
+    //
+    // `Locale.ROOT` on the lowercasing, not the default locale: under `-Duser.language=tr`,
+    // `"INSTALL".toLowerCase` is a dotless-i `install` (U+0131), which matches no key in
+    // `DeniedFirstTokens` and admits INSTALL on a locked-down deployment.
+    val lower =
+      SqlTrivia.normalize(
+        SqlCommentStripper.stripComments(SqlTrivia.stripLeading(stmt.toLowerCase(Locale.ROOT)))
+      )
     val first = FirstToken.findFirstMatchIn(lower).map(_.group(1))
     first.flatMap(DeniedFirstTokens.get) match
       case some @ Some(_) => some
@@ -132,45 +173,24 @@ object LockdownScreen:
           .orElse(deniedFunctionIn(lower, deniedBuckets))
           .orElse(barePathFrom(lower, deniedBuckets))
 
-  /** Skips leading whitespace (including BOM, zero-width space and unicode space separators), `--`
-    * line comments, and (nested) block comments so a comment prefix cannot hide the first token. An
-    * unterminated block comment consumes the rest of the statement (nothing executable remains, so
-    * the empty remainder screens clean).
-    */
-  private def stripLeadingTrivia(s: String): String =
-    var i     = 0
-    var moved = true
-    while moved do
-      moved = false
-      while i < s.length && isTriviaSpace(s(i)) do
-        i += 1
-        moved = true
-      if i + 1 < s.length && s(i) == '-' && s(i + 1) == '-' then
-        while i < s.length && s(i) != '\n' do i += 1
-        moved = true
-      else if i + 1 < s.length && s(i) == '/' && s(i + 1) == '*' then
-        var depth = 1
-        i += 2
-        while i < s.length && depth > 0 do
-          if i + 1 < s.length && s(i) == '/' && s(i + 1) == '*' then
-            depth += 1
-            i += 2
-          else if i + 1 < s.length && s(i) == '*' && s(i + 1) == '/' then
-            depth -= 1
-            i += 2
-          else i += 1
-        if depth > 0 then i = s.length
-        moved = true
-    s.substring(i)
-
-  private def isTriviaSpace(c: Char): Boolean =
-    c.isWhitespace || c == '\uFEFF' || c == '\u200B' ||
-      Character.getType(c) == Character.SPACE_SEPARATOR
-
   /** Splits the input on top-level semicolons: semicolons inside single-quoted strings,
     * double-quoted identifiers, line comments, or (nested) block comments do not split.
+    *
+    * `private[sql]`, not `private`, so `CatalogWriteScreen` can reuse the same quote- and
+    * comment-aware splitter to judge a batch statement by statement instead of by its first token.
+    *
+    * The line-comment arm ends at a line feed OR at a bare carriage return, the same pair
+    * `SqlTrivia.stripLeading` and `SqlCommentStripper.stripComments` already end one at (verified
+    * against a real DuckDB 1.5.4). Ending it at a line feed alone was NOT a cosmetic divergence
+    * here: with no line feed anywhere after the `--`, the comment stayed open to end of input, so a
+    * top-level `;` behind the carriage return never split and the whole batch came back as ONE
+    * fragment. `CatalogWriteScreen` reads that fragment's first token on its cheap admit path, so
+    * `SELECT 1 -- c<CR>; INSERT INTO <read-only>.t VALUES (1)` classified `Select`, screened clean,
+    * and reached a node where DuckDB ends the comment at the carriage return and runs the INSERT.
+    * (The engine-level `READ_ONLY` on the ATTACH still refused that write; this screen is the layer
+    * that must refuse it BEFORE a node ever sees it.)
     */
-  private def splitStatements(sql: String): List[String] =
+  private[sql] def splitStatements(sql: String): List[String] =
     val out        = ListBuffer.empty[String]
     val buf        = new StringBuilder
     var i          = 0
@@ -190,7 +210,7 @@ object LockdownScreen:
         i += 1
       else if inLine then
         buf.append(c)
-        if c == '\n' then inLine = false
+        if c == '\n' || c == '\r' then inLine = false
         i += 1
       else if blockDepth > 0 then
         if i + 1 < sql.length && c == '/' && sql(i + 1) == '*' then

@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.model.{NodePlacement, NodeToleration, PoolCohort, RoleDistribution}
+import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import io.circe.{Codec, Decoder, Encoder, Json}
 import io.circe.derivation.{Configuration, ConfiguredCodec}
 import io.circe.generic.semiauto.deriveCodec
@@ -86,6 +87,18 @@ final case class CreatePoolRequest(
     maxNodes: Option[Int] = None
 )
 
+/** One declared catalog that is not attached on a node, with the DuckDB error that says why.
+  * Populated from the in-memory AttachStatusRegistry, so it reflects THIS manager replica's view of
+  * ITS OWN process state: under HA each replica verifies only the nodes it tracks, so the same node
+  * can show a different (or absent) failure list depending on which replica answered the request.
+  */
+final case class CatalogAttachFailureDto(
+    alias: String,
+    error: String,
+    at: String,
+    attempts: Int
+)
+
 final case class NodeInfo(
     nodeId: String,
     role: String,
@@ -112,7 +125,10 @@ final case class NodeInfo(
     duckdbMemoryBytes: Option[Long] = None,
     duckdbTempStorageBytes: Option[Long] = None,
     duckdbSpillFiles: Option[Long] = None,
-    duckdbSpillBytes: Option[Long] = None
+    duckdbSpillBytes: Option[Long] = None,
+    // Declared catalogs that failed to ATTACH on this node (Iceberg REST today). Empty is the
+    // healthy case; a non-empty list means the node serves everything EXCEPT these catalogs.
+    catalogAttachFailures: List[CatalogAttachFailureDto] = Nil
 )
 
 final case class PoolResponse(
@@ -424,18 +440,32 @@ final case class UpdateTenantDbResponse(
 
 final case class FederatedSourceCreateRequest(
     alias: String,
-    setupSql: String,
+    // `sql` sources only. Optional since the iceberg_rest type carries `config` instead;
+    // supplying both is a 400.
+    setupSql: Option[String] = None,
     description: Option[String] = None,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    // "sql" (default) or "iceberg_rest".
+    sourceType: Option[String] = None,
+    // iceberg_rest only. Credential fields carry {{secret.NAME}} placeholders, never values,
+    // so this object is safe to echo back on the response.
+    config: Option[IcebergRestConfig] = None,
+    // Omitted means: false for a sql source, true for an iceberg_rest source.
+    readOnly: Option[Boolean] = None
 )
 
 final case class FederatedSourceResponse(
     id: String,
     tenantDbId: String,
     alias: String,
-    setupSql: String,
+    setupSql: Option[String] = None,
     description: Option[String] = None,
-    disabled: Boolean = false
+    disabled: Boolean = false,
+    sourceType: String = "sql",
+    config: Option[IcebergRestConfig] = None,
+    readOnly: Boolean = false,
+    // Live attach state aggregated across the pool's nodes; filled in Task 8.
+    attachStatus: Option[String] = None
 )
 
 final case class FederatedSourceListResponse(sources: List[FederatedSourceResponse])
@@ -1366,6 +1396,7 @@ object Dtos:
   given Codec[DeletePoolRequest]        = ConfiguredCodec.derived
   given Codec[SuspendPoolRequest]       = deriveCodec
   given Codec[ResumePoolRequest]        = deriveCodec
+  given Codec[CatalogAttachFailureDto]  = deriveCodec
   given Codec[NodeInfo]                 = ConfiguredCodec.derived
   given Codec[PoolResponse]             = deriveCodec
   given Codec[SetPoolResourcesRequest]  = deriveCodec

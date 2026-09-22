@@ -813,7 +813,7 @@ what the later Execute actually delivers.
 
 ## Federation - external catalogs via DuckDB extensions
 
-Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table.
+Quack-on-Demand supports per-tenant-db federated catalogs that attach external sources (Postgres, S3, Iceberg, any DuckDB extension) under DuckDB catalog aliases. Existing RBAC covers federated tables - a `RolePermission(catalog='fedpg', schema='public', table='orders', verb='RO')` grants read access to a federated alias just like a DuckLake table. Sources come in two flavours: `sql`, where the operator writes the `ATTACH` text, and `iceberg-rest`, a typed source where QoD writes it (see "Register an Iceberg REST catalog").
 
 ### Tenant-db kinds
 
@@ -1058,6 +1058,28 @@ Placeholders:
 - `{{alias}}` - replaced with the source's `alias` field.
 - `{{secret.NAME}}` - replaced with the resolved value of the secret named `NAME`.
 
+Alias rules, for **every** source type (`sql` as well as `iceberg-rest`):
+
+- **An alias must be a plain lowercase identifier**: ASCII letters, digits and
+  underscore, starting with a letter or underscore, 1..63 chars. `--alias ext-s3`
+  (hyphen, dot, or over-length) is a `400`; use `ext_s3`. DuckDB treats catalog
+  and secret names case-insensitively, so a mixed-case alias is stored lowercase
+  and `Sales_Lake` and `sales_lake` are one row, not two.
+- **A source already stored under an alias that rule rejects stays editable.**
+  Re-`create` it naming that same alias and the edit applies under the stored
+  spelling. Its NAME is frozen, though: renaming it means delete and recreate,
+  and since the alias is the catalog segment of every role permission, that also
+  means re-granting.
+- The manager lists every stored alias it would reject or rewrite at boot, at
+  ERROR level, so an upgrade names the affected rows for you.
+- An alias must not collide with the tenant-db's own catalog alias, with a
+  sibling federated alias, or with a DuckDB builtin (`memory`, `system`, `temp`).
+- **`create` upserts, and an omitted field is RESET, not preserved.** Re-POST the
+  same alias to edit a source in place (there is no `qod federation update`). Every
+  field the request leaves out goes back to its default, so a re-`create` that
+  omits `--read-only` on a read-only source makes it writable again; the manager
+  WARNs when that happens. Pass the flags you want kept.
+
 ### Add a Postgres-backed secret
 
 ```bash
@@ -1070,6 +1092,89 @@ Or a secret backed by an external store (env var, AWS Secrets Manager, etc.):
 qod federation secret set acme acme_fed fedpg --name PG_PWD \
   --external-ref "vault:secret/data/qod/fedpg#password"
 ```
+
+### Register an Iceberg REST catalog
+
+An external Iceberg REST catalog (Polaris, Lakekeeper, Glue, S3 Tables, any
+REST-spec catalog) is a **typed** source: declare the connection settings and
+QoD renders the `INSTALL` / `CREATE SECRET` / `ATTACH` block itself, validating
+them at create time instead of at node spawn. No `--setup-sql` for this type.
+
+```bash
+# 1. declare the catalog. Credential flags carry {{secret.NAME}} placeholders, never values.
+qod federation create acme acme_fed --alias icelake --type iceberg-rest \
+  --uri https://polaris.example.com/api/catalog \
+  --warehouse analytics \
+  --auth oauth2 \
+  --client-id qod-svc \
+  --client-secret '{{secret.ICE_SECRET}}'
+
+# 2. store the real credential under the name the placeholder used
+qod federation secret set acme acme_fed icelake --name ICE_SECRET --value "$CLIENT_SECRET"
+
+# 3. recycle the pool's nodes so they re-attach with the new source
+qod node restart --tenant acme --db acme_fed --pool bi --node-id bi-1
+```
+
+Flags:
+
+- `--type iceberg-rest` selects the typed path. `--warehouse` is always required.
+- Exactly ONE of `--auth` (`none` | `oauth2` | `token` | `sigv4`) or
+  `--endpoint-type` (`glue` | `s3_tables`) - DuckDB refuses both at once. `--uri`
+  is required whenever `--auth` is set.
+- `oauth2` needs `--client-id` + `--client-secret`; `token` needs `--token` and
+  takes nothing else; `none` / `sigv4` / either `--endpoint-type` take no
+  credential flags at all. Optional oauth2 knobs: `--oauth2-server-uri`,
+  `--oauth2-scope`, `--oauth2-grant-type`.
+- `--config '<json>'` passes the whole config object instead of the flags, and
+  wins over them when both are given.
+- `--read-only` / `--no-read-only`. **Defaults ON for `iceberg-rest`** (an
+  external catalog is one QoD does not own), and it is enforced by the engine:
+  the rendered `ATTACH` carries `READ_ONLY`, so writes come back as DuckDB's
+  "attached in read-only mode" error. Note the pool-wide side effect: while any
+  source on the pool is read-only, every write anywhere on that pool must be
+  fully parseable and fully qualified or the edge refuses it.
+
+Rules worth knowing before the first create:
+
+- **Credentials must be placeholders.** `--client-secret` / `--token` holding a
+  literal is a `400`: they must match `{{secret.NAME}}` exactly, and the value
+  lives in `qod federation secret set`. That is what keeps the config safe to
+  echo back on `qod federation get`. `--client-id` is not constrained this way.
+- **The secret is set after the source exists** - secrets hang off the alias, so
+  step 1 must precede step 2. Step 1 does not check that the secret exists; an
+  unresolved `{{secret.NAME}}` fails the whole tenant-db federation blob at node
+  spawn, not just this catalog.
+- **`create` upserts**, with the reset-on-omit behaviour described under
+  "Register a federated source" above. Changing an alias between `sql` and
+  `iceberg-rest` is refused: delete it first.
+- **The alias rules are not Iceberg-specific.** See "Register a federated
+  source" above: they apply to every source type.
+
+### Check whether an Iceberg catalog actually attached
+
+A failed `ATTACH` does NOT fail the node: it comes up healthy, serves
+everything else, and the catalog is simply missing, so clients see
+`Catalog 'icelake' does not exist`. Two places report it:
+
+```bash
+# Per source, aggregated over the pool's nodes:
+# "attached" | "unknown" | "failed on N of M nodes"
+qod federation get acme acme_fed icelake     # -> .attachStatus
+
+# Per node, with the DuckDB error that says why:
+qod pool status --tenant acme --db acme_fed --pool bi   # -> .nodes[].catalogAttachFailures
+```
+
+`attachStatus` is reported only for enabled `iceberg-rest` sources (a `sql` or
+disabled source has no attach state), and both views are **replica-local**: each
+manager replica verifies only the nodes it tracks, so under HA the same node can
+read differently depending on which replica answered.
+
+The manager retries a missing catalog on its own health ticks, with backoff, and
+logs `catalog '<alias>' attached on retry` when a transient failure heals. It
+stops retrying a node once every declared catalog is attached, so a source added
+to an ALREADY-RUNNING pool is not picked up until its nodes restart.
 
 ### Switch the secret resolver
 
@@ -1124,13 +1229,16 @@ Import semantics: replace-by-alias inside the tenant-db. Sources absent from the
 | `kind env var is required` from spawn script | Manager invoked the script without setting `kind` | Manager release too old for this feature - upgrade (`qod start` with a current release) and restart |
 | `secret '<name>' for source '<alias>' has no existing value to reuse` on YAML import | Imported `***REDACTED***` for a new source that didn't exist before | Provide the actual `value` or `externalRef` for that secret in the YAML |
 | YAML import HTTP 400 `duplicate alias '<X>' in payload` | Two sources in the imported YAML have the same alias | Dedupe in the YAML before re-importing |
+| HTTP 400 `clientSecret must be a secret placeholder of the form {{secret.NAME}}, not a literal value` | Credential passed inline to `qod federation create --type iceberg-rest` | Pass `'{{secret.NAME}}'` and store the value with `qod federation secret set` |
+| HTTP 400 `set exactly one of authType / endpointType` | Both `--auth` and `--endpoint-type` given (or neither) | Pick one: `--auth` for a plain REST catalog, `--endpoint-type` for Glue / S3 Tables |
+| `attachStatus: failed on N of M nodes`, or `catalog '<alias>' does not exist` from the client | The Iceberg ATTACH failed on those nodes (bad credential, unreachable catalog, alias collision) | Read the per-node DuckDB error in `qod pool status` under `catalogAttachFailures`, fix the source or secret, then `qod node restart` the affected nodes |
 
 ### What does NOT need an ACL change
 
 The existing RBAC graph covers federated tables with zero changes:
 - Grant `RO` on `fedpg.public.orders` to role `analyst` via `qod role permission grant` (verb `RO`), exactly like a DuckLake table.
 - Federated writes (INSERT/UPDATE/DELETE on a federated alias) require an `RW` grant on the same triple; otherwise they are denied.
-- Read-only is enforced at ATTACH time (the user's `setupSql` should include `READ_ONLY`), not in the validator.
+- Read-only is enforced at ATTACH time, not in the validator: a `sql` source's `setupSql` should include `READ_ONLY` itself, while an `iceberg-rest` source gets it from QoD (`--read-only`, on by default).
 
 ## Node status + metrics
 

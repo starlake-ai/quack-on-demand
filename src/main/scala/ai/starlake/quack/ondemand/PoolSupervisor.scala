@@ -388,10 +388,17 @@ final class PoolSupervisor(
             val bound = e match
               case _: java.util.concurrent.TimeoutException => s" (bound: $blobResolveTimeout)"
               case _                                        => ""
-            logger.warn(
+            // ERROR, not WARN: the default logback root level is ERROR (see logback.xml), so a
+            // WARN here is silently swallowed on every install that hasn't raised the level. This
+            // failure fails the WHOLE tenant-db's blob (assemble composes all its sources with
+            // traverse), not just the one bad source, so every pool of this tenant-db respawned
+            // from this state loses EVERY federation alias, not only the offending one, until the
+            // cause is fixed and the state re-saved.
+            logger.error(
               s"restore: federation blob resolution failed for tenant-db '${td.name}'$bound: " +
-                s"${e.getMessage}; nodes respawned from this state will lack federation " +
-                "aliases until it is re-saved"
+                s"${e.getMessage}; ALL federation aliases for this tenant-db are lost on every " +
+                "node respawned from this state (one bad source fails the whole blob), until " +
+                "the cause is fixed and the state re-saved"
             )
           }
           attempt
@@ -599,8 +606,88 @@ final class PoolSupervisor(
         case None => current
     }.flatMap(fresh => reconcilePoolUnlockedWith(key, fresh))
 
+  /** The tenant-db's CURRENT federation blob, or `None` when one could not be produced - the caller
+    * then keeps its last-known-good value rather than spawning without federation.
+    *
+    * Mirrors `restore()`'s `resolvedBlobFor` (the `federatedTenantDbIds` pre-filter, the
+    * [[blobResolveTimeout]] bound, the ERROR-level log because the default logback root level is
+    * ERROR) with one deliberate difference: a tenant-db the filter reports as NOT federated
+    * resolves to `Some("")`, not to "could not resolve". That answer is authoritative - the store
+    * says there are no enabled sources, which is exactly the empty blob
+    * `FederationBlobBuilder.assemble` would return - and it is what makes DELETING the last
+    * federated source take effect on the next spawn instead of pinning its ATTACH forever.
+    *
+    * Stays in IO rather than borrowing restore()'s `unsafeRunSync` bridge: every caller here is
+    * already in an IO chain.
+    */
+  private def freshFederationBlob(tenantDbId: String, ctx: String): IO[Option[String]] =
+    IO.blocking(federatedTenantDbIds())
+      .handleErrorWith { e =>
+        IO.delay(
+          logger.warn(
+            s"$ctx: federatedTenantDbIds() failed: ${e.getMessage}; resolving the federation " +
+              "blob for this tenant-db anyway"
+          )
+        ).as(None)
+      }
+      .flatMap { fedTds =>
+        if fedTds.exists(!_.contains(tenantDbId)) then IO.pure(Some(""))
+        else
+          federationBlobOf(tenantDbId).timeout(blobResolveTimeout).attempt.flatMap {
+            case Right(blobOpt) => IO.pure(Some(blobOpt.getOrElse("")))
+            case Left(e)        =>
+              val bound = e match
+                case _: java.util.concurrent.TimeoutException => s" (bound: $blobResolveTimeout)"
+                case _                                        => ""
+              IO.delay(
+                logger.error(
+                  s"$ctx: federation blob resolution failed$bound: ${e.getMessage}; spawning " +
+                    "with this pool's last-known-good federation blob, which may predate the " +
+                    "most recent federated-source edit (one bad source fails the whole blob)"
+                )
+              ).as(None)
+          }
+      }
+
+  /** `state` with its federation blob re-resolved from the store, for a spawn about to happen.
+    *
+    * [[PoolState.extraSetupSql]] is a CACHE of a derived value: `createPool` fills it and only
+    * `restore()` refreshes it. A federated source created, edited, disabled or deleted after a
+    * pool's nodes first spawned therefore never reached a node respawned from that cached state -
+    * manual restart, reconcile respawn, scale-up addition, resume - until a full manager boot. That
+    * contradicted the documented contract ("edits take effect on the next spawn"), and it is
+    * silent: with no blob a `sql` source is simply absent, no error anywhere.
+    *
+    * Re-resolving at the moment of use (rather than invalidating this cache when a federation
+    * mutation commits) is also the only placement that covers an HA replica which never saw the
+    * mutation: federation writes fire no `qod_topology` NOTIFY.
+    *
+    * Fallback direction is deliberate: on ANY failure to produce a fresh blob the node spawns with
+    * the last-known-good one, never with an empty one - a default that silently disables federation
+    * is worse than running one commit behind. See [[freshFederationBlob]].
+    */
+  private def stateWithFreshBlob(key: PoolKey, state: PoolState): IO[PoolState] =
+    poolIdByKey.get(key).flatMap(poolRows.get).map(_.tenantDbId) match
+      case None =>
+        IO.delay(
+          logger.warn(
+            s"$key: no pool row to resolve a tenant-db id from (control-plane out of sync); " +
+              "spawning with this pool's last-known-good federation blob"
+          )
+        ).as(state)
+      case Some(tenantDbId) =>
+        freshFederationBlob(tenantDbId, s"spawn $key").map {
+          case Some(fresh) => state.copy(extraSetupSql = fresh)
+          case None        => state
+        }
+
   /** The full NodeSpec for one slot of a pool, from its PoolState. Shared by every spawn path
     * (createPool, scaleUnlocked, spawnFromDistribution, respawn) so the contract can't drift.
+    *
+    * `state.extraSetupSql` is taken as authoritative here. Every path that spawns from a CACHED
+    * PoolState must therefore put it through [[stateWithFreshBlob]] first; `createPool` is the one
+    * exception, having just resolved the blob itself. A new spawn path that forgets this
+    * reintroduces the stale-federation-blob defect [[stateWithFreshBlob]] documents.
     */
   private def specFromState(
       key: PoolKey,
@@ -680,6 +767,12 @@ final class PoolSupervisor(
     * has no pool yet, so a per-db-credentialed bucket still authors its `CREATE SECRET` and a
     * duckdb-file / memory tenant-db still spawns with its own wire kind on a donor-less run. The
     * pool segment is the reserved name `__maint` so node ids can't collide with a serving pool's.
+    *
+    * Deliberately does NOT go through [[stateWithFreshBlob]], unlike every serving spawn path: a
+    * maintenance (or merge) node only ever touches the tenant-db's OWN DuckLake catalog, so the
+    * donor's federation aliases are decoration there - being one commit behind on them changes
+    * nothing it does. Staying synchronous also keeps the branch-merge and maintenance-scheduler
+    * callers unchanged.
     */
   def maintenanceNodeSpec(tenantName: String, tenantDbName: String): Option[NodeSpec] =
     findTenantDb(tenantName, tenantDbName).map { td =>
@@ -861,7 +954,14 @@ final class PoolSupervisor(
             IO.delay(tracker.remove(n.nodeId))
         }
 
-        pruneIO *>
+        // Re-resolve the federation blob only when this pass is actually going to respawn: the
+        // loop runs every tick on every pool, and a pass that adopts everything must not cost a
+        // federation round trip. Resolved ONCE here, not per dead node, so a multi-node heal makes
+        // one call inside the advisory lock.
+        val respawnStateIO: IO[PoolState] =
+          if keep.exists(n => !podAlive(n)) then stateWithFreshBlob(key, state) else IO.pure(state)
+
+        pruneIO *> respawnStateIO.flatMap { spawnState =>
           keep
             .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
               acc.flatMap { kept =>
@@ -873,7 +973,7 @@ final class PoolSupervisor(
                   )
                   val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
                   IO.delay(tracker.remove(n.nodeId)) *>
-                    startNodeEmitting(key, respawnSpec(key, state, n))
+                    startNodeEmitting(key, respawnSpec(key, spawnState, n))
                       .flatMap { fresh =>
                         // Re-apply the pre-remove quarantine so an operator quarantine survives a
                         // node crash. Only automatic reconcile respawn preserves it; restartNode
@@ -893,10 +993,11 @@ final class PoolSupervisor(
             .flatMap { newNodes =>
               val changed = excess.nonEmpty || newNodes.zip(keep).exists((a, b) => a ne b)
               if changed then
-                val updated = state.copy(nodes = newNodes)
+                val updated = spawnState.copy(nodes = newNodes)
                 IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
               else IO.pure(state)
             }
+        }
       }
 
   /** Spawn the full distribution for a pool whose persisted state has no nodes yet. Mirrors
@@ -919,31 +1020,33 @@ final class PoolSupervisor(
     val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
       if cohortPlan.size == state.distribution.total then cohortPlan
       else state.distribution.asRoleList.map(r => (r, NodePlacement.empty))
-    val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
-      specFromState(
-        key,
-        state,
-        PoolSupervisor.nodeId(key, i + 1),
-        role,
-        placement,
-        state.maxConcurrentPerNode
-      )
-    }
-    spawnAll(key, specs)
-      .flatMap { running =>
-        val updated = state.copy(nodes = running)
-        pools.put(key, updated)
-        logger.info(
-          s"reconcile: spawned ${running.size} node(s) for empty pool $key"
+    stateWithFreshBlob(key, state).flatMap { spawnState =>
+      val specs = plan.zipWithIndex.map { case ((role, placement), i) =>
+        specFromState(
+          key,
+          spawnState,
+          PoolSupervisor.nodeId(key, i + 1),
+          role,
+          placement,
+          spawnState.maxConcurrentPerNode
         )
-        poolIdByKey.get(key) match
-          case Some(pid) =>
-            running
-              .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, pid)))
-              .map { _ => publish.topologyChanged(); updated }
-          case None =>
-            IO.delay { publish.topologyChanged(); updated }
       }
+      spawnAll(key, specs)
+        .flatMap { running =>
+          val updated = spawnState.copy(nodes = running)
+          pools.put(key, updated)
+          logger.info(
+            s"reconcile: spawned ${running.size} node(s) for empty pool $key"
+          )
+          poolIdByKey.get(key) match
+            case Some(pid) =>
+              running
+                .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, pid)))
+                .map { _ => publish.topologyChanged(); updated }
+            case None =>
+              IO.delay { publish.topologyChanged(); updated }
+        }
+    }
 
   /** Cohort placement owning the node at 1-based `index` in the pool's spawn order.
     * [[NodePlacement.empty]] when there are no explicit cohorts or the index is out of range. Used
@@ -1013,6 +1116,11 @@ final class PoolSupervisor(
   /** Lookup by surrogate id (`qodstate_tenant.id`). The `tenants` map is keyed by id: a direct hit.
     */
   def getTenantById(id: String): Option[Tenant] = tenants.get(id)
+
+  /** Lookup by surrogate id (`qodstate_tenant_db.id`). The `tenantDbs` map is keyed by id: a direct
+    * hit.
+    */
+  def getTenantDbById(id: String): Option[TenantDb] = tenantDbs.get(id)
 
   def listPoolsOfTenant(name: String): List[String] =
     pools.values.filter(_.key.tenant == name.toLowerCase(Locale.ROOT)).map(_.key.pool).toList.sorted
@@ -2134,16 +2242,11 @@ final class PoolSupervisor(
           // during a mixed add/remove. Scaling clears authored cohorts (updatePoolEntityDist below),
           // so new nodes spawn placement-less by design.
           val baseIndex = state.size
-          val specs     = rolesToAdd.zipWithIndex.map { case (role, i) =>
-            specFromState(
-              key,
-              state,
-              PoolSupervisor.nodeId(key, baseIndex + i + 1),
-              role,
-              NodePlacement.empty,
-              state.maxConcurrentPerNode
-            )
-          }
+          // A pure scale-DOWN adds no node, so it must not pay a federation round trip inside the
+          // advisory lock; the cached state is only ever handed to specFromState when something
+          // actually spawns.
+          val spawnStateIO: IO[PoolState] =
+            if rolesToAdd.isEmpty then IO.pure(state) else stateWithFreshBlob(key, state)
           val survivors = state.nodes.filterNot(n => toRemove.exists(_.nodeId == n.nodeId))
 
           val stopRemoved =
@@ -2163,11 +2266,21 @@ final class PoolSupervisor(
               acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))
             }
 
-          stopRemoved *> deleteRemoved *>
+          stopRemoved *> deleteRemoved *> spawnStateIO.flatMap { spawnState =>
+            val specs = rolesToAdd.zipWithIndex.map { case (role, i) =>
+              specFromState(
+                key,
+                spawnState,
+                PoolSupervisor.nodeId(key, baseIndex + i + 1),
+                role,
+                NodePlacement.empty,
+                spawnState.maxConcurrentPerNode
+              )
+            }
             spawnAll(key, specs)
               .map(survivors ++ _)
               .flatMap { combined =>
-                pools.put(key, state.copy(nodes = combined, distribution = newDist))
+                pools.put(key, spawnState.copy(nodes = combined, distribution = newDist))
                 updatePoolEntityDist(key, newDist, combined.size)
                 val added = combined.drop(survivors.size)
                 (if poolId.nonEmpty then
@@ -2175,6 +2288,7 @@ final class PoolSupervisor(
                      .foldLeft(IO.unit)((acc, n) => acc *> IO.blocking(store.upsertNode(n, poolId)))
                  else IO.unit).map { _ => publish.topologyChanged(); combined }
               }
+          }
 
   /** Stop every node but KEEP the pool registered: the row survives and in-memory state stays with
     * empty nodes + zero distribution, so the pool is scaled to 0 and stays drained across a restart
@@ -2372,17 +2486,18 @@ final class PoolSupervisor(
                 IO.pure(Left(SupervisorError.NotFound(s"node $nodeId not found in $key")))
               case Some(n) =>
                 for
-                  _     <- stopNodeEmitting(key, n.nodeId, "respawn")
-                  _     <- IO.delay(tracker.remove(n.nodeId))
-                  fresh <- startNodeEmitting(key, respawnSpec(key, state, n))
-                  _     <- poolIdByKey.get(key) match
+                  _          <- stopNodeEmitting(key, n.nodeId, "respawn")
+                  _          <- IO.delay(tracker.remove(n.nodeId))
+                  spawnState <- stateWithFreshBlob(key, state)
+                  fresh      <- startNodeEmitting(key, respawnSpec(key, spawnState, n))
+                  _          <- poolIdByKey.get(key) match
                     case Some(pid) => IO.blocking(store.upsertNode(fresh, pid))
                     case None      => IO.unit
                   _ <- IO.blocking(store.setNodeQuarantined(nodeId, false))
                   _ <- IO.delay {
                     tracker.setQuarantined(nodeId, false)
-                    val updated = state.copy(
-                      nodes = state.nodes.map(x => if x.nodeId == nodeId then fresh else x)
+                    val updated = spawnState.copy(
+                      nodes = spawnState.nodes.map(x => if x.nodeId == nodeId then fresh else x)
                     )
                     pools.put(key, updated)
                     publish.topologyChanged()

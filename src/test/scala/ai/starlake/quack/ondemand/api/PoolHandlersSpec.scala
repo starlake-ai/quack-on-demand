@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{RoleDistribution, Tenant, TenantDbKind}
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -13,6 +13,8 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
+
+import java.time.Instant
 
 class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
@@ -699,3 +701,53 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       )(_ => Some(tenantScope("globex")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
+
+  // --- Task 8: catalog attach failures on NodeInfo ---------------------------
+
+  "the node response" should "carry the attach failures looked up for the node's OWN incarnation" in:
+    val tracker = new NodeLoadTracker
+    // A DISTINCTIVE startedAt, not the testkit's default Instant.EPOCH: against EPOCH the
+    // assertion below cannot tell the node's own incarnation key from any constant-zero
+    // expression (`Instant.EPOCH`, `Instant.ofEpochMilli(0)`, a dropped argument defaulting to
+    // zero), because all of them render as "@0".
+    val sup =
+      new PoolSupervisor(
+        new StubQuackBackend(startedAt = Instant.ofEpochMilli(1_700_000_123_456L)),
+        tracker,
+        new InMemoryControlPlaneStore()
+      )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    // The injected lookup echoes BOTH its arguments back inside the alias, so the assertion below
+    // pins the incarnation key (the node's own startedAt) and not merely "some timestamp": an
+    // Instant.now() at the call site, or a swapped/derived/constant value, changes the expected
+    // string.
+    val h = new PoolHandlers(
+      sup,
+      tracker,
+      attachFailuresOf = (nodeId, startedAt) =>
+        List(CatalogAttachFailureDto(s"$nodeId@${startedAt.toEpochMilli}", "boom", "t0", 3))
+    )
+    val out = h
+      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .unsafeRunSync()
+    val Right(resp) = out: @unchecked
+    val running     = sup.get(PoolKey("acme", "acme_default", "sales")).get.nodes.head
+    resp.nodes.map(_.catalogAttachFailures) shouldBe List(
+      List(
+        CatalogAttachFailureDto(
+          s"${running.nodeId}@${running.startedAt.toEpochMilli}",
+          "boom",
+          "t0",
+          3
+        )
+      )
+    )
+
+  it should "default to no attach failures when no lookup is wired" in:
+    val h   = freshHandlers
+    val out = h
+      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .unsafeRunSync()
+    val Right(resp) = out: @unchecked
+    resp.nodes.map(_.catalogAttachFailures) shouldBe List(Nil)

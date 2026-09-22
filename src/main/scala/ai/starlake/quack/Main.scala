@@ -24,7 +24,7 @@ import ai.starlake.quack.boot.{
 }
 import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
-import ai.starlake.quack.model.{Names, TenantDb}
+import ai.starlake.quack.model.{Names, RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -369,23 +369,55 @@ object Main extends IOApp with LazyLogging:
       val jdbcUrl = s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}"
       Some(new FederatedSourceStore(jdbcUrl, dm.pgUser, dm.pgPassword))
 
+    // Best-effort: reports (never fails boot on) a federated alias the naming rule now rejects,
+    // so an operator learns about it on restart rather than on their next edit attempt.
+    manifestFedStore.foreach(BootPreflight.checkFederatedAliases)
+
+    // Declared here (rather than just above catalogReaders below) so federationBlobOf can also
+    // close over it: both need the supervisor's tenant-db resolution but are themselves inputs to
+    // the supervisor's constructor. Empty reference, filled right after the supervisor is built;
+    // get() only runs at request time, never during construction.
+    val supRef = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
+
+    // ONE builder instance, shared by the spawn-time blob (`federationBlobOf`, what the node
+    // actually runs) and the Iceberg attach verifier's re-attach (`buildOne`, what the verifier
+    // re-issues onto a live node). These were two separate constructions and they drifted: the
+    // verifier's copy omitted `catalogAliasOf`, so it reserved a smaller alias set than the blob
+    // deployed to the node, and re-issued an ATTACH the node's own startup script had refused.
+    // Sharing the instance makes that drift unrepresentable rather than merely fixed once.
+    // The tenant-db's own DuckDB catalog alias. ONE definition, two consumers: the blob builder
+    // reserves it so an iceberg source can't claim the name its own tenant-db is ATTACHed under,
+    // and the attach verifier takes a declared alias equal to it out of the node-listing match
+    // (where it would always look attached, because the tenant-db itself is attached under that
+    // name). Mirrors attachedCatalogsOf's resolution below. Null-safe before supRef is filled
+    // (construction order) and never throws: a lookup failure just means one fewer reserved
+    // alias, not a broken blob.
+    val catalogAliasOfDbId: String => IO[Option[String]] = tdId =>
+      IO.delay(
+        Option(supRef.get())
+          .flatMap(_.getTenantDbById(tdId))
+          .map(td => TenantDb.catalogAlias(td.metastore, td.name))
+      )
+
+    val federationBlobBuilder: Option[FederationBlobBuilder] =
+      manifestFedStore.map { federatedStore =>
+        new FederationBlobBuilder(
+          loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
+          loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
+          resolver = secretResolver,
+          catalogAliasOf = catalogAliasOfDbId
+        )
+      }
+
     val federationBlobOf: String => IO[Option[String]] =
-      manifestFedStore match
-        case Some(federatedStore) =>
-          val builder = new FederationBlobBuilder(
-            loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
-            loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
-            resolver = secretResolver
-          )
-          tdId => builder.build(tdId)
-        case None =>
-          _ => IO.pure(None)
+      federationBlobBuilder match
+        case Some(builder) => tdId => builder.build(tdId)
+        case None          => _ => IO.pure(None)
 
     // Cached per-tenant-db DuckLake catalog readers (contract in CatalogReaders).
     // Construction cycle with `sup`: readers need the supervisor's metastore
     // resolution, the supervisor's hooks need evict. Broken via supRef, filled
     // right after the supervisor is built; get() only runs at request time.
-    val supRef           = new java.util.concurrent.atomic.AtomicReference[PoolSupervisor]()
     val catalogReaderCfg =
       com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.catalogReader")
     val catalogReaders: CatalogReaders = new CatalogReaders(
@@ -522,13 +554,30 @@ object Main extends IOApp with LazyLogging:
     val moduleStart: IO[Unit] =
       modules.traverse_(m => IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtx))
 
+    // Declared here (rather than beside its verifier below) so both the node and federated-source
+    // REST responses can read from it: NodeInfo.catalogAttachFailures needs it right away, and
+    // IcebergAttachVerifier (further down, once adapter/manifestFedStore exist) writes into this
+    // same instance.
+    val attachRegistry = new ai.starlake.quack.ondemand.federation.iceberg.AttachStatusRegistry()
+
     val pools = new PoolHandlers(
       sup,
       tracker,
       engineStatsTracker,
       mgrCfg.k8s.podTemplateEnabled,
       autoscaleHardCap = mgrCfg.autoscale.hardCap,
-      audit = auditRecorder
+      audit = auditRecorder,
+      attachFailuresOf = (nodeId, startedAt) =>
+        attachRegistry
+          .failuresFor(nodeId, startedAt.toEpochMilli)
+          .map(f =>
+            ai.starlake.quack.ondemand.api.CatalogAttachFailureDto(
+              alias = f.alias,
+              error = f.error,
+              at = f.at.toString,
+              attempts = f.attempts
+            )
+          )
     )
     val nodes   = new NodeHandlers(sup, tracker, store, publisher, audit = auditRecorder)
     val tenants = new TenantHandlers(
@@ -758,7 +807,61 @@ object Main extends IOApp with LazyLogging:
     // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
     // recorded, so the next tick retries the (idempotent) CREATE.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
-    val healthProbe  = new HealthProbe(
+
+    // Reads one node's attached catalogs. Decoding (batch draining, schema-only first batch,
+    // close-on-every-path) lives in IcebergAttachVerifier.decodeCatalogNames, which is unit
+    // tested; this is wiring only. Fail-soft: any surprise becomes a Left, never an exception.
+    def nodeCatalogs(n: RunningNode): IO[Either[String, Set[String]]] =
+      adapter
+        .send(n, "SELECT database_name FROM duckdb_databases()", session = None, recordLoad = false)
+        .map {
+          case QuackResponse.Failed(err, _)     => Left(err.toString)
+          case QuackResponse.Ok(rows, _, close) =>
+            ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier
+              .decodeCatalogNames(rows, close)
+        }
+        .handleError(t => Left(t.getMessage))
+
+    // Both halves come from the same `manifestFedStore`, so this is all-or-nothing in practice;
+    // zipping says so to the compiler instead of re-deriving a second builder here.
+    val attachVerifier = manifestFedStore.zip(federationBlobBuilder).map { (fedStore, builder) =>
+      new ai.starlake.quack.ondemand.federation.iceberg.IcebergAttachVerifier(
+        sourcesOf = key =>
+          sup.findTenantDb(key.tenant, key.tenantDb) match
+            case Some(td) => IO.blocking(fedStore.listEnabledSources(td.id))
+            case None     =>
+              // Distinguish "lookup failed" from "nothing declared": a missing tenant-db here
+              // is a cache-population race, not proof the pool has no Iceberg source, and must
+              // not latch the node. IO.raiseError routes it through verify's own Left arm.
+              IO.raiseError(
+                new NoSuchElementException(
+                  s"no tenant-db for ${key.tenant}/${key.tenantDb}"
+                )
+              ),
+        // Same `catalogAliasOfDbId` the blob builder reserves with, so the verifier and the
+        // deployed blob cannot disagree about which name belongs to the tenant-db itself. Reached
+        // only after `sourcesOf` succeeded, which already required this same tenant-db lookup, so
+        // the None arm here is a cache race, not a normal state.
+        ownCatalogAliasOf = key =>
+          sup.findTenantDb(key.tenant, key.tenantDb) match
+            case Some(td) => catalogAliasOfDbId(td.id)
+            case None     => IO.pure(None),
+        renderOne = src => builder.buildOne(src),
+        runOnNode = (n, sql) =>
+          adapter.send(n, sql, session = None, recordLoad = false).map {
+            case QuackResponse.Ok(_, _, close) => close(); Right(())
+            case QuackResponse.Failed(err, _)  => Left(err.toString)
+          },
+        listCatalogs = nodeCatalogs,
+        // The SAME enumeration the health probe itself ticks over (see `healthProbe.start`
+        // below), so the registry is reconciled against the supervisor's own view of the fleet
+        // rather than against a second list that could disagree with it.
+        liveNodes = () => sup.list().flatMap(_.nodes),
+        registry = attachRegistry
+      )
+    }
+
+    val healthProbe = new HealthProbe(
       tracker,
       n => {
         val initSql =
@@ -799,9 +902,12 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
-      // Piggyback the engine-stats scrape on each healthy tick; fail-soft.
+      // Piggyback the engine-stats scrape and the Iceberg attach verifier on each healthy tick;
+      // both are fail-soft (HealthProbe swallows onHealthy errors, so neither can flip the health
+      // flag).
       onHealthy = n =>
-        adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st)))
+        adapter.engineStats(n).map(_.foreach(st => engineStatsTracker.update(n.nodeId, st))) *>
+          attachVerifier.fold(IO.unit)(_.verify(n).handleErrorWith(_ => IO.unit))
     )
 
     def runWithMetrics(
@@ -936,7 +1042,7 @@ object Main extends IOApp with LazyLogging:
           case (at, set) if now - at < 60000L => set
         }
         cached.getOrElse {
-          val builtins = Set("memory", "system", "temp")
+          val builtins = ai.starlake.quack.model.DuckDbCatalogs.Builtins
           val dbName   =
             TenantDb.catalogAlias(sup.effectiveMetastoreFor(key.tenant, key.tenantDb), key.tenantDb)
           val aliases = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
@@ -945,6 +1051,31 @@ object Main extends IOApp with LazyLogging:
             case _ => Set.empty[String]
           val result = builtins + dbName ++ aliases
           attachedCatalogsCache.put(key, (now, result))
+          result
+        }
+
+      // Per-pool read-only catalog lookup, cached 60s like attachedCatalogsOf. Disabled sources
+      // are included for the same reason: a disabled source's alias stays ATTACHed on running
+      // nodes until the pool recycles, so its read-only flag must keep applying until then.
+      val readOnlyCatalogsCache =
+        new java.util.concurrent.ConcurrentHashMap[
+          ai.starlake.quack.model.PoolKey,
+          (Long, Set[String])
+        ]()
+      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
+        val now    = System.currentTimeMillis()
+        val cached = Option(readOnlyCatalogsCache.get(key)).collect {
+          case (at, set) if now - at < 60000L => set
+        }
+        cached.getOrElse {
+          val result = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+            case (Some(td), Some(fedStore)) =>
+              // Through `FederatedAlias.readOnlySet`, not an inline map: this set is matched by
+              // `CatalogWriteScreen` against refs the ACL parser lowercased with `Locale.ROOT`,
+              // by exact equality, so a default-locale fold here fails OPEN on a `tr`/`az` JVM.
+              ai.starlake.quack.model.FederatedAlias.readOnlySet(fedStore.listSources(td.id))
+            case _ => Set.empty[String]
+          readOnlyCatalogsCache.put(key, (now, result))
           result
         }
 
@@ -986,6 +1117,7 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
+        readOnlyCatalogsOf = readOnlyCatalogsOf,
         // The in-process sinks go FIRST: fanout has no error isolation, so a module
         // sink that throws must not be able to starve the autoscale demand signal or
         // the hibernation activity signal. Invariant: each of poolLoadStats.sink and
@@ -1169,13 +1301,49 @@ object Main extends IOApp with LazyLogging:
           sup.listTenantDbsByTenant(tenantName).find(_.name == tenantDbName).map(_.id)
         val tenantIdResolver: String => Option[String] = tenantName =>
           sup.getTenant(tenantName).map(_.id)
+        // Mirrors attachedCatalogsOf's dbName resolution: the tenant-db's own DuckDB catalog
+        // alias, reserved so a new iceberg_rest source cannot be aliased onto it.
+        val catalogAliasOf: String => Option[String] = tenantDbId =>
+          sup.getTenantDbById(tenantDbId).map { td =>
+            TenantDb.catalogAlias(sup.effectiveMetastoreFor(td.tenantId, td.name), td.name)
+          }
+        // Aggregated across the tenant-db's pool(s): a tenant-db id resolves to zero or more live
+        // PoolStates, whose nodes' incarnations are looked up in the same AttachStatusRegistry the
+        // node endpoint reads (attachFailuresOf above). This is the one guarded lookup on the
+        // attach-reporting path, because unlike the handler-side calls it does real work
+        // (supervisor map reads plus a scan) -- and it LOGS rather than swallowing, so a lookup
+        // that starts throwing cannot masquerade as a healthy catalog in silence. Both supervisor
+        // calls are plain in-memory map reads, so the per-source re-derivation costs a filter over
+        // the pool map; hoisting it would mean reshaping the handler's parameter, which is not
+        // worth it at this cost.
+        val attachStatusOf: (String, String) => Option[String] = (tenantDbId, alias) =>
+          scala.util.Try {
+            sup.getTenantDbById(tenantDbId) match
+              case None     => None
+              case Some(td) =>
+                val nodeIds = sup
+                  .list()
+                  .filter(st => st.key.tenant == td.tenantId && st.key.tenantDb == td.name)
+                  .flatMap(_.nodes.map(_.nodeId))
+                  .toSet
+                attachRegistry.aliasSummary(alias, nodeIds)
+          } match
+            case scala.util.Success(v) => v
+            case scala.util.Failure(t) =>
+              logger.warn(
+                s"attach status lookup failed for tenant-db $tenantDbId alias '$alias': " +
+                  t.getMessage
+              )
+              None
         Some(
           new ai.starlake.quack.ondemand.api.FederatedSourceHandlers(
             fedHandlersStore,
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            scopeOf = t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+            scopeOf = t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t)),
+            catalogAliasOf = catalogAliasOf,
+            attachStatusOf = attachStatusOf
           )
         )
 

@@ -5,6 +5,7 @@ import ai.starlake.quack.model.{
   AutoscaleBand,
   FederatedSecret,
   FederatedSource,
+  FederatedSourceType,
   LockdownTriState,
   Names,
   NodePlacement,
@@ -672,9 +673,29 @@ object ManifestImporter:
     store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
 
   /** Apply federated sources from a manifest tenant-db into the federated source store.
-    * Replace-by-alias semantics: sources not present in the manifest are deleted; each present
-    * source is upserted. Secrets follow the same delete-then-upsert pattern with reuse of existing
-    * values when the manifest carries "***REDACTED***".
+    * Replace-by-alias semantics, but only when the manifest declares at least one source: a
+    * tenant-db carrying a NON-EMPTY `federatedSources` list has its stored sources not named by
+    * that list deleted and every named one upserted, while an EMPTY list is a no-op that deletes
+    * nothing (the `nonEmpty` guard below skips the whole body). The asymmetry is pre-existing and
+    * load-bearing in at least one shape: `ManifestExporter` emits no sources at all when it is
+    * built without a federated store, so treating an empty list as "delete everything" would let
+    * such a manifest wipe the federation of the manager it is replayed against. Secrets follow the
+    * same delete-then-upsert pattern with reuse of existing values when the manifest carries
+    * "***REDACTED***".
+    *
+    * This is the one write path that builds a `FederatedSource` row directly instead of going
+    * through `FederatedSourceHandlers`, so the guards that handler applies are applied here too:
+    * the alias is normalized through `Names.normalizeOrError` (an invalid one is reported and the
+    * source skipped, never written under a name every other path rejects), the constructed row is
+    * run through `FederatedSource.validate`, and a blank inline secret value is refused the way
+    * `upsertSecret` refuses it. The one guard NOT replicated here is `IcebergRestConfig.validated`:
+    * an `iceberg_rest` config that parses but does not validate is stored, and
+    * `FederationBlobBuilder.bodyTemplate` is what catches it, at node spawn.
+    *
+    * Identity is the ROW ID throughout, never the alias string: aliases are case-insensitive to
+    * DuckDB, and rows written before normalization landed may carry a case the manifest does not
+    * repeat. Matching by string made a manifest carrying `Sales` delete the stored `sales` row and
+    * recreate it.
     */
   private def applyFederatedSources(
       federatedStore: Option[FederatedSourceStore],
@@ -685,74 +706,188 @@ object ManifestImporter:
     if federatedStore.isDefined && mtd.federatedSources.nonEmpty then
       val fs = federatedStore.get
 
-      // Reject duplicate aliases in payload.
-      mtd.federatedSources.groupBy(_.alias).foreach { case (a, vs) =>
-        if vs.size > 1 then errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
+      val existingSources: List[FederatedSource] = fs.listSources(tdId)
+
+      // OWNER DECISION (session audit): every imported alias is normalized exactly as on REST
+      // create -- lowercase, 1..63 chars, identifier pattern. A source whose alias does not
+      // normalize is reported and skipped; it is never written.
+      //
+      // Same grandfather clause as `FederatedSourceHandlers.toSource`, for the same reason and
+      // with the same narrowness: an alias the rule rejects is still accepted when a STORED row
+      // already carries it, and it resolves to that row's OWN spelling. Without it a manifest-
+      // driven install holding a pre-normalization `ext-s3` row could not import AT ALL -- the
+      // error below is accumulated, so it fails the whole apply, every time, with no edit path to
+      // fix it. A new invalid alias (no stored row) is still reported and never written.
+      val resolvedAliases: List[(ManifestFederatedSource, Option[String])] =
+        mtd.federatedSources.map { msrc =>
+          Names.normalizeOrError(msrc.alias, "alias") match
+            case Right(a) => (msrc, Some(a))
+            case Left(e)  =>
+              existingSources.find(s => fold(s.alias) == fold(msrc.alias)) match
+                case Some(row) => (msrc, Some(row.alias))
+                case None      =>
+                  errs += s"tenant-db '${mtd.name}': $e"
+                  (msrc, None)
+        }
+
+      // Reject duplicate aliases in payload, on the NORMALIZED form: `Sales` and `sales` are one
+      // catalog to DuckDB and must not both be written.
+      //
+      // Reporting is not enough: a duplicated alias must also be kept OUT of the upsert loop
+      // below. `sourceByAlias` is a snapshot taken before the loop, so with no stored row the
+      // second entry does not see the id the first one minted; it mints its own and issues a
+      // second INSERT under the same (tenant_db, alias). On `InMemoryFederatedSourceStore` that
+      // lands as two rows; on Postgres it violates `uq_fedsrc_tenant_db_alias` and throws out of
+      // `apply`, so the caller gets an exception where this code means to return the accumulated
+      // `Left`. Skipping them writes nothing and leaves the error as the only outcome.
+      val duplicateAliases: Set[String] =
+        resolvedAliases
+          .flatMap(_._2)
+          .groupBy(identity)
+          .collect { case (a, vs) if vs.size > 1 => a }
+          .toSet
+      duplicateAliases.toList.sorted.foreach { a =>
+        errs += s"tenant-db '${mtd.name}': duplicate alias '$a' in payload"
       }
 
-      // Load existing for value-reuse keyed by (alias, secretName).
-      val existing: Map[(String, String), FederatedSecret] =
-        fs.listSources(tdId)
-          .flatMap { src =>
-            fs.listSecrets(src.id).map(sec => (src.alias, sec.name) -> sec)
-          }
+      // The stored row for an incoming alias, matched case-insensitively. This is where the id of
+      // an existing source is recovered, from the SOURCE rows rather than (as before) from a map
+      // flat-mapped over each source's SECRETS: a source with zero secrets contributed no entry
+      // there, so its re-import minted a fresh id and hit `uq_fedsrc_tenant_db_alias` against the
+      // alias the tenant-db already held.
+      //
+      // `.toMap` collapses two legacy rows whose aliases differ only in case (`Sales` and
+      // `sales`, both writable before REST normalized aliases) onto one entry, last one wins.
+      // That is not a leak: only the surviving row's id reaches `keepIds`, so the delete sweep
+      // below removes the other one, which is the cleanup the alias-string code also did. Which
+      // of the two survives is `listSources` order, and the survivor is rewritten with the
+      // normalized alias, so the tenant-db ends with exactly one row under one alias either way.
+      val sourceByAlias: Map[String, FederatedSource] =
+        existingSources.map(s => fold(s.alias) -> s).toMap
+
+      // Existing secret values for reuse when the manifest carries the redaction sentinel, keyed
+      // by (source row id, secret name) so the alias string is out of the lookup here too.
+      val existingSecrets: Map[(String, String), FederatedSecret] =
+        existingSources
+          .flatMap(src => fs.listSecrets(src.id).map(sec => (src.id, sec.name) -> sec))
           .toMap
 
-      // Delete sources not in the incoming payload.
-      val incomingAliases = mtd.federatedSources.map(_.alias).toSet
-      fs.listSources(tdId)
-        .filterNot(s => incomingAliases.contains(s.alias))
-        .foreach(s => fs.deleteSource(s.id))
+      // Delete sources not in the incoming payload, by row id. A source the manifest DOES name but
+      // that was rejected above still counts as named: a rejected source is an error to fix, not a
+      // reason to destroy the stored row.
+      //
+      // Matched on the RAW incoming alias, folded. This arm IS load-bearing -- emptying `keepIds`
+      // deletes rows Test 20 and the shape-rejection test both check are kept -- but it is no
+      // longer the ONLY form that would work: with the grandfather clause above, a legacy row's
+      // resolved alias is the stored spelling, which folds to this same key, so matching on the
+      // resolved alias instead would pick the same entry. Mutating one INTO the other therefore
+      // kills nothing, and that is a proven equivalence rather than a hole.
+      //
+      // The resolved alias used to be carried here as a SECOND arm. It was retained on the stated
+      // grounds that `Names` folds with the DEFAULT locale while `fold` here uses `Locale.ROOT`,
+      // so a `tr`/`az` JVM would diverge on a single-letter `I` alias and only that arm would
+      // match. That was never true: `Names.normalize` and `Names.normalizeOrError` both fold with
+      // `Locale.ROOT` (Names.scala:45,49), which is why mutating that arm killed no test. Removed
+      // rather than re-justified; the raw form is kept because it does not depend on the
+      // resolution step at all.
+      val keepIds: Set[String] =
+        resolvedAliases.flatMap { case (msrc, _) =>
+          sourceByAlias.get(fold(msrc.alias)).map(_.id)
+        }.toSet
+      existingSources.filterNot(s => keepIds.contains(s.id)).foreach(s => fs.deleteSource(s.id))
 
-      // Upsert each source and its secrets.
-      mtd.federatedSources.foreach { msrc =>
-        val srcId = existing
-          .collectFirst {
-            case ((alias, _), sec) if alias == msrc.alias => sec.federatedSourceId
-          }
-          .getOrElse(Names.newSurrogateId("fs"))
-
-        fs.upsertSource(
-          FederatedSource(
+      // Upsert each source and its secrets. A duplicated alias is skipped: it was already
+      // reported above, and writing it twice is the constraint violation described there.
+      resolvedAliases.foreach { case (msrc, normalized) =>
+        normalized.filterNot(duplicateAliases.contains).foreach { alias =>
+          // Keyed through `fold`, not on `alias` raw: a grandfathered legacy alias resolves to
+          // the stored row's OWN spelling, which need not already be lowercase, while the map is
+          // keyed on the folded form. A raw lookup would miss that row, mint a fresh id and issue
+          // a second INSERT under the same (tenant_db, alias). No-op for a normalized alias,
+          // which folds to itself.
+          val srcId = sourceByAlias.get(fold(alias)).map(_.id).getOrElse(Names.newSurrogateId("fs"))
+          val source = FederatedSource(
             id = srcId,
             tenantDbId = tdId,
-            alias = msrc.alias,
+            alias = alias,
             setupSql = msrc.setupSql,
             description = msrc.description,
-            disabled = msrc.disabled
+            disabled = msrc.disabled,
+            // The typed triple. `readOnly` above all: it is what puts READ_ONLY on the ATTACH the
+            // blob builder renders for an iceberg_rest source, so losing it here would re-attach
+            // the catalog WRITABLE at the next node spawn -- an engine-level regression, not just
+            // the loss of the edge screen.
+            sourceType = FederatedSourceType.fromWireOrSql(msrc.sourceType),
+            config = msrc.config,
+            readOnly = msrc.readOnly
           )
-        )
 
-        val incomingSecretNames = msrc.secrets.map(_.name).toSet
-        fs.listSecrets(srcId)
-          .filterNot(s => incomingSecretNames.contains(s.name))
-          .foreach(s => fs.deleteSecret(srcId, s.name))
+          val shapeErrors = source.validate
+          if shapeErrors.nonEmpty then
+            errs += s"tenant-db '${mtd.name}' source '$alias': ${shapeErrors.mkString("; ")}"
+          else
+            // `FederatedSourceHandlers.toSource` REFUSES an in-place flip between `sql` and
+            // `iceberg_rest`; this path applies it, because a manifest is a declarative statement
+            // of desired state rather than an incremental edit. That is intended, but it is the
+            // one place a read-only iceberg_rest catalog can become a writable sql source -- a
+            // stale manifest replayed after the alias was converted through REST does exactly
+            // that, and rewrites `readOnly` to the manifest's value along with it. It must not be
+            // silent: this WARN is the only audit line the downgrade leaves.
+            sourceByAlias.get(fold(alias)).map(_.sourceType).filter(_ != source.sourceType).foreach {
+              was =>
+                logger.warn(
+                  s"manifest import: tenant-db '${mtd.name}' federated source '$alias' changes " +
+                    s"sourceType '${was.wire}' -> '${source.sourceType.wire}' (readOnly " +
+                    s"becomes ${source.readOnly}); REST refuses this transition in place"
+                )
+            }
+            fs.upsertSource(source)
 
-        msrc.secrets.foreach { msec =>
-          val resolved: (Option[String], Option[String]) =
-            (msec.value, msec.externalRef) match
-              case (Some(FederatedSecret.RedactedMarker), None) | (None, None) =>
-                existing.get((msrc.alias, msec.name)) match
-                  case Some(old) => (old.value, old.externalRef)
-                  case None      =>
-                    errs += s"tenant-db '${mtd.name}' source '${msrc.alias}' secret '${msec.name}': " +
-                      "no existing value to reuse; provide value or externalRef"
+            val incomingSecretNames = msrc.secrets.map(_.name).toSet
+            fs.listSecrets(srcId)
+              .filterNot(s => incomingSecretNames.contains(s.name))
+              .foreach(s => fs.deleteSecret(srcId, s.name))
+
+            msrc.secrets.foreach { msec =>
+              val resolved: (Option[String], Option[String]) =
+                (msec.value, msec.externalRef) match
+                  case (Some(FederatedSecret.RedactedMarker), None) | (None, None) =>
+                    existingSecrets.get((srcId, msec.name)) match
+                      case Some(old) => (old.value, old.externalRef)
+                      case None      =>
+                        errs += s"tenant-db '${mtd.name}' source '$alias' secret '${msec.name}': " +
+                          "no existing value to reuse; provide value or externalRef"
+                        (None, None)
+                  // A blank inline value renders `ATTACH ''` (or `CREATE SECRET ... (VALUE '')`)
+                  // into the node's piped init script; DuckDB refuses it, and because the piped
+                  // CLI does not bail, the node comes up healthy with the catalog silently
+                  // missing. Same refusal as FederatedSourceHandlers.upsertSecret.
+                  case (Some(v), _) if v.trim.isEmpty =>
+                    errs += s"tenant-db '${mtd.name}' source '$alias' secret '${msec.name}': " +
+                      "has a blank value"
                     (None, None)
-              case (v, ref) => (v, ref)
+                  case (v, ref) => (v, ref)
 
-          if resolved._1.isDefined || resolved._2.isDefined then
-            val secId = existing
-              .get((msrc.alias, msec.name))
-              .map(_.id)
-              .getOrElse(Names.newSurrogateId("fsec"))
-            fs.upsertSecret(
-              FederatedSecret(
-                id = secId,
-                federatedSourceId = srcId,
-                name = msec.name,
-                value = resolved._1,
-                externalRef = resolved._2
-              )
-            )
+              if resolved._1.isDefined || resolved._2.isDefined then
+                val secId = existingSecrets
+                  .get((srcId, msec.name))
+                  .map(_.id)
+                  .getOrElse(Names.newSurrogateId("fsec"))
+                fs.upsertSecret(
+                  FederatedSecret(
+                    id = secId,
+                    federatedSourceId = srcId,
+                    name = msec.name,
+                    value = resolved._1,
+                    externalRef = resolved._2
+                  )
+                )
+            }
         }
       }
+
+  /** The one alias fold, [[ai.starlake.quack.model.FederatedAlias.fold]], for matching a manifest
+    * alias against a stored one: the default locale must not decide what two aliases are the same
+    * row. Aliased locally only to keep the call sites above short.
+    */
+  private def fold(s: String): String = ai.starlake.quack.model.FederatedAlias.fold(s)

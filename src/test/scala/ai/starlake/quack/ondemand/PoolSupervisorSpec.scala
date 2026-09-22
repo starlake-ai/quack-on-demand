@@ -2082,6 +2082,206 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     supB.get(key).get.extraSetupSql shouldBe ""
   }
 
+  // ---------- spawn-time federation blob refresh ----------
+  //
+  // PoolState.extraSetupSql is a CACHE: createPool fills it and only restore() refreshed it, so a
+  // federated source created / edited / disabled / deleted AFTER a pool's nodes first spawned
+  // never reached a node respawned from that cached state (manual restart, reconcile respawn,
+  // scale-up addition, resume) until a full manager boot. It was silent too: with no blob a `sql`
+  // source is simply absent, no error anywhere.
+  //
+  // The distinguishing shape is a source that did NOT exist at first spawn. A test whose source
+  // already exists at createPool time passes on the BROKEN code, because the stale cached blob
+  // still contains it. Every test below therefore flips `cell` only after createPool has spawned.
+
+  /** The answer `federationBlobOf` gives, swappable between spawns. */
+  private final class BlobCell(var answer: IO[Option[String]] = IO.pure(None))
+
+  private def fedSupervisor(
+      cell: BlobCell,
+      federatedIds: () => Option[Set[String]] = () => None
+  ): (PoolSupervisor, CapturingBackend) =
+    val b   = new CapturingBackend
+    val sup = new PoolSupervisor(
+      b,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      federationBlobOf = _ => IO.defer(cell.answer),
+      federatedTenantDbIds = federatedIds
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    (sup, b)
+
+  "spawn-time federation blob" should "reach a node restarted after the source was created" in {
+    val cell     = new BlobCell()
+    val (sup, b) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    // Precondition that makes this test discriminating: no source existed at first spawn.
+    b.specs.head.extraSetupSql shouldBe ""
+
+    cell.answer = IO.pure(Some("ATTACH ':memory:' AS zprobe;"))
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    b.specs.last.extraSetupSql should include("AS zprobe;")
+  }
+
+  it should "reach a scale-up addition made after the source was created" in {
+    val cell     = new BlobCell()
+    val (sup, b) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql shouldBe ""
+
+    cell.answer = IO.pure(Some("ATTACH ':memory:' AS zprobe;"))
+    sup.scale(key, targetSize = 2, RoleDistribution(0, 0, 2), force = false).unsafeRunSync()
+
+    b.specs.last.extraSetupSql should include("AS zprobe;")
+  }
+
+  it should "reach a reconcile respawn of a node that died after the source was created" in {
+    val cell     = new BlobCell()
+    val (sup, b) = fedSupervisor(cell)
+    b.spawnPid = None // k8s shape: liveNodeIds is the authoritative liveness answer
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql shouldBe ""
+
+    cell.answer = IO.pure(Some("ATTACH ':memory:' AS zprobe;"))
+    b.liveIds = Some(Set.empty) // the pod vanished with its node
+    sup.reconcile().unsafeRunSync()
+
+    b.specs.last.extraSetupSql should include("AS zprobe;")
+  }
+
+  it should "reach the nodes a resume respawns after the source was created" in {
+    val cell     = new BlobCell()
+    val (sup, b) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql shouldBe ""
+    sup.suspendPool(key, "rest").unsafeRunSync().isRight shouldBe true
+
+    cell.answer = IO.pure(Some("ATTACH ':memory:' AS zprobe;"))
+    sup.resumePool(key, "query").unsafeRunSync().isRight shouldBe true
+
+    b.specs.last.extraSetupSql should include("AS zprobe;")
+  }
+
+  // Fallback DIRECTION. Deliberately asserts a DIFFERENT alias (`cached`) from the fresh-resolution
+  // tests above (`zprobe`), so this test cannot stand in for one of those: a fix that only ever
+  // fell back to the cached blob would pass here and fail every test above.
+  it should "keep the pool's last-known-good blob when a fresh resolution fails" in {
+    val cell     = new BlobCell(IO.pure(Some("ATTACH ':memory:' AS cached;")))
+    val (sup, b) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql should include("AS cached;")
+
+    cell.answer = IO.raiseError(new RuntimeException("federation postgres down"))
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    // Never an empty blob: losing every federation alias is worse than running one commit behind.
+    b.specs.last.extraSetupSql should include("AS cached;")
+  }
+
+  it should "keep the last-known-good blob when a fresh resolution times out" in {
+    val cell = new BlobCell(IO.pure(Some("ATTACH ':memory:' AS cached;")))
+    val b    = new CapturingBackend
+    val sup  = new PoolSupervisor(
+      b,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      federationBlobOf = _ => IO.defer(cell.answer),
+      blobResolveTimeout = 100.millis
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+
+    cell.answer = IO.never
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    b.specs.last.extraSetupSql should include("AS cached;")
+  }
+
+  // The other direction of "takes effect on the next spawn": deleting the LAST federated source
+  // must drop its ATTACH, not pin it forever behind the fallback.
+  it should "drop the blob when the last federated source is deleted" in {
+    val cell     = new BlobCell(IO.pure(Some("ATTACH ':memory:' AS gone;")))
+    val (sup, b) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql should include("AS gone;")
+
+    cell.answer = IO.pure(None) // FederationBlobBuilder.assemble with no enabled sources
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    b.specs.last.extraSetupSql shouldBe ""
+  }
+
+  // federatedTenantDbIds is the same pre-filter restore() uses: a tenant-db outside the set has no
+  // enabled sources at all, so its fresh blob is authoritatively EMPTY and no connection is opened.
+  it should "spawn with an empty blob, without resolving, for a non-federated tenant-db" in {
+    var invoked  = false
+    val cell     = new BlobCell(IO { invoked = true; Some("ATTACH ':memory:' AS gone;") })
+    val (sup, b) = fedSupervisor(cell, federatedIds = () => Some(Set.empty))
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    // createPool resolves unfiltered, so the pool starts with a cached blob to clobber.
+    b.specs.head.extraSetupSql should include("AS gone;")
+    invoked = false
+
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    invoked shouldBe false
+    b.specs.last.extraSetupSql shouldBe ""
+  }
+
+  // A throwing filter must degrade to "resolve anyway", never to "skip and keep the cached blob":
+  // a broken pre-filter is not evidence that a tenant-db has no federated sources.
+  it should "still resolve when the federatedTenantDbIds filter throws" in {
+    val cell     = new BlobCell()
+    val (sup, b) = fedSupervisor(cell, federatedIds = () => throw new RuntimeException("boom"))
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.specs.head.extraSetupSql shouldBe ""
+
+    cell.answer = IO.pure(Some("ATTACH ':memory:' AS zprobe;"))
+    val nodeId = sup.get(key).get.nodes.head.nodeId
+    sup.restartNode(key, nodeId).unsafeRunSync() shouldBe Right(())
+
+    b.specs.last.extraSetupSql should include("AS zprobe;")
+  }
+
+  // Cost guard: the reconcile loop runs every tick on every pool. A pass that spawns nothing must
+  // not pay a federation round trip inside the per-pool advisory lock.
+  it should "not resolve at all on a reconcile pass that spawns nothing" in {
+    var invoked  = false
+    val cell     = new BlobCell(IO { invoked = true; Some("ATTACH ':memory:' AS zprobe;") })
+    val (sup, b) = fedSupervisor(cell)
+    b.spawnPid = None
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    b.liveIds = Some(sup.get(key).get.nodes.map(_.nodeId).toSet) // everything alive; adopt only
+    invoked = false
+
+    sup.reconcile().unsafeRunSync()
+
+    invoked shouldBe false
+  }
+
+  it should "not resolve on a pure scale-down, which spawns nothing" in {
+    var invoked  = false
+    val cell     = new BlobCell(IO { invoked = true; Some("ATTACH ':memory:' AS zprobe;") })
+    val (sup, _) = fedSupervisor(cell)
+    sup.createPool(key, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    invoked = false
+
+    sup.scale(key, targetSize = 1, RoleDistribution(0, 0, 1), force = true).unsafeRunSync()
+
+    invoked shouldBe false
+  }
+
   // ---------- restore() carries the tenant-db's own kindWire (live-smoke regression) ----------
   //
   // Narrower sibling of the test above: that one also pins extraSetupSql. This one isolates

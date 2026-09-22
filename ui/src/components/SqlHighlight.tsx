@@ -24,9 +24,13 @@ type SqlToken = { text: string; cls: 'kw' | 'str' | 'num' | 'com' | 'id' | null 
 
 function tokenizeSql(sql: string): SqlToken[] {
   // Order matters: comments and strings must beat the word/number patterns.
+  // The line-comment class excludes a bare carriage return as well as a line feed, because that
+  // is where DuckDB ends a `--` comment (and where every scanner in the manager ends one). With
+  // `[^\n]` a CR-terminated comment was painted over the SQL that follows it, so a statement
+  // rendered here as fully commented out was one the engine actually executed.
   const re = new RegExp(
     [
-      '(--[^\\n]*)',                       // 1: line comment
+      '(--[^\\n\\r]*)',                    // 1: line comment
       '(\\/\\*[\\s\\S]*?\\*\\/)',          // 2: block comment
       "('(?:[^'\\\\]|\\\\.|'')*')",        // 3: single-quoted string
       '("(?:[^"\\\\]|\\\\.|"")*")',        // 4: double-quoted identifier

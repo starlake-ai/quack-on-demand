@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.state
 
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
 
 import java.sql.{Connection, DriverManager, ResultSet}
 import scala.collection.mutable.ListBuffer
@@ -54,6 +54,17 @@ class FederatedSourceStore(
 
   Class.forName("org.postgresql.Driver")
 
+  // Single source of truth for the ten `FederatedSource` columns: getSource / listSources /
+  // listEnabledSources each SELECT this exact list, and readSource reads them back by label - a
+  // column missed in only one of the three previously would fail at runtime on that path alone.
+  private val SourceColumns =
+    "id, tenant_db_id, alias, setup_sql, description, disabled, created_at, " +
+      "source_type, config, read_only"
+
+  // Single source of truth for the six `FederatedSecret` columns: getSecret and listSecrets each
+  // SELECT this exact list, and readSecret reads them back by label.
+  private val SecretColumns = "id, federated_source_id, name, value, external_ref, created_at"
+
   // Bounded once at construction: every caller of withConn (handlers, blob builder loads via
   // listEnabledSources/listSecrets, tenantDbIdsWithSources) benefits without a per-call cost.
   private val boundedUrl = FederatedSourceStore.withTimeouts(jdbcUrl)
@@ -68,14 +79,18 @@ class FederatedSourceStore(
   def upsertSource(s: FederatedSource): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_federated_source
-        |  (id, tenant_db_id, alias, setup_sql, description, disabled)
-        |VALUES (?, ?, ?, ?, ?, ?)
+        |  (id, tenant_db_id, alias, setup_sql, description, disabled,
+        |   source_type, config, read_only)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_db_id = EXCLUDED.tenant_db_id,
         |  alias        = EXCLUDED.alias,
         |  setup_sql    = EXCLUDED.setup_sql,
         |  description  = EXCLUDED.description,
-        |  disabled     = EXCLUDED.disabled""".stripMargin
+        |  disabled     = EXCLUDED.disabled,
+        |  source_type  = EXCLUDED.source_type,
+        |  config       = EXCLUDED.config,
+        |  read_only    = EXCLUDED.read_only""".stripMargin
     )
     try
       ps.setString(1, s.id)
@@ -84,6 +99,9 @@ class FederatedSourceStore(
       ps.setString(4, s.setupSql)
       ps.setString(5, s.description.orNull)
       ps.setBoolean(6, s.disabled)
+      ps.setString(7, s.sourceType.wire)
+      ps.setString(8, s.config.orNull)
+      ps.setBoolean(9, s.readOnly)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -98,7 +116,7 @@ class FederatedSourceStore(
 
   def getSource(tenantDbId: String, alias: String): Option[FederatedSource] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source WHERE tenant_db_id = ? AND alias = ?""".stripMargin
     )
     try
@@ -114,7 +132,7 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source WHERE tenant_db_id = ? ORDER BY alias""".stripMargin
     )
   }
@@ -123,7 +141,7 @@ class FederatedSourceStore(
     queryWithTd(
       c,
       tenantDbId,
-      """SELECT id, tenant_db_id, alias, setup_sql, description, disabled, created_at
+      s"""SELECT $SourceColumns
         |FROM qodstate_federated_source
         |WHERE tenant_db_id = ? AND disabled = false ORDER BY alias""".stripMargin
     )
@@ -188,7 +206,7 @@ class FederatedSourceStore(
 
   def getSecret(sourceId: String, name: String): Option[FederatedSecret] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, federated_source_id, name, value, external_ref, created_at
+      s"""SELECT $SecretColumns
         |FROM qodstate_federated_secret
         |WHERE federated_source_id = ? AND name = ?""".stripMargin
     )
@@ -203,7 +221,7 @@ class FederatedSourceStore(
 
   def listSecrets(sourceId: String): List[FederatedSecret] = withConn { c =>
     val ps = c.prepareStatement(
-      """SELECT id, federated_source_id, name, value, external_ref, created_at
+      s"""SELECT $SecretColumns
         |FROM qodstate_federated_secret
         |WHERE federated_source_id = ? ORDER BY name""".stripMargin
     )
@@ -222,10 +240,14 @@ class FederatedSourceStore(
       id = rs.getString("id"),
       tenantDbId = rs.getString("tenant_db_id"),
       alias = rs.getString("alias"),
-      setupSql = rs.getString("setup_sql"),
+      // Nullable since 0038: a typed source carries no operator SQL.
+      setupSql = Option(rs.getString("setup_sql")).getOrElse(""),
       description = Option(rs.getString("description")),
       disabled = rs.getBoolean("disabled"),
-      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant)
+      createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
+      sourceType = FederatedSourceType.fromWireOrSql(rs.getString("source_type")),
+      config = Option(rs.getString("config")),
+      readOnly = rs.getBoolean("read_only")
     )
 
   private def readSecret(rs: ResultSet): FederatedSecret =

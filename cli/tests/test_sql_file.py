@@ -35,6 +35,18 @@ def test_split_comments_hide_semicolons():
     ]
 
 
+def test_split_line_comment_ends_at_bare_carriage_return():
+    # DuckDB 1.5.4 ends a `--` comment at a line feed OR at a bare CR, and so does the manager
+    # (SqlTrivia / SqlCommentStripper / LockdownScreen.splitStatements). Scanning to a line feed
+    # alone kept the comment open to end of file, so the `;` behind the CR stopped splitting and
+    # the whole rest of the script was sent as one statement.
+    assert _stmts("SELECT 1 -- c\r; SELECT 2;") == ["SELECT 1 -- c", "SELECT 2"]
+    # The engine runs what follows the CR, so it must not be dropped as comment-only either.
+    assert _stmts("-- c\rSELECT 2;") == ["-- c\rSELECT 2"]
+    # A CRLF script keeps splitting exactly as it did before.
+    assert _stmts("SELECT 1 -- c\r\n; SELECT 2;") == ["SELECT 1 -- c", "SELECT 2"]
+
+
 def test_split_dollar_quoted():
     assert _stmts("SELECT $$a;b$$; SELECT 2;") == ["SELECT $$a;b$$", "SELECT 2"]
     assert _stmts("SELECT $t$x;$$;y$t$; SELECT 2;") == ["SELECT $t$x;$$;y$t$", "SELECT 2"]

@@ -67,6 +67,217 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
       "INSERT INTO t VALUES ('-- not a comment')"
     ) shouldBe StatementKind.Dml
 
+  // ---- invisible leading trivia cannot hide the verb (live security bypass) ----
+  //
+  // `String.trim` only strips characters <= U+0020, and `Character.isWhitespace` is false for
+  // NBSP (U+00A0), the word joiner (U+2060), the BOM (U+FEFF), zero-width space (U+200B) and soft
+  // hyphen (U+00AD). A statement prefixed with one of these classified as `Other` -- the same
+  // reader-routed bypass the `WITH` special case below exists to close, reached here through a
+  // hidden first token on a PLAIN INSERT/UPDATE/DELETE/DROP instead of a misleading one. Verified
+  // against a real DuckDB 1.5.4: NBSP, BOM, ZWSP and the word joiner all still execute as a prefix;
+  // soft hyphen is rejected by DuckDB itself but is stripped here too since nothing downstream
+  // should ever see it as part of the token.
+  it should "not let a leading NBSP hide a write's verb" in:
+    StatementClassifier.classify("\u00A0INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading BOM hide a write's verb" in:
+    StatementClassifier.classify("\uFEFFINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading zero-width space hide a write's verb" in:
+    StatementClassifier.classify("\u200BINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading word joiner hide a write's verb" in:
+    StatementClassifier.classify("\u2060INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let a leading soft hyphen hide a write's verb" in:
+    StatementClassifier.classify("\u00ADINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "strip the same invisible prefixes ahead of UPDATE, DELETE and DROP" in:
+    StatementClassifier.classify("\u00A0UPDATE t SET x = 1") shouldBe StatementKind.Dml
+    StatementClassifier.classify("\uFEFFDELETE FROM t WHERE x = 1") shouldBe StatementKind.Dml
+    StatementClassifier.classify("\u200BDROP TABLE t") shouldBe StatementKind.Ddl
+
+  it should "strip an invisible prefix ahead of CREATE TABLE as Ddl" in:
+    StatementClassifier.classify("\u00A0CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("\uFEFFCREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("\u200BCREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("\u2060CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("\u00ADCREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: an invisible prefix ahead of SELECT stays Select" in:
+    StatementClassifier.classify("\u00A0SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("\uFEFFSELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("\u200BSELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("\u2060SELECT * FROM t") shouldBe StatementKind.Select
+    StatementClassifier.classify("\u00ADSELECT * FROM t") shouldBe StatementKind.Select
+
+  it should "strip an invisible prefix ahead of the WITH ... INSERT special case too" in:
+    StatementClassifier.classify(
+      "\uFEFFWITH s AS (SELECT * FROM t) INSERT INTO m SELECT * FROM s"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "\u200BWITH cte AS (SELECT 1) SELECT * FROM cte"
+    ) shouldBe StatementKind.Select
+
+  it should "combine an invisible prefix with a leading comment" in:
+    StatementClassifier.classify(
+      "\uFEFF-- a comment\nINSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "-- a comment\n\uFEFFINSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "leave ordinary, unprefixed statements unchanged" in:
+    StatementClassifier.classify("INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("SELECT 1") shouldBe StatementKind.Select
+    StatementClassifier.classify("CREATE TABLE t (x INT)") shouldBe StatementKind.Ddl
+
+  // ---- interior invisible trivia cannot hide the verb either (C1 follow-up) ----
+  //
+  // Stripping only the LEADING position fixes one spot; the same character one word to the
+  // right reproduces the identical bypass, because the token terminator was still
+  // `Character.isWhitespace`, which is false for exactly these characters. DuckDB's parser
+  // front end substitutes ASCII spaces for its Unicode space/format set ACROSS THE WHOLE
+  // QUERY before parsing, so an interior NBSP between the verb and the next keyword is just
+  // as executable as a leading one. Verified against a real DuckDB 1.5.4: every one of
+  // `INSERT<char>INTO t VALUES (1)` below still writes a row. `SqlTrivia.normalize` mirrors
+  // that whole-query substitution so every downstream scan (`firstToken`,
+  // `verbAfterWithClause`) sees the same token boundaries DuckDB does.
+  it should "not let an interior NBSP hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u00A0INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior BOM hide a write's verb" in:
+    StatementClassifier.classify("INSERT\uFEFFINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior zero-width space hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u200BINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior word joiner hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u2060INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior figure space (U+2007) hide a write's verb" in:
+    // A non-breaking Zs character `isTriviaSpace` already covered (via SPACE_SEPARATOR), but
+    // that alone was not enough: `firstToken`'s old terminator was `Character.isWhitespace`,
+    // which U+2007 also fails. Only whole-string normalization closes it.
+    StatementClassifier.classify("INSERT\u2007INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let an interior narrow no-break space (U+202F) hide a write's verb" in:
+    StatementClassifier.classify("INSERT\u202FINTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "not let interior trivia hide a DROP TABLE's verb" in:
+    StatementClassifier.classify("DROP\u00A0TABLE t") shouldBe StatementKind.Ddl
+
+  it should "not let interior trivia hide the verb throughout a WITH ... INSERT" in:
+    StatementClassifier.classify(
+      "WITH\u00A0x\u00A0AS\u00A0(SELECT\u00A01)\u00A0INSERT\u00A0INTO t SELECT 1"
+    ) shouldBe StatementKind.Dml
+
+  it should "not let interior trivia hide EXPLAIN ANALYZE's inner write" in:
+    // Regression for the recursion gap (C2): `classifyStripped` re-entered itself for the
+    // ANALYZE case with a freshly sliced substring that was never normalized, so a trivia
+    // character right before the inner statement stayed hidden even though the entry point
+    // was fixed. Verified against DuckDB 1.5.4: this writes a row.
+    StatementClassifier.classify(
+      "EXPLAIN ANALYZE\u00A0INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "\u00A0EXPLAIN ANALYZE INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not let interior trivia outside every named test's own character list hide the verb" in:
+    // I3 coverage witness, not a discriminating regression test (documented honestly, matching
+    // the "already safe" test below): U+205F (medium mathematical space) and U+2004
+    // (three-per-em space) are accepted by DuckDB as separators and appear in NO other test in
+    // this file, but both are ALSO true for plain `Character.isWhitespace` (confirmed directly,
+    // not assumed), so `firstToken`'s own `takeWhile(!c.isWhitespace)` already terminates on them
+    // regardless of `SqlTrivia`'s category check or any named list -- a regression to a
+    // hardcoded `SPACE_SEPARATOR`/`FORMAT` list would NOT be caught by this test. It is kept as a
+    // pin that the category check does not regress ORDINARY classification for these two
+    // characters specifically; `SqlTriviaSpec`'s category-derived property test is the one that
+    // actually discriminates a narrowing to a hardcoded list (mutation-verified: it is the only
+    // test in the suite that fails when `isTriviaSpace` is reverted to a named set).
+    StatementClassifier.classify("INSERT\u205FINTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("DROP\u2004TABLE t") shouldBe StatementKind.Ddl
+
+  it should "not regress on interior trivia that was already safe" in:
+    // U+2000 (en quad) and U+3000 (ideographic space) are true to `Character.isWhitespace`
+    // already, so they terminated `firstToken` correctly even before normalization; pin that
+    // whole-string normalization doesn't disturb them.
+    StatementClassifier.classify("INSERT\u2000INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("DROP\u3000TABLE t") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: interior trivia in a SELECT stays Select" in:
+    StatementClassifier.classify("SELECT\u00A01") shouldBe StatementKind.Select
+    StatementClassifier.classify("SELECT * FROM\u00A0t") shouldBe StatementKind.Select
+
+  it should "not let trivia inside a string literal change the classification" in:
+    StatementClassifier.classify(
+      "INSERT INTO t VALUES ('a\u00A0b')"
+    ) shouldBe StatementKind.Dml
+    StatementClassifier.classify(
+      "SELECT 'a\u00A0b' FROM t"
+    ) shouldBe StatementKind.Select
+
+  // ---- C1: a stripped comment must not weld two keywords into one token ----
+  //
+  // `SqlCommentStripper` used to delete a block comment entirely, leaving nothing in its place.
+  // DuckDB treats a comment as a SEPARATOR, not a weld -- verified against a real DuckDB 1.5.4,
+  // `INSERT/*x*/INTO t VALUES (1)` writes the row -- so the pre-fix stripped text was
+  // `INSERTINTO t VALUES (1)`, a first token matching no classifier bucket (`Other`), the exact
+  // same class of bypass the interior-trivia tests above pin, one comment class over.
+  it should "classify INSERT/*x*/INTO t VALUES (1) as Dml, not Other" in:
+    StatementClassifier.classify("INSERT/*x*/INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "classify CREATE/*x*/TABLE t(a int) as Ddl, not Other" in:
+    StatementClassifier.classify("CREATE/*x*/TABLE t(a int)") shouldBe StatementKind.Ddl
+
+  it should "not over-correct: a SELECT with an interior comment stays Select" in:
+    StatementClassifier.classify("SELECT * FROM/*x*/t") shouldBe StatementKind.Select
+    StatementClassifier.classify("SELECT a/*x*/FROM t") shouldBe StatementKind.Select
+
+  // ---- a nested leading block comment must not put a non-keyword first ----
+  //
+  // `classify` used to strip comments (non-nesting-aware) before stripping leading trivia
+  // (nesting-aware), so a nested leading comment exposed the literal text between its inner and
+  // outer close as the "first token" -- a misclassification into `Other`, not merely a missed
+  // normalization. DuckDB nests block comments to arbitrary depth and executes every one of these
+  // as a write (verified against a real DuckDB 1.5.4).
+  it should "not let a nested leading block comment misclassify a write as Other" in:
+    StatementClassifier.classify(
+      "/* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not let a nested leading block comment misclassify a DDL statement as Other" in:
+    StatementClassifier.classify(
+      "/* a /* b */ c */ CREATE TABLE t(a int)"
+    ) shouldBe StatementKind.Ddl
+
+  it should "close arbitrarily deep nesting, not just two levels" in:
+    StatementClassifier.classify(
+      "/* L1 /* L2 /* L3 */ back2 */ back1 */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "not over-correct: a non-nested leading comment still behaves as before" in:
+    StatementClassifier.classify("/* x */ INSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+
+  it should "close a nested leading comment preceded by a plain trivia character" in:
+    StatementClassifier.classify(
+      "\u00A0/* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "classify from a normalized copy without altering the original statement" in:
+    // `SqlTrivia.normalize` must never be threaded anywhere but the classifier's own scan --
+    // the original SQL text is what is sent to the node. Strings are immutable in the JVM, so
+    // this also documents the property `normalize`'s scaladoc promises: pin that the input
+    // string a caller holds still carries its original invisible characters unchanged, and
+    // still has its original length, after `classify` has run.
+    val original = "INSERT\u00A0INTO t VALUES ('a\u00A0b')"
+    val length   = original.length
+    StatementClassifier.classify(original) shouldBe StatementKind.Dml
+    original.length shouldBe length
+    original.charAt(6) shouldBe '\u00A0'
+    original.contains("a\u00A0b") shouldBe true
+
   // ---- WITH-prefixed statements classify by their real verb (deep-review H2) ----
   //
   // First-token classification put every WITH-prefixed statement in the select bucket,
@@ -108,6 +319,74 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
     StatementClassifier.classify(
       "WITH s AS (SELECT $$) INSERT $$ AS p) SELECT * FROM s"
     ) shouldBe StatementKind.Select
+
+  // ---- C2: a bare carriage return terminates a leading line comment ----
+  //
+  // Executed against a real DuckDB 1.5.4: `CREATE TABLE t(a int); -- x<CR>INSERT INTO t VALUES
+  // (1); SELECT count(*) FROM t` returns 1, the DROP form leaves zero tables, and the CREATE form
+  // creates one. (Each through `duckdb :memory: -c`, not piped on stdin: the CLI's own line reader
+  // mangles a bare CR and answers the opposite.) The composition put `SqlTrivia.stripLeading`
+  // first, and its line-comment arm scanned to a line feed alone, so it consumed the whole
+  // statement and the verb never reached any first-token read. `Other` is what `RoleMatcher`
+  // routes to a reader node, and it skips `ProtectedWriteGuard`, the RLS/CLS rewriters, the author
+  // stamp, the write audit record and a branch-only PAT's refusal all at once.
+  it should "classify the write behind a bare carriage return in a leading line comment" in:
+    StatementClassifier.classify("-- x" + "\r" + "INSERT INTO t VALUES (1)") shouldBe
+      StatementKind.Dml
+    StatementClassifier.classify("-- h" + "\r" + "DROP TABLE t") shouldBe StatementKind.Ddl
+    StatementClassifier.classify("--" + "\r" + "CREATE TABLE z(a int)") shouldBe
+      StatementKind.Ddl
+
+  it should "still classify the same writes behind a line-feed-terminated comment (guard)" in:
+    // GUARD: passes with the CR fix reverted. Pins that widening the terminator set did not break
+    // the terminator that already worked.
+    StatementClassifier.classify("-- x\nINSERT INTO t VALUES (1)") shouldBe StatementKind.Dml
+    StatementClassifier.classify("-- h\nDROP TABLE t") shouldBe StatementKind.Ddl
+
+  // ---- C3: a nested comment inside EXPLAIN / EXPLAIN ANALYZE ----
+  //
+  // `EXPLAIN ANALYZE` EXECUTES its inner statement. Both shapes below write the row on a real
+  // DuckDB 1.5.4 (checked by counting rows in a file-backed table afterwards; plain
+  // `EXPLAIN INSERT ...` leaves zero, so the ANALYZE really is what runs it). A stripper that
+  // closed a nested comment at the inner marker left the text between the inner and outer close
+  // sitting exactly where the EXPLAIN arm reads its next token from: the first shape read that
+  // residue instead of `ANALYZE` and returned `Select`, the second recursed onto it and returned
+  // `Other`. Both are read-shaped, for a statement DuckDB executes as a write.
+  it should "classify a nested comment between EXPLAIN and ANALYZE by the executed write" in:
+    StatementClassifier.classify(
+      "EXPLAIN /* a /* b */ c */ ANALYZE INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "classify a nested comment after EXPLAIN ANALYZE by the executed write" in:
+    StatementClassifier.classify(
+      "EXPLAIN ANALYZE /* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Dml
+
+  it should "keep plain EXPLAIN with a nested comment as Select (over-correction guard)" in:
+    // GUARD: plain EXPLAIN plans without executing (verified: zero rows), so it must stay Select.
+    StatementClassifier.classify(
+      "EXPLAIN /* a /* b */ c */ INSERT INTO t VALUES (1)"
+    ) shouldBe StatementKind.Select
+
+  // ---- I3: a comment marker inside a quoted identifier, reaching gate 1 through the WITH arm ----
+  //
+  // `WITH x AS (SELECT 1 AS "a/*b") INSERT INTO t SELECT 1` writes the row on a real DuckDB 1.5.4.
+  // The stripper tracked single quotes only, so the marker inside the quoted identifier opened a
+  // block comment that never closed and truncated the text to `WITH x AS (SELECT 1 AS "a`.
+  // `verbAfterWithClause` then scanned text whose paren depth never returned to zero, ran out, and
+  // the statement fell to the legacy select bucket.
+  it should "classify a WITH write whose CTE carries a comment marker in a quoted identifier" in:
+    StatementClassifier.classify(
+      "WITH x AS (SELECT 1 AS \"a/*b\") INSERT INTO t SELECT 1"
+    ) shouldBe StatementKind.Dml
+
+  it should "classify a write whose alias carries a marker in a quoted identifier (guard)" in:
+    // GUARD: mutation-tested, passes with the quoted-identifier arm reverted, because the verb
+    // sits ahead of the marker and the first-token read never reaches it. The discriminating
+    // shape is the WITH one above, where the marker precedes the verb.
+    StatementClassifier.classify(
+      "INSERT INTO t SELECT 1 AS \"x--y\""
+    ) shouldBe StatementKind.Dml
 
   // ---- EXPLAIN ANALYZE executes its inner statement (deep-review H3) ----
 
@@ -175,3 +454,54 @@ class StatementClassifierSpec extends AnyFlatSpec with Matchers:
     val cfg = StatementClassifierConfig.Defaults.copy(dml = Set.empty)
     val c   = new StatementClassifier(cfg)
     c.classify("INSERT INTO t VALUES (1)") shouldBe StatementKind.Other
+
+  // ---- escape hygiene of this file's own invisible-character test literals (I1) ----
+  //
+  // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as
+  // a raw invisible byte pasted into the source: an editor or an "helpful" formatting pass can
+  // silently decode `\u00A0` back into a raw NBSP, at which point this file still compiles,
+  // every assertion above still passes (a `String` built from the escape and one built from
+  // the raw byte are identical at runtime -- that's the whole point of an escape), and the
+  // next reader sees what looks like ordinary blank space around a keyword with no way to
+  // tell the test asserts anything about trivia at all. That already happened once in this
+  // file. This test is the only thing in the suite that can catch a repeat: it reads this very
+  // source file back and fails if any codepoint above ASCII (U+007F) appears anywhere in it.
+  it should "carry no raw non-ASCII codepoints in its own source file" in:
+    // Path is relative to the sbt project root, which is the forked test JVM's working
+    // directory (`Test / fork := true` in build.sbt, no `Test / baseDirectory` override to
+    // change it). If this ever proves brittle under a different launcher, the fallback is a
+    // `Thread.currentThread.getContextClassLoader` resource lookup keyed off a copy of this
+    // file placed under `src/test/resources`, or a CI-level grep step -- both discussed in the
+    // review; the in-spec form is kept because it travels with the code and runs under plain
+    // `sbt test`.
+    val path = "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+    val file = new java.io.File(path)
+    withClue(s"expected to find $path relative to the working directory ${file.getAbsolutePath}") {
+      file.exists shouldBe true
+    }
+    val src = scala.io.Source.fromFile(file, "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c.toInt > 0x7f }
+      withClue(s"found non-ASCII codepoints at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+
+  // ---- the same hygiene rule for CONTROL characters, which the check above cannot see ----
+  //
+  // The guard above only catches a codepoint above ASCII, so it says nothing about a raw carriage
+  // return (U+000D): a tool-call parameter carrying the two characters backslash-r can arrive in
+  // the file as one raw CR byte, and then a test whose whole point is "DuckDB ends a line comment
+  // at a bare CR" reads, to the next maintainer, as an ordinary line break inside a string
+  // literal. The comparison below is written as `0x0d.toChar` deliberately: spelling it as an
+  // escape would put the very byte sequence this test polices into the test itself.
+  it should "carry no raw carriage return in its own source file" in {
+    val path = "src/test/scala/ai/starlake/quack/route/StatementClassifierSpec.scala"
+    val src  = scala.io.Source.fromFile(new java.io.File(path), "UTF-8")
+    try
+      val offenders = src.mkString.zipWithIndex.filter { case (c, _) => c == 0x0d.toChar }
+      withClue(s"found raw CR bytes at offsets ${offenders.map(_._2).mkString(", ")}: ") {
+        offenders shouldBe empty
+      }
+    finally src.close()
+  }

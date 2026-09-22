@@ -5,6 +5,7 @@ import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.sql.{
   Allowed,
+  CatalogWriteScreen,
   Denied,
   LockdownScreen,
   StatementValidator,
@@ -16,7 +17,7 @@ import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
 import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.SqlTrivia
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
@@ -63,6 +64,7 @@ final class FlightSqlRouter(
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
     val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
+    val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
@@ -272,9 +274,16 @@ final class FlightSqlRouter(
     if !stampWrites || !isWrite || kindWire != "ducklake" || txOpen then None
     else
       Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty).map { db =>
-        val author   = s"tenant:$tenant/user:$user"
-        val stripped = SqlCommentStripper.stripComments(sql)
-        val verb     = stripped.trim.takeWhile(c => !c.isWhitespace).toLowerCase(Locale.ROOT)
+        val author = s"tenant:$tenant/user:$user"
+        // Reuses the same first-token reader `StatementClassifier` classified `kind` with (see
+        // `SqlTrivia.firstToken`), so a leading or interior trivia character that made `kind`
+        // Dml/Ddl in the first place (e.g. `INSERT<NBSP>INTO`) cannot also survive into this
+        // verb. Once the classifier started seeing through such trivia, this path became
+        // reachable for exactly those statements, and this reader had not caught up: an
+        // invisible character leaked into the DuckLake commit ledger's verb field (rendering as
+        // `flightsql insert<NBSP>into`) -- a ledger-integrity regression, not an injection risk
+        // (`SqlLiterals.duckdbLiteral` below escapes it regardless).
+        val verb = SqlTrivia.firstToken(sql).toLowerCase(Locale.ROOT)
         s"BEGIN; CALL ducklake_set_commit_message(" +
           s"${SqlLiterals.duckdbLiteral(db)}, " +
           s"${SqlLiterals.duckdbLiteral(author)}, " +
@@ -486,6 +495,33 @@ final class FlightSqlRouter(
             Left(RouterFailure.AccessDenied(s"access denied: $reason"))
           case Allowed => Right(())
 
+    // Per-catalog read-only screen. Runs AFTER the ACL gate so a principal that lacks the grant
+    // is refused for the honest reason first, and BEFORE the CLS/RLS rewriters so a denied write
+    // never reaches a rewrite. Inert (and unparsed) when the pool has no read-only catalog. The
+    // screen re-splits and re-classifies `sql` itself per statement -- it does NOT reuse the
+    // whole-submission `kind` computed above, which describes only the first statement of a batch
+    // -- see CatalogWriteScreen's scaladoc for the exact rule.
+    val catalogDenial: Either[RouterFailure, Unit] = aclCheck.flatMap { _ =>
+      val readOnly = readOnlyCatalogsOf(poolKey)
+      if readOnly.isEmpty then Right(())
+      else
+        val parserCfg = ai.starlake.acl.model.Config.forDuckDB(
+          ctx.defaultDatabase,
+          ctx.defaultSchema,
+          ctx.attachedCatalogs
+        )
+        CatalogWriteScreen.screen(sql, classifier.classify, readOnly, parserCfg) match
+          case None         => Right(())
+          case Some(reason) =>
+            maybeRecord(
+              nodeId = "-",
+              durationMs = 0,
+              status = "denied",
+              error = Some("read_only_catalog: " + reason)
+            )
+            Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+    }
+
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = ctx.defaultDatabase,
@@ -613,11 +649,11 @@ final class FlightSqlRouter(
               maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
               Left(f)
 
-    // ACL -> CLS -> RLS -> metadata-filter pipeline; every denial arm has already
-    // journaled itself. Bound to resultIO so one flatTap below emits exactly one
-    // StatementExecuted event on every exit path, including the denial arms.
+    // ACL -> catalog read-only screen -> CLS -> RLS -> metadata-filter pipeline; every denial
+    // arm has already journaled itself. Bound to resultIO so one flatTap below emits exactly
+    // one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
-      aclCheck
+      catalogDenial
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)

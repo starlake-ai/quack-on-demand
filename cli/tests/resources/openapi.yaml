@@ -6686,6 +6686,24 @@ components:
           type: boolean
         reason:
           type: string
+    CatalogAttachFailureDto:
+      title: CatalogAttachFailureDto
+      type: object
+      required:
+      - alias
+      - error
+      - at
+      - attempts
+      properties:
+        alias:
+          type: string
+        error:
+          type: string
+        at:
+          type: string
+        attempts:
+          type: integer
+          format: int32
     CatalogColumnEntry:
       title: CatalogColumnEntry
       type: object
@@ -7354,7 +7372,6 @@ components:
       type: object
       required:
       - alias
-      - setupSql
       - disabled
       properties:
         alias:
@@ -7364,6 +7381,12 @@ components:
         description:
           type: string
         disabled:
+          type: boolean
+        sourceType:
+          type: string
+        config:
+          $ref: '#/components/schemas/IcebergRestConfig'
+        readOnly:
           type: boolean
     FederatedSourceListResponse:
       title: FederatedSourceListResponse
@@ -7380,8 +7403,9 @@ components:
       - id
       - tenantDbId
       - alias
-      - setupSql
       - disabled
+      - sourceType
+      - readOnly
       properties:
         id:
           type: string
@@ -7395,6 +7419,14 @@ components:
           type: string
         disabled:
           type: boolean
+        sourceType:
+          type: string
+        config:
+          $ref: '#/components/schemas/IcebergRestConfig'
+        readOnly:
+          type: boolean
+        attachStatus:
+          type: string
     ForgotPasswordRequest:
       title: ForgotPasswordRequest
       type: object
@@ -7477,6 +7509,33 @@ components:
         nodesCount:
           type: integer
           format: int32
+    IcebergRestConfig:
+      title: IcebergRestConfig
+      type: object
+      required:
+      - uri
+      - warehouse
+      properties:
+        uri:
+          type: string
+        warehouse:
+          type: string
+        authType:
+          type: string
+        endpointType:
+          type: string
+        clientId:
+          type: string
+        clientSecret:
+          type: string
+        oauth2ServerUri:
+          type: string
+        oauth2Scope:
+          type: string
+        oauth2GrantType:
+          type: string
+        token:
+          type: string
     KillStatementRequest:
       title: KillStatementRequest
       type: object
@@ -7887,6 +7946,10 @@ components:
         duckdbSpillBytes:
           type: integer
           format: int64
+        catalogAttachFailures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogAttachFailureDto'
     NodeOpRequest:
       title: NodeOpRequest
       type: object

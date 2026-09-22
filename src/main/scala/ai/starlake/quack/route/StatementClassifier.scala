@@ -2,7 +2,7 @@ package ai.starlake.quack.route
 
 import java.util.Locale
 import ai.starlake.quack.model.StatementKind
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
 /** Per-bucket keyword sets used to classify a statement by its first non-blank token. Sets are
   * uppercased on construction so matching is case-insensitive without per-call allocation.
@@ -76,8 +76,17 @@ object StatementClassifierConfig:
   * a coarse three-bucket answer; authorization runs `SqlParser.extract` separately and consumes its
   * own per-`TableAccess` `Verb` enum.
   *
-  * SQL comments (`--`, `/* */`) are stripped before the first-token match so a leading comment
-  * doesn't make a query look like `Other`.
+  * SQL comments (`--`, `/* */`) are stripped, and every trivia character (whitespace, BOM,
+  * zero-width space, non-breaking space, and other invisible `Character.FORMAT` / `SPACE_SEPARATOR`
+  * characters `String.trim` and `Character.isWhitespace` don't treat as blank -- see
+  * `ai.starlake.sql.SqlTrivia`) is normalized to an ASCII space ACROSS THE WHOLE STATEMENT, not
+  * just its head, before the first-token match. A leading OR an interior trivia character (e.g.
+  * `INSERT<NBSP>INTO t VALUES (1)`, which DuckDB executes identically to `INSERT INTO ...`) can
+  * otherwise make a write look like `Other`, which `RoleMatcher` routes to a reader node and lets
+  * skip `ProtectedWriteGuard` and the write audit path (the same class of bypass the `WITH` special
+  * case below documents, reached here through a hidden first or verb token instead of a misleading
+  * one). The normalized copy is used ONLY for classification -- `sql` itself is what every other
+  * consumer, and the node, receives.
   */
 final class StatementClassifier(
     config: StatementClassifierConfig = StatementClassifierConfig.Defaults
@@ -85,10 +94,22 @@ final class StatementClassifier(
 
   private val cfg = config.normalized
 
+  // Leading trivia/comments are stripped BEFORE stripComments, not after: `SqlTrivia.stripLeading`
+  // tracks comment-nesting depth correctly, `SqlCommentStripper.stripComments` does not (it closes
+  // on the FIRST `*/` it sees, however deep). DuckDB nests block comments to arbitrary depth
+  // (verified against a real DuckDB 1.5.4: a leading `/* a /* b */ c */ INSERT INTO t VALUES (1)`
+  // executes and writes the row), so stripping comments before leading trivia on a nested leading
+  // comment exposes the literal text between the inner and outer close (`c` above) as if it were
+  // the real first token -- a misclassification to `Other`, the same bucket `RoleMatcher` treats as
+  // read-shaped, not merely a missed normalization. See `SqlTrivia.firstToken`'s scaladoc for the
+  // identical reasoning; this entry point needs its own copy because `classifyStripped` below
+  // receives already-comment-stripped text and reuses it for more than just the first token (the
+  // `WITH`/`EXPLAIN` arms slice into it directly).
   def classify(sql: String): StatementKind =
-    classifyStripped(SqlCommentStripper.stripComments(sql))
+    classifyStripped(SqlCommentStripper.stripComments(SqlTrivia.stripLeading(sql)))
 
-  private def classifyStripped(sql: String): StatementKind =
+  private def classifyStripped(raw: String): StatementKind =
+    val sql = SqlTrivia.normalize(raw)
     firstToken(sql).map(_.toUpperCase(Locale.ROOT)) match
       // A WITH prefix says nothing about what the statement DOES: the verb after the
       // CTE list decides. First-token classification put WITH ... INSERT in the select
@@ -123,10 +144,17 @@ final class StatementClassifier(
     else if cfg.rollback.contains(tok) then StatementKind.Rollback
     else StatementKind.Other
 
+  // Routes through the one shared reader (`SqlTrivia.firstToken`) rather than a hand-rolled
+  // takeWhile of its own -- see that method's scaladoc for why a sibling reader is exactly how
+  // this class of bug regenerates. `sql` here is already comment-stripped and whole-string
+  // normalized by `classifyStripped`, so `firstToken`'s own stripComments/stripLeading/normalize
+  // passes are idempotent no-ops on it; kept anyway so this method stays correct even if a future
+  // caller passes it raw SQL directly. `.takeWhile(_ != ';')` and `.dropWhile(_ == '(')` are this
+  // call site's own extras (a bare `COMMIT;` or a WITH-list's opening paren), not universal to the
+  // shared primitive.
   private def firstToken(sql: String): Option[String] =
-    val trimmed = sql.trim
-    if trimmed.isEmpty then None
-    else Some(trimmed.takeWhile(c => !c.isWhitespace && c != ';').dropWhile(_ == '('))
+    val tok = SqlTrivia.firstToken(sql).takeWhile(_ != ';').dropWhile(_ == '(')
+    Option.when(tok.nonEmpty)(tok)
 
   /** The first depth-0 keyword token after the leading WITH's CTE list, uppercased: the statement's
     * real verb. The scan is quote-aware (single-quoted literals with '' doubling and backslash

@@ -1,8 +1,12 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
 import type {
   FederatedSourceResponse,
+  FederatedSourceType,
   FederatedSecretResponse,
+  IcebergAuthType,
+  IcebergEndpointType,
+  IcebergRestConfig,
 } from '../api/types';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
@@ -98,6 +102,121 @@ const SETUP_SAMPLES: { label: string; hint: string; sql: string }[] = [
       "  );\n",
   },
 ];
+
+/** The single selector the Iceberg form shows for "how do we authenticate".
+  *
+  * DuckDB refuses `AUTHORIZATION_TYPE` combined with `ENDPOINT_TYPE` (and the
+  * manager 400s the pair, see `IcebergRestConfig.validate`), so the two option
+  * sets can never both be live. Merging them into one control makes that
+  * exclusivity impossible to express rather than merely validated: picking
+  * `glue` / `s3_tables` sets `endpointType` and leaves `authType` undefined,
+  * and the other four do the converse. */
+type IcebergMode = IcebergAuthType | IcebergEndpointType;
+
+const ICEBERG_ENDPOINT_MODES: IcebergEndpointType[] = ['glue', 's3_tables'];
+
+const ICEBERG_MODES: { id: IcebergMode; label: string }[] = [
+  { id: 'none',      label: 'none - unauthenticated catalog' },
+  { id: 'oauth2',    label: 'oauth2 - client credentials exchange' },
+  { id: 'token',     label: 'token - bearer token' },
+  { id: 'sigv4',     label: 'sigv4 - AWS request signing' },
+  { id: 'glue',      label: 'glue - AWS Glue endpoint' },
+  { id: 's3_tables', label: 's3_tables - AWS S3 Tables endpoint' },
+];
+
+/** Narrows an `IcebergMode` to the two that are `ENDPOINT_TYPE` values. The
+  * type predicate is what lets `buildIcebergConfig` assign `mode` straight
+  * into `endpointType` / `authType` without a cast, so a mode added to one
+  * union and forgotten in the other is a compile error. */
+function isEndpointMode(mode: IcebergMode): mode is IcebergEndpointType {
+  return (ICEBERG_ENDPOINT_MODES as IcebergMode[]).includes(mode);
+}
+
+/** Every free-text input of the Iceberg form, held as one blob so switching
+  * mode does not lose what the operator already typed. What is SENT is
+  * decided by `buildIcebergConfig`, not by what is still in here. */
+type IcebergFields = {
+  uri:             string;
+  warehouse:       string;
+  clientId:        string;
+  clientSecret:    string;
+  oauth2ServerUri: string;
+  oauth2Scope:     string;
+  oauth2GrantType: string;
+  token:           string;
+};
+
+const EMPTY_ICEBERG_FIELDS: IcebergFields = {
+  uri: '', warehouse: '', clientId: '', clientSecret: '',
+  oauth2ServerUri: '', oauth2Scope: '', oauth2GrantType: '', token: '',
+};
+
+/** The manager requires `clientSecret` and `token` to hold a
+  * `{{secret.NAME}}` placeholder and rejects a literal with a 400 at save
+  * time (`IcebergRestConfig.placeholderErrors`). Same pattern, anchored on
+  * the trimmed value exactly as the server anchors on its own. */
+const SECRET_PLACEHOLDER = /^\{\{secret\.[A-Za-z0-9_]+\}\}$/;
+
+function isSecretPlaceholder(raw: string): boolean {
+  return SECRET_PLACEHOLDER.test(raw.trim());
+}
+
+/** A credential field the operator has filled in with something that is not a
+  * placeholder. Blank is NOT an error here: the input's own `required`
+  * attribute reports that, and disabling submit for it would leave a dead
+  * button with no explanation. */
+function credentialError(raw: string): boolean {
+  return raw.trim().length > 0 && !isSecretPlaceholder(raw);
+}
+
+const CREDENTIAL_HINT =
+  'Use {{secret.NAME}} and add the value under Secrets. ' +
+  'Literal values are rejected when the source is saved.';
+
+/** Assemble the wire config from the form.
+  *
+  * Fields the selected mode does not show are omitted entirely rather than
+  * sent blank: the manager rejects a credential field set under a mode that
+  * takes none, so a client secret typed under `oauth2` and abandoned after a
+  * switch to `token` must not survive into the request. */
+function buildIcebergConfig(mode: IcebergMode, f: IcebergFields): IcebergRestConfig {
+  const set = (s: string) => (s.trim().length > 0 ? s.trim() : undefined);
+  const warehouse = f.warehouse.trim();
+  if (isEndpointMode(mode)) return { warehouse, endpointType: mode };
+  const base: IcebergRestConfig = { warehouse, authType: mode, uri: f.uri.trim() };
+  if (mode === 'oauth2')
+    return {
+      ...base,
+      clientId:        set(f.clientId),
+      clientSecret:    set(f.clientSecret),
+      oauth2ServerUri: set(f.oauth2ServerUri),
+      oauth2Scope:     set(f.oauth2Scope),
+      oauth2GrantType: set(f.oauth2GrantType),
+    };
+  if (mode === 'token') return { ...base, token: set(f.token) };
+  return base;
+}
+
+/** Inverse of `buildIcebergConfig` for edit-mode prefill. A stored config
+  * always carries exactly one of the two, so the `none` fallback only ever
+  * applies to a create. */
+function icebergModeOf(config: IcebergRestConfig | undefined): IcebergMode {
+  return config?.endpointType ?? config?.authType ?? 'none';
+}
+
+function icebergFieldsOf(config: IcebergRestConfig | undefined): IcebergFields {
+  if (!config) return EMPTY_ICEBERG_FIELDS;
+  return {
+    uri:             config.uri             ?? '',
+    warehouse:       config.warehouse       ?? '',
+    clientId:        config.clientId        ?? '',
+    clientSecret:    config.clientSecret    ?? '',
+    oauth2ServerUri: config.oauth2ServerUri ?? '',
+    oauth2Scope:     config.oauth2Scope     ?? '',
+    oauth2GrantType: config.oauth2GrantType ?? '',
+    token:           config.token           ?? '',
+  };
+}
 
 /** Inline labeled-value pair used in the federation-source detail view.
   * Renders a small uppercase label above the value. The `mono` prop
@@ -627,6 +746,20 @@ export default function FederationSection({
   const [alias,       setAlias]       = useState('');
   const [setupSql,    setSetupSql]    = useState('');
   const [description, setDescription] = useState('');
+  const [sourceType,  setSourceType]  = useState<FederatedSourceType>('sql');
+  const [readOnly,    setReadOnly]    = useState(false);
+  const [icebergMode, setIcebergMode] = useState<IcebergMode>('none');
+  const [iceberg,     setIceberg]     = useState<IcebergFields>(EMPTY_ICEBERG_FIELDS);
+
+  const isIceberg = sourceType === 'iceberg_rest';
+  const setIcebergField = (key: keyof IcebergFields, value: string) =>
+    setIceberg(prev => ({ ...prev, [key]: value }));
+
+  // Blocks submit only on a credential the manager is certain to reject.
+  const credentialsOk =
+    !isIceberg ||
+    !((icebergMode === 'oauth2' && credentialError(iceberg.clientSecret)) ||
+      (icebergMode === 'token'  && credentialError(iceberg.token)));
 
   const reload = () =>
     api.listFederatedSources(tenant, tenantDb)
@@ -639,7 +772,19 @@ export default function FederationSection({
     setAlias('');
     setSetupSql('');
     setDescription('');
+    setSourceType('sql');
+    setReadOnly(false);
+    setIcebergMode('none');
+    setIceberg(EMPTY_ICEBERG_FIELDS);
     setError(null);
+  }
+
+  /** Picking the type also resets the read-only default: an external catalog
+    * QoD does not own starts read-only (the manager's own default for a new
+    * `iceberg_rest` row), a `sql` source keeps today's behaviour. */
+  function selectSourceType(next: FederatedSourceType) {
+    setSourceType(next);
+    setReadOnly(next === 'iceberg_rest');
   }
 
   function openCreate() {
@@ -650,8 +795,12 @@ export default function FederationSection({
 
   function openEdit(s: FederatedSourceResponse) {
     setAlias(s.alias);
-    setSetupSql(s.setupSql);
+    setSetupSql(s.setupSql ?? '');
     setDescription(s.description ?? '');
+    setSourceType(s.sourceType);
+    setReadOnly(s.readOnly);
+    setIcebergMode(icebergModeOf(s.config));
+    setIceberg(icebergFieldsOf(s.config));
     setError(null);
     setEditingAlias(s.alias);
     setAdding(true);
@@ -666,11 +815,20 @@ export default function FederationSection({
   async function handleCreate(ev: React.FormEvent) {
     ev.preventDefault();
     setError(null);
+    if (!credentialsOk) return;
     try {
       await api.createFederatedSource(tenant, tenantDb, {
-        alias:       alias.trim(),
-        setupSql:    setupSql.trim(),
+        // The manager normalizes every alias through Names.normalizeOrError
+        // (lowercase); sending the normalized form is what keeps the value the
+        // operator sees in this field identical to the one it is stored under.
+        alias:       alias.trim().toLowerCase(),
         description: description.trim() || undefined,
+        sourceType,
+        readOnly,
+        // Exactly one of the two: the manager 400s a row carrying both.
+        ...(isIceberg
+          ? { config: buildIcebergConfig(icebergMode, iceberg) }
+          : { setupSql: setupSql.trim() || undefined }),
       });
       closeForm();
       await reload();
@@ -695,7 +853,7 @@ export default function FederationSection({
     <div className="card">
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
         <div className="card-title" style={{ margin: 0 }}>
-          Federation &mdash; <code>{tenantDb}</code>
+          Federation: <code>{tenantDb}</code>
         </div>
         <div className="row" style={{ gap: 8 }}>
           {!adding && (
@@ -707,7 +865,8 @@ export default function FederationSection({
       <p className="subtle">
         Federated sources are DuckDB <code>ATTACH</code> / extension-based remote catalogs injected
         at session start via <code>setupSql</code>. Secrets referenced inside that SQL are resolved
-        from the secrets table at runtime.
+        from the secrets table at runtime. An <code>iceberg_rest</code> source skips the hand-written
+        SQL: fill in the typed form and the manager renders the <code>ATTACH</code> itself.
       </p>
 
       {error && <div className="login-err">Error: {error}</div>}
@@ -719,16 +878,43 @@ export default function FederationSection({
             </div>
             <form onSubmit={handleCreate} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
               <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+            {/* The alias is lowercased as it is typed rather than silently on
+                save: every alias is stored lowercase, and an operator who typed
+                "Sales_Lake" should not have to go looking for "sales_lake". */}
             <label>
               Alias <span style={{ color: 'var(--bad)' }}>*</span>
               <input
                 value={alias}
-                onChange={ev => setAlias(ev.target.value)}
+                onChange={ev => setAlias(ev.target.value.toLowerCase())}
                 placeholder="my_s3_source"
+                pattern="[a-z_][a-z0-9_]*"
+                maxLength={63}
                 disabled={editingAlias != null}
                 required
               />
             </label>
+            <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '-.35rem' }}>
+              Stored lowercase, 1 to 63 chars, letters / digits / underscore, not starting with a
+              digit. DuckDB compares catalog aliases case-insensitively.
+            </div>
+            <label>
+              Source type
+              <select
+                value={sourceType}
+                onChange={ev => selectSourceType(ev.target.value as FederatedSourceType)}
+                disabled={editingAlias != null}
+              >
+                <option value="sql">sql - your own ATTACH / setup SQL</option>
+                <option value="iceberg_rest">iceberg_rest - external Iceberg REST catalog</option>
+              </select>
+            </label>
+            {editingAlias != null && (
+              <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '-.35rem' }}>
+                The type is fixed for an existing alias: the manager refuses a flip between sql and
+                iceberg_rest rather than replacing your setup SQL with a rendered config unseen.
+                Delete the source and recreate it to change type.
+              </div>
+            )}
             <label>
               Description
               <input
@@ -737,6 +923,128 @@ export default function FederationSection({
                 placeholder="Optional description"
               />
             </label>
+
+            {isIceberg && (
+              <>
+                <label>
+                  Warehouse <span style={{ color: 'var(--bad)' }}>*</span>
+                  <input
+                    value={iceberg.warehouse}
+                    onChange={ev => setIcebergField('warehouse', ev.target.value)}
+                    placeholder="my_warehouse"
+                    required
+                  />
+                </label>
+                <label>
+                  Authentication
+                  <select
+                    value={icebergMode}
+                    onChange={ev => setIcebergMode(ev.target.value as IcebergMode)}
+                  >
+                    {ICEBERG_MODES.map(m => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                </label>
+                {isEndpointMode(icebergMode) ? (
+                  <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
+                    This endpoint type selects its own signing, so it takes no URI and no
+                    credentials: DuckDB refuses ENDPOINT_TYPE combined with AUTHORIZATION_TYPE.
+                  </div>
+                ) : (
+                  <label>
+                    URI <span style={{ color: 'var(--bad)' }}>*</span>
+                    <input
+                      value={iceberg.uri}
+                      onChange={ev => setIcebergField('uri', ev.target.value)}
+                      placeholder="https://catalog.example.com/iceberg"
+                      required
+                    />
+                  </label>
+                )}
+                {icebergMode === 'oauth2' && (
+                  <>
+                    <label>
+                      Client ID <span style={{ color: 'var(--bad)' }}>*</span>
+                      <input
+                        value={iceberg.clientId}
+                        onChange={ev => setIcebergField('clientId', ev.target.value)}
+                        placeholder="qod-catalog-client"
+                        required
+                      />
+                    </label>
+                    <label>
+                      Client secret <span style={{ color: 'var(--bad)' }}>*</span>
+                      <input
+                        value={iceberg.clientSecret}
+                        onChange={ev => setIcebergField('clientSecret', ev.target.value)}
+                        placeholder="{{secret.ICEBERG_CLIENT_SECRET}}"
+                        style={credentialError(iceberg.clientSecret) ? { borderColor: 'var(--bad)' } : undefined}
+                        aria-invalid={credentialError(iceberg.clientSecret)}
+                        required
+                      />
+                    </label>
+                    {credentialError(iceberg.clientSecret) && (
+                      <div style={{ fontSize: '.85em', color: 'var(--bad)' }}>
+                        Client secret must be a {'{{secret.NAME}}'} placeholder, not a literal value.
+                      </div>
+                    )}
+                    <label>
+                      OAuth2 server URI
+                      <input
+                        value={iceberg.oauth2ServerUri}
+                        onChange={ev => setIcebergField('oauth2ServerUri', ev.target.value)}
+                        placeholder="Optional; defaults to <uri>/v1/oauth/tokens"
+                      />
+                    </label>
+                    <label>
+                      OAuth2 scope
+                      <input
+                        value={iceberg.oauth2Scope}
+                        onChange={ev => setIcebergField('oauth2Scope', ev.target.value)}
+                        placeholder="Optional, e.g. PRINCIPAL_ROLE:ALL"
+                      />
+                    </label>
+                    <label>
+                      OAuth2 grant type
+                      <input
+                        value={iceberg.oauth2GrantType}
+                        onChange={ev => setIcebergField('oauth2GrantType', ev.target.value)}
+                        placeholder="Optional, e.g. client_credentials"
+                      />
+                    </label>
+                  </>
+                )}
+                {icebergMode === 'token' && (
+                  <>
+                    <label>
+                      Token <span style={{ color: 'var(--bad)' }}>*</span>
+                      <input
+                        value={iceberg.token}
+                        onChange={ev => setIcebergField('token', ev.target.value)}
+                        placeholder="{{secret.ICEBERG_TOKEN}}"
+                        style={credentialError(iceberg.token) ? { borderColor: 'var(--bad)' } : undefined}
+                        aria-invalid={credentialError(iceberg.token)}
+                        required
+                      />
+                    </label>
+                    {credentialError(iceberg.token) && (
+                      <div style={{ fontSize: '.85em', color: 'var(--bad)' }}>
+                        Token must be a {'{{secret.NAME}}'} placeholder, not a literal value.
+                      </div>
+                    )}
+                  </>
+                )}
+                {(icebergMode === 'oauth2' || icebergMode === 'token') && (
+                  <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
+                    {CREDENTIAL_HINT}
+                    {' '}Expand the source row after saving to add the secret value.
+                  </div>
+                )}
+              </>
+            )}
+
+            {!isIceberg && (
             <label>
               Setup SQL <span style={{ color: 'var(--bad)' }}>*</span>
               <div className="setup-templates">
@@ -777,10 +1085,25 @@ export default function FederationSection({
                 required
               />
             </label>
+            )}
+
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={readOnly}
+                onChange={ev => setReadOnly(ev.target.checked)}
+              />
+              {' '}Read-only catalog
+            </label>
+            <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
+              {isIceberg
+                ? 'Renders a READ_ONLY ATTACH option and denies writes at the edge. Takes effect on an already-running node only after the pool recycles.'
+                : 'Denies writes to this catalog at the edge. The ATTACH text itself is yours, so this screen is the only enforcement for a sql source.'}
+            </div>
               </div>
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeForm}>Cancel</button>
-                <button type="submit" style={{ minWidth: '7rem' }}>{editingAlias ? 'Save' : 'Create'}</button>
+                <button type="submit" style={{ minWidth: '7rem' }} disabled={!credentialsOk}>{editingAlias ? 'Save' : 'Create'}</button>
               </div>
             </form>
         </Modal>
@@ -793,6 +1116,7 @@ export default function FederationSection({
           <thead>
             <tr>
               <th>Alias</th>
+              <th>Type</th>
               <th>Description</th>
               <th>Disabled</th>
               <th className="actions">Actions</th>
@@ -800,8 +1124,8 @@ export default function FederationSection({
           </thead>
           <tbody>
             {sources.map(s => (
-              <>
-                <tr key={s.id}>
+              <Fragment key={s.id}>
+                <tr>
                   <td>
                     <button
                       type="button"
@@ -812,6 +1136,21 @@ export default function FederationSection({
                       <code>{s.alias}</code>
                     </button>
                   </td>
+                  <td>
+                    <code>{s.sourceType}</code>
+                    {/* Absent for a sql or disabled row, and "attached" is the
+                        quiet case: only a state an operator should act on is
+                        worth a badge. */}
+                    {s.attachStatus != null && s.attachStatus !== 'attached' && (
+                      <>
+                        {' '}
+                        <span
+                          className="badge warn"
+                          title="Live attach state across this pool's nodes"
+                        >{s.attachStatus}</span>
+                      </>
+                    )}
+                  </td>
                   <td>{s.description ?? <span className="subtle">-</span>}</td>
                   <td>{s.disabled ? 'Yes' : 'No'}</td>
                   <td className="actions">
@@ -821,40 +1160,70 @@ export default function FederationSection({
                   </td>
                 </tr>
                 {expanded === s.alias && (
-                  <tr key={`${s.id}-detail`}>
-                    <td colSpan={4} style={{ padding: 0, background: 'var(--bg-elev)' }}>
+                  <tr>
+                    <td colSpan={5} style={{ padding: 0, background: 'var(--bg-elev)' }}>
                       <div style={{ padding: '.75rem 1rem' }}>
                         <div className="row" style={{ gap: '1.5rem', flexWrap: 'wrap', marginBottom: '.6rem' }}>
                           <DetailItem label="Alias"       value={s.alias} mono />
+                          <DetailItem label="Source type" value={s.sourceType} mono />
                           <DetailItem label="Source ID"   value={s.id} mono subtle />
                           <DetailItem label="Tenant-DB"   value={s.tenantDbId} mono subtle />
                           <DetailItem label="Disabled"    value={s.disabled ? 'Yes' : 'No'} />
+                          <DetailItem label="Read-only"   value={s.readOnly ? 'Yes' : 'No'} />
+                          {s.attachStatus && <DetailItem label="Attach status" value={s.attachStatus} />}
                           {s.description && <DetailItem label="Description" value={s.description} />}
                         </div>
-                        <div style={{ marginTop: '.4rem' }}>
-                          <div style={{
-                            fontSize: '.75rem', color: 'var(--text-mute)',
-                            textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
-                          }}>
-                            Setup SQL
+                        {s.config && (
+                          <div style={{ marginTop: '.4rem' }}>
+                            <div style={{
+                              fontSize: '.75rem', color: 'var(--text-mute)',
+                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                            }}>
+                              Iceberg REST catalog
+                            </div>
+                            <div className="row" style={{ gap: '1.5rem', flexWrap: 'wrap' }}>
+                              {s.config.warehouse && <DetailItem label="Warehouse" value={s.config.warehouse} mono />}
+                              {s.config.uri && <DetailItem label="URI" value={s.config.uri} mono />}
+                              {s.config.authType && <DetailItem label="Auth type" value={s.config.authType} mono />}
+                              {s.config.endpointType && <DetailItem label="Endpoint type" value={s.config.endpointType} mono />}
+                              {s.config.clientId && <DetailItem label="Client ID" value={s.config.clientId} mono />}
+                              {/* Credential fields hold a {{secret.NAME}} placeholder, never a
+                                  value: the manager rejects a literal, which is why showing
+                                  them here is safe and tells the operator which secret is wired. */}
+                              {s.config.clientSecret && <DetailItem label="Client secret" value={s.config.clientSecret} mono />}
+                              {s.config.token && <DetailItem label="Token" value={s.config.token} mono />}
+                              {s.config.oauth2ServerUri && <DetailItem label="OAuth2 server URI" value={s.config.oauth2ServerUri} mono />}
+                              {s.config.oauth2Scope && <DetailItem label="OAuth2 scope" value={s.config.oauth2Scope} mono />}
+                              {s.config.oauth2GrantType && <DetailItem label="OAuth2 grant type" value={s.config.oauth2GrantType} mono />}
+                            </div>
                           </div>
-                          <pre style={{
-                            margin: 0,
-                            padding: '.6rem .8rem',
-                            background: 'var(--bg-card)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius)',
-                            fontFamily: 'var(--mono)',
-                            fontSize: '.85em',
-                            color: 'var(--text)',
-                            whiteSpace: 'pre-wrap',
-                            overflowX: 'auto',
-                          }}>{s.setupSql}</pre>
-                          <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
-                            <code>{'{{alias}}'}</code> and <code>{'{{secret.NAME}}'}</code> placeholders are
-                            resolved at node spawn; never logged in resolved form.
+                        )}
+                        {s.setupSql && (
+                          <div style={{ marginTop: '.4rem' }}>
+                            <div style={{
+                              fontSize: '.75rem', color: 'var(--text-mute)',
+                              textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '.25rem',
+                            }}>
+                              Setup SQL
+                            </div>
+                            <pre style={{
+                              margin: 0,
+                              padding: '.6rem .8rem',
+                              background: 'var(--bg-card)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 'var(--radius)',
+                              fontFamily: 'var(--mono)',
+                              fontSize: '.85em',
+                              color: 'var(--text)',
+                              whiteSpace: 'pre-wrap',
+                              overflowX: 'auto',
+                            }}>{s.setupSql}</pre>
+                            <div style={{ fontSize: '.75em', color: 'var(--text-mute)', marginTop: '.35rem' }}>
+                              <code>{'{{alias}}'}</code> and <code>{'{{secret.NAME}}'}</code> placeholders are
+                              resolved at node spawn; never logged in resolved form.
+                            </div>
                           </div>
-                        </div>
+                        )}
                         <div style={{ marginTop: '.9rem' }}>
                           <div style={{
                             fontSize: '.75rem', color: 'var(--text-mute)',
@@ -868,7 +1237,7 @@ export default function FederationSection({
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>

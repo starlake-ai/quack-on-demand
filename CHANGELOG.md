@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **External Iceberg REST catalogs as a typed federated source.** A tenant-db can now attach an
+  Iceberg REST catalog (`qod federation create TENANT DB --alias icelake --type iceberg-rest --uri
+  ... --warehouse ...`, `POST /api/tenants/{tenant}/tenant-dbs/{tenantDb}/federated-sources` with a
+  typed `config`, the admin console's federation section, or `sourceType: iceberg_rest` in a
+  control-plane manifest) instead of hand-written `setupSql`. QoD renders the `ATTACH` itself, so
+  the catalog is governed like any other: ACL grants reference it as the first segment of a
+  three-part table ref, and every statement goes through the usual routing pipeline. A new `iceberg_rest` source defaults to **read-only**, which
+  is enforced twice: `READ_ONLY` on the rendered `ATTACH` (engine-level, from the next node spawn)
+  and a new edge screen that refuses a write it can resolve against a read-only catalog before it
+  reaches a node. Credentials stay in the federation secret store, never in the rendered SQL a
+  `kubectl describe` or an error message can echo. A catalog that is unreachable at node spawn no
+  longer disappears silently: the node still comes up healthy serving its other catalogs, the real
+  DuckDB error is reported on the node and on the source, and the next health probe re-attaches it
+  without a restart.
+
+- **BREAKING: every federated source alias must now be a plain lowercase identifier.** The rule
+  that already applied to tenant, tenant-db and pool names (ASCII letters, digits and underscore,
+  starting with a letter or underscore, 1..63 chars, stored lowercase) now applies to federated
+  aliases too -- **`sql` sources included, not only the new `iceberg_rest` ones**. DuckDB treats
+  catalog and secret names case-insensitively, so `Sales` and `sales` were two rows whose second
+  `ATTACH` failed at node spawn, and a hyphenated alias needed hand-quoting to attach at all.
+  What changes for an existing install:
+  - Creating a source with a hyphen, a dot, or an over-63-char alias (`--alias ext-s3`) now
+    returns `400` where it previously worked. Pick an identifier alias (`ext_s3`).
+  - A mixed-case alias is rewritten to lowercase in place on its next upsert. `Sales_Lake` and
+    `sales_lake` resolve to one row rather than minting a second.
+  - A source **already stored** under an alias the rule rejects stays editable: an update naming
+    that alias keeps the stored spelling and applies the edit, through REST, CLI, MCP and manifest
+    import alike. Only its NAME is frozen -- renaming it to a valid alias still means delete and
+    recreate, and because the alias is the catalog segment of every role permission, that also
+    means re-granting.
+  - The manager reports every stored alias the rule would reject or rewrite at boot, at ERROR, so
+    an upgrade tells you which rows are affected before you go looking.
+
 - **Encryption at rest for tenant databases.** `qod database create --encrypted` (REST
   `"encrypted": true`, the same switch on the admin console's create form, `encrypted` in a
   control-plane manifest) makes a `kind=ducklake` database write encrypted Parquet, with DuckLake

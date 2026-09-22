@@ -35,10 +35,36 @@ final case class ManifestFederatedSecret(
 
 final case class ManifestFederatedSource(
     alias: String,
-    setupSql: String,
+    // Defaulted so a typed (iceberg_rest) source need not carry an empty string explicitly.
+    // A `sql` source still requires it: FederatedSource.validate, which the importer now runs
+    // on every row, rejects an empty setupSql for sourceType 'sql'.
+    setupSql: String = "",
     description: Option[String] = None,
     disabled: Boolean = false,
-    secrets: List[ManifestFederatedSecret] = Nil
+    secrets: List[ManifestFederatedSecret] = Nil,
+    // "sql" (default) or "iceberg_rest". Defaulted so a pre-Iceberg manifest decodes unchanged.
+    sourceType: String = "sql",
+    // Typed config as raw JSON for iceberg_rest sources. Mirrors FederatedSource.config, which is
+    // text because `model` is a leaf package. Exported verbatim rather than redacted.
+    //
+    // What that is guaranteed to be safe for, exactly: `IcebergRestConfig.validate` runs
+    // `placeholderErrors` over `IcebergRestConfig.CredentialFields`, which is `clientSecret` and
+    // `token` and nothing else, so those two can only hold a `{{secret.NAME}}` placeholder whose
+    // value lives in the source's secrets, and those ARE redacted. Every OTHER field is checked
+    // for stray braces only and may hold a literal: `uri` in particular MAY legitimately carry
+    // userinfo or a signed query parameter, and such a value is exported here in the clear. This
+    // is the same policy the manifest already applies to `setupSql`, which can hold a full
+    // connection string, so a manifest is a secret-bearing artifact in general and not a
+    // redacted one. Redacting `uri` was considered and rejected: the round trip has to reproduce
+    // an attachable catalog, and a redaction sentinel in `uri` imports as a source that can never
+    // attach.
+    config: Option[String] = None,
+    // Round-tripped verbatim from FederatedSource.readOnly. Defaulted to false for pre-Iceberg
+    // manifests, which had no such field and described writable sources. The default direction
+    // matters: losing a `true` here would attach the catalog WRITABLE at the next node spawn
+    // (the flag is threaded onto the rendered Iceberg ATTACH as READ_ONLY), so the exporter
+    // always writes the stored value and the importer always applies it.
+    readOnly: Boolean = false
 )
 
 final case class ManifestTenantDb(

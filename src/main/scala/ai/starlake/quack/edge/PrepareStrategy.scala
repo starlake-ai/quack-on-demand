@@ -2,7 +2,7 @@ package ai.starlake.quack.edge
 
 import java.util.Locale
 import ai.starlake.quack.model.StatementKind
-import ai.starlake.sql.SqlCommentStripper
+import ai.starlake.sql.{SqlCommentStripper, SqlTrivia}
 
 /** Decides how the FlightSQL `createPreparedStatement` action should obtain a `dataset_schema` for
   * a given SQL statement. The FlightSQL spec wants the Arrow schema of the future result *before*
@@ -35,18 +35,38 @@ object PrepareStrategy:
       case StatementKind.Begin | StatementKind.Commit | StatementKind.Rollback => SkipExecute
       case StatementKind.Other                                                 => FullExecute
       case StatementKind.Select                                                =>
-        val stripped = SqlCommentStripper.stripComments(sql).trim
-        val verb     = firstToken(stripped).map(_.toUpperCase(Locale.ROOT)).getOrElse("")
+        // Same composition the verb reader below goes through (`SqlTrivia.firstToken` is
+        // `stripLeading -> stripComments -> normalize`), minus the normalize pass, which must NOT
+        // run here: `stripped` becomes the executed probe SQL, and rewriting an interior Unicode
+        // character inside a string literal would change the statement's data. Dropping the
+        // leading strip is what made the two readers disagree: `kind` came back `Select` for
+        // `/* a /* b */ c */ SELECT 1` (which DuckDB executes) while `stripped` still carried the
+        // `c */` residue of a naively-closed nested comment, so the probe went out as
+        // `SELECT * FROM (c */ SELECT 1) AS _qod_probe LIMIT 0` and DuckDB answered with a parser
+        // error naming a query the caller never wrote. `isMultiStatement` reads the same string,
+        // so it miscounted a `;` leaked out of a comment body the same way.
+        val stripped = SqlCommentStripper.stripComments(SqlTrivia.stripLeading(sql)).trim
+        // Reads its own verb through the one shared reader (`SqlTrivia.firstToken`) instead of a
+        // hand-rolled takeWhile of its own -- that hand-rolled version read RAW `sql`, disagreeing
+        // with `StatementClassifier`'s (normalized) verdict on `kind` the moment either a leading
+        // or interior trivia character sat in front of a `NotSubquerySafe` verb: `kind` came back
+        // Select (correctly), but the old reader's own first token still carried the trivia
+        // character and matched no entry in `NotSubquerySafe`, so a BOM-prefixed `EXPLAIN` took
+        // the `ProbeWrap` path instead of `FullExecute` and DuckDB rejected the resulting
+        // `SELECT * FROM (<BOM>EXPLAIN ...) LIMIT 0` with a parser error -- a previously-working
+        // prepared statement broken by this same class of gap, not fixed by it. `stripped` itself
+        // (comment-stripped but NOT trivia-normalized) is still what feeds `isMultiStatement` and
+        // the actual probe SQL below: only the verb reader may see a normalized copy.
+        val verb = SqlTrivia
+          .firstToken(sql)
+          .takeWhile(_ != ';')
+          .dropWhile(_ == '(')
+          .toUpperCase(Locale.ROOT)
         if NotSubquerySafe.contains(verb) then FullExecute
         else if isMultiStatement(stripped) then FullExecute
         else
           val inner = stripTrailingSemicolon(stripped)
           ProbeWrap(s"SELECT * FROM ($inner) AS _qod_probe LIMIT 0")
-
-  private def firstToken(sql: String): Option[String] =
-    val trimmed = sql.trim
-    if trimmed.isEmpty then None
-    else Some(trimmed.takeWhile(c => !c.isWhitespace && c != ';').dropWhile(_ == '('))
 
   /** True when the (already-stripped) SQL contains a `;` separating two non-empty statements --
     * i.e. anything past the last trailing `;` is itself non-empty.

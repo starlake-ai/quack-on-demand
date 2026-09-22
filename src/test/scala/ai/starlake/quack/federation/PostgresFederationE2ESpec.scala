@@ -111,7 +111,10 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
     new FederationBlobBuilder(
       loadEnabled = tdId => IO.blocking(fs.listEnabledSources(tdId)),
       loadSecrets = srcId => IO.blocking(fs.listSecrets(srcId)),
-      resolver    = new PostgresSecretResolver()
+      resolver    = new PostgresSecretResolver(),
+      // No tenant-db catalog alias reserved: these cases assert federation SQL round-trips
+      // through the real store, and none of them collides with its own tenant-db's alias.
+      catalogAliasOf = _ => IO.pure(None)
     )
 
   // -----------------------------------------------------------------------

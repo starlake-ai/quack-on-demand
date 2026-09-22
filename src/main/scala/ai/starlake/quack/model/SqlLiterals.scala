@@ -8,3 +8,7 @@ object SqlLiterals:
   /** DuckDB SQL string literal: wrap in single quotes, double any embedded `'`. */
   def duckdbLiteral(v: String): String =
     "'" + v.replace("'", "''") + "'"
+
+  /** DuckDB quoted identifier: wrap in double quotes, double any embedded `"`. */
+  def duckdbIdent(v: String): String =
+    "\"" + v.replace("\"", "\"\"") + "\""
