@@ -16,8 +16,8 @@ import scala.collection.concurrent.TrieMap
   *
   * For the fire-and-forget flavor (nothing tracked, every node reports alive) use
   * [[StubQuackBackend.noop]].
-  */
-/** `startedAt` defaults to `Instant.EPOCH` (what every per-spec copy used), but a spec asserting on
+  *
+  * `startedAt` defaults to `Instant.EPOCH` (what every per-spec copy used), but a spec asserting on
   * a node's incarnation key should pass a distinctive value: against EPOCH the assertion cannot
   * tell a real lookup from any constant-zero expression.
   */

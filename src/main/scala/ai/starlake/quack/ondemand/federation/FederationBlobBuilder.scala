@@ -16,8 +16,15 @@ import cats.syntax.all.*
   * covers every `{{secret.NAME}}` the builder resolved regardless of where in the template it sat.
   *
   * Empty in `redactSecrets` (preview) mode, where nothing was resolved. NEVER log `sql`.
+  *
+  * `toString` is overridden because "NEVER log sql" is a comment, not a guard: a case class whose
+  * DERIVED `toString` renders the SQL and the raw secret set is one string interpolation away from
+  * the exact leak this type exists to help prevent. No caller renders it today; the override is so
+  * that a future log line, exception message or debug print cannot.
   */
-final case class ResolvedFederationBlock(sql: String, secretValues: Set[String])
+final case class ResolvedFederationBlock(sql: String, secretValues: Set[String]):
+  override def toString: String =
+    s"ResolvedFederationBlock(sql=${sql.length} chars, secretValues=${secretValues.size} values)"
 
 /** Assembles the post-DuckLake setup SQL blob for a single tenant-db's federated sources. The blob
   * is what `spawn-quack-node.sh` runs in DuckDB after attaching the default catalog (or instead of,

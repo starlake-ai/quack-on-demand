@@ -210,6 +210,22 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
     out.secretValues shouldBe Set("the-id", "the-secret")
   }
 
+  it should "render neither the SQL nor the secret values when the block is stringified" in {
+    // A case class's DERIVED toString prints every field, so `s"... $block"` or a logger's
+    // implicit toString on this value would publish the resolved plaintext secrets and the SQL
+    // that carries them -- the exact leak AttachErrorRedactor exists to prevent, arriving through
+    // the component that resolved them. No caller does this today; this test is what keeps it
+    // that way, so the override cannot be deleted as dead weight.
+    val s     = iceSrc()
+    val block = builderWith(List(s), iceSecrets(s)).buildOne(s).unsafeRunSync()
+    block.secretValues should contain("the-secret")
+    val rendered = s"federation block: $block"
+    rendered should not include "the-secret"
+    rendered should not include "the-id"
+    rendered should not include "CLIENT_ID"
+    rendered should include("2 values")
+  }
+
   it should "render only the named source, not its siblings" in {
     val ice   = iceSrc()
     val other = src("fedpg", "ATTACH 'x' AS {{alias}};")
