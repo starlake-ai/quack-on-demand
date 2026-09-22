@@ -349,6 +349,31 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
     out should include("Invalid Configuration Error")
   }
 
+  it should "evasion 7d: remove a hex-of-base64 credential behind a long garbage prefix" in {
+    // The task-8b verification pass's exact input, and the fixture four earlier attempts missed.
+    // `deadbeef` is eight hex characters, so the run decodes to FOUR garbage bytes in front of the
+    // inner blob: one more than the four base64 alignments in `decodings` can skip, so decoding
+    // the decoding from character zero reads garbage and gives up. 7c above sits on the other side
+    // of that boundary (its prefix is one byte), which is why the run scan inside each decoding
+    // looked unpinnable and was deleted. Only that scan reaches this one.
+    //
+    // The run is 24 lowercase hex characters, below the blanket arm's all-hex floor of 32, so no
+    // shape rule can carry it -- `precisely` asserts that rather than assuming it.
+    val tiny    = "abcd"
+    val doubled = Base64.getEncoder
+      .encodeToString(tiny.getBytes(StandardCharsets.UTF_8))
+      .getBytes(StandardCharsets.UTF_8)
+      .map("%02x".format(_))
+      .mkString
+    val blob = s"deadbeef$doubled"
+    blob shouldBe "deadbeef59574a6a5a413d3d"
+    val out = precisely(s"Invalid Configuration Error: rejected \"$blob\" now", tiny)
+    out should not include blob
+    // The quotes bound the run, so the fallback's whole-run cost stops at the blob here.
+    out should include("rejected")
+    out should include("now")
+  }
+
   it should "mask an encoding it cannot decode at all, on shape alone" in {
     // The fail-safe arm on its own, with NO credential known: an encoding nobody modelled has to
     // be caught on shape or it walks straight through. This is the arm that decides the object

@@ -64,10 +64,13 @@ import scala.util.matching.Regex
   *      diagnostic cost is bounded by the credential itself.
   *   3. a decode search over the shadow copies: every run in the base64 / base64url / hex / base32
   *      alphabet is decoded (at all four base64 group alignments, so a run glued to a preceding
-  *      word still decodes; up to [[MaxDecodeDepth]] times, and a doubly-encoded blob is located by
-  *      finding the inner run INSIDE the first decoding and mapping it back through the outer
-  *      grouping, so double-encoding does not help whether or not the blob was isolated by a
-  *      delimiter) and the run is redacted if any decoding contains a credential.
+  *      word still decodes; up to [[MaxDecodeDepth]] times, and each decoding is itself scanned for
+  *      further encoded runs, so an inner blob sitting behind more garbage than the alignment sweep
+  *      can skip is reached too) and the run is redacted if any decoding contains a credential. A
+  *      doubly-encoded blob under a base64 OUTER layer is additionally located PRECISELY, by
+  *      mapping the inner run back through the outer grouping, so the message loses the blob and
+  *      keeps the words around it; under a hex or base32 outer layer the whole run is taken
+  *      instead. What this does not reach is a THIRD layer, which [[MaxDecodeDepth]] bounds.
   *      Running on the shadow copy is what makes a base64 blob wrapped at 76 columns, the MIME wire
   *      form, one contiguous run.
   *   4. a blanket mask, independent of the credential set: any run of [[MinOpaqueChars]]+
@@ -445,17 +448,28 @@ object AttachErrorRedactor:
     * for the whole-run fallback above; a run that is not valid base64, hex or base32, or that
     * decodes to bytes containing nothing we know, simply is not a match.
     *
-    * The recursive step reaches an inner encoding preceded by a few garbage bytes because
-    * [[decodings]] retries at four base64 alignments, which skips up to three leading characters.
-    * A longer garbage prefix is the [[credentialRanges]] `fromNested` case, which locates the inner
-    * run explicitly AND maps it back precisely, so no rule for it is needed here.
+    * Each decoding is attacked two ways: decoded again from character zero, AND scanned for the
+    * encoded-looking runs inside it. Decoding from zero reaches an inner encoding preceded by at
+    * most three garbage bytes, because [[decodings]] retries at four base64 alignments; the run
+    * scan is what reaches one preceded by MORE. The scan is not redundant with
+    * [[credentialRanges]]'s `fromNested`, which covers a base64 OUTER layer only: under a hex outer
+    * layer with a four-byte garbage prefix (`hex(base64(secret))` behind eight hex characters)
+    * nothing else here reaches the credential, and the run stays below the all-hex blanket floor.
+    * The scan was deleted once for failing no test, which was true of the four fixtures tried and
+    * false of the one now pinning it in `AttachErrorRedactorSpec`.
+    *
+    * It is skipped at `depth == 1`, where the recursion it feeds could only answer false, so it
+    * costs one regex pass per decoding of the outermost run and nothing below that.
     */
   private def decodesToCredential(run: String, creds: Set[String], depth: Int): Boolean =
     if depth <= 0 then false
     else
-      decodings(run).exists(text =>
-        hits(text, creds).nonEmpty || decodesToCredential(text, creds, depth - 1)
-      )
+      decodings(run).exists { text =>
+        hits(text, creds).nonEmpty || decodesToCredential(text, creds, depth - 1) ||
+        (depth > 1 && BlobRun
+          .findAllMatchIn(text)
+          .exists(inner => decodesToCredential(inner.matched, creds, depth - 1)))
+      }
 
   private def decodings(run: String): List[String] =
     (0 to 3).toList.flatMap(offset => decodeBase64(run.drop(offset)).map(byteText)) ++
