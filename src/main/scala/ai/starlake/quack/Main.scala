@@ -1874,7 +1874,8 @@ object Main extends IOApp with LazyLogging:
                     edgeCfg.tlsEnabled,
                     quack = quackDoor.map(_ =>
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
-                    )
+                    ),
+                    aclEnabled = aclCfg.enabled
                   )
                 )
                 val shutdownCoordinator = new ai.starlake.quack.boot.ShutdownCoordinator(

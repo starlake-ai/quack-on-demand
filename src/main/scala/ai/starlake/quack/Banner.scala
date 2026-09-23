@@ -56,12 +56,21 @@ object Banner:
       flightPort: Int,
       tlsEnabled: Boolean,
       /** The native Quack front door `(host, port, tls)` when it is enabled. */
-      quack: Option[(String, Int, Boolean)] = None
+      quack: Option[(String, Int, Boolean)] = None,
+      /** Whether the SQL ACL (`quack-flightsql.acl.enabled`, env `QOD_ACL_ENABLED`) is enforced.
+        * Required, not defaulted: the logger's ACL line sits below the default ERROR level, so this
+        * banner is the one place an operator reliably sees whether grants are enforced.
+        */
+      aclEnabled: Boolean
   ): String =
     def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
-    val rh                 = display(restHost)
-    val fh                 = display(flightHost)
-    val quackLine          = quack.fold("") { case (h, p, tls) =>
+    val aclLine            =
+      if aclEnabled then "   SQL ACL       : ENABLED (grants, column and row policies enforced)"
+      else
+        "   SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true to enforce)"
+    val rh        = display(restHost)
+    val fh        = display(flightHost)
+    val quackLine = quack.fold("") { case (h, p, tls) =>
       s"\n   Quack (DuckDB): quack:${display(h)}:$p  (${if tls then "TLS" else "plain HTTP"})"
     }
     val quackStrings = quack.fold("") { case (h, p, tls) =>
@@ -84,6 +93,7 @@ object Banner:
        |   control plane : ${jdbcControlPlaneUrl(meta)}
        |   REST API + UI : http://$rh:$restPort  (UI: http://$rh:$restPort/ui)
        |   FlightSQL     : $scheme://$fh:$flightPort$quackLine
+       |$aclLine
        |
        | Client connection strings (replace <tenant>, <pool>, <user>):$quackStrings
        |   JDBC : jdbc:arrow-flight-sql://$fh:$flightPort/?tenant=<tenant>&pool=<pool>&user=<user>$jdbcTls
