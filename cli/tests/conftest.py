@@ -1,7 +1,13 @@
 import os
 
-import pytest
-from typer.testing import CliRunner
+# Typer forces rich's terminal mode whenever GITHUB_ACTIONS (or FORCE_COLOR / PY_COLORS) is set,
+# and rich then styles `--setup-sql` as three separately coloured tokens, so an assertion on
+# `result.output` no longer finds the substring on CI while passing locally. The knob is read
+# once, at typer import time, so it must be set before anything imports typer.
+os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
+
+import pytest  # noqa: E402
+from typer.testing import CliRunner  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
