@@ -191,26 +191,6 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | `qod serve <target>` | One command over a `.duckdb` file, a parquet/csv directory, or an object-store prefix, control plane on a bundled embedded Postgres | Zero-install path from "files on disk" to a secured multi-user endpoint |
 | `qod sql` and MCP query | Ad-hoc SQL from the CLI or from an AI agent, with optional `--branch` targeting | Scripted and agentic access share the same auth, ACL and audit path as BI users |
 
-### Serving and routing
-
-| Feature | Description | Added value |
-|---|---|---|
-| Node pools per tenant-db | Child DuckDB processes (local) or pods (Kubernetes) with roles `READONLY` / `WRITEONLY` / `DUAL` | DuckDB is single-process, single-writer. Pools give many concurrent users a compatible node each |
-| Statement classification and least-loaded routing | Each statement is classified READ / WRITE / DDL and sent to a compatible, least-loaded node | Writes are funneled to write-capable nodes so DuckLake's single-writer constraint is enforced for the user, not by the user |
-| Cache-aware routing | Reader affinity so repeated scans hit warm nodes | Better cache hit rates than random placement across N processes |
-| Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
-| Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
-
-### Multi-tenancy and isolation
-
-| Feature | Description | Added value |
-|---|---|---|
-| Tenants, tenant-dbs, pools | Registry of tenants, each owning databases (`ducklake`, `duckdb-file`, `memory`) and pools; each DuckLake catalog DB (`${tenant}_${tenantDb}`) is auto-provisioned next to the control-plane DB | DuckLake has no notion of tenant. QoD isolates tenants at the Postgres-database boundary, not just row level |
-| Tenant resource caps and quotas | Per-tenant limits on nodes and pools, enforced on every scale action including autoscale | Shared infrastructure without one tenant starving the others |
-| Per-pool lockdown | Deny-set that blocks node-side escape hatches (file reads, other buckets, extensions) | A DuckDB process can read any path its OS user can. Lockdown closes that for served users |
-| Filtered metadata | `information_schema` and `duckdb_*` catalog functions are filtered to what the principal may see | DuckDB shows every table to everyone. QoD hides what you cannot query |
-| Regular-user profile sessions | Non-admin users log into the console for their own usage and statements only | Self-service without exposing the admin plane |
-
 ### Authentication and identity
 
 | Feature | Description | Added value |
@@ -235,6 +215,26 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Attached-catalog resolution and ATTACH governance | Unqualified refs resolved fail-closed; `ATTACH` for ordinary users constrained to allowed catalogs | Prevents catalog-alias confusion from leaking cross-tenant data |
 | Encryption at rest | `qod database create --encrypted` makes a DuckLake database write encrypted Parquet (DuckLake mints a key per file into its own catalog) or a `duckdb-file` database an AES-256-GCM encrypted file. Create-time only, per database, with `QOD_REQUIRE_ENCRYPTION` as the manager-wide policy gate. | DuckLake supports it but nothing forces it. QoD makes it a policy and keeps the key inside the control plane |
 | Audit log | Every statement, admin mutation and autoscale action recorded with its actor, filterable in the console | DuckDB keeps no history of who ran what |
+
+### Serving and routing
+
+| Feature | Description | Added value |
+|---|---|---|
+| Node pools per tenant-db | Child DuckDB processes (local) or pods (Kubernetes) with roles `READONLY` / `WRITEONLY` / `DUAL` | DuckDB is single-process, single-writer. Pools give many concurrent users a compatible node each |
+| Statement classification and least-loaded routing | Each statement is classified READ / WRITE / DDL and sent to a compatible, least-loaded node | Writes are funneled to write-capable nodes so DuckLake's single-writer constraint is enforced for the user, not by the user |
+| Cache-aware routing | Reader affinity so repeated scans hit warm nodes | Better cache hit rates than random placement across N processes |
+| Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
+| Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
+
+### Multi-tenancy and isolation
+
+| Feature | Description | Added value |
+|---|---|---|
+| Tenants, tenant-dbs, pools | Registry of tenants, each owning databases (`ducklake`, `duckdb-file`, `memory`) and pools; each DuckLake catalog DB (`${tenant}_${tenantDb}`) is auto-provisioned next to the control-plane DB | DuckLake has no notion of tenant. QoD isolates tenants at the Postgres-database boundary, not just row level |
+| Tenant resource caps and quotas | Per-tenant limits on nodes and pools, enforced on every scale action including autoscale | Shared infrastructure without one tenant starving the others |
+| Per-pool lockdown | Deny-set that blocks node-side escape hatches (file reads, other buckets, extensions) | A DuckDB process can read any path its OS user can. Lockdown closes that for served users |
+| Filtered metadata | `information_schema` and `duckdb_*` catalog functions are filtered to what the principal may see | DuckDB shows every table to everyone. QoD hides what you cannot query |
+| Regular-user profile sessions | Non-admin users log into the console for their own usage and statements only | Self-service without exposing the admin plane |
 
 ### Data lifecycle on DuckLake
 
