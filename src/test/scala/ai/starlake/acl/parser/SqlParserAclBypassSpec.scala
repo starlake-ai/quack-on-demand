@@ -59,6 +59,53 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
     e.unsupported should not be empty
   }
 
+  // --- 3c': DuckDB resolves a bare `duckdb_tables` (no parentheses) to the catalog function when
+  // no table of that name shadows it, so qualifying it as `db.main.duckdb_tables` and grant-checking
+  // THAT would admit a schema-wide grant to an unfiltered catalog dump (issue #114).
+
+  test(
+    "bare duckdb_tables reference (no parentheses) is flagged unsupported, not qualified as a table"
+  ) {
+    val e = extracted("SELECT sql FROM duckdb_tables")
+    e.accesses shouldBe empty
+    e.unsupported.exists(_.contains("duckdb_tables")) shouldBe true
+  }
+
+  test("main- and system-qualified bare catalog function names are flagged too") {
+    extracted("SELECT * FROM main.duckdb_views").unsupported.exists(
+      _.contains("duckdb_views")
+    ) shouldBe true
+    extracted("SELECT * FROM system.main.duckdb_columns").unsupported
+      .exists(_.contains("duckdb_columns")) shouldBe true
+  }
+
+  test("a fully-qualified non-system spelling stays an ordinary table ref") {
+    // DuckDB only falls back to the function for unqualified / main / system spellings; a real
+    // catalog's three-part name resolves to a table or errors, so it is grant-gated as a table.
+    val e = extracted("SELECT * FROM db.main.duckdb_tables")
+    e.unsupported shouldBe empty
+    e.accesses.map(_.table) shouldBe Set(TableRef("db", "main", "duckdb_tables"))
+  }
+
+  test("a CTE named like a catalog function still shadows the bare reference") {
+    val e = extracted("WITH duckdb_tables AS (SELECT 1 AS x) SELECT * FROM duckdb_tables")
+    e.unsupported shouldBe empty
+    e.accesses shouldBe empty
+  }
+
+  test("the parenthesized call keeps its table-function marker, carrying the call shape") {
+    val e = extracted("SELECT * FROM duckdb_tables()")
+    e.accesses shouldBe empty
+    e.unsupported should contain(TableExtractor.tableFunctionMarker("duckdb_tables()"))
+    TableExtractor.catalogFunctionCall("duckdb_tables()") shouldBe Some("duckdb_tables")
+    TableExtractor.catalogFunctionCall("\"duckdb_tables\"()") shouldBe Some("duckdb_tables")
+    TableExtractor.catalogFunctionCall("duckdb_tables('x')") shouldBe None
+    TableExtractor.catalogFunctionCall("main.duckdb_tables()") shouldBe None
+    TableExtractor.catalogFunctionCall("duckdb_tables") shouldBe None
+    extracted("SELECT * FROM duckdb_tables('x')").unsupported
+      .exists(_.contains("duckdb_tables('x')")) shouldBe true
+  }
+
   // --- 3d: UPDATE SET-clause subquery read source is captured ---
 
   test("UPDATE SET value subquery captures the read source") {

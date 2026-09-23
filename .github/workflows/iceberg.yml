@@ -174,7 +174,10 @@ jobs:
       - name: Run the Iceberg and federation specs
         run: |
           set -euo pipefail
-          sbt "testOnly $SPECS" 2>&1 | tee /tmp/iceberg-specs.log
+          # -no-colors: the verify step greps for plain `[info] <Spec>:` lines, and sbt colours its
+          # output on the runner (the ANSI-wrapped `[info]` matched nothing, so the channel's first
+          # run reported every spec as never having run).
+          sbt -no-colors "testOnly $SPECS" 2>&1 | tee /tmp/iceberg-specs.log
 
       # A spec that matched nothing, or one that cancelled because the fixture was not actually
       # reachable, both leave a green bar behind: ScalaTest counts a cancellation separately from

@@ -563,6 +563,150 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other     => fail(s"expected Denied, got $other")
   }
 
+  // ---- DuckDB catalog functions (issue #114) --------------------------------------------
+  //
+  // The quack client's ATTACH syncs the remote catalog with `duckdb_tables() UNION ALL
+  // duckdb_views()`, so the four catalog functions are filtered like information_schema:
+  // narrowed to the SESSION catalog and the principal's Read-covering grants.
+
+  "catalog functions" should "wrap duckdb_tables() with the session-catalog and grant predicate" in {
+    go(
+      "SELECT schema_name, table_name FROM duckdb_tables()",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("schema_name = 'tpch1' AND table_name = 'customer'")
+        sql should not include "table_schema"
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "rewrite both arms of the quack client's catalog sync query" in {
+    go(
+      "SELECT schema_name, sql, 'table' FROM duckdb_tables() " +
+        "UNION ALL SELECT schema_name, view_name, 'view' FROM duckdb_views()",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"), grant("*", "sales", "*"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch'")
+        sql should include("FROM duckdb_views() WHERE database_name = 'acme_tpch'")
+        sql should include("schema_name = 'tpch1' AND table_name = 'customer'")
+        sql should include("schema_name = 'tpch1' AND view_name = 'customer'")
+        sql should include("(schema_name = 'sales')")
+        sql should include("'table'")
+        sql should include("'view'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "filter duckdb_schemas() on schema_name and duckdb_columns() on table_name" in {
+    go(
+      "SELECT * FROM duckdb_schemas()",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("FROM duckdb_schemas() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("schema_name = 'tpch1'")
+        sql should not include "table_name"
+      case other => fail(s"expected Rewritten, got $other")
+    go("SELECT * FROM duckdb_columns()", eff(tenantUser, grant("acme_tpch", "*", "orders"))) match
+      case Rewritten(sql) =>
+        sql should include("FROM duckdb_columns() WHERE database_name = 'acme_tpch' AND (")
+        sql should include("(table_name = 'orders')")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "collapse a wildcard grant to TRUE and a zero-grant principal to FALSE" in {
+    // jsqlparser re-serializes boolean literals in lowercase.
+    go("SELECT * FROM duckdb_tables()", eff(tenantUser, grant("*", "*", "*", verb = "RO"))) match
+      case Rewritten(sql) =>
+        sql.toUpperCase should include("WHERE DATABASE_NAME = 'ACME_TPCH' AND (TRUE)")
+      case other => fail(s"expected Rewritten, got $other")
+    go("SELECT * FROM duckdb_tables()", eff(tenantUser)) match
+      case Rewritten(sql) =>
+        sql.toUpperCase should include("WHERE DATABASE_NAME = 'ACME_TPCH' AND (FALSE)")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "keep the caller's alias, defaulting to the function name" in {
+    go(
+      "SELECT t.table_name FROM duckdb_tables() t",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include(") t")
+        sql should include("SELECT t.table_name FROM (")
+      case other => fail(s"expected Rewritten, got $other")
+    go(
+      "SELECT duckdb_tables.table_name FROM duckdb_tables()",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) => sql should include(") duckdb_tables")
+      case other          => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "wrap a catalog function nested inside a subquery and a CTE" in {
+    go(
+      "WITH t AS (SELECT * FROM duckdb_tables()) SELECT * FROM t WHERE schema_name IN " +
+        "(SELECT schema_name FROM duckdb_schemas())",
+      eff(tenantUser, grant("acme_tpch", "tpch1", "customer"))
+    ) match
+      case Rewritten(sql) =>
+        sql should include("FROM duckdb_tables() WHERE database_name = 'acme_tpch'")
+        sql should include("FROM duckdb_schemas() WHERE database_name = 'acme_tpch'")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny the bare spelling that DuckDB resolves to the same function (fail-closed)" in {
+    val e = eff(tenantUser, grant("acme_tpch", "*", "*"))
+    go("SELECT sql FROM duckdb_tables", e) match
+      case Denied(reason) => reason should include("duckdb_tables()")
+      case other          => fail(s"expected Denied, got $other")
+    go("SELECT * FROM main.duckdb_views", e) shouldBe a[Denied]
+    go("SELECT * FROM system.main.duckdb_columns", e) shouldBe a[Denied]
+  }
+
+  it should "deny a catalog function called with arguments, qualified, or through ROWS FROM" in {
+    val e = eff(tenantUser, grant("acme_tpch", "*", "*"))
+    go("SELECT * FROM duckdb_tables('x')", e) shouldBe a[Denied]
+    go("SELECT * FROM main.duckdb_tables()", e) shouldBe a[Denied]
+    go("SELECT * FROM ROWS FROM (duckdb_tables(), duckdb_views())", e) shouldBe a[Denied]
+  }
+
+  it should "deny a catalog function hidden in an ORDER BY subquery" in {
+    go(
+      "SELECT c_custkey FROM tpch1.customer ORDER BY (SELECT count(*) FROM duckdb_tables())",
+      eff(tenantUser, grant("acme_tpch", "*", "*"))
+    ) shouldBe a[Denied]
+  }
+
+  it should "deny a batch whose write statement reads a catalog function" in {
+    go(
+      "INSERT INTO tpch1.mine SELECT table_name FROM duckdb_tables()",
+      eff(tenantUser, grant("acme_tpch", "*", "*", verb = "RW"))
+    ) shouldBe a[Denied]
+  }
+
+  it should "deny the function name inside a string literal (accepted over-denial)" in {
+    go("SELECT 'duckdb_tables' AS s", eff(tenantUser, grant("acme_tpch", "*", "*"))) shouldBe a[
+      Denied
+    ]
+  }
+
+  it should "pass other table functions through untouched (the validator gates them)" in {
+    go(
+      "SELECT * FROM read_parquet('/data/x.parquet')",
+      eff(tenantUser, grant("acme_tpch", "*", "*"))
+    ) shouldBe Passthrough
+  }
+
+  it should "pass catalog functions through for superusers and wildcard-ALL principals" in {
+    go("SELECT * FROM duckdb_tables()", eff(superuser)) shouldBe Passthrough
+    go(
+      "SELECT * FROM duckdb_tables()",
+      eff(tenantUser, grant("*", "*", "*", "ALL"))
+    ) shouldBe Passthrough
+  }
+
   it should "leave unparseable non-SHOW statements untouched" in {
     go("THIS IS NOT SQL", eff(tenantUser)) shouldBe Passthrough
   }

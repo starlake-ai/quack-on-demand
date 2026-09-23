@@ -2,7 +2,7 @@ package ai.starlake.quack.edge.sql
 
 import java.util.Locale
 import ai.starlake.acl.model.{Config, DenyReason}
-import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, Verb}
+import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, TableExtractor, Verb}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
 import com.typesafe.scalalogging.LazyLogging
@@ -36,10 +36,13 @@ import com.typesafe.scalalogging.LazyLogging
   *
   * `filteredMetadata` mirrors `quack-flightsql.acl.filteredMetadata` (QOD_ACL_FILTERED_METADATA):
   * when on, a PURE-READ statement's Read accesses on the SESSION catalog's filterable
-  * `information_schema` tables are admitted without a grant, because the edge
-  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter]] (mounted from the same flag) narrows
-  * those rows to the principal's granted objects. Defaults to `false` so a caller that constructs
-  * the validator without the rewriter keeps the grant-required posture.
+  * `information_schema` tables, and its unqualified no-argument calls of DuckDB's catalog functions
+  * (`duckdb_tables()` and the others in
+  * [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.FilterableFunctions]]), are admitted
+  * without a grant, because the edge [[ai.starlake.quack.edge.meta.MetadataFilterRewriter]]
+  * (mounted from the same flag) narrows those rows to the principal's granted objects. Defaults to
+  * `false` so a caller that constructs the validator without the rewriter keeps the grant-required
+  * posture.
   */
 final class PostgresAclValidator(
     defaultDatabase: String = "",
@@ -109,9 +112,23 @@ final class PostgresAclValidator(
     // FROM-item / node types). Fail closed: these escape the tenant-catalog
     // boundary or would otherwise be silently dropped, turning the
     // empty-access fail-open into an allow. Wildcard ALL still covers them.
-    val unsupported = extraction.statements.collect {
+    //
+    // Filtered-metadata carve-out (issue #114): the DuckDB catalog functions the
+    // edge rewriter filters are set aside here and admitted below, but only once
+    // the statement is known to be a pure read. The marker is the parser's own
+    // (TableExtractor.tableFunctionName reads it back), and the call must be
+    // exactly `<function>()`: `duckdb_tables('x')`, `main.duckdb_tables()` and the
+    // bare-name marker for `FROM duckdb_tables` are not that shape and stay
+    // unsupported.
+    val allUnsupported = extraction.statements.collect {
       case StatementResult.Extracted(_, _, _, _, u) if u.nonEmpty => u
     }.flatten
+    val (catalogFunctions, unsupported) =
+      if filteredMetadata then
+        allUnsupported.partition(u =>
+          TableExtractor.tableFunctionName(u).flatMap(TableExtractor.catalogFunctionCall).isDefined
+        )
+      else (Nil, allUnsupported)
     // Qualification errors were previously ignored, silently DROPPING the
     // offending ref from the access set (fail-open). AmbiguousCatalogRef denies
     // unconditionally: admitting it under the wildcard would reopen the
@@ -197,7 +214,18 @@ final class PostgresAclValidator(
             ta.table.database.equalsIgnoreCase(sessionCatalog)
           }
 
-      if gated.isEmpty then
+      if catalogFunctions.nonEmpty && !pureRead then
+        // A catalog function riding inside an INSERT / CTAS / MERGE: the rewriter
+        // does not filter the read half of a write, so admitting it would copy an
+        // unfiltered catalog listing into a table the principal owns.
+        denyUnlessWildcardAll(
+          eff,
+          context.username,
+          s"unsupported constructs (${catalogFunctions.mkString(", ")})",
+          "catalog functions are admitted in read-only statements only (deny, fail-closed): " +
+            catalogFunctions.mkString(", ")
+        )
+      else if gated.isEmpty then
         // Pure ControlFlow (or every arm yielded zero refs), or an
         // all-metadata statement whose every access the implicit admit above
         // dropped. Admit unconditionally -- there is nothing left to
@@ -207,7 +235,9 @@ final class PostgresAclValidator(
           s"ACL ALLOWED: user=${context.username} no gated table refs" +
             (if accesses.isEmpty then ""
              else
-               s" accesses=${accesses.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")}")
+               s" accesses=${accesses.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")}") +
+            (if catalogFunctions.isEmpty then ""
+             else s" filtered=${catalogFunctions.mkString(",")}")
         )
         Allowed
       else

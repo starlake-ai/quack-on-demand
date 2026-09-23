@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Native `ATTACH ... (TYPE quack)` now works for ordinary users (#114).** The DuckDB quack
+  client syncs the remote catalog on attach with `duckdb_tables() UNION ALL duckdb_views()`, and the
+  ACL gate denied that query for every principal without a `*.*.*` ALL grant (`unsupported
+  constructs (deny, fail-closed): table function duckdb_tables`), so only superusers could attach.
+  The filtered-metadata rewriter now covers DuckDB's four catalog functions (`duckdb_tables()`,
+  `duckdb_views()`, `duckdb_schemas()`, `duckdb_columns()`) the way it covers `information_schema`:
+  an unqualified, argument-free call in a read-only statement is narrowed to the session catalog
+  (`database_name = '<session>'`) and the principal's Read-covering grants, under the same
+  `QOD_ACL_FILTERED_METADATA` flag. An attached catalog therefore lists only the tables the user is
+  granted; an ungranted table is absent on the client rather than described. Fail-closed as before:
+  calls with arguments, qualified calls (`main.duckdb_tables()`), `ROWS FROM`, positions the
+  rewriter cannot reach, and a catalog function riding inside a write or DDL statement are denied.
+  Also closed while here: the bare spelling `FROM duckdb_tables` (no parentheses), which DuckDB
+  resolves to the same function, used to be qualified as an ordinary table and admitted under any
+  schema-wide grant, exposing the DDL of every catalog on the node. The ACL parser now marks the
+  unqualified, `main.` and `system.main.` spellings unsupported (denied without wildcard ALL, flag on
+  or off). `QuackCompatibilitySpec` drives the real DuckDB CLI through the real
+  `PostgresAclValidator` with narrow grants instead of a stand-in that admitted everything, and
+  `QuackClientSyncFunctionsSpec` pins the vendored client's sync queries to the filterable set, so a
+  client bump that syncs through an unlisted function fails the build instead of re-opening #114.
+
 ## 0.9.4
 
 - **External Iceberg REST catalogs as a typed federated source.** A tenant-db can now attach an

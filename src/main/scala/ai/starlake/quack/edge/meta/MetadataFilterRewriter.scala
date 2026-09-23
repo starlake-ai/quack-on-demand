@@ -23,7 +23,8 @@ import net.sf.jsqlparser.statement.select.{
   ParenthesedSelect,
   PlainSelect,
   Select,
-  SetOperationList
+  SetOperationList,
+  TableFunction
 }
 
 import scala.jdk.CollectionConverters._
@@ -43,9 +44,13 @@ enum MetadataFilterOutcome:
 /** Filters system-catalog reads to the principal's granted objects (spec
   * 2026-08-20-filtered-metadata-design): each `information_schema.{schemata,tables,columns,views}`
   * reference of the SESSION catalog is replaced by a derived table whose WHERE keeps the system
-  * rows plus the rows covered by a Read-covering grant. Runs for every non-superuser principal
-  * without an explicit information_schema grant; the ACL validator implicitly admits exactly the
-  * references this class filters (same flag).
+  * rows plus the rows covered by a Read-covering grant, and each unqualified no-argument call of
+  * DuckDB's catalog functions `duckdb_tables()` / `duckdb_views()` / `duckdb_schemas()` /
+  * `duckdb_columns()` by one whose WHERE pins `database_name` to the session catalog and keeps the
+  * granted rows (issue #114: the quack client's ATTACH syncs the remote catalog through
+  * `duckdb_tables() UNION ALL duckdb_views()`). Runs for every non-superuser principal without an
+  * explicit information_schema grant; the ACL validator implicitly admits exactly the references
+  * this class filters (same flag, same [[FilterableTables]] / [[FilterableFunctions]] lists).
   *
   * Fail-closed, and DENIAL is how it stays that way: a filterable reference the substitution walk
   * cannot reach is refused, not filtered. The walk alone cannot promise this (SQL puts tables in
@@ -136,7 +141,8 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
                       )
 
   /** One statement of the batch. Only SELECT and SHOW TABLES are rewritable; anything else keeps
-    * its text but may not smuggle a catalog read past the filter.
+    * its text but may not smuggle a catalog read past the filter (the textual tripwire counts
+    * information_schema references AND catalog function names).
     */
   private def processOne(
       st: Statement,
@@ -312,12 +318,29 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
     /** Substitute one FROM/JOIN item in place through `install`, or descend into it. */
     private def substituteIn(item: FromItem)(install: FromItem => Unit): Unit = item match
       case t: Table =>
-        filterableName(t).foreach { meta =>
-          replacementFor(t, meta) match
-            case Some(rep) => install(rep); substitutions += 1
-            case None      =>
-              failure = Some(s"cannot filter reference to information_schema.$meta")
-        }
+        filterableName(t) match
+          case Some(meta) =>
+            replacementFor(t, meta) match
+              case Some(rep) => install(rep); substitutions += 1
+              case None      =>
+                failure = Some(s"cannot filter reference to information_schema.$meta")
+          case None =>
+            // `FROM duckdb_tables` with no parentheses resolves to the catalog function on the
+            // node unless a table of that name shadows it, and this filter cannot know which.
+            // The ACL parser already marks the spelling unsupported; refusing it here too keeps
+            // the filter fail-closed on its own.
+            bareCatalogFunction(t).foreach(fn => failure = Some(bareFunctionRefusal(fn)))
+      case tf: TableFunction =>
+        filterableFunction(tf) match
+          case Some(fn) =>
+            functionReplacementFor(tf, fn) match
+              case Some(rep) => install(rep); substitutions += 1
+              case None      => failure = Some(s"cannot filter call to $fn()")
+          case None =>
+            // A catalog function spelled in a shape the replacement does not model (arguments,
+            // a qualified name, ROWS FROM): refused rather than forwarded, since the node would
+            // answer it unfiltered.
+            if mentionsCatalogFunction(tf) then failure = Some(FunctionShapeRefusal)
       case sub: ParenthesedSelect => walkSelect(sub.getSelect)
       case _                      => ()
 
@@ -330,19 +353,42 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
       * rather than assembling the node tree by hand.
       */
     private def replacementFor(t: Table, meta: String): Option[FromItem] =
-      val derived =
-        s"SELECT * FROM (SELECT * FROM information_schema.$meta " +
-          s"WHERE ${predicateFor(meta, grants)}) qod_meta"
-      Try(CCJSqlParserUtil.parse(derived)).toOption
+      derivedTable(
+        s"information_schema.$meta WHERE ${predicateFor(meta, grants)}",
+        Option(t.getAlias).getOrElse(new Alias(t.getName, false))
+      )
+
+    /** The derived table replacing the catalog function call `fn()`, pinned to the session catalog
+      * and the principal's grants. DuckDB's default alias for a table function is the function
+      * name, so an outer `duckdb_tables.schema_name` keeps resolving.
+      */
+    private def functionReplacementFor(tf: TableFunction, fn: String): Option[FromItem] =
+      val sessionCat = ctx.defaultDatabase.getOrElse("")
+      derivedTable(
+        s"$fn() WHERE ${functionPredicateFor(fn, grants, sessionCat)}",
+        Option(tf.getAlias).getOrElse(new Alias(fn, false))
+      )
+
+    /** `(SELECT * FROM <source>) <alias>` as a FromItem, built by parsing a one-off statement
+      * rather than assembling the node tree by hand.
+      */
+    private def derivedTable(source: String, alias: Alias): Option[FromItem] =
+      Try(CCJSqlParserUtil.parse(s"SELECT * FROM (SELECT * FROM $source) qod_meta")).toOption
         .collect { case ps: PlainSelect => ps.getFromItem }
         .map { fromItem =>
-          fromItem.setAlias(Option(t.getAlias).getOrElse(new Alias(t.getName, false)))
+          fromItem.setAlias(alias)
           fromItem
         }
 
 object MetadataFilterRewriter:
 
   val FilterableTables: Set[String] = Set("schemata", "tables", "columns", "views")
+
+  /** DuckDB catalog functions filtered here and admitted by the validator under the same flag. One
+    * list, owned by the ACL parser (which also marks the bare spelling unsupported).
+    */
+  val FilterableFunctions: Set[String] =
+    ai.starlake.acl.parser.TableExtractor.DuckDbCatalogFunctions
 
   private val InformationSchema   = "information_schema"
   private val ReadCoveringVerbs   = Set("RO", "RW", "ALL")
@@ -353,11 +399,20 @@ object MetadataFilterRewriter:
 
   /** Why one statement was refused. Any of these denies the whole batch. */
   private[meta] val UnsupportedPositionRefusal: String =
-    "information_schema reference in a position this filter cannot rewrite (or mentioned in a " +
-      "string literal); query it directly in the FROM clause instead"
+    "system-catalog reference (information_schema or a duckdb_* catalog function) in a position " +
+      "this filter cannot rewrite (or mentioned in a string literal); query it directly in the " +
+      "FROM clause instead"
 
   private[meta] val AnalysisRefusal: String =
-    "cannot analyse the information_schema references in this statement"
+    "cannot analyse the system-catalog references in this statement"
+
+  private[meta] val FunctionShapeRefusal: String =
+    "a duckdb_* catalog function is filtered only as an unqualified call without arguments " +
+      "(duckdb_tables(), duckdb_views(), duckdb_schemas(), duckdb_columns())"
+
+  private[meta] def bareFunctionRefusal(fn: String): String =
+    s"$fn without parentheses resolves to DuckDB's catalog function and cannot be filtered; " +
+      s"call it as $fn()"
 
   /** What one statement of a batch came to. `Kept` and `Changed` carry the statement's text; the
     * distinction decides whether the batch is rewritten at all, so a batch nothing touched can
@@ -382,9 +437,41 @@ object MetadataFilterRewriter:
     then Some(name.toLowerCase(Locale.ROOT))
     else None
 
-  /** Counts filterable table OCCURRENCES by riding jsqlparser's own complete traversal and tallying
-    * each visited [[net.sf.jsqlparser.schema.Table]] node, instead of reading the finder's
-    * de-duplicated name list.
+  /** Some(fn) when `tf` is exactly the unqualified, argument-free call `fn()` of a filterable
+    * catalog function: the one shape [[Walker]] substitutes. The single rule the walk and
+    * [[FilterableOccurrences]] apply, for the same reason as [[filterableMeta]].
+    */
+  private def filterableFunction(tf: TableFunction): Option[String] =
+    if tf.isRowsFrom then None
+    else
+      Option(tf.getFunction).flatMap { f =>
+        val noArgs = Option(f.getParameters).forall(_.isEmpty) && f.getNamedParameters == null
+        val single = Option(f.getMultipartName).forall(_.size <= 1)
+        if noArgs && single then
+          ai.starlake.acl.parser.TableExtractor.catalogFunctionName(f.getName)
+        else None
+      }
+
+  /** True when any function of `tf` (a plain call or a ROWS FROM list) is a filterable catalog
+    * function in a shape [[filterableFunction]] does not accept.
+    */
+  private def mentionsCatalogFunction(tf: TableFunction): Boolean =
+    Option(tf.getFunctions).exists(_.asScala.exists { f =>
+      Option(f.getMultipartName)
+        .map(_.asScala.toList)
+        .getOrElse(List(f.getName))
+        .exists(part => ai.starlake.acl.parser.TableExtractor.catalogFunctionName(part).isDefined)
+    })
+
+  /** Some(fn) when `t` is a bare table reference spelled like a filterable catalog function, in any
+    * qualification: refused by the walk, counted by the textual tripwire.
+    */
+  private def bareCatalogFunction(t: Table): Option[String] =
+    ai.starlake.acl.parser.TableExtractor.catalogFunctionName(t.getUnquotedName)
+
+  /** Counts filterable OCCURRENCES by riding jsqlparser's own complete traversal and tallying each
+    * visited [[net.sf.jsqlparser.schema.Table]] and filterable [[TableFunction]] node, instead of
+    * reading the finder's de-duplicated name list.
     */
   private final class FilterableOccurrences(sessionCat: String)
       extends TablesNamesFinder[java.lang.Void]:
@@ -397,14 +484,21 @@ object MetadataFilterRewriter:
 
     private val seen      = identitySet
     private val crossSeen = identitySet
+    private val fnSeen    = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[TableFunction, java.lang.Boolean]
+    )
 
-    def count: Int             = seen.size
+    def count: Int             = seen.size + fnSeen.size
     def crossCatalogCount: Int = crossSeen.size
 
     override def visit[S](table: Table, context: S): java.lang.Void =
       if filterableMeta(table, sessionCat).isDefined then seen.add(table)
       else if crossCatalogFilterable(table, sessionCat) then crossSeen.add(table)
       super.visit(table, context)
+
+    override def visit[S](tf: TableFunction, context: S): java.lang.Void =
+      if filterableFunction(tf).isDefined then fnSeen.add(tf)
+      super.visit(tf, context)
 
   /** A filterable information_schema table of some OTHER catalog. The substitution walk leaves
     * these alone by design (cross-catalog metadata stays grant-gated by the validator rather than
@@ -443,34 +537,75 @@ object MetadataFilterRewriter:
     * The AST occurrence count is kept alongside it, since the two are blind to different things.
     */
   private def textualRefCount(normalizedSql: String): Int =
-    TextualRefRe.findAllMatchIn(normalizedSql).size
+    TextualRefRe.findAllMatchIn(normalizedSql).size +
+      FunctionRefRe.findAllMatchIn(normalizedSql).size
 
   /** Tolerates every quote form the printer can emit around either identifier. */
   private val TextualRefRe =
     """(?i)["`\[]?information_schema["`\]]?\s*\.\s*["`\[]?(?:schemata|tables|columns|views)["`\]]?\b""".r
 
+  /** Every spelling of a catalog function name: the call, the bare table reference, a qualified
+    * form, an argument-carrying call. Anything the walk did not substitute is a refusal. A name
+    * followed by a dot is a column qualifier (`duckdb_tables.schema_name`, DuckDB's default alias
+    * for the call), not a reference: the function name is always the LAST segment of one.
+    */
+  private val FunctionRefRe =
+    """(?i)\bduckdb_(?:tables|views|schemas|columns)\b(?!\s*\.)""".r
+
+  /** One clause per grant over the given column names. `tableCol` None means schema-level
+    * visibility (a table grant exposes its schema).
+    */
+  private def grantClauses(
+      grants: List[RolePermission],
+      schemaCol: String,
+      tableCol: Option[String]
+  ): List[String] =
+    val w = RolePermission.Wildcard
+    tableCol match
+      case None =>
+        grants.map { g =>
+          if g.schemaName == w then "TRUE" else s"$schemaCol = ${lit(g.schemaName)}"
+        }
+      case Some(tCol) =>
+        grants.map { g =>
+          (g.schemaName == w, g.tableName == w) match
+            case (true, true)   => "TRUE"
+            case (false, true)  => s"$schemaCol = ${lit(g.schemaName)}"
+            case (true, false)  => s"$tCol = ${lit(g.tableName)}"
+            case (false, false) =>
+              s"$schemaCol = ${lit(g.schemaName)} AND $tCol = ${lit(g.tableName)}"
+        }
+
   /** Disjunction: system rows always, plus one clause per grant. TRUE-clause grants short-circuit
     * the whole predicate to keep the SQL readable.
     */
   private[meta] def predicateFor(meta: String, grants: List[RolePermission]): String =
-    val w = RolePermission.Wildcard
-    if meta == "schemata" then
-      val clauses = grants.map { g =>
-        if g.schemaName == w then "TRUE" else s"schema_name = ${lit(g.schemaName)}"
-      }
+    val (systemRows, clauses) =
+      if meta == "schemata" then (SystemRowClauseSchm, grantClauses(grants, "schema_name", None))
+      else (SystemRowClauseTab, grantClauses(grants, "table_schema", Some("table_name")))
+    if clauses.contains("TRUE") then "TRUE"
+    else (systemRows :: clauses).distinct.mkString("(", ") OR (", ")")
+
+  /** The WHERE of a filtered catalog function call: `database_name` pinned to the session catalog
+    * (the functions list every attached catalog, including the DuckLake metadata one), then one
+    * clause per grant. No system-row clause: the internal views live in the `system` catalog, which
+    * the pin already excludes. A zero-grant principal gets `FALSE`, i.e. an empty listing rather
+    * than a denial, which is what lets a fresh ATTACH complete.
+    */
+  private[meta] def functionPredicateFor(
+      fn: String,
+      grants: List[RolePermission],
+      sessionCat: String
+  ): String =
+    val clauses = fn match
+      case "duckdb_schemas" => grantClauses(grants, "schema_name", None)
+      case "duckdb_views"   => grantClauses(grants, "schema_name", Some("view_name"))
+      case _                => grantClauses(grants, "schema_name", Some("table_name"))
+    val objects =
       if clauses.contains("TRUE") then "TRUE"
-      else (SystemRowClauseSchm :: clauses).distinct.mkString("(", ") OR (", ")")
-    else
-      val clauses = grants.map { g =>
-        (g.schemaName == w, g.tableName == w) match
-          case (true, true)   => "TRUE"
-          case (false, true)  => s"table_schema = ${lit(g.schemaName)}"
-          case (true, false)  => s"table_name = ${lit(g.tableName)}"
-          case (false, false) =>
-            s"table_schema = ${lit(g.schemaName)} AND table_name = ${lit(g.tableName)}"
-      }
-      if clauses.contains("TRUE") then "TRUE"
-      else (SystemRowClauseTab :: clauses).distinct.mkString("(", ") OR (", ")")
+      else if clauses.isEmpty then "FALSE"
+      else clauses.distinct.mkString("(", ") OR (", ")")
+    s"database_name = ${lit(sessionCat)} AND ($objects)"
 
   /** SHOW TABLES handling (jsqlparser models it as a statement the filter walker never sees). Plain
     * SHOW TABLES is replaced by the filtered listing matching DuckDB's native single-column `name`

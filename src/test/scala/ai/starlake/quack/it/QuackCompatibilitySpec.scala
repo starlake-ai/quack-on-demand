@@ -6,18 +6,13 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.edge.quack.*
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
+import ai.starlake.quack.edge.sql.PostgresAclValidator
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser, RolePermission}
 import ai.starlake.quack.spi.ManagerEventSink
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -35,6 +30,12 @@ import scala.sys.process.{Process, ProcessLogger}
   * front door, which relays to a real `quack_serve` node laid out like a QoD node (attached
   * catalog, non-default schema, USE'd on the init connection only). Cancelled when `duckdb` is not
   * on PATH, like the other real-node specs.
+  *
+  * The front door runs the REAL ACL gate: `PostgresAclValidator` with the metadata filter mounted,
+  * and alice holds narrow grants (RW on `customer`, RO on `ids`, nothing on `secret`). A stand-in
+  * validator that admitted everything used to hide that the client's attach-time catalog sync
+  * (`duckdb_tables() UNION ALL duckdb_views()`) was denied for every ordinary principal (issue
+  * #114).
   *
   * Result sizes stay inside the upstream client's working envelope (spec section 2.4): the
   * generation 1 client fails on multi-column results larger than its inline batch, so the fetch
@@ -132,21 +133,29 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    // A stand-in for the RBAC validator: everything is granted except the table `secret`.
-    val validator = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        if ctx.statement.toLowerCase.contains("secret") then Denied("no grant on secret", Set.empty)
-        else Allowed
+    // The real RBAC gate, as Main wires it: grant-checked per statement, with the metadata filter
+    // mounted from the same flag so catalog reads are narrowed instead of denied.
+    val validator = new PostgresAclValidator(
+      defaultDatabase = "acme_db",
+      defaultSchema = "tpch1",
+      tenantCatalogs = t => if t == "t-1" then Set("acme_db") else Set.empty,
+      filteredMetadata = true
+    )
     val client = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator(), true, true)
     router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
-      validator = validator
+      validator = validator,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
-    val user      = RbacUser("u-1", Some("t-1"), "alice", role = "user")
-    val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)
+    val user   = RbacUser("u-1", Some("t-1"), "alice", role = "user")
+    val grants = List(
+      RolePermission("rp-1", "r-1", "acme_db", "tpch1", "customer", "RW"),
+      RolePermission("rp-2", "r-1", "acme_db", "tpch1", "ids", "RO")
+    )
+    val eff       = EffectiveSet(user, Nil, Nil, grants, Nil)
     val handshake = new EdgeHandshake(
       new AuthenticationService(AuthenticationConfig.disabled, "x"),
       lookupPool = (t, p) =>
@@ -212,7 +221,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       cli(s"SELECT * FROM quack_query('$endpoint', 'SELECT * FROM secret', token := '$Token');")
     rc should not be 0
     err should include("access denied")
-    err should include("no grant on secret")
+    err should include("lacks grants on acme_db.tpch1.secret:Read")
     router.history
       .snapshot(20)
       .exists(r => r.status == "denied" && r.sql.contains("secret")) shouldBe true
@@ -229,6 +238,28 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       cli(s"$attach SELECT count(*) FROM q.tpch1.customer WHERE c_custkey > 100;")
     withClue(err)(rc shouldBe 0)
     out shouldBe "1899"
+
+  it should "sync only the tables the principal is granted (issue #114)" in:
+    assume(duckdbPresent, "duckdb CLI not on PATH")
+    // The manager narrowed the attach-time sync to alice's grants, so `secret` was never
+    // described to her session: the granted tables resolve on the client, the ungranted one is
+    // a client-side catalog miss, not a manager denial. (The quack extension does not enumerate
+    // its catalog through duckdb_tables() on the client, so visibility is asserted by lookup.)
+    val (rc, out, err) = cli(
+      s"$attach SELECT column_name FROM (DESCRIBE q.tpch1.customer) ORDER BY 1; " +
+        "SELECT count(*) FROM q.tpch1.ids;"
+    )
+    withClue(err)(rc shouldBe 0)
+    out.split("\n").toList shouldBe List("c_custkey", "c_name", "60000")
+    val (rc2, _, err2) = cli(s"$attach SELECT * FROM q.tpch1.secret;")
+    rc2 should not be 0
+    err2 should include("does not exist")
+    router.history
+      .snapshot(50)
+      .exists(r => r.status == "ok" && r.sql.contains("duckdb_tables()")) shouldBe true
+    router.history
+      .snapshot(50)
+      .exists(r => r.status == "denied" && r.sql.contains("duckdb_tables()")) shouldBe false
 
   it should "stream a large single-column result through the fetch loop" in:
     assume(duckdbPresent, "duckdb CLI not on PATH")
@@ -253,9 +284,12 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     withClue(err)(rc shouldBe 0)
     out shouldBe "2003"
-    val (rc2, _, err2) = cli(s"$attach INSERT INTO q.tpch1.secret SELECT 1;")
+    // `ids` is visible (RO) but not writable: the append reaches the manager and is denied there.
+    // `secret` would fail earlier, on the client, since it was never synced (see the case above).
+    val (rc2, _, err2) = cli(s"$attach INSERT INTO q.tpch1.ids SELECT 1;")
     rc2 should not be 0
     err2 should include("access denied")
+    err2 should include("acme_db.tpch1.ids:Write")
 
   "the Python client" should "connect through uv-provisioned DuckDB 1.5.4" in:
     assume(duckdbPresent, "duckdb CLI not on PATH")

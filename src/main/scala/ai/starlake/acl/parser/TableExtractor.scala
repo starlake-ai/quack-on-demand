@@ -26,6 +26,57 @@ final case class TableExtraction(tables: List[Table], unsupported: List[String])
   */
 object TableExtractor:
 
+  /** DuckDB's catalog-introspection table functions: the ones the edge metadata filter narrows to
+    * the session catalog and the principal's grants (issue #114), and the ones DuckDB ALSO resolves
+    * from a bare table name when nothing shadows it (`FROM duckdb_tables`,
+    * `FROM main.duckdb_tables`, `FROM system.main.duckdb_tables`). The single list both the walk
+    * below and `ai.starlake.quack.edge.meta.MetadataFilterRewriter` key off, so the admit and the
+    * filter cannot drift apart.
+    */
+  val DuckDbCatalogFunctions: Set[String] =
+    Set("duckdb_tables", "duckdb_views", "duckdb_schemas", "duckdb_columns")
+
+  /** Some(canonical name) when `raw` (a function or table name as the parser spells it, quotes
+    * included) is exactly one of [[DuckDbCatalogFunctions]], unqualified. A qualified spelling
+    * (`main.duckdb_tables`) is None: the filter only rewrites the unqualified call.
+    */
+  def catalogFunctionName(raw: String): Option[String] =
+    Option(raw)
+      .map(_.trim.stripPrefix("\"").stripSuffix("\"").toLowerCase(Locale.ROOT))
+      .filter(DuckDbCatalogFunctions.contains)
+
+  /** Some(canonical name) when `call` is exactly the argument-free call `name()` of one of
+    * [[DuckDbCatalogFunctions]] (quotes tolerated): the one shape the metadata filter rewrites.
+    * `duckdb_tables('x')`, `main.duckdb_tables()` and a bare `duckdb_tables` are None.
+    */
+  def catalogFunctionCall(call: String): Option[String] =
+    Option(call)
+      .map(_.trim)
+      .filter(_.endsWith("()"))
+      .flatMap(c => catalogFunctionName(c.dropRight(2)))
+
+  private val TableFunctionMarkerPrefix = "table function "
+
+  /** The `unsupported` marker for a table function, carrying the call as the parser prints it
+    * (`read_parquet('/x')`, `duckdb_tables()`), in one place so the validator can read it back with
+    * [[tableFunctionName]] instead of matching on prose.
+    */
+  def tableFunctionMarker(call: String): String = TableFunctionMarkerPrefix + call
+
+  /** Inverse of [[tableFunctionMarker]]: Some(call) for a marker it produced, None otherwise. */
+  def tableFunctionName(marker: String): Option[String] =
+    Option.when(marker.startsWith(TableFunctionMarkerPrefix))(
+      marker.drop(TableFunctionMarkerPrefix.length)
+    )
+
+  /** The marker for a catalog function referenced as a bare table name. Deliberately NOT a
+    * [[tableFunctionMarker]]: the metadata filter cannot tell whether a real table of that name
+    * shadows the function on the node, so this spelling is never admitted (only wildcard ALL and
+    * superusers, who bypass the whole gate, can use it).
+    */
+  def bareCatalogFunctionMarker(name: String): String =
+    s"catalog function $name referenced without parentheses (call it as $name())"
+
   /** Extract all Table references from a parsed Select statement.
     *
     * @param select
@@ -196,18 +247,35 @@ private[parser] class TableExtractorVisitor:
             (table.getDatabase != null && table.getDatabase.getDatabaseName != null)
           val isCteName = !isQualified && cteNames.contains(name.toLowerCase(Locale.ROOT))
           val isFileRef = table.getName != null && table.getName.startsWith("'")
+          // `FROM duckdb_tables` with no parentheses: DuckDB resolves the bare name to the
+          // catalog function unless a table shadows it, and it does so for the unqualified,
+          // `main`-qualified and `system`-qualified spellings. Qualifying it as
+          // `<session>.<schema>.duckdb_tables` and grant-checking THAT would admit a schema-wide
+          // grant to an unfiltered dump of every catalog's DDL, so it is not a table ref. A
+          // three-part name under a real catalog resolves to a table (or errors) on the node and
+          // stays an ordinary, grant-gated reference.
+          val catalog         = Option(table.getUnquotedDatabaseName).filter(_.nonEmpty)
+          val isBareCatalogFn = !isCteName &&
+            TableExtractor.catalogFunctionName(name).isDefined &&
+            catalog.forall(_.equalsIgnoreCase("system"))
           if isFileRef then
             // DuckDB `FROM 'file.parquet'` reads straight from storage, escaping
             // the tenant-catalog boundary; there is no table to grant on.
             unsupported += s"file reference ${table.getName}"
+          else if isBareCatalogFn then
+            unsupported += TableExtractor.bareCatalogFunctionMarker(name.toLowerCase(Locale.ROOT))
           else if !isCteName then tables += table
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
       case tf: TableFunction     =>
         // Table functions (read_parquet, read_csv, ...) can read files directly,
-        // escaping the tenant-catalog boundary; no grantable table ref exists.
-        val fnName = Option(tf.getFunction).map(_.getName).getOrElse("?")
-        unsupported += s"table function $fnName"
+        // escaping the tenant-catalog boundary; no grantable table ref exists. The
+        // marker carries the whole call (name AND arguments) so the validator can
+        // admit exactly the argument-free DuckDB catalog calls under the
+        // filtered-metadata flag (TableExtractor.catalogFunctionCall reads it back);
+        // a ROWS FROM list has no single function and prints as itself.
+        val call = Option(tf.getFunction).map(_.toString).getOrElse(tf.toString)
+        unsupported += TableExtractor.tableFunctionMarker(call)
       case pfi: ParenthesedFromItem =>
         // `FROM (a JOIN b ON ...)`: recurse into the wrapped item and its joins.
         val inner = pfi.getFromItem
