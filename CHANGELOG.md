@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.5
 
 - **Native `ATTACH ... (TYPE quack)` now works for ordinary users (#114).** The DuckDB quack
   client syncs the remote catalog on attach with `duckdb_tables() UNION ALL duckdb_views()`, and the
