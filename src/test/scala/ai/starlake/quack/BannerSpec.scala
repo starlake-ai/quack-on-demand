@@ -31,7 +31,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
     import ai.starlake.quack.ondemand.state.testkit.TestPostgres
     TestPostgres.ensureReachable()
     val name = s"qod_cpb_banner_test_${System.nanoTime()}"
-    val m = Map(
+    val m    = Map(
       "pgHost"     -> TestPostgres.pgHost,
       "pgPort"     -> TestPostgres.pgPort.toString,
       "pgUser"     -> TestPostgres.pgUser,
@@ -46,8 +46,10 @@ class BannerSpec extends AnyFlatSpec with Matchers:
   }
 
   "startup" should "render copy-pasteable strings with TLS on and 0.0.0.0 mapped" in {
-    val b = Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true)
+    val b =
+      Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true, aclEnabled = true)
     b should include("http://localhost:20900/ui")
+    b should include("SQL ACL       : ENABLED")
     b should include("grpc+tls://localhost:31338")
     b should include(
       "jdbc:arrow-flight-sql://localhost:31338/?tenant=<tenant>&pool=<pool>&user=<user>" +
@@ -58,8 +60,10 @@ class BannerSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "render plain grpc and useEncryption=false when TLS is off" in {
-    val b = Banner.startup(meta, "myhost", 20900, "myhost", 31338, tlsEnabled = false)
+    val b =
+      Banner.startup(meta, "myhost", 20900, "myhost", 31338, tlsEnabled = false, aclEnabled = false)
     b should include("grpc://myhost:31338")
+    b should include("SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true")
     b should include("&useEncryption=false")
     (b should not).include("DisableCertificateVerification")
   }

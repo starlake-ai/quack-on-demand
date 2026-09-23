@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **`ATTACH ... (TYPE quack)` now works for users holding column policies, and their masks hold on
+  the pushed-down scans (#114, second report).** Two gaps behind one symptom. First, the column-level
+  security rewriter runs the attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`)
+  through its column resolver, which cannot model a table function and reported a parse failure,
+  denied fail-closed: `column policy rewrite could not parse statement`. A statement that reads no
+  physical table, only the four filterable catalog functions, now passes that rewriter (decided on
+  the ACL parser's complete walk, so a policy-bearing table hidden in any subquery still reaches the
+  resolver; batches and other table functions keep the fail-closed path). Second, and worse once the
+  first was fixed: the quack client pushes every scan down as `SELECT #1, #2 FROM <table>`, DuckDB
+  positional references with no column names, so the resolver saw nothing to mask and forwarded the
+  scan unmasked. Positional references are now resolved against the table's physical column order
+  before the mask runs, for the one shape whose numbering is unambiguous (a single-table SELECT with
+  no join, subquery or set operation, `#n` in the projection, WHERE or an expression); a `#n` as an
+  ORDER BY, GROUP BY or HAVING term, in a join or derived table, out of range, or on a table the
+  catalog does not know is denied rather than guessed. `QuackCompatibilitySpec` attaches with a
+  column mask and a row policy in force and asserts the masked value on a pushed-down scan.
+
 - **Bare references to DuckDB's system views no longer pass a schema-wide grant.** DuckDB keeps
   default views in the `system` catalog's `main` and `pg_catalog` schemas, both on the unqualified
   search path, so `FROM sqlite_master` (every catalog's DDL), `FROM pg_class` / `FROM pg_attribute`

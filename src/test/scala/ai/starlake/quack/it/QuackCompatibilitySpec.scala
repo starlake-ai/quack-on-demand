@@ -6,13 +6,20 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.edge.quack.*
+import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.sql.PostgresAclValidator
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser, RolePermission}
+import ai.starlake.quack.ondemand.state.{
+  InMemoryControlPlaneStore,
+  RbacUser,
+  RoleColumnPolicy,
+  RolePermission,
+  RoleRowPolicy
+}
 import ai.starlake.quack.spi.ManagerEventSink
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -32,10 +39,12 @@ import scala.sys.process.{Process, ProcessLogger}
   * on PATH, like the other real-node specs.
   *
   * The front door runs the REAL ACL gate: `PostgresAclValidator` with the metadata filter mounted,
-  * and alice holds narrow grants (RW on `customer`, RO on `ids`, nothing on `secret`). A stand-in
-  * validator that admitted everything used to hide that the client's attach-time catalog sync
-  * (`duckdb_tables() UNION ALL duckdb_views()`) was denied for every ordinary principal (issue
-  * #114).
+  * and alice holds narrow grants (RW on `customer`, RO on `ids`, nothing on `secret`) PLUS a column
+  * mask on `customer.c_name` and a row policy on `secret`, so the CLS and RLS rewriters run on
+  * every statement too. A stand-in validator that admitted everything used to hide that the
+  * client's attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`) was denied for
+  * every ordinary principal (issue #114), and a policy-free principal then hid that the CLS
+  * rewriter denied the same sync for anyone holding a column policy (the issue's second report).
   *
   * Result sizes stay inside the upstream client's working envelope (spec section 2.4): the
   * generation 1 client fails on multi-column results larger than its inline batch, so the fetch
@@ -142,12 +151,21 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       filteredMetadata = true
     )
     val client = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator(), true, true)
+    // The column catalog the CLS resolver needs, mirroring the node's tables.
+    val columns = new ColumnCatalog.MapCatalog(
+      Map(
+        ("acme_db", "tpch1", "customer") -> List("c_custkey", "c_name"),
+        ("acme_db", "tpch1", "ids")      -> List("id"),
+        ("acme_db", "tpch1", "secret")   -> List("x")
+      )
+    )
     router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
       validator = validator,
+      columnPolicyRewriter = new ColumnPolicyRewriter(columns),
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     val user   = RbacUser("u-1", Some("t-1"), "alice", role = "user")
@@ -155,8 +173,21 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       RolePermission("rp-1", "r-1", "acme_db", "tpch1", "customer", "RW"),
       RolePermission("rp-2", "r-1", "acme_db", "tpch1", "ids", "RO")
     )
-    val eff       = EffectiveSet(user, Nil, Nil, grants, Nil)
-    val handshake = new EdgeHandshake(
+    val masks = List(
+      RoleColumnPolicy(
+        "cp-1",
+        "r-1",
+        "acme_db",
+        "tpch1",
+        "customer",
+        "c_name",
+        "mask",
+        Some("'***'")
+      )
+    )
+    val rowPolicies = List(RoleRowPolicy("rlp-1", "r-1", "acme_db", "tpch1", "secret", "x = 1"))
+    val eff         = EffectiveSet(user, Nil, Nil, grants, Nil, masks, rowPolicies)
+    val handshake   = new EdgeHandshake(
       new AuthenticationService(AuthenticationConfig.disabled, "x"),
       lookupPool = (t, p) =>
         sup.findPoolKeyByTenantAndPoolName(t, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
@@ -238,6 +269,13 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       cli(s"$attach SELECT count(*) FROM q.tpch1.customer WHERE c_custkey > 100;")
     withClue(err)(rc shouldBe 0)
     out shouldBe "1899"
+
+  it should "mask a column-policy column on a scan pushed through the attached catalog" in:
+    assume(duckdbPresent, "duckdb CLI not on PATH")
+    val (rc, out, err) =
+      cli(s"$attach SELECT c_custkey, c_name FROM q.tpch1.customer WHERE c_custkey = 7;")
+    withClue(err)(rc shouldBe 0)
+    out shouldBe "7,***"
 
   it should "sync only the tables the principal is granted (issue #114)" in:
     assume(duckdbPresent, "duckdb CLI not on PATH")
