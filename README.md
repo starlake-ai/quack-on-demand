@@ -180,57 +180,113 @@ Then harden it: **[Production hardening](https://docs.starlake.ai/qod/operating/
 
 ## Features
 
-### Security & identity
+Each table lists what Quack on Demand adds on top of a bare DuckDB process plus a DuckLake catalog.
 
-- **Arrow Flight SQL edge** with TLS on by default (auto-generated self-signed cert; drop in a CA-signed one for prod)
-- **Pluggable authentication**: Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito)
-- **First-class RBAC graph**: two gates at handshake (user-scope, pool-access), then per-statement table and column checks against a cached **EffectiveSet**. See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model)
-- **Column-level security and dynamic data masking**: per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied by rewriting each statement at the edge before it reaches a node. Row-level security (predicate filters) ships too. Both are on by default, with `QOD_CLS_ENABLED=false` / `QOD_RLS_ENABLED=false` as kill switches
-- **Admin REST API** guarded by an `X-API-Key` static key OR a session token from `/api/auth/login`
-- **MCP server for AI agents** at `POST /mcp`: agents authenticate with a personal access token (self-scoped, tenant-inferred) or the static key, and reach the full admin control plane - identity, access, pools & nodes, databases, maintenance & tags, time travel, federation, manifest, PATs, telemetry - gated by the same server-side guards as REST. See `skills/quack-on-demand/SKILL.md` ("Administering over MCP") for the tool families and setup
-- **Account security**: opt-in login lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), self-service password reset over SMTP (email a single-use link), and admin-forced password change at next login. Database users can carry an email; an email-format username is its own email
-- **Encryption at rest**: `qod database create --encrypted` makes a DuckLake database write encrypted Parquet (DuckLake mints a key per file into its own catalog) or a `duckdb-file` database an AES-256-GCM encrypted file. Create-time only, per database, with `QOD_REQUIRE_ENCRYPTION` as the manager-wide policy gate. See [Encryption at rest](#encryption-at-rest)
+### Connectivity
 
-### Data plane
+| Feature | Description | Added value over DuckDB / DuckLake alone |
+|---|---|---|
+| Arrow Flight SQL edge (`:31338`) | gRPC endpoint with TLS on by default (auto-generated self-signed cert; drop in a CA-signed one for prod) | DuckDB has no network listener. Any JDBC / ODBC / ADBC / PyArrow / Spark / DBeaver / Power BI / Tableau client connects without a DuckDB library on the client side |
+| Native Quack front door (`:9494`) | A plain DuckDB client runs `ATTACH 'quack:host:9494'` and queries remotely, result bytes relayed untouched | Turns a local DuckDB into a thin client of the shared warehouse, with hybrid local-plus-remote joins, while the base tables never leave the server |
+| `qod serve <target>` | One command over a `.duckdb` file, a parquet/csv directory, or an object-store prefix, control plane on a bundled embedded Postgres | Zero-install path from "files on disk" to a secured multi-user endpoint |
+| `qod sql` and MCP query | Ad-hoc SQL from the CLI or from an AI agent, with optional `--branch` targeting | Scripted and agentic access share the same auth, ACL and audit path as BI users |
 
-- **One-command serving**: `qod serve <target>` boots a persistent, secured gateway over an existing `.duckdb` file, a directory of parquet/csv, or an object-store prefix - control plane on a bundled embedded Postgres, so there is nothing to install first
-- **Multi-tenant pools** of Quack nodes (`READONLY` / `WRITEONLY` / `DUAL`); the router classifies each statement and picks a compatible least-loaded node
-- **Per-tenant DuckLake catalog DB** (`${tenant}_${tenantDb}`) auto-provisioned next to the control-plane DB: tenant isolation at the Postgres-database boundary, not just row level
-- **Branches for agents and pipelines**: `qod branch create` clones a DuckLake database at its current head without copying data (the branch reads the parent's Parquet in place and writes its own files), served by its own pool. Agents target it with the FlightSQL `branch` connection header or the MCP `branch` argument, review the change set (`qod branch changes` / `diff`, or the tenant page's Branches tab in the admin console), propose a merge, and a *different* human fast-forward merges it into main in one stamped, tagged snapshot. A branch-only personal access token (`--branch-only`) makes writes on the live database impossible for that agent. Maintenance on main never expires a snapshot a live branch was forked from
-- **Single binary** deployment
+### Serving and routing
 
-### Operability
+| Feature | Description | Added value |
+|---|---|---|
+| Node pools per tenant-db | Child DuckDB processes (local) or pods (Kubernetes) with roles `READONLY` / `WRITEONLY` / `DUAL` | DuckDB is single-process, single-writer. Pools give many concurrent users a compatible node each |
+| Statement classification and least-loaded routing | Each statement is classified READ / WRITE / DDL and sent to a compatible, least-loaded node | Writes are funneled to write-capable nodes so DuckLake's single-writer constraint is enforced for the user, not by the user |
+| Cache-aware routing | Reader affinity so repeated scans hit warm nodes | Better cache hit rates than random placement across N processes |
+| Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
+| Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
 
-- **React admin console** at `http://localhost:20900/ui/`: tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency)
-- **Observability built in**: Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards: [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json)
-- **Self-healing on restart**: the registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience)
-- **Every config key** is overridable via a `QOD_*` env var
+### Multi-tenancy and isolation
 
----
+| Feature | Description | Added value |
+|---|---|---|
+| Tenants, tenant-dbs, pools | Registry of tenants, each owning databases (`ducklake`, `duckdb-file`, `memory`) and pools; each DuckLake catalog DB (`${tenant}_${tenantDb}`) is auto-provisioned next to the control-plane DB | DuckLake has no notion of tenant. QoD isolates tenants at the Postgres-database boundary, not just row level |
+| Tenant resource caps and quotas | Per-tenant limits on nodes and pools, enforced on every scale action including autoscale | Shared infrastructure without one tenant starving the others |
+| Per-pool lockdown | Deny-set that blocks node-side escape hatches (file reads, other buckets, extensions) | A DuckDB process can read any path its OS user can. Lockdown closes that for served users |
+| Filtered metadata | `information_schema` and `duckdb_*` catalog functions are filtered to what the principal may see | DuckDB shows every table to everyone. QoD hides what you cannot query |
+| Regular-user profile sessions | Non-admin users log into the console for their own usage and statements only | Self-service without exposing the admin plane |
 
-## How it compares
+### Authentication and identity
 
-|                              | DuckDB<br/>embedded | OSS Flight SQL servers<br/>(GizmoSQL, sqlflite) | MotherDuck | Trino /<br/>Dremio | **Quack on<br/>Demand** |
-|------------------------------|:---:|:---:|:---:|:---:|:---:|
-| Embedded / in-process        | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Self-hosted                  | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Open source                  | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Fully managed SaaS (zero ops)| ❌ | ❌ | ✅ | vendor cloud | ❌ |
-| Multi-user serving           | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Multi-tenant isolation       | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Table-level RBAC             | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Row-level security           | ❌ | ❌ | ❌ | add-on | ✅ |
-| Column security + masking    | ❌ | ❌ | ❌ | add-on | ✅ |
-| Audit log                    | ❌ | ❌ | partial | via plugin | ✅ |
-| Per-tenant usage metering    | ❌ | ❌ | ✅ | add-on | ✅ |
-| Active-active manager HA     | n/a | ❌ | ✅ | ✅ | ✅ |
-| Autoscaling node pools       | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Distributed joins (TB-scale) | ❌ | ❌ | ❌ | ✅ | ❌ |
-| BI via JDBC / ODBC           | via files | ✅ | ✅ | ✅ | ✅ |
-| DuckLake-native catalog      | ✅ | partial | ✅ | ❌ | ✅ |
-| Footprint                    | library | single binary | SaaS | cluster | single binary |
+| Feature | Description | Added value |
+|---|---|---|
+| Pluggable authenticators | Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito) | DuckDB has no users. QoD ties every connection to an identity from your IdP |
+| OIDC SSO for the admin console | Browser SSO, JWT session in an HttpOnly cookie | Admin access follows corporate identity |
+| Personal access tokens | Self-scoped, tenant-inferred tokens with restrictions such as read-only, one database, or branch-only | Least-privilege credentials for agents and CI |
+| SCIM 2.0 provisioning | Users and groups pushed by Okta / Entra | Joiner-mover-leaver lifecycle drives RBAC membership automatically |
+| Account lockout and self-service reset | Opt-in lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), single-use emailed reset link over SMTP. Database users can carry an email; an email-format username is its own email | Standard account hygiene the engine cannot provide |
+| Forced password change | `mustChangePassword` blocks both the REST login and the FlightSQL handshake until the password is rotated | Onboarding and rotation policies enforced on the wire |
+| Revocation kills statements | Revoking a grant or token cancels that principal's in-flight statements | Access removal is immediate, not "at next connect" |
 
-**Pick DuckDB** for one embedded database in one app. **Pick MotherDuck** if managed SaaS fits and data residency isn't a constraint. **Pick Trino / Dremio** for distributed joins across TB-scale tables. **Pick Quack on Demand** when you want DuckLake served to many users, with auth, table / row / column level security, an audit trail, and per-tenant usage metering, in open source, on infrastructure you control.
+### Authorization and data security
+
+| Feature | Description | Added value |
+|---|---|---|
+| RBAC graph | Users, roles, groups, role permissions and pool permissions, computed into a cached **EffectiveSet** per session; two gates at handshake (user-scope, pool-access). See the [RBAC model](https://docs.starlake.ai/qod/operating/rbac-model) | Table-level grants for a database that has no `GRANT` statement |
+| Per-statement ACL | SQL is parsed at the edge, table refs extracted, verb collapsed to Read / Write / Ddl and matched against grants | Enforcement is independent of client and node |
+| Row-level security | Predicate filters injected per role by rewriting the statement (`QOD_RLS_ENABLED=false` as kill switch) | Same data, different rows per user, with no views to maintain |
+| Column-level security and masking | Per-role policies on `catalog.schema.table.column` either **deny** the column or **mask** it through a custom SQL transform, applied before the node sees the statement (`QOD_CLS_ENABLED=false` as kill switch) | Dynamic masking without copying tables |
+| Protected-write guard | Fail-closed deny on any write that wraps or references a masked or filtered table | Closes the classic "write it somewhere I can read" bypass |
+| Attached-catalog resolution and ATTACH governance | Unqualified refs resolved fail-closed; `ATTACH` for ordinary users constrained to allowed catalogs | Prevents catalog-alias confusion from leaking cross-tenant data |
+| Encryption at rest | `qod database create --encrypted` makes a DuckLake database write encrypted Parquet (DuckLake mints a key per file into its own catalog) or a `duckdb-file` database an AES-256-GCM encrypted file. Create-time only, per database, with `QOD_REQUIRE_ENCRYPTION` as the manager-wide policy gate. | DuckLake supports it but nothing forces it. QoD makes it a policy and keeps the key inside the control plane |
+| Audit log | Every statement, admin mutation and autoscale action recorded with its actor, filterable in the console | DuckDB keeps no history of who ran what |
+
+### Data lifecycle on DuckLake
+
+| Feature | Description | Added value |
+|---|---|---|
+| Snapshot browser and time travel | Browse snapshots, query as-of a snapshot or timestamp from the UI or CLI | DuckLake stores snapshots. QoD makes them navigable without SQL archaeology |
+| Table history timeline and data diff | Per-table change feed and diff between two snapshots | Turns raw `ducklake_snapshot_changes` into a reviewable change set |
+| Tags and pinning | Named tags on snapshots; pinned snapshots survive maintenance | Human-readable release points that expiry cannot delete |
+| Undrop | Recover a dropped table from an earlier snapshot | Operational safety net on top of DuckLake's retention |
+| Restore and rollback | Roll a database back to a snapshot as a new snapshot | Point-in-time recovery as a one-liner |
+| Managed maintenance | Scheduled expire-snapshots, merge-adjacent-files, cleanup-old-files and orphan sweep, leader-gated | DuckLake ships the functions; QoD schedules them, respects pins, and skips branches |
+| Branches for agents and pipelines | `qod branch create` clones a DuckLake database at its current head without copying data (the branch reads the parent's Parquet in place and writes its own files), served by its own pool. Agents target it with the FlightSQL `branch` connection header or the MCP `branch` argument, review the change set (`qod branch changes` / `diff`, or the tenant page's Branches tab), propose a merge, and a *different* human fast-forward merges it into main in one stamped, tagged snapshot. A branch-only personal access token (`--branch-only`) makes writes on the live database impossible for that agent. Maintenance on main never expires a snapshot a live branch was forked from | Git-style workflow for agents and pipelines that DuckLake does not have |
+| Database init SQL | Per-database or per-pool SQL run at node spawn | Consistent extensions, settings and secrets on every node |
+
+### Storage and federation
+
+| Feature | Description | Added value |
+|---|---|---|
+| Per-database object-store credentials | Each database carries its own endpoint and keys, injected as node secrets | Multiple buckets and clouds behind one gateway |
+| Managed object storage | QoD provisions an id-keyed bucket prefix, with a retention window and purge sweep on delete | Self-service databases with no bucket plumbing by the user |
+| Statement-level federation | Registered external sources (Postgres, MySQL, other catalogs) attached on the nodes, secrets resolved per source | Federated queries governed by the same ACL |
+| External Iceberg REST catalogs | Attach Iceberg catalogs next to DuckLake, with SQL screening | One endpoint over lakehouse formats you did not create |
+| Default metastore sparse create | Metastore keys omitted at create resolve from the manager defaults | Fewer secrets to hand around |
+
+### Elasticity and high availability
+
+| Feature | Description | Added value |
+|---|---|---|
+| Pool suspend / resume | Scale to zero keeping the role distribution; wake on REST, query, module, or idle policy | Pay for compute only while queried |
+| Idle hibernation | Leader-gated sweep suspends pools after an idle window | Automatic cost control per pool |
+| Demand scale-out | Owner-declared min / max band; readers added under load and shed when quiet | Elastic read capacity with a hard cap and quota gating |
+| Active-active manager HA | N managers on Kubernetes, one leader by Postgres advisory lock, caches synced by LISTEN / NOTIFY | No single point of failure for the control plane |
+| Kubernetes backend | Pod plus Service per node, Secrets for tokens, federation SQL and metastore passwords, pod resources and templates, registry-drift healing | Production deployment shape, with the local backend for a single box |
+
+### Operability and administration
+
+| Feature | Description | Added value |
+|---|---|---|
+| React admin console | `http://localhost:20900/ui/`: tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), incident-response page | Ops visibility DuckDB never had |
+| Python CLI `qod` | Full REST parity with a pytest gate, profiles, install via `uvx` and PyPI | Scriptable operations, same contract as the API |
+| Admin REST API | Every operation guarded by an `X-API-Key` static key OR a session token from `/api/auth/login`, tenant scope checked on every RBAC endpoint | Automation hook for IaC and portals |
+| SQL admin dialect | Administer users, grants and pools over FlightSQL itself | DBA tools become admin tools |
+| MCP server for AI agents | `POST /mcp`: agents authenticate with a personal access token (self-scoped, tenant-inferred) or the static key, and reach the full admin control plane (identity, access, pools and nodes, databases, maintenance and tags, time travel, federation, manifest, PATs, telemetry) gated by the same server-side guards as REST. See `skills/quack-on-demand/SKILL.md` ("Administering over MCP") | Agent-native administration and querying |
+| Manifest YAML export / import | Whole-perimeter config as YAML with round-trip and fragments | GitOps for tenants, pools, grants and federation |
+| Observability | Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards: [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json). Statement history and trends in the console | Per-node latency, in-flight and served counters that an embedded engine does not expose |
+| Usage accounting and metering | Per-tenant and per-user usage, statement history | Chargeback and hosted billing inputs |
+| Incident response | Reader eviction, node restart, pool stop, blunt node reset | Operator levers for a live fleet |
+| Manager module SPI | Jars on the classpath add tables, endpoints, SPA mounts, event sinks and leader-gated tasks | Hosted-service extensions without forking |
+| Configuration | Every config key is overridable via a `QOD_*` env var | Twelve-factor deployment out of the box |
+| Distribution | Single binary or Docker, native Linux / macOS / Windows including ARM, GitHub Releases, Claude Code plugin with the operator runbook | Install path measured in one command |
+
+What QoD deliberately does not add: distributed joins across nodes. Each statement runs on exactly one DuckDB node, so TB-scale shuffle workloads still belong to Trino or Dremio.
 
 ---
 
@@ -262,12 +318,6 @@ flowchart LR
 
 ---
 
-## Project status
-
-**Stable.** In production use against the documented surface: multi-tenant FlightSQL gateway, per-tenant DuckLake catalogs, the full RBAC graph (users / groups / roles / table permissions / pool grants), statement-level federation across external Postgres / S3 / Iceberg, with Iceberg REST catalogs as a first-class typed source that attaches read-only by default instead of a hand-written setup script, and YAML-round-trippable control-plane manifests. The REST API, FlightSQL wire protocol, control-plane schema, and CLI surface are stable.
-
-The manager runs as a **single instance** by default (safely restartable), and supports opt-in **active-active HA** on Kubernetes (`replicaCount > 1`). Worker pools scale horizontally in both modes.
-
 ## Configuration
 
 Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. The security-critical ones to set before any non-localhost deploy:
@@ -290,85 +340,6 @@ Hosted / self-serve deployments should also harden the data plane:
 - **Catalog-reader eviction**: tune `QOD_CATALOG_READER_SWEEP_MIN` / `QOD_CATALOG_READER_IDLE_EVICT_MIN` if the default 10/30-minute cadence for evicting idle per-tenant-db catalog readers needs adjusting
 
 The full hardening runbook is in `plugins/qod/skills/quack-on-demand/SKILL.md`.
-
-## Encryption at rest
-
-A tenant database can be created encrypted, so the bytes QoD writes to disk or to a bucket are
-unreadable without the control plane. It is a per-database choice, made at creation.
-
-```bash
-qod database create --tenant acme --name warehouse --encrypted
-qod database create --tenant acme --name ledger --kind duckdb-file \
-  --data-path /srv/qod/ledger.duckdb --encrypted
-```
-
-REST is `POST /api/database/create` with `"encrypted": true`; the admin console exposes the same
-switch on the database create form, and a control-plane manifest carries `encrypted` per tenant-db.
-
-| kind | What gets encrypted | Where the key lives |
-|---|---|---|
-| `ducklake` | every Parquet file DuckLake writes under the data path | DuckLake mints one key per file into `ducklake_data_file.encryption_key`, in the tenant-db's own Postgres catalog. QoD holds no key material |
-| `duckdb-file` | the `.duckdb` file, its WAL and its temp files (AES-256-GCM) | one key per database, in the control-plane row's `metastore` |
-| `memory` | nothing is at rest | refused with `400 invalid` |
-
-For `duckdb-file` QoD mints the key (32 random bytes, base64) unless you supply your own with
-`--encryption-key`. Either way it is **never readable back through any API**: it is redacted from
-every response, from `database/list`, and from an exported manifest. Recovery means reading the
-control-plane Postgres directly. Lose the key and that row, and the database is unreadable.
-
-**It is create-time only, in both directions, for both kinds.** Neither DuckDB nor DuckLake can
-encrypt an existing database in place, or decrypt one. There is no `encrypted` field on
-`database/update`, and a manifest import that flips the flag on an existing database is refused.
-To change it, create a new database and copy the data.
-
-**`QOD_REQUIRE_ENCRYPTION=true`** (default off) makes the manager refuse any `database/create` that
-does not ask for encryption, and likewise any manifest import (REST, `qod manifest import`, or the
-boot-time bootstrap manifest) that would create such a database, so an operator can guarantee no
-plaintext database exists in the deployment. It gates creates only: existing databases keep working
-and a manifest describing them still applies, so turning it on never bricks a running deployment. A
-`kind=memory` create is refused outright while it is on.
-
-A **branch** inherits its parent's encryption. Cloning copies the parent's catalog rows wholesale,
-so a branch of an encrypted database is encrypted and reads the parent's encrypted Parquet with the
-parent's keys.
-
-An **exported manifest cannot recreate an encrypted `duckdb-file` database**, and that is
-deliberate: the key is redacted on export like every other secret, so an import has nothing to open
-the file with. An encrypted `ducklake` database round-trips fine, because its keys live in its own
-catalog rather than in the manifest.
-
-Encrypting a database makes its nodes load the `httpfs` extension, because DuckDB needs OpenSSL for
-a *writable* encrypted file (in its mbedtls fallback, writes to an encrypted database are refused
-outright since 1.4.1). On an air-gapped host, make sure `httpfs` is already in the extension cache.
-
-### One asymmetry worth knowing
-
-DuckLake **errors** when you attach an unencrypted catalog *with* `ENCRYPTED`, but attaching an
-encrypted catalog *without* the flag silently **succeeds** (and still writes encrypted files, since
-the catalog's own metadata decides). So the engine will not tell you when a control-plane row says
-`encrypted=false` about a catalog that is in fact encrypted. QoD's own pre-attach guard is what
-catches that, in both directions, with one message naming the cause instead of a DuckDB error
-repeated once per node spawn.
-
-### Upgrading on Kubernetes
-
-Node credentials (`pgPassword`, and `encryptionKey` for encrypted `duckdb-file` databases) now
-reach a pod through a per-pool Secret instead of the pod's plain environment. Pods created by an
-earlier manager keep the old shape and are not migrated in place. Restart every node after
-upgrading, for example by scaling each pool down and back up.
-
-### The trust boundary
-
-Encryption at rest moves the trust boundary to the control plane. For `kind=ducklake` the object
-store becomes untrusted storage, which is the point, but the per-file keys sit in the tenant-db's
-Postgres catalog and `pgPassword` reaches it. For `kind=duckdb-file` the key sits in
-`qodstate_tenant_db.metastore` in the control-plane Postgres. In both cases, whoever can read the
-control-plane database can decrypt the data. This feature does not change that, and no design at
-this layer can.
-
-Treat an **exported manifest as a secret** for the same reason. `encryptionKey` is redacted out of
-it, but `pgPassword` is not, and for an encrypted `ducklake` database that password is what opens
-the catalog holding the per-file keys.
 
 ## Claude Code skill
 
