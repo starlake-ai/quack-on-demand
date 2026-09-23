@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Bare references to DuckDB's system views no longer pass a schema-wide grant.** DuckDB keeps
+  default views in the `system` catalog's `main` and `pg_catalog` schemas, both on the unqualified
+  search path, so `FROM sqlite_master` (every catalog's DDL), `FROM pg_class` / `FROM pg_attribute`
+  (every catalog's relation and column names), `FROM duckdb_databases` (every attached catalog and
+  its path) and the rest resolve on a node whenever no table of that name shadows them. The ACL
+  parser qualified such a name as `<session>.<schema>.<name>` and grant-checked that, so a
+  `acme.*.* RO` grant admitted an unfiltered read of the system view. All 36 default views of DuckDB
+  1.5.5, plus any `duckdb_` / `pragma_` / `sqlite_` prefixed bare name, are now marked unsupported
+  (denied without a wildcard ALL grant, flag on or off), completing the `duckdb_tables` case of
+  0.9.5. A three-part name under a real catalog, and an explicit `pg_catalog.X` (the documented,
+  schema-grant-gated surface), are unchanged. `DuckDbSystemViewsSpec` pins the list against the
+  `duckdb` CLI so a DuckDB bump that adds a view fails the build.
+
 ## 0.9.5
 
 - **Native `ATTACH ... (TYPE quack)` now works for ordinary users (#114).** The DuckDB quack

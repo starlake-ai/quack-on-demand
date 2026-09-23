@@ -612,11 +612,14 @@ whole feature off manager-wide and go back to the pre-0.6.7 grant-required postu
   clause, or a filterable name merely **mentioned inside a string literal**, is *denied*
   with a message ending `query it directly in the FROM clause instead`. The remedy is to
   move the reference into the `FROM` clause (or drop the literal mention) and re-run.
-- A catalog function spelled without parentheses (`FROM duckdb_tables`, which DuckDB
-  resolves to the same function) is denied for every non-wildcard principal, flag on or
-  off, because the manager cannot tell it apart from a real table of that name. Call it
-  as `duckdb_tables()`. Qualified (`main.duckdb_tables()`) and argument-carrying calls
-  are denied the same way.
+- A bare reference to one of DuckDB's system views (`FROM sqlite_master`, `FROM pg_class`,
+  `FROM duckdb_databases`, `FROM duckdb_tables` without parentheses, and the other default
+  views of `system.main` / `system.pg_catalog`, also spelled `main.X` or `system.main.X`)
+  is denied for every non-wildcard principal, flag on or off: on the node such a name
+  resolves to the system view unless a real table shadows it, and the manager cannot tell
+  which. For the catalog functions, call them as `duckdb_tables()` and they are filtered;
+  qualified (`main.duckdb_tables()`) and argument-carrying calls are denied the same way.
+  A real table that happens to carry such a name is reachable by its three-part name.
 - `DESCRIBE <t>`, `SHOW <t>` and `SHOW COLUMNS FROM <t>` now require RO on the target
   table. They previously bypassed the ACL entirely. This applies whenever ACL is on,
   independent of `QOD_ACL_FILTERED_METADATA`.

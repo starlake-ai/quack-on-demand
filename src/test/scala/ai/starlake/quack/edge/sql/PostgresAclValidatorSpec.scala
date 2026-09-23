@@ -450,3 +450,23 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
     val wildcard = effectiveWith(List(perm("*", "*", "*", "ALL")))
     catalogAware.validate(mkAcmeCtx(ClientSync, wildcard)) shouldBe Allowed
   }
+
+  it should "deny DuckDB's other bare-resolvable system views under a schema-wide grant, flag on or off" in {
+    // sqlite_master carries every catalog's DDL and pg_class every catalog's relation names; an
+    // unqualified reference used to be qualified as <session>.<schema>.<name> and matched by a
+    // schema-wide grant, then resolved on the node to the system view.
+    val eff = effectiveWith(List(perm("acme_tpch", "*", "*", "RO")))
+    for sql <- List(
+        "SELECT sql FROM sqlite_master",
+        "SELECT relname FROM pg_class",
+        "SELECT database_name, path FROM duckdb_databases",
+        "SELECT * FROM main.pragma_database_list"
+      )
+    do
+      withClue(sql) {
+        filteredMeta.validate(mkAcmeCtx(sql, eff)) shouldBe a[Denied]
+        catalogAware.validate(mkAcmeCtx(sql, eff)) shouldBe a[Denied]
+      }
+    val wildcard = effectiveWith(List(perm("*", "*", "*", "ALL")))
+    filteredMeta.validate(mkAcmeCtx("SELECT sql FROM sqlite_master", wildcard)) shouldBe Allowed
+  }
