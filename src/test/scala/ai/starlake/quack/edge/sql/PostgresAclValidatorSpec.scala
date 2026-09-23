@@ -364,3 +364,89 @@ class PostgresAclValidatorSpec extends AnyFlatSpec with Matchers:
       mkAcmeCtx("SELCT * FRM information_schema.tables WHRE", eff)
     ) shouldBe a[Denied]
   }
+
+  // ---- DuckDB catalog functions (issue #114) ---------------------------
+  //
+  // The quack client's ATTACH syncs the remote catalog through
+  // `duckdb_tables() UNION ALL duckdb_views()`. Under the flag, an unqualified
+  // no-argument call of one of the four catalog functions is admitted in a
+  // PURE-READ statement, because the edge rewriter narrows it to the session
+  // catalog and the principal's grants. Every other table function, and every
+  // other spelling, keeps failing closed.
+
+  private val ClientSync =
+    "SELECT schema_name, sql, 'table' FROM duckdb_tables() " +
+      "UNION ALL SELECT schema_name, view_name, 'view' FROM duckdb_views()"
+
+  "filteredMetadata" should "implicitly admit the quack client's catalog sync for a grantless principal" in {
+    val eff = effectiveWith(permissions = Nil)
+    filteredMeta.validate(mkAcmeCtx(ClientSync, eff)) shouldBe Allowed
+    filteredMeta.validate(mkAcmeCtx("SELECT * FROM duckdb_schemas()", eff)) shouldBe Allowed
+    filteredMeta.validate(mkAcmeCtx("SELECT * FROM duckdb_columns() c", eff)) shouldBe Allowed
+  }
+
+  it should "still gate the ordinary tables read beside a catalog function" in {
+    val ungranted = effectiveWith(permissions = Nil)
+    filteredMeta.validate(
+      mkAcmeCtx(
+        "SELECT t.table_name, c.c_custkey FROM duckdb_tables() t, tpch1.customer c",
+        ungranted
+      )
+    ) match
+      case Denied(msg, _) =>
+        msg should include("tpch1.customer")
+        msg should not include "duckdb_tables"
+      case other => fail(s"expected Denied, got $other")
+  }
+
+  it should "keep every other table function fail-closed" in {
+    val eff = effectiveWith(List(perm("acme_tpch", "*", "*", "RO")))
+    filteredMeta.validate(
+      mkAcmeCtx("SELECT * FROM read_parquet('/data/secret.parquet')", eff)
+    ) match
+      case Denied(msg, _) => msg should include("read_parquet")
+      case other          => fail(s"expected Denied, got $other")
+    // A qualified call and an argument-carrying call are not the shape the rewriter filters.
+    filteredMeta.validate(mkAcmeCtx("SELECT * FROM main.duckdb_tables()", eff)) shouldBe a[Denied]
+    filteredMeta.validate(mkAcmeCtx("SELECT * FROM duckdb_tables('x')", eff)) match
+      case Denied(msg, _) => msg should include("duckdb_tables")
+      case other          => fail(s"expected Denied, got $other")
+  }
+
+  it should "deny the bare spelling even under a schema-wide grant, flag on or off" in {
+    // `FROM duckdb_tables` (no parentheses) resolves to the catalog function on the node, so
+    // qualifying it as acme_tpch.main.duckdb_tables and matching the grant would admit an
+    // unfiltered dump of every catalog's DDL.
+    val eff = effectiveWith(List(perm("acme_tpch", "*", "*", "RO")))
+    filteredMeta.validate(mkAcmeCtx("SELECT sql FROM duckdb_tables", eff)) match
+      case Denied(msg, _) => msg should include("duckdb_tables")
+      case other          => fail(s"expected Denied, got $other")
+    catalogAware.validate(mkAcmeCtx("SELECT sql FROM duckdb_tables", eff)) shouldBe a[Denied]
+    filteredMeta
+      .validate(mkAcmeCtx("SELECT * FROM system.main.duckdb_views", eff)) shouldBe a[Denied]
+  }
+
+  it should "not implicitly admit catalog functions embedded in write/DDL statements" in {
+    val eff = effectiveWith(
+      List(perm("acme_tpch", "tpch1", "*", "RW"), perm("acme_tpch", "tpch1", "*", "DDL"))
+    )
+    filteredMeta.validate(
+      mkAcmeCtx("INSERT INTO tpch1.mine SELECT table_name FROM duckdb_tables()", eff)
+    ) match
+      case Denied(msg, _) => msg should include("duckdb_tables")
+      case other          => fail(s"expected Denied, got $other")
+    filteredMeta.validate(
+      mkAcmeCtx("CREATE TABLE tpch1.mine2 AS SELECT table_name FROM duckdb_tables()", eff)
+    ) match
+      case Denied(msg, _) => msg should include("duckdb_tables")
+      case other          => fail(s"expected Denied, got $other")
+  }
+
+  it should "keep requiring wildcard ALL for catalog functions when the flag is off" in {
+    val eff = effectiveWith(permissions = Nil)
+    catalogAware.validate(mkAcmeCtx(ClientSync, eff)) match
+      case Denied(msg, _) => msg should include("duckdb_tables")
+      case other          => fail(s"expected Denied, got $other")
+    val wildcard = effectiveWith(List(perm("*", "*", "*", "ALL")))
+    catalogAware.validate(mkAcmeCtx(ClientSync, wildcard)) shouldBe Allowed
+  }
