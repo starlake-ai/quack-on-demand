@@ -51,6 +51,7 @@ on:
       # The quack client's attach-time catalog sync must stay within what the metadata filter
       # rewrites (#114): the pin spec, the two lists it compares, and the vendored client.
       - "src/test/scala/ai/starlake/quack/edge/meta/QuackClientSyncFunctionsSpec.scala"
+      - "src/test/scala/ai/starlake/acl/parser/DuckDbSystemViewsSpec.scala"
       - "src/main/scala/ai/starlake/acl/parser/TableExtractor.scala"
       - "src/main/scala/ai/starlake/quack/edge/meta/MetadataFilterRewriter.scala"
       - "native/quackwire/thirdparty/duckdb-quack"
@@ -86,6 +87,7 @@ on:
       # The quack client's attach-time catalog sync must stay within what the metadata filter
       # rewrites (#114): the pin spec, the two lists it compares, and the vendored client.
       - "src/test/scala/ai/starlake/quack/edge/meta/QuackClientSyncFunctionsSpec.scala"
+      - "src/test/scala/ai/starlake/acl/parser/DuckDbSystemViewsSpec.scala"
       - "src/main/scala/ai/starlake/acl/parser/TableExtractor.scala"
       - "src/main/scala/ai/starlake/quack/edge/meta/MetadataFilterRewriter.scala"
       - "native/quackwire/thirdparty/duckdb-quack"
@@ -141,6 +143,7 @@ jobs:
         ai.starlake.quack.model.FederatedAliasSpec
         ai.starlake.quack.route.LocaleIndependenceSpec
         ai.starlake.quack.edge.meta.QuackClientSyncFunctionsSpec
+        ai.starlake.acl.parser.DuckDbSystemViewsSpec
     steps:
       # The duckdb-quack submodule is what QuackClientSyncFunctionsSpec reads (the client's
       # catalog-sync queries); without it that spec cancels, which the verify step below treats as
