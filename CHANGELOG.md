@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.6
 
 - **`ATTACH ... (TYPE quack)` now works for users holding column policies, and their masks hold on
   the pushed-down scans (#114, second report).** Two gaps behind one symptom. First, the column-level
