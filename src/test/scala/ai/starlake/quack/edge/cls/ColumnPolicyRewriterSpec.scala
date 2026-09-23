@@ -77,6 +77,139 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   private val maskEmail =
     RoleColumnPolicy("cp-1", "r-1", "*", "tpch1", "customer", "c_email", "mask", Some("'***'"))
 
+  // ---- statements that read no physical table (issue #114, second report) -----------------
+  //
+  // The quack client's ATTACH syncs the remote catalog with `duckdb_tables() UNION ALL
+  // duckdb_views()`. The column resolver cannot model a table function and reports ParseFailed,
+  // which the router denies fail-closed, so every principal holding ANY column policy could not
+  // attach. Nothing in such a statement can carry a masked column.
+
+  private val ClientSync =
+    "SELECT schema_name, sql, 'table' FROM duckdb_tables() " +
+      "UNION ALL SELECT schema_name, view_name, 'view' FROM duckdb_views()"
+
+  it should "pass the quack client's catalog sync through even with policies in scope" in {
+    rw.rewrite(ClientSync, StatementKind.Select, eff(tenantUser, List(maskEmail)), ctx)
+      .unsafeRunSync() shouldBe Passthrough
+    rw.rewrite(
+      "SELECT * FROM duckdb_schemas() s",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe Passthrough
+  }
+
+  it should "not shortcut when a policy-bearing table hides beside the catalog function" in {
+    // ORDER BY subqueries are a known blind spot of jsqlparser's traversal; the decision rides
+    // on the ACL parser's complete walk, so this still reaches the resolver and fails closed.
+    rw.rewrite(
+      "SELECT 1 FROM duckdb_tables() ORDER BY (SELECT c_email FROM customer LIMIT 1)",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() should not be Passthrough
+    rw.rewrite(
+      "SELECT t.table_name, c.c_email FROM duckdb_tables() t, customer c",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() should not be Passthrough
+  }
+
+  // ---- DuckDB positional column references (issue #114, second report) --------------------
+  //
+  // The quack client pushes every scan down as `SELECT #1, #2 FROM <table>`: positional
+  // references, no column names. The resolver saw a column literally named `#1`, found nothing to
+  // mask, and in the default lenient mode forwarded the scan unmasked: a column policy holder could
+  // read every masked value through ATTACH.
+
+  it should "resolve the client's positional projection against the table and mask it" in {
+    rw.rewrite(
+      "SELECT #1, #2 FROM customer",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() match
+      case Rewritten(sql) =>
+        sql should include("c_id")
+        sql should include("'***' AS c_email")
+        sql should not include "#"
+      case other => fail(s"expected Rewritten, got $other")
+    // A positional reference to an unmasked column alone: resolved, nothing to mask.
+    rw.rewrite(
+      "SELECT #1 FROM customer",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() shouldBe Passthrough
+  }
+
+  it should "resolve positional references inside functions and WHERE (FROM-relative there too)" in {
+    rw.rewrite(
+      "SELECT count(#2) FROM customer WHERE #1 = 7",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() match
+      case Rewritten(sql) =>
+        sql should include("count('***')")
+        sql should include("c_id = 7")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
+  it should "deny positional references it cannot resolve safely" in {
+    val e = eff(tenantUser, List(maskEmail))
+    // Out of range.
+    rw.rewrite("SELECT #9 FROM customer", StatementKind.Select, e, ctx)
+      .unsafeRunSync() shouldBe a[Denied]
+    // ORDER BY is projection-relative, a different rule: refused rather than guessed.
+    rw.rewrite("SELECT c_id, c_email FROM customer ORDER BY #2", StatementKind.Select, e, ctx)
+      .unsafeRunSync() shouldBe a[Denied]
+    // Joins and derived tables number the combined column list: refused.
+    rw.rewrite(
+      "SELECT #1 FROM customer c JOIN customer d ON c.c_id = d.c_id",
+      StatementKind.Select,
+      e,
+      ctx
+    ).unsafeRunSync() shouldBe a[Denied]
+    rw.rewrite(
+      "SELECT #1 FROM (SELECT c_email, c_id FROM customer) s",
+      StatementKind.Select,
+      e,
+      ctx
+    ).unsafeRunSync() shouldBe a[Denied]
+    // A table the catalog does not know cannot be numbered.
+    rw.rewrite("SELECT #1 FROM unknown_table", StatementKind.Select, e, ctx)
+      .unsafeRunSync() shouldBe a[Denied]
+    // A batch.
+    rw.rewrite("SELECT #1 FROM customer; SELECT #2 FROM customer", StatementKind.Select, e, ctx)
+      .unsafeRunSync() shouldBe a[Denied]
+  }
+
+  it should "not mistake a string literal for a positional reference" in {
+    rw.rewrite(
+      "SELECT c_id FROM customer WHERE c_id = '#1'",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() should not be a[Denied]
+  }
+
+  it should "not shortcut a batch or any other table function" in {
+    rw.rewrite(
+      "SELECT * FROM duckdb_tables(); SELECT c_email FROM customer",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() should not be Passthrough
+    rw.rewrite(
+      "SELECT * FROM read_parquet('/data/x.parquet')",
+      StatementKind.Select,
+      eff(tenantUser, List(maskEmail)),
+      ctx
+    ).unsafeRunSync() should not be Passthrough
+  }
+
   it should "rewrite a direct column reference in the projection to the transform" in {
     val out = rw
       .rewrite(

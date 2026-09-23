@@ -319,3 +319,21 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     sql should include("c_region = 'eu'")
     sql should include("information_schema.tables")
   }
+
+  // ---- statements that read no physical table (issue #114, second report) -----------------
+
+  "a statement reading only catalog functions" should "pass through with row policies in scope" in {
+    val sync =
+      "SELECT schema_name, sql, 'table' FROM duckdb_tables() " +
+        "UNION ALL SELECT schema_name, view_name, 'view' FROM duckdb_views()"
+    go(sync, eff(tenantUser, List(policy("c_region = 'EU'")))) shouldBe Passthrough
+  }
+
+  it should "wrap the table under a positional-reference scan (numbering survives the wrap)" in {
+    // The quack client pushes scans down as `SELECT #1, #2 FROM customer`; the derived table the
+    // wrap installs keeps the base table's column order, so `#n` keeps meaning the same column.
+    val out =
+      rewritten(go("SELECT #1, #2 FROM customer", eff(tenantUser, List(policy("c_region = 'EU'")))))
+    out should include("c_region = 'eu'")
+    out should include("#1, #2")
+  }
