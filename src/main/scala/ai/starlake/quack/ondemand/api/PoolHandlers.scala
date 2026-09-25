@@ -94,7 +94,9 @@ final class PoolHandlers(
         ),
         lockdownEffective = sup.effectiveLockdown(key),
         minNodes = band.map(_._1),
-        maxNodes = band.map(_._2)
+        maxNodes = band.map(_._2),
+        pending = sup.pendingCount(key),
+        pendingReason = sup.pendingReason(key)
       )
     }
 

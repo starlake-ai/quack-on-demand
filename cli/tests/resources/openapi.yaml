@@ -8399,6 +8399,7 @@ components:
       - memory
       - lockdown
       - lockdownEffective
+      - pending
       properties:
         tenant:
           type: string
@@ -8440,6 +8441,11 @@ components:
         maxNodes:
           type: integer
           format: int32
+        pending:
+          type: integer
+          format: int32
+        pendingReason:
+          type: string
     PreviewColumn:
       title: PreviewColumn
       type: object

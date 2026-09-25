@@ -81,6 +81,10 @@ export interface PoolResponse {
   // and manual scales outside the band are refused.
   minNodes?: number;
   maxNodes?: number;
+  // Fleet backend: slots waiting for a free server, and why the last spawn
+  // attempt left them pending ("none_free" | "none_fits").
+  pending?: number;
+  pendingReason?: string | null;
 }
 
 export interface SetPoolDisabledRequest {

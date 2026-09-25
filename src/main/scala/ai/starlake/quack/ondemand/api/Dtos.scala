@@ -150,7 +150,11 @@ final case class PoolResponse(
     lockdownEffective: Boolean = false, // tri-state resolved against the global flag
     // Owner-declared demand scale-out band; both None on a fixed-size pool.
     minNodes: Option[Int] = None,
-    maxNodes: Option[Int] = None
+    maxNodes: Option[Int] = None,
+    // Fleet: slots the distribution wants that no node fills yet, and why the last spawn attempt
+    // left them pending ("none_free" | "none_fits"); 0 / None on every other backend.
+    pending: Int = 0,
+    pendingReason: Option[String] = None
 )
 
 final case class SetPoolResourcesRequest(

@@ -19,7 +19,13 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.rbac.RbacResolver
-import ai.starlake.quack.ondemand.runtime.{NodeLockdown, ObjectStoreSecret, QuackBackend}
+import ai.starlake.quack.ondemand.fleet.MissingSlots
+import ai.starlake.quack.ondemand.runtime.{
+  NoFreeServer,
+  NodeLockdown,
+  ObjectStoreSecret,
+  QuackBackend
+}
 import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   DbAdmin,
@@ -143,6 +149,10 @@ final class PoolSupervisor(
   private val pools = TrieMap.empty[PoolKey, PoolState]
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
+  // Why the last spawn attempt left a slot pending (`none_free` | `none_fits`), fed by
+  // NoFreeServer. Replica-local: it explains this replica's last attempt, which under HA is the
+  // leader's reconcile or the replica that served the scale call. Read via pendingReason.
+  private val pendingReasons = TrieMap.empty[PoolKey, String]
 
   // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
   // encryption disagreement between the control-plane row and the catalog's own metadata).
@@ -722,12 +732,23 @@ final class PoolSupervisor(
 
   /** Start `specs` sequentially, clearing any stale NodeLoadTracker entry first (a reused node id
     * must not inherit a lingering draining=true flag). Returns the started nodes in spawn order.
+    *
+    * A [[NoFreeServer]] (fleet backend: no server free or none fits) leaves that slot pending
+    * instead of failing the operation; reconcile fills it once capacity appears. Every other
+    * failure propagates unchanged.
     */
   private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
     specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-      acc.flatMap(rs =>
-        IO.delay(tracker.remove(spec.nodeId)) *> startNodeEmitting(key, spec).map(rs :+ _)
-      )
+      acc.flatMap { rs =>
+        IO.delay(tracker.remove(spec.nodeId)) *>
+          startNodeEmitting(key, spec).map(rs :+ _).recoverWith {
+            case NoFreeServer(_, id, reason) =>
+              IO.delay {
+                pendingReasons.put(key, reason)
+                logger.info(s"fleet: slot $id of $key pending ($reason)")
+              }.as(rs)
+          }
+      }
     }
 
   /** Start one node and emit [[ManagerEvent.NodeStarted]]. Every `backend.start` call site routes
@@ -977,29 +998,73 @@ final class PoolSupervisor(
                   )
                   val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
                   IO.delay(tracker.remove(n.nodeId)) *>
-                    startNodeEmitting(key, respawnSpec(key, spawnState, n))
-                      .flatMap { fresh =>
-                        // Re-apply the pre-remove quarantine so an operator quarantine survives a
-                        // node crash. Only automatic reconcile respawn preserves it; restartNode
-                        // clears it.
-                        val restore: IO[Unit] =
-                          if wasQuarantined then
-                            IO.delay(tracker.setQuarantined(fresh.nodeId, true))
-                          else IO.unit
-                        poolIdByKey.get(key) match
-                          case Some(pid) =>
-                            IO.blocking(store.upsertNode(fresh, pid)) *> restore.as(kept :+ fresh)
-                          case None =>
-                            restore.as(kept :+ fresh)
+                    startNodeEmitting(key, respawnSpec(key, spawnState, n)).attempt
+                      .flatMap {
+                        case Left(NoFreeServer(_, id, reason)) =>
+                          // Fleet: the node's server is gone and no other is free. Drop the dead
+                          // row; the missing-slot fill below recreates it when capacity appears.
+                          IO.delay {
+                            pendingReasons.put(key, reason)
+                            logger.warn(
+                              s"fleet: $key/$id is dead and no server is free ($reason); " +
+                                "slot pending"
+                            )
+                          } *> IO.blocking(store.deleteNode(id)).as(kept)
+                        case Left(t)      => IO.raiseError(t)
+                        case Right(fresh) =>
+                          // Re-apply the pre-remove quarantine so an operator quarantine survives
+                          // a node crash. Only automatic reconcile respawn preserves it;
+                          // restartNode clears it.
+                          val restore: IO[Unit] =
+                            if wasQuarantined then
+                              IO.delay(tracker.setQuarantined(fresh.nodeId, true))
+                            else IO.unit
+                          poolIdByKey.get(key) match
+                            case Some(pid) =>
+                              IO.blocking(store.upsertNode(fresh, pid)) *>
+                                restore.as(kept :+ fresh)
+                            case None =>
+                              restore.as(kept :+ fresh)
                       }
               }
             }
             .flatMap { newNodes =>
-              val changed = excess.nonEmpty || newNodes.zip(keep).exists((a, b) => a ne b)
-              if changed then
-                val updated = spawnState.copy(nodes = newNodes)
-                IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
-              else IO.pure(state)
+              // Fill (index, role) slots the distribution wants but no row holds: fleet slots left
+              // pending by a NoFreeServer, or a row genuinely missing on any backend.
+              val afterHeal = spawnState.copy(nodes = newNodes)
+              val missing   = MissingSlots.compute(afterHeal.distribution, newNodes)
+              val fillIO: IO[List[RunningNode]] =
+                if missing.isEmpty || afterHeal.suspended then IO.pure(Nil)
+                else
+                  stateWithFreshBlob(key, afterHeal).flatMap { fresh =>
+                    val specs = missing.map { case (idx, role) =>
+                      val id = PoolSupervisor.nodeId(key, idx)
+                      specFromState(
+                        key,
+                        fresh,
+                        id,
+                        role,
+                        placementForNodeId(key, id),
+                        fresh.maxConcurrentPerNode
+                      )
+                    }
+                    spawnAll(key, specs).flatTap { added =>
+                      poolIdByKey.get(key).fold(IO.unit) { pid =>
+                        added.foldLeft(IO.unit)((acc, n) =>
+                          acc *> IO.blocking(store.upsertNode(n, pid))
+                        )
+                      }
+                    }
+                  }
+              fillIO.flatMap { added =>
+                val all     = newNodes ++ added
+                val changed = excess.nonEmpty || added.nonEmpty || newNodes.size != keep.size ||
+                  newNodes.zip(keep).exists((a, b) => a ne b)
+                if changed then
+                  val updated = afterHeal.copy(nodes = all)
+                  IO.delay { pools.put(key, updated); publish.topologyChanged() }.as(updated)
+                else IO.pure(state)
+              }
             }
         }
       }
@@ -1098,6 +1163,19 @@ final class PoolSupervisor(
   def supportsPlacement: Boolean = backend.supportsPlacement
 
   def get(key: PoolKey): Option[PoolState] = pools.get(key)
+
+  /** Slots the distribution wants that no node row fills (fleet: waiting for a free server). */
+  def pendingCount(key: PoolKey): Int =
+    pools.get(key).map(s => (s.distribution.total - s.nodes.size).max(0)).getOrElse(0)
+
+  /** Why the last spawn attempt left a slot of `key` pending (`none_free` | `none_fits`); None (and
+    * the entry cleared) once nothing is pending.
+    */
+  def pendingReason(key: PoolKey): Option[String] =
+    if pendingCount(key) > 0 then pendingReasons.get(key)
+    else
+      pendingReasons.remove(key)
+      None
 
   /** Surface the internal `qodstate_pool.id` for a (tenant, tenantDb, pool) triple so the RBAC
     * pool-grant UI can submit the id the grant endpoint expects. None until the pool is hydrated.
