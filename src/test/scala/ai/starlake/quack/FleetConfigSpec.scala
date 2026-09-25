@@ -19,6 +19,20 @@ class FleetConfigSpec extends AnyFlatSpec with Matchers:
     cfg.fleet.ephemeral shouldBe "fleet"
   }
 
+  it should "read the camelCase keys of an overlay, not only the defaults" in {
+    // Without a camelCase ProductHint the derived reader looks for kebab-case keys, silently
+    // ignores every configured value (QOD_FLEET_JOIN_TOKEN included) and keeps the defaults.
+    val cfg = ConfigSource
+      .string(
+        """quack-on-demand.fleet { joinToken = "t", heartbeatSec = 1, heartbeatTimeoutSec = 5,
+          |reassignAfterSec = 10, startupTimeoutSec = 7, stopTimeoutSec = 8, ephemeral = "local" }""".stripMargin
+      )
+      .withFallback(ConfigSource.default)
+      .at("quack-on-demand")
+      .loadOrThrow[ManagerConfig]
+    cfg.fleet shouldBe FleetConfig("t", 1, 5, 10, 7, 8, "local")
+  }
+
   it should "flag joinToken as sensitive so ConfigHandlers masks it" in {
     val entries = ConfigRegistry.collect(List("quack-on-demand" -> classOf[ManagerConfig]))
     entries

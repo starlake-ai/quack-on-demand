@@ -94,6 +94,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[BranchingConfig]           = ProductHint[BranchingConfig](camelMapping)
+  given ProductHint[FleetConfig]               = ProductHint[FleetConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[EmbeddedPostgresConfig]    = ProductHint[EmbeddedPostgresConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)

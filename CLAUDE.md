@@ -289,6 +289,25 @@ All three Secrets must exist BEFORE pod create (kubelet rejects pods referencing
 
 **Upgrading:** pods created by an earlier manager keep `pgPassword` as a plain env var and are NOT migrated in place. Restart every node after upgrading, for example by scaling each pool down and back up.
 
+### Fleet backend (bare servers, no Kubernetes)
+
+`QOD_RUNTIME_TYPE=fleet` plus `QOD_FLEET_JOIN_TOKEN`. Linux/macOS servers join by running
+`qod agent` (`cli/src/qod_cli/agent.py`), which heartbeats `POST /api/fleet/heartbeat` (header
+`X-Fleet-Token`, public at the guard only in fleet mode; the handler checks the token) and
+runs the one node the reply assigns via the bundled spawn script, bound to `QOD_NODE_BIND`.
+Two tables: `qodstate_fleet_server` (identity, assignment; locked by claims) and
+`qodstate_fleet_heartbeat` (agent-reported state and capacity; rewritten every interval, never
+locked by claims). `FleetQuackBackend` (`ondemand/runtime/`) claims with one
+`UPDATE ... FOR UPDATE OF s SKIP LOCKED` plus a memory-fit predicate and waits for the agent to
+report `running`. Liveness comes from the database clock (`silent_seconds`), never the JVM's, so
+HA replicas agree. `NoFreeServer(reason)` is the one failure the supervisor tolerates: the slot
+stays pending and reconcile fills it when a server joins (`MissingSlots`). Silent past
+`heartbeatTimeoutSec` = unroutable but kept; past `reassignAfterSec` = dead, respawned elsewhere.
+A known name reporting a new address is refused unless drained (shared-token takeover guard).
+`QOD_FLEET_EPHEMERAL=local` runs maintenance and merge nodes on the manager host instead of a
+fleet server. Manager-to-node is plain HTTP: fleet mode needs a private network. Design:
+docs/superpowers/specs/2026-09-25-fleet-backend-design.md.
+
 ### Manager module SPI (hosted-service plug-in)
 
 `ai.starlake.quack.spi` defines `ManagerModule`: jars on the classpath declaring
