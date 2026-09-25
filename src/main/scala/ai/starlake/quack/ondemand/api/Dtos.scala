@@ -282,6 +282,44 @@ final case class SetMaxConcurrentRequest(
 )
 final case class NodeOpRequest(tenant: String, tenantDb: String, pool: String, nodeId: String)
 
+/** Fleet agent heartbeat (POST /api/fleet/heartbeat). `state` is one of none | starting | running
+  * | failed | stopped; `startedAt` is ISO-8601.
+  */
+final case class FleetNodeReportDto(
+    assignmentEpoch: Long,
+    nodeId: Option[String],
+    state: String,
+    pid: Option[Long],
+    error: Option[String],
+    startedAt: Option[String]
+)
+final case class FleetHeartbeatRequest(
+    name: String,
+    advertiseHost: String,
+    nodePort: Int,
+    agentVersion: Option[String],
+    os: Option[String],
+    duckdbVersion: Option[String],
+    cpus: Option[Int],
+    memoryBytes: Option[Long],
+    node: FleetNodeReportDto
+)
+final case class FleetPoolKeyDto(tenant: String, tenantDb: String, pool: String)
+final case class FleetAssignmentDto(
+    epoch: Long,
+    nodeId: String,
+    poolKey: FleetPoolKeyDto,
+    port: Int,
+    token: String,
+    kind: String,
+    env: Map[String, String],
+    dbInitSql: String,
+    objectStoreSql: String,
+    extraSetupSql: String,
+    lockdownSql: String
+)
+final case class FleetHeartbeatResponse(heartbeatSec: Int, assignment: Option[FleetAssignmentDto])
+
 final case class ActiveStatementInfo(
     id: String,
     user: String,
@@ -1407,6 +1445,11 @@ object Dtos:
   given Codec[HealthResponse]           = deriveCodec
   given Codec[SetMaxConcurrentRequest]  = deriveCodec
   given Codec[NodeOpRequest]            = deriveCodec
+  given Codec[FleetNodeReportDto]       = deriveCodec
+  given Codec[FleetHeartbeatRequest]    = deriveCodec
+  given Codec[FleetPoolKeyDto]          = deriveCodec
+  given Codec[FleetAssignmentDto]       = deriveCodec
+  given Codec[FleetHeartbeatResponse]   = deriveCodec
   given Codec[ErrorResponse]            = deriveCodec
   given Codec[TenantRequest]            = ConfiguredCodec.derived
   given Codec[TenantResponse]           = deriveCodec

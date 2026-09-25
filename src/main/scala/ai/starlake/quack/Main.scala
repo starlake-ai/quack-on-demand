@@ -1761,6 +1761,10 @@ object Main extends IOApp with LazyLogging:
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,
+        fleet =
+          if FleetConfig.isFleet(mgrCfg.runtimeType) then
+            Some(new ai.starlake.quack.ondemand.api.FleetHandlers(store, mgrCfg.fleet))
+          else None,
         patAuth = Some(patAuthenticator),
         scim = Some(
           new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)

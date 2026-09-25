@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand
 
-import ai.starlake.quack.{FlightConfig, ManagerConfig}
+import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.ondemand.api._
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
@@ -75,6 +75,8 @@ final class ManagerServer(
     pat: Option[PatHandlers] = None,
     // Branches (Epic 1). None (tests / branching disabled) leaves the routes unmounted.
     branches: Option[BranchHandlers] = None,
+    // Fleet agent heartbeat (runtimeType=fleet). None leaves the route unmounted.
+    fleet: Option[FleetHandlers] = None,
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /
     // callers without Postgres) keeps the guard session-and-static-key only.
@@ -137,6 +139,9 @@ final class ManagerServer(
       // audit row) that an unrecognized path got before this feature existed, not silently
       // become "public" ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/redeem") ||
+      // Fleet agent heartbeat: the handler validates X-Fleet-Token itself. Gated on the
+      // runtime so the path stays 401 at the guard everywhere else.
+      (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
       modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface only. Everything else on
@@ -443,6 +448,12 @@ final class ManagerServer(
       RestoreEndpoints.restoreEndpoint.serverLogic { case (req, token) =>
         h.restore(req, token)(scopeOfToken)
       }
+    }
+
+    // Fleet agent heartbeat: public at the guard (fleet runtime only), X-Fleet-Token checked
+    // inside the handler.
+    val fleetEndpoints: List[ServerEndpoint[Any, IO]] = fleet.toList.flatMap { h =>
+      List(FleetEndpoints.heartbeat.serverLogic { case (req, token) => h.heartbeat(req, token) })
     }
 
     // Branches (Epic 1). Session-gated per request via TenantScopeCheck inside the handler.
@@ -916,7 +927,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

@@ -4537,6 +4537,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/heartbeat:
+    post:
+      operationId: postApiFleetHeartbeat
+      parameters:
+      - name: X-Fleet-Token
+        in: header
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FleetHeartbeatRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetHeartbeatResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-Fleet-Token'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/group/create:
     post:
       operationId: postApiGroupCreate
@@ -7426,6 +7460,122 @@ components:
         readOnly:
           type: boolean
         attachStatus:
+          type: string
+    FleetAssignmentDto:
+      title: FleetAssignmentDto
+      type: object
+      required:
+      - epoch
+      - nodeId
+      - poolKey
+      - port
+      - token
+      - kind
+      - env
+      - dbInitSql
+      - objectStoreSql
+      - extraSetupSql
+      - lockdownSql
+      properties:
+        epoch:
+          type: integer
+          format: int64
+        nodeId:
+          type: string
+        poolKey:
+          $ref: '#/components/schemas/FleetPoolKeyDto'
+        port:
+          type: integer
+          format: int32
+        token:
+          type: string
+        kind:
+          type: string
+        env:
+          $ref: '#/components/schemas/Map_String'
+        dbInitSql:
+          type: string
+        objectStoreSql:
+          type: string
+        extraSetupSql:
+          type: string
+        lockdownSql:
+          type: string
+    FleetHeartbeatRequest:
+      title: FleetHeartbeatRequest
+      type: object
+      required:
+      - name
+      - advertiseHost
+      - nodePort
+      - node
+      properties:
+        name:
+          type: string
+        advertiseHost:
+          type: string
+        nodePort:
+          type: integer
+          format: int32
+        agentVersion:
+          type: string
+        os:
+          type: string
+        duckdbVersion:
+          type: string
+        cpus:
+          type: integer
+          format: int32
+        memoryBytes:
+          type: integer
+          format: int64
+        node:
+          $ref: '#/components/schemas/FleetNodeReportDto'
+    FleetHeartbeatResponse:
+      title: FleetHeartbeatResponse
+      type: object
+      required:
+      - heartbeatSec
+      properties:
+        heartbeatSec:
+          type: integer
+          format: int32
+        assignment:
+          $ref: '#/components/schemas/FleetAssignmentDto'
+    FleetNodeReportDto:
+      title: FleetNodeReportDto
+      type: object
+      required:
+      - assignmentEpoch
+      - state
+      properties:
+        assignmentEpoch:
+          type: integer
+          format: int64
+        nodeId:
+          type: string
+        state:
+          type: string
+        pid:
+          type: integer
+          format: int64
+        error:
+          type: string
+        startedAt:
+          type: string
+    FleetPoolKeyDto:
+      title: FleetPoolKeyDto
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
           type: string
     ForgotPasswordRequest:
       title: ForgotPasswordRequest

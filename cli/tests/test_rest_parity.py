@@ -37,6 +37,8 @@ EXCLUSIONS = {
     "/api/scim/v2/{tenant}/ServiceProviderConfig",
     "/api/scim/v2/{tenant}/ResourceTypes",
     "/api/scim/v2/{tenant}/Schemas",
+    # machine-to-machine: qod agent
+    "/api/fleet/heartbeat",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

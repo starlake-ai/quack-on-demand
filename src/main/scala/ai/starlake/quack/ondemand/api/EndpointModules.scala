@@ -25,5 +25,6 @@ object EndpointModules:
     TimeTravelEndpoints,
     UndropEndpoints,
     RestoreEndpoints,
-    BranchEndpoints
+    BranchEndpoints,
+    FleetEndpoints
   )
