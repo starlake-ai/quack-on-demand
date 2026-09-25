@@ -121,6 +121,52 @@ def test_epoch_change_restarts_and_null_assignment_stops_and_clears_pidfile(tmp_
     assert http.requests[3][1]["node"]["state"] == "stopped"
 
 
+def test_new_token_or_node_id_under_the_same_epoch_restarts_the_node(tmp_path):
+    # A server removed while unreachable rejoins with its epoch reset: its next claim is epoch 1
+    # again, for the same or another node id, always with a new token. The old process must go.
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(pid=100 + len(procs)); procs.append(p); p.cmd = cmd; return p
+    first = assignment(1)
+    same = dict(first)
+    new_token = dict(first, token="tok-2")
+    new_node = dict(new_token, nodeId="quack-acme-db-bi-7")
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})
+                     for a in (first, same, new_token, new_node)])
+    agent = make_agent(http, popen, tmp_path)
+    agent.run_once(); agent.run_once()
+    assert len(procs) == 1 and not procs[0].terminated  # an identical assignment keeps the node
+    agent.run_once()
+    assert procs[0].terminated and len(procs) == 2
+    assert procs[1].cmd[-1] == "tok-2"
+    agent.run_once()
+    assert procs[1].terminated and len(procs) == 3
+    assert agent.node.assignment["nodeId"] == "quack-acme-db-bi-7"
+
+
+def test_pidfile_write_failure_keeps_the_spawned_node_tracked(tmp_path, monkeypatch, capsys):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(pid=100 + len(procs)); procs.append(p); return p
+    http = FakeHttp([
+        FakeResponse(200, {"heartbeatSec": 7, "assignment": assignment(1)}),
+        FakeResponse(200, {"heartbeatSec": 7, "assignment": assignment(1)}),
+        FakeResponse(200, {"heartbeatSec": 7, "assignment": None}),
+    ])
+    agent = make_agent(http, popen, tmp_path)
+    def no_space(self, *a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(type(agent.pidfile), "write_text", no_space)
+    assert agent.run_once() == 7  # the spawn succeeded: a normal heartbeat, not the backoff
+    assert len(procs) == 1 and agent.node is not None and agent.node.proc is procs[0]
+    assert "WARN" in capsys.readouterr().err
+    agent.run_once()
+    assert len(procs) == 1  # no second spawn for the same assignment
+    assert http.requests[1][1]["node"]["state"] == "running"
+    agent.run_once()
+    assert procs[0].terminated and agent.node is None
+
+
 def test_crash_is_restarted_with_backoff_and_reported_failed(tmp_path):
     procs = []
     def popen(cmd, env=None, **kw):

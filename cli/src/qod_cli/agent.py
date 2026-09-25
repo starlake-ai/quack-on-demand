@@ -107,6 +107,13 @@ def _cmdline(pid: int) -> str:
         return ""
 
 
+def _identity(assignment: dict) -> tuple:
+    """What makes an assignment a different node to run. The epoch alone is not enough: a server
+    removed while unreachable rejoins with its epoch reset, so its next claim can carry the same
+    epoch (and even the same node id) with a new token the old process does not accept."""
+    return assignment["epoch"], assignment["nodeId"], assignment["token"]
+
+
 def _error_of(r) -> str:
     """The manager's JSON error code and message (`address_change_refused: ...`), so a
     mis-addressed or mis-tokened agent is diagnosable from its log; the raw body otherwise."""
@@ -248,8 +255,15 @@ class Agent:
         # terminal signal. The pidfile is what lets the NEXT agent find it if this one dies.
         proc = self.popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                           start_new_session=True)
-        self.pidfile.write_text(f"{proc.pid}\n")
+        # Track the child before any fallible bookkeeping: an untracked child would be spawned
+        # again on the next heartbeat. A missing pidfile only degrades orphan reaping after an
+        # agent crash, so a write failure is a warning, not a failed start.
         self.node = _Node(assignment, proc, self.clock())
+        try:
+            self.pidfile.write_text(f"{proc.pid}\n")
+        except OSError as exc:
+            sys.stderr.write(f"qod agent: WARN could not write pidfile {self.pidfile}: {exc}; "
+                             f"a crash of this agent would leave node pid {proc.pid} unreaped\n")
 
     def _stop(self) -> None:
         n = self.node
@@ -282,7 +296,7 @@ class Agent:
             if n is not None:
                 self._stop()
             self.failures, self.next_restart_at = 0, None
-        elif n is None or n.assignment["epoch"] != assignment["epoch"]:
+        elif n is None or _identity(n.assignment) != _identity(assignment):
             spec = self._launch_spec(assignment)  # malformed: raise before stopping anything
             if n is not None:
                 self._stop()
