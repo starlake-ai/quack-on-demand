@@ -11,6 +11,8 @@ import java.net.ServerSocket
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.net.URI
 import java.security.cert.X509Certificate
+import java.time.Instant
+import scala.concurrent.duration.*
 import javax.net.ssl.{SSLContext, TrustManager, X509TrustManager}
 
 /** The HTTP shell around the dispatcher: framing, limits, the node-compatible GET and CORS answers,
@@ -112,3 +114,14 @@ class QuackFrontDoorServerSpec extends AnyFlatSpec with Matchers:
       resp.statusCode() shouldBe 200
       QuackWire.decodeErrorMessage(resp.body()) shouldBe Right("len=3")
     }
+
+  "the sweeper" should "call sweep with a fresh clock on every tick" in:
+    val seen                       = scala.collection.mutable.ArrayBuffer.empty[Instant]
+    val sweep: Instant => IO[Unit] = now => IO(seen.synchronized { seen += now; () })
+    val server = new QuackFrontDoorServer(cfg(freePort()), echo, sweep, IO.unit, 100.millis)
+    server.start().unsafeRunSync()
+    try Thread.sleep(1000)
+    finally server.stop()
+    val ticks = seen.synchronized(seen.toList)
+    ticks.size should be >= 3
+    ticks.distinct.size shouldBe ticks.size

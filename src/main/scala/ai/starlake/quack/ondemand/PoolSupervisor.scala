@@ -193,10 +193,14 @@ final class PoolSupervisor(
 
   /** Short-TTL cache for `effectiveSetForUser`: every handshake costs 3 store reads + resolver
     * joins, and the same (userId, JWT claims) tuple repeats under load. Invalidated wholesale on
-    * every RBAC mutation and on `restore()`. The key bakes in the JWT fingerprint so a claim flip
-    * is reflected immediately even within the TTL.
+    * every RBAC mutation and on `restore()`. The key carries the JWT claim sets themselves (not
+    * their hash codes, which collide) so a claim flip is reflected immediately even within the TTL.
     */
-  private final case class EffectiveCacheKey(userId: String, jwtRolesHash: Int, jwtGroupsHash: Int)
+  private final case class EffectiveCacheKey(
+      userId: String,
+      jwtRoles: Set[String],
+      jwtGroups: Set[String]
+  )
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
 
@@ -3312,7 +3316,7 @@ final class PoolSupervisor(
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
-    val key    = EffectiveCacheKey(userId, jwtRoles.hashCode, jwtGroups.hashCode)
+    val key    = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
     val cached = effectiveCache.getIfPresent(key)
     if cached != null then Some(cached)
     else

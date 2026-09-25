@@ -35,7 +35,8 @@ final class QuackFrontDoorServer(
     cfg: QuackNativeConfig,
     handle: Array[Byte] => IO[Array[Byte]],
     sweep: Instant => IO[Unit],
-    closeAll: IO[Unit]
+    closeAll: IO[Unit],
+    sweepEvery: FiniteDuration = 30.seconds
 ) extends LazyLogging:
 
   private val wireType = `Content-Type`(new MediaType("application", "vnd.duckdb"))
@@ -88,7 +89,10 @@ final class QuackFrontDoorServer(
         .withShutdownTimeout(1.second)
       built = tls.fold(base)(ctx => base.withTLS(ctx, TLSParameters.Default))
       server <- built.build
-      _      <- (IO.sleep(30.seconds) *> sweep(Instant.now()).attempt.void).foreverM.background
+      // The clock is read per tick, and `sweep` builds its IO per tick: a sweep constructed once
+      // at listener start would only ever see the sessions that existed then.
+      tick = IO.sleep(sweepEvery) *> IO.realTimeInstant.flatMap(sweep).attempt.void
+      _ <- tick.foreverM.background
     yield server
 
   private val release = new AtomicReference[Option[IO[Unit]]](None)

@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.adapter
 
 import ai.starlake.quack.model.RunningNode
-import cats.effect.IO
+import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 
 final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) extends LazyLogging:
@@ -29,17 +29,10 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) 
   ): IO[QuackResponse] =
     // Quack's URI scheme; DuckDB's `quack_query` parses it.
     val endpoint = s"quack:${node.host}:${node.port}"
-    val onStart  = if recordLoad then IO.delay(tracker.onStart(node.nodeId)) else IO.unit
     val call     = stampPrelude match
       case Some(p) => client.queryStamped(endpoint, node.token, p, sql)
       case None    => client.query(endpoint, node.token, sql, session)
-    onStart *>
-      call.flatMap { resp =>
-        IO.delay {
-          if recordLoad then bookkeep(node, NodeOutcome.fromQuackResponse(resp))
-          resp
-        }
-      }
+    withLoad(node, recordLoad)(call)(NodeOutcome.fromQuackResponse)
 
   /** Run any node call with the same load, latency and health bookkeeping as [[send]]. This is what
     * the native Quack relay wraps its per-statement node connection in, so both transports feed the
@@ -49,13 +42,20 @@ final class QuackHttpAdapter(client: QuackHttpClient, tracker: NodeLoadTracker) 
   def tracked[A](node: RunningNode, recordLoad: Boolean)(
       call: IO[NodeOutcome[A]]
   ): IO[NodeOutcome[A]] =
-    val onStart = if recordLoad then IO.delay(tracker.onStart(node.nodeId)) else IO.unit
-    onStart *>
-      call.flatMap { out =>
-        IO.delay {
-          if recordLoad then bookkeep(node, out)
-          out
-        }
+    withLoad(node, recordLoad)(call)(identity)
+
+  /** The in-flight bracket around one node call. `onStart` and the release are the acquire and
+    * release of a `bracketCase`, so a cancelled or raised call still gives its slot back: it is
+    * released without a latency sample, since there is no outcome to book.
+    */
+  private def withLoad[A](node: RunningNode, recordLoad: Boolean)(
+      call: IO[A]
+  )(outcome: A => NodeOutcome[?]): IO[A] =
+    if !recordLoad then call
+    else
+      IO.delay(tracker.onStart(node.nodeId)).bracketCase(_ => call) {
+        case (_, Outcome.Succeeded(fa)) => fa.flatMap(a => IO.delay(bookkeep(node, outcome(a))))
+        case (_, _)                     => IO.delay(tracker.onAbort(node.nodeId))
       }
 
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =

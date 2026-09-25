@@ -223,3 +223,43 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val adapter = new QuackHttpAdapter(client, tracker)
     adapter.engineStats(node("es2")).unsafeRunSync() shouldBe None
     tracker.snapshot("es2").healthy shouldBe true
+
+  "tracked" should "release inFlight when the call is cancelled" in:
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)
+    val n       = node("n-cancel")
+    cats.effect
+      .Deferred[IO, Unit]
+      .flatMap { started =>
+        adapter
+          .tracked[Unit](n, recordLoad = true)(started.complete(()) *> IO.never)
+          .start
+          .flatMap(f => started.get *> f.cancel)
+      }
+      .unsafeRunSync()
+    tracker.snapshot(n.nodeId).inFlight shouldBe 0
+    tracker.snapshot(n.nodeId).totalServed shouldBe 0L
+
+  it should "release inFlight when the call raises" in:
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)
+    val n       = node("n-raise")
+    val boom    = new RuntimeException("boom")
+    adapter
+      .tracked[Unit](n, recordLoad = true)(IO.raiseError(boom))
+      .attempt
+      .unsafeRunSync() shouldBe
+      Left(boom)
+    tracker.snapshot(n.nodeId).inFlight shouldBe 0
+
+  "send" should "release inFlight when the client raises" in:
+    val boom   = new RuntimeException("socket reset")
+    val client =
+      new QuackHttpClient(TestArrow.sharedAllocator, nativeClient = true, nodeDisableSsl = true):
+        override def query(e: String, t: String, s: String, ss: Option[String]): IO[QuackResponse] =
+          IO.raiseError(boom)
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val n       = node("n-send-raise")
+    adapter.send(n, "SELECT 1", None).attempt.unsafeRunSync() shouldBe Left(boom)
+    tracker.snapshot(n.nodeId).inFlight shouldBe 0
