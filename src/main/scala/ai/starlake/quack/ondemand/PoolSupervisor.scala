@@ -40,8 +40,9 @@ import ai.starlake.quack.ondemand.state.{
 import ai.starlake.quack.ondemand.storage.ManagedPrefix
 import ai.starlake.quack.route.PoolSnapshot
 import ai.starlake.quack.spi.ManagerEvent
-import cats.effect.IO
+import cats.effect.{IO, Outcome, Ref}
 import cats.effect.unsafe.implicits.global
+import cats.syntax.all._
 import org.slf4j.LoggerFactory
 
 import scala.collection.concurrent.TrieMap
@@ -743,34 +744,45 @@ final class PoolSupervisor(
     *
     * A [[NoFreeServer]] (fleet backend: no server free or none fits) leaves that slot pending
     * instead of failing the operation; reconcile fills it once capacity appears. Every other
-    * failure first stops (best effort) every node this call already started, then propagates
+    * failure, AND a cancellation of the calling fiber (request timeout, resume hold timeout,
+    * shutdown), first stops (best effort) every node this call already started, then propagates
     * unchanged: callers persist rows and the new distribution only after the whole call succeeds,
     * so a node left running here would be capacity no row tracks (a fleet server kept assigned, a
     * pod or process leaked).
+    *
+    * Cancellation safety: each start stays cancelable (the backend releases its own in-flight claim
+    * on cancel), but a completed start is recorded in `started` in the same uncancelable step, so
+    * the rollback finalizer always sees it. The rollback stops run in parallel (each releases its
+    * own claim) so the pool lock is held about one stop timeout at worst.
     */
   private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
-    specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
-      acc.flatMap { rs =>
-        IO.delay(tracker.remove(spec.nodeId)) *>
-          startNodeEmitting(key, spec).map(rs :+ _).recoverWith {
-            case NoFreeServer(_, id, reason) =>
-              IO.delay {
-                pendingReasons.put(key, reason)
-                logger.info(s"fleet: slot $id of $key pending ($reason)")
-              }.as(rs)
-            case t =>
-              IO.delay(
-                logger.warn(
-                  s"start of ${spec.nodeId} in $key failed (${t.getMessage}); stopping " +
-                    s"${rs.size} node(s) this call started: ${rs.map(_.nodeId).mkString(", ")}"
-                )
-              ) *>
-                rs.foldLeft(IO.unit)((a, n) =>
-                  a *> stopNodeBestEffort(key, n.nodeId, "spawn-rollback")
-                ) *>
-                IO.raiseError(t)
+    Ref.of[IO, List[RunningNode]](Nil).flatMap { started =>
+      val startEach: IO[Unit] = specs.traverse_ { spec =>
+        (IO.delay(tracker.remove(spec.nodeId)) *>
+          IO.uncancelable { poll =>
+            poll(startNodeEmitting(key, spec)).flatMap(n => started.update(_ :+ n))
+          }).recoverWith { case NoFreeServer(_, id, reason) =>
+          IO.delay {
+            pendingReasons.put(key, reason)
+            logger.info(s"fleet: slot $id of $key pending ($reason)")
           }
+        }
       }
+      def rollback(cause: String): IO[Unit] = started.get.flatMap { rs =>
+        if rs.isEmpty then IO.unit
+        else
+          IO.delay(
+            logger.warn(
+              s"spawn in $key $cause; stopping ${rs.size} node(s) this call started: " +
+                rs.map(_.nodeId).mkString(", ")
+            )
+          ) *> rs.parTraverse_(n => stopNodeBestEffort(key, n.nodeId, "spawn-rollback"))
+      }
+      startEach.guaranteeCase {
+        case Outcome.Succeeded(_) => IO.unit
+        case Outcome.Errored(t)   => IO.uncancelable(_ => rollback(s"failed (${t.getMessage})"))
+        case Outcome.Canceled()   => IO.uncancelable(_ => rollback("was cancelled"))
+      } *> started.get
     }
 
   /** Start one node and emit [[ManagerEvent.NodeStarted]]. Every `backend.start` call site routes

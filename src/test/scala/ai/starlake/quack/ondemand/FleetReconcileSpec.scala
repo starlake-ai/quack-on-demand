@@ -230,13 +230,18 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
   private final class Agent(store: FleetServerStore, val name: String, host: String):
     @volatile var paused: Boolean = false
     // When set, the agent reports its assignment `failed` instead of `running`.
-    @volatile var failing: Boolean                         = false
+    @volatile var failing: Boolean = false
+    // When set, the agent reports its assignment `starting` forever (a slow node start).
+    @volatile var starting: Boolean                        = false
     @volatile private var lastRun: Option[FleetAssignment] = None
     def beat(): Unit                                       =
       val node = store.get(name).flatMap(_.assignment) match
         case Some(a) if failing =>
           lastRun = Some(a)
           NodeReport(a.epoch, Some(a.nodeId), "failed", None, Some("boom"), None)
+        case Some(a) if starting =>
+          lastRun = Some(a)
+          NodeReport(a.epoch, Some(a.nodeId), "starting", None, None, None)
         case Some(a) =>
           lastRun = Some(a)
           NodeReport(a.epoch, Some(a.nodeId), "running", Some(1L), None, Some(Instant.EPOCH))
@@ -415,6 +420,35 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.inner.list().flatMap(_.assignedNodeId) shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("a")
       fx.rowIds shouldBe List(id(1))
+      fx.sup.get(fx.key).get.distribution shouldBe RoleDistribution(0, 0, 1)
+      fx.sup.poolEntity(fx.sup.poolId(fx.key).get).get.distribution shouldBe
+        RoleDistribution(0, 0, 1)
+    }
+  }
+
+  it should "cancelling a scale after node 2 is running and while node 3 is starting releases node 2 and node 3, keeps node 1, rows and distribution unchanged" in {
+    val fx = new Fx
+    fx.join("a"); fx.join("b"); fx.join("c")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      // `c` (where -3 lands) never gets past `starting`.
+      fx.agents("c").starting = true
+      val scaling = fx.sup
+        .scale(fx.key, 3, RoleDistribution(0, 0, 3), force = true)
+        .start
+        .unsafeRunSync()
+      fx.eventually(
+        fx.inner.get("b").exists(r => r.assignedNodeId.contains(id(2)) && r.nodeState == "running")
+          && fx.holder(id(3)) == List("c")
+      )
+      // Request timeout, resume hold timeout, shutdown: the scale fiber is cancelled.
+      scaling.cancel.unsafeRunSync()
+      scaling.join.unsafeRunSync().isCanceled shouldBe true
+      fx.inner.list().flatMap(_.assignedNodeId) shouldBe List(id(1))
+      fx.holder(id(1)) shouldBe List("a")
+      fx.rowIds shouldBe List(id(1))
+      fx.sup.get(fx.key).get.nodes.map(_.nodeId) shouldBe List(id(1))
       fx.sup.get(fx.key).get.distribution shouldBe RoleDistribution(0, 0, 1)
       fx.sup.poolEntity(fx.sup.poolId(fx.key).get).get.distribution shouldBe
         RoleDistribution(0, 0, 1)
