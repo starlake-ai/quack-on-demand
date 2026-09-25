@@ -529,6 +529,16 @@ final class PostgresControlPlaneStore(
   def deleteNode(nodeId: String): Unit =
     withConn(c => deleteById(c, "qodstate_node", "node_id", nodeId))
 
+  def nodeExists(nodeId: String): Boolean = withConn { c =>
+    val st = c.prepareStatement("SELECT 1 FROM qodstate_node WHERE node_id = ?")
+    try
+      st.setString(1, nodeId)
+      val rs = st.executeQuery()
+      try rs.next()
+      finally rs.close()
+    finally st.close()
+  }
+
   def deleteNodesForPool(poolId: String): Unit = withConn { c =>
     val st = c.prepareStatement("DELETE FROM qodstate_node WHERE pool_id = ?")
     try

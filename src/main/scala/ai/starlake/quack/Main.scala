@@ -337,8 +337,6 @@ object Main extends IOApp with LazyLogging:
       grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.role))
     )
 
-    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
-
     val secretResolver: SecretResolver =
       BootFactories.secretResolver(mgrCfg.federation.secretStore)
     logger.info(
@@ -355,6 +353,14 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // After the store: the fleet backend claims servers through it (FleetServerStore).
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store)
+    backend match
+      case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend =>
+        f.nodeRowExists = id => store.nodeExists(id)
+      case _ => ()
+    // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
+    val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
     // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
@@ -1595,8 +1601,8 @@ object Main extends IOApp with LazyLogging:
           resolveReader = catalogReader,
           cloneCatalog = (meta, parentDb, branchDb, path) =>
             ai.starlake.quack.ondemand.branch.BranchCloner(meta).clone(parentDb, branchDb, path),
-          mergeExecutor =
-            ai.starlake.quack.boot.BranchWiring.mergeExecutor(mgrCfg.branching, backend, adapter),
+          mergeExecutor = ai.starlake.quack.boot.BranchWiring
+            .mergeExecutor(mgrCfg.branching, ephemeralBackend, adapter),
           counter = ai.starlake.quack.boot.BranchWiring.changeCounter(
             previewExecutor,
             b => branchService.poolKeyOf(b),
@@ -1922,7 +1928,7 @@ object Main extends IOApp with LazyLogging:
                 val maintenanceWiring = new ai.starlake.quack.boot.MaintenanceWiring(
                   store = store,
                   sup = sup,
-                  backend = backend,
+                  backend = ephemeralBackend,
                   adapter = adapter,
                   poolLocks = poolLocks,
                   catalogReader = catalogReader,

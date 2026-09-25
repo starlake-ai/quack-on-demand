@@ -127,6 +127,9 @@ trait ControlPlaneStore:
   def listNodes(poolId: String): List[RunningNode]
   def deleteNode(nodeId: String): Unit
 
+  /** True when a qodstate_node row exists for `nodeId` (any pool). */
+  def nodeExists(nodeId: String): Boolean
+
   /** Delete every node row of `poolId`, including rows no in-memory state knows about (crash
     * orphans, peer-replica writes). Lets deletePool succeed against the FK RESTRICT.
     */

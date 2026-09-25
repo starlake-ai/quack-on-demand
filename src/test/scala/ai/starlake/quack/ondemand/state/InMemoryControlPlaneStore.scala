@@ -127,6 +127,8 @@ final class InMemoryControlPlaneStore extends ControlPlaneStore:
     nodes.remove(nodeId)
     nodeIndex.remove(nodeId)
 
+  def nodeExists(nodeId: String): Boolean = nodes.contains(nodeId)
+
   def deleteNodesForPool(poolId: String): Unit =
     nodeIndex.collect { case (nid, pid) if pid == poolId => nid }.foreach { nid =>
       nodes.remove(nid)
