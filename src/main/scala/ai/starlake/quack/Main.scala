@@ -109,6 +109,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[AwsAuthConfig]             = ProductHint[AwsAuthConfig](camelMapping)
   given ProductHint[JwtAuthConfig]             = ProductHint[JwtAuthConfig](camelMapping)
   given ProductHint[AuthenticationConfig]      = ProductHint[AuthenticationConfig](camelMapping)
+  given ProductHint[HibernationConfig]         = ProductHint[HibernationConfig](camelMapping)
 
   given ConfigReader[K8sConfig]                = deriveReader[K8sConfig]
   given ConfigReader[AdminConfig]              = deriveReader[AdminConfig]

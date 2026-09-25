@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **`QOD_HIBERNATE_SWEEP_SEC` and `QOD_HIBERNATE_IDLE_MIN` are honoured again.** The
+  `quack-on-demand.hibernation` block had no camelCase pureconfig hint, so the derived reader looked
+  for `sweep-seconds` / `default-idle-minutes`, found neither, and kept the defaults (300 s sweep,
+  no manager-wide idle minutes) whatever the environment said; only the single-word `enabled` key
+  was read. `HibernationConfigSpec` loads a camelCase overlay so a missing hint fails the build
+  instead of the operator's configuration.
+
 ## 0.9.6
 
 - **`ATTACH ... (TYPE quack)` now works for users holding column policies, and their masks hold on
