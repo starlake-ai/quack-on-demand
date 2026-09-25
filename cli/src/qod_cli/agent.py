@@ -39,6 +39,10 @@ _ENV_PASSTHROUGH = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "SHELL",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "DUCKDB_BIN", "QOD_APP_HOME",
+    # The spawn script's CREATE DATABASE admin db, and libpq / OpenSSL settings for a metastore
+    # reached over TLS: without them every node of the fleet fails, silently.
+    "PG_ADMIN_DB", "PGSSLMODE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGCONNECT_TIMEOUT",
+    "SSL_CERT_FILE",
 )
 # Object-storage settings the spawn script reads.
 _ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
@@ -101,6 +105,18 @@ def _cmdline(pid: int) -> str:
         return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def _error_of(r) -> str:
+    """The manager's JSON error code and message (`address_change_refused: ...`), so a
+    mis-addressed or mis-tokened agent is diagnosable from its log; the raw body otherwise."""
+    try:
+        body = r.json()
+    except (ValueError, TypeError, AttributeError):
+        body = None
+    if isinstance(body, dict) and body.get("error"):
+        return f"{body['error']}: {body.get('message', '')}"
+    return getattr(r, "text", "") or ""
 
 
 class _Node:
@@ -300,7 +316,7 @@ class Agent:
             sys.stderr.write(f"qod agent: heartbeat failed: {exc}\n")
             return BACKOFF_MIN_S
         if not r.is_success:
-            sys.stderr.write(f"qod agent: manager answered {r.status_code}: {getattr(r, 'text', '')}\n")
+            sys.stderr.write(f"qod agent: WARN manager answered {r.status_code}: {_error_of(r)}\n")
             return BACKOFF_MIN_S
         # One bad reply (not JSON, a malformed assignment) or a failed spawn/pidfile write must not
         # kill the agent: log it, keep whatever node runs, and heartbeat again after the backoff.

@@ -183,6 +183,37 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
     assert env["pgPassword"] == "pw" and env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
 
 
+def test_node_env_passes_the_spawn_scripts_admin_db_and_libpq_tls_settings(tmp_path, monkeypatch):
+    # The spawn script's CREATE DATABASE runs against PG_ADMIN_DB, and a TLS metastore needs the
+    # libpq PGSSL* settings: dropping them fails every node of the fleet, silently.
+    passed = {"PG_ADMIN_DB": "maint", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": "/etc/ca.pem",
+              "PGSSLCERT": "/etc/c.pem", "PGSSLKEY": "/etc/k.pem", "PGCONNECT_TIMEOUT": "7",
+              "SSL_CERT_FILE": "/etc/bundle.pem"}
+    for k, v in passed.items():
+        monkeypatch.setenv(k, v)
+    envs = []
+    def popen(cmd, env=None, **kw):
+        envs.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    make_agent(http, popen, tmp_path).run_once()
+    assert {k: envs[0].get(k) for k in passed} == passed
+
+
+def test_non_2xx_reply_logs_the_manager_error_code_at_warn(tmp_path, capsys):
+    refused = FakeResponse(409, {"error": "address_change_refused", "message": "known with another address"})
+    refused.text = '{"error":"address_change_refused","message":"known with another address"}'
+    unauthorized = FakeResponse(401, {"error": "fleet_unauthorized", "message": "invalid token"})
+    not_json = FakeResponse(502, None)
+    not_json.json = lambda: (_ for _ in ()).throw(ValueError("not json"))
+    not_json.text = "<html>bad gateway</html>"
+    agent = make_agent(FakeHttp([refused, unauthorized, not_json]), lambda *a, **k: FakeProc(), tmp_path)
+    assert agent.run_once() == 5 and agent.run_once() == 5 and agent.run_once() == 5
+    err = capsys.readouterr().err.splitlines()
+    assert "WARN" in err[0] and "409" in err[0] and "address_change_refused" in err[0]
+    assert "WARN" in err[1] and "fleet_unauthorized" in err[1]
+    assert "WARN" in err[2] and "502" in err[2] and "bad gateway" in err[2]
+
+
 def test_non_json_reply_is_a_failed_heartbeat_and_keeps_the_node(tmp_path):
     procs = []
     def popen(cmd, env=None, **kw):

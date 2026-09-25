@@ -23,6 +23,11 @@ class NodeResourceSqlSpec extends AnyFlatSpec with Matchers:
       Some("512Mi")
     ) shouldBe "SET threads = 2;\nSET memory_limit = '512MiB';\n"
   }
+  it should "skip an absurd quantity instead of wrapping it around" in {
+    NodeResourceSql.render(Some("1e10"), None) shouldBe ""
+    NodeResourceSql.render(None, Some("1e30")) shouldBe ""
+    NodeResourceSql.render(Some("1e10"), Some("4Gi")) shouldBe "SET memory_limit = '4096MiB';\n"
+  }
   it should "ignore an unparsable quantity rather than break the node" in {
     NodeResourceSql.render(Some("lots"), Some("4Gi")) shouldBe "SET memory_limit = '4096MiB';\n"
   }

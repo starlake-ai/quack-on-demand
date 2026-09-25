@@ -42,10 +42,15 @@ import scala.util.Try
   *   6. drain s1: the slot goes pending, s1 keeps no assignment;
   *   7. undrain s1: the node comes back on s1;
   *   8. SIGKILL the agent (the node survives it), restart the agent: it reaps the orphan through
-  *      its pidfile and the node comes back on s1, capacity reported;
+  *      its pidfile and the node comes back on s1, capacity reported; 8b. scale the pool to 0 and
+  *      back to 1: the scale-down returns in seconds, well under `stopTimeoutSec` (60 s here),
+  *      because the agent's stop confirmation is seen; 8c. SIGSTOP the agent past the reassign
+  *      window: the node row goes, the slot goes pending and s1 keeps no assignment; SIGCONT: the
+  *      thawed agent stops its old node and the slot refills on s1;
   *   9. SIGTERM the agent: its node stops; after the reassign window the node row is gone and the
   *      slot is pending again;
-  *   10. teardown (afterAll, also on failure): agent and node processes, manager fiber, database.
+  *   10. teardown (afterAll, also on failure, timed): agent and node processes, manager fiber,
+  *       database.
   *
   * Cancelled (not failed) when `duckdb` or `uv` is not on PATH, when the CLI checkout has no `cli/`
   * directory, or when the test Postgres (SL_TEST_PG_* envs) is unreachable. Never touches the
@@ -186,8 +191,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       "agent",
       "--manager",
       s"http://127.0.0.1:$RestPort",
-      "--join-token",
-      JoinToken,
       "--name",
       Server,
       "--advertise-host",
@@ -200,9 +203,11 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       stateDir.toString,
       "--insecure"
     )
-    // VIRTUAL_ENV from the caller's shell would make uv warn and could point it elsewhere.
+    // VIRTUAL_ENV from the caller's shell would make uv warn and could point it elsewhere. The
+    // join token goes through the environment, as the operator recipe says: a flag is visible
+    // in `ps`.
     val before = uvChildren()
-    val p      = Process(cmd, cliDir, "VIRTUAL_ENV" -> "")
+    val p      = Process(cmd, cliDir, "VIRTUAL_ENV" -> "", "QOD_FLEET_JOIN_TOKEN" -> JoinToken)
       .run(ProcessLogger(l => println(s"[agent] $l"), l => println(s"[agent] $l")))
     agent = Some(p)
     // The scala Process API exposes no pid: find the new `uv` child of this JVM.
@@ -244,6 +249,9 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     Try(Process(Seq("kill", "-KILL", s"-$pid")).!(ProcessLogger(_ => ())))
     Try(Process(Seq("kill", "-KILL", pid.toString)).!(ProcessLogger(_ => ())))
 
+  private def signal(sig: String, pid: Long): Unit =
+    Process(Seq("kill", s"-$sig", pid.toString)).!(ProcessLogger(_ => ())) shouldBe 0
+
   private def awaitAgentGone(): Unit =
     await("the agent process to exit")(Option.when(agent.forall(!_.isAlive()))(()))
     agent = None
@@ -277,7 +285,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
          |    heartbeatTimeoutSec = 5
          |    reassignAfterSec = 10
          |    startupTimeoutSec = 60
-         |    stopTimeoutSec = 10
+         |    stopTimeoutSec = 60
          |    ephemeral = "fleet"
          |  }
          |}
@@ -369,9 +377,15 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       stateDir = Files.createTempDirectory("qod-fleet-smoke")
 
   override def afterAll(): Unit =
+    val t0 = System.nanoTime()
+    teardown()
+    println(f"[fleet-smoke] ${"10 teardown"}%-40s ${(System.nanoTime() - t0) / 1_000_000}%6d ms")
+
+  private def teardown(): Unit =
     // Agents first (TERM, then KILL whatever is left of the tree), then every node group the
     // pidfiles named, then the manager fiber, then the database. Each stage is guarded so one
-    // failure cannot skip the next.
+    // failure cannot skip the next. A frozen agent (step 8c failing mid-way) is thawed first.
+    Try(agentHandles().foreach(h => signal("CONT", h.pid())))
     Try(agentHandles().foreach(_.destroy()))
     Try {
       val deadline = System.nanoTime() + 15.seconds.toNanos
@@ -481,6 +495,69 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     s.hcursor.get[Option[Long]]("memoryBytes").toOption.flatten should not be empty
     val fresh = recordNodePid().getOrElse(fail("no node pidfile after the restart"))
     fresh should not be orphan
+  }
+
+  private def scale(size: Int): Long =
+    val t0 = System.nanoTime()
+    post(
+      "/api/pool/scale",
+      s"""{"tenant":"$Tenant","tenantDb":"$TenantDb","pool":"$Pool","targetSize":$size,
+         |"roleDistribution":{"writeonly":0,"readonly":0,"dual":$size},"force":true}""".stripMargin
+    )
+    val ms = (System.nanoTime() - t0) / 1_000_000
+    println(s"[fleet-smoke]   pool/scale to $size returned in $ms ms")
+    ms
+
+  "fleet smoke 8b" should "scale the pool to 0 and back to 1 without waiting out the stop timeout" in step(
+    "8b scale 1 -> 0 -> 1"
+  ) {
+    val before = recordNodePid().getOrElse(fail("no node pidfile before the scale-down"))
+    // stopTimeoutSec is 60 s: a stop confirmation the manager cannot see would stall here.
+    scale(0) should be < 20_000L
+    await("no node and no pending slot at size 0") {
+      val p = pool()
+      Option.when(p.nodes.isEmpty && p.pending == 0)(())
+    }
+    await("node process stopped by the agent")(Option.when(!alive(before))(()))
+    server().flatMap(str(_, "assignedNodeId")) shouldBe None
+    scale(1)
+    val node = await("node back at size 1") {
+      val p = pool()
+      Option.when(p.nodes.size == 1 && p.pending == 0)(p.nodes.head)
+    }
+    str(node, "serverName") shouldBe Some(Server)
+    await("s1 running again after the scale-up") {
+      server().filter(s => str(s, "nodeState").contains("running"))
+    }
+    recordNodePid() should not be empty
+  }
+
+  "fleet smoke 8c" should "free a frozen server's slot and refill it once the agent thaws" in step(
+    "8c SIGSTOP agent past reassign window"
+  ) {
+    val agentPid   = agentHandles().headOption.map(_.pid()).getOrElse(fail("no agent process"))
+    val frozenNode = recordNodePid().getOrElse(fail("no node pidfile before the freeze"))
+    signal("STOP", agentPid)
+    try
+      // reassignAfterSec = 10, reconcile every 2 s: the node row goes, the slot goes pending.
+      await("node row gone and the slot pending while the agent is frozen") {
+        val p = pool()
+        Option.when(p.nodes.isEmpty && p.pending == 1)(())
+      }
+      server().flatMap(str(_, "assignedNodeId")) shouldBe None
+      alive(frozenNode) shouldBe true // the node itself never froze
+    finally signal("CONT", agentPid)
+    // The thawed agent sees no assignment (or a fresh epoch) and stops the old node.
+    await("old node stopped by the thawed agent")(Option.when(!alive(frozenNode))(()))
+    val node = await("slot refilled on s1") {
+      val p = pool()
+      Option.when(p.nodes.size == 1 && p.pending == 0)(p.nodes.head)
+    }
+    str(node, "serverName") shouldBe Some(Server)
+    await("s1 running a fresh node") {
+      server().filter(s => str(s, "nodeState").contains("running"))
+    }
+    recordNodePid().filterNot(_ == frozenNode) should not be empty
   }
 
   "fleet smoke 9" should "stop the node and free the slot when the agent is stopped" in step(

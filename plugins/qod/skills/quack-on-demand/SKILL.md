@@ -1574,8 +1574,9 @@ Things to know:
 ## Fleet mode (nodes on your own servers, no Kubernetes)
 
 Manager: `QOD_RUNTIME_TYPE=fleet QOD_FLEET_JOIN_TOKEN=<random>` (plus HA if you run several managers).
-Every Linux or macOS server: `uvx qod agent --manager https://mgr:20900 --join-token <random> --advertise-host <data-ip>`
-under systemd or launchd (unit files below). A joined server runs exactly one node; pools are scheduled
+Every Linux or macOS server: `QOD_FLEET_JOIN_TOKEN=<random> uvx qod agent --manager https://mgr:20900 --advertise-host <data-ip>`
+under systemd or launchd (unit files below). Pass the token through the environment, never
+`--join-token`: a command-line argument is visible to every local user in `ps`. A joined server runs exactly one node; pools are scheduled
 onto free servers whose reported RAM covers the pool's `--memory`. `qod pool create --size 3` before three
 servers exist is fine: the pool shows `pending` (reason `none_free` or `none_fits`) until they join.
 
@@ -1600,6 +1601,13 @@ WantedBy=multi-user.target
 launchd plist (`/Library/LaunchDaemons/ai.starlake.qod-agent.plist`): `ProgramArguments` with the same
 command line, `KeepAlive` true, `EnvironmentVariables` carrying the token. On a crash the next agent
 start reaps the previous node through `node.pid` in the state dir.
+
+The node does NOT inherit the agent's whole environment (the agent holds the join token). It gets only
+`PATH HOME TMPDIR LANG LC_ALL TZ USER LOGNAME SHELL`, the proxy variables, `DUCKDB_BIN`, `QOD_APP_HOME`,
+`QOD_S3_*` / `QOD_AZURE_*`, and these metastore settings, so set them on the agent's unit when needed:
+`PG_ADMIN_DB` (the database `CREATE DATABASE` runs from, when it is not `postgres`), `PGSSLMODE`,
+`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `PGCONNECT_TIMEOUT` (a metastore reached over TLS) and
+`SSL_CERT_FILE`. Anything else exported on the agent never reaches a node.
 
 - `qod fleet servers` lists servers with liveness (reachable / unreachable / dead) and the node they run.
 - Maintenance on a server: `qod fleet drain <name>` (its node moves elsewhere or goes pending), work,

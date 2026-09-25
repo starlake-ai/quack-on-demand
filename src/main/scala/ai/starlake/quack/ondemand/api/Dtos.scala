@@ -157,6 +157,8 @@ final case class PoolResponse(
     maxNodes: Option[Int] = None,
     // Fleet: slots the distribution wants that no node fills yet, and why the last spawn attempt
     // left them pending ("none_free" | "none_fits"); 0 / None on every other backend.
+    // `pendingReason` is replica-local (it explains the last spawn attempt of the replica that
+    // answers): under HA a follower may report pending > 0 with pendingReason = None.
     pending: Int = 0,
     pendingReason: Option[String] = None
 )

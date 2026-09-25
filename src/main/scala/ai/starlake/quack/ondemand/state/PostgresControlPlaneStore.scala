@@ -1606,7 +1606,8 @@ final class PostgresControlPlaneStore(
       attempt(1)
     catch
       case t: Throwable =>
-        c.rollback()
+        // A failing rollback (connection already broken) must not hide the original error.
+        scala.util.Try(c.rollback())
         throw t
     finally c.setAutoCommit(true)
   }
@@ -1753,7 +1754,8 @@ final class PostgresControlPlaneStore(
         result
       catch
         case t: Throwable =>
-          c.rollback()
+          // A failing rollback (connection already broken) must not hide the original error.
+          scala.util.Try(c.rollback())
           throw t
       finally c.setAutoCommit(true)
     }
