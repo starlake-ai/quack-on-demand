@@ -154,6 +154,11 @@ final class PoolSupervisor(
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private val pendingReasons = TrieMap.empty[PoolKey, String]
 
+  /** Fleet server name -> liveness (`reachable | unreachable | dead`), for the pool listing's
+    * NodeInfo.serverState. Main sets it in fleet mode; None everywhere else.
+    */
+  @volatile var serverLiveness: String => Option[String] = _ => None
+
   // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
   // encryption disagreement between the control-plane row and the catalog's own metadata).
   // Populated by ensureDuckLakeInitialized when a pre-init guard refuses at boot; consulted by

@@ -451,9 +451,22 @@ final class ManagerServer(
     }
 
     // Fleet agent heartbeat: public at the guard (fleet runtime only), X-Fleet-Token checked
-    // inside the handler.
+    // inside the handler. The server admin endpoints go through the normal guard and are
+    // superuser-gated per request inside the handler.
     val fleetEndpoints: List[ServerEndpoint[Any, IO]] = fleet.toList.flatMap { h =>
-      List(FleetEndpoints.heartbeat.serverLogic { case (req, token) => h.heartbeat(req, token) })
+      List[ServerEndpoint[Any, IO]](
+        FleetEndpoints.heartbeat.serverLogic { case (req, token) => h.heartbeat(req, token) },
+        FleetEndpoints.listServers.serverLogic(token => h.listServers(token)(scopeOfToken)),
+        FleetEndpoints.drainServer.serverLogic { case (req, token) =>
+          h.drain(req, token)(scopeOfToken)
+        },
+        FleetEndpoints.undrainServer.serverLogic { case (req, token) =>
+          h.undrain(req, token)(scopeOfToken)
+        },
+        FleetEndpoints.removeServer.serverLogic { case (req, token) =>
+          h.remove(req, token)(scopeOfToken)
+        }
+      )
     }
 
     // Branches (Epic 1). Session-gated per request via TenantScopeCheck inside the handler.

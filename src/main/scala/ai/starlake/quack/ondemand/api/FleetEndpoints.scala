@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import Dtos.given
 import EndpointSchemas.given
+import Endpoints.authToken
 import sttp.tapir._
 import sttp.tapir.generic.auto._
 import sttp.tapir.json.circe._
@@ -27,3 +28,48 @@ object FleetEndpoints:
       .in(jsonBody[FleetHeartbeatRequest])
       .in(header[Option[String]]("X-Fleet-Token"))
       .out(jsonBody[FleetHeartbeatResponse])
+
+  // Admin surface: superuser session or static key only (checked in the handler).
+  val listServers: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    FleetServerListResponse,
+    Any
+  ] =
+    base.get
+      .in("fleet" / "servers")
+      .in(authToken)
+      .out(jsonBody[FleetServerListResponse])
+
+  val drainServer: PublicEndpoint[
+    (FleetServerOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("fleet" / "server" / "drain")
+      .in(jsonBody[FleetServerOpRequest])
+      .in(authToken)
+
+  val undrainServer: PublicEndpoint[
+    (FleetServerOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("fleet" / "server" / "undrain")
+      .in(jsonBody[FleetServerOpRequest])
+      .in(authToken)
+
+  val removeServer: PublicEndpoint[
+    (FleetServerOpRequest, Option[String]),
+    (sttp.model.StatusCode, ErrorResponse),
+    Unit,
+    Any
+  ] =
+    base.post
+      .in("fleet" / "server" / "remove")
+      .in(jsonBody[FleetServerOpRequest])
+      .in(authToken)

@@ -128,7 +128,11 @@ final case class NodeInfo(
     duckdbSpillBytes: Option[Long] = None,
     // Declared catalogs that failed to ATTACH on this node (Iceberg REST today). Empty is the
     // healthy case; a non-empty list means the node serves everything EXCEPT these catalogs.
-    catalogAttachFailures: List[CatalogAttachFailureDto] = Nil
+    catalogAttachFailures: List[CatalogAttachFailureDto] = Nil,
+    // Fleet mode only: the server hosting the node and its liveness
+    // (reachable | unreachable | dead). None on every other runtime.
+    serverName: Option[String] = None,
+    serverState: Option[String] = None
 )
 
 final case class PoolResponse(
@@ -323,6 +327,33 @@ final case class FleetAssignmentDto(
     lockdownSql: String
 )
 final case class FleetHeartbeatResponse(heartbeatSec: Int, assignment: Option[FleetAssignmentDto])
+
+/** One fleet server (GET /api/fleet/servers). `liveness` is reachable | unreachable | dead;
+  * `silentSeconds` is measured on the database clock. The pool key fields come from the current
+  * assignment and are None while the server is idle.
+  */
+final case class FleetServerDto(
+    name: String,
+    advertiseHost: String,
+    nodePort: Int,
+    liveness: String,
+    silentSeconds: Long,
+    unschedulable: Boolean,
+    assignedNodeId: Option[String],
+    tenant: Option[String],
+    tenantDb: Option[String],
+    pool: Option[String],
+    nodeState: String,
+    nodeError: Option[String],
+    agentVersion: Option[String],
+    duckdbVersion: Option[String],
+    cpus: Option[Int],
+    memoryBytes: Option[Long],
+    joinedAt: String,
+    lastHeartbeatAt: String
+)
+final case class FleetServerListResponse(servers: List[FleetServerDto])
+final case class FleetServerOpRequest(name: String)
 
 final case class ActiveStatementInfo(
     id: String,
@@ -1454,6 +1485,9 @@ object Dtos:
   given Codec[FleetPoolKeyDto]          = deriveCodec
   given Codec[FleetAssignmentDto]       = deriveCodec
   given Codec[FleetHeartbeatResponse]   = deriveCodec
+  given Codec[FleetServerDto]           = deriveCodec
+  given Codec[FleetServerListResponse]  = deriveCodec
+  given Codec[FleetServerOpRequest]     = deriveCodec
   given Codec[ErrorResponse]            = deriveCodec
   given Codec[TenantRequest]            = ConfiguredCodec.derived
   given Codec[TenantResponse]           = deriveCodec

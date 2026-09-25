@@ -25,20 +25,7 @@ final class NodeHandlers(
     * mutation beats the bodyless 500 it replaced.
     */
   private def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: => Out[A]): Out[A] =
-    IO.defer(io).attempt.map {
-      case Right(r) => r
-      case Left(t)  =>
-        onRaised
-        Left(
-          (
-            StatusCode.BadGateway,
-            ErrorResponse(
-              "backend_error",
-              s"$describe: ${Option(t.getMessage).getOrElse(t.toString)}"
-            )
-          )
-        )
-    }
+    HandlerErrors.raisedToBadGateway(describe)(onRaised)(io)
 
   private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)(
       f: => IO[A]

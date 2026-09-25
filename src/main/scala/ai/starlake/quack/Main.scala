@@ -355,10 +355,11 @@ object Main extends IOApp with LazyLogging:
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store)
-    backend match
-      case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend =>
-        f.nodeRowExists = id => store.nodeExists(id)
-      case _ => ()
+    val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
+      backend match
+        case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
+        case _                                                        => None
+    fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
     // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
     val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
     // HA leader election and cross-replica NOTIFY run against this database.
@@ -483,6 +484,13 @@ object Main extends IOApp with LazyLogging:
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
     )
     supRef.set(sup)
+    // Fleet mode: the pool listing shows each node's server and its liveness.
+    fleetBackend.foreach { fb =>
+      sup.serverLiveness = name =>
+        store
+          .get(name)
+          .map(r => ai.starlake.quack.ondemand.api.FleetHandlers.livenessString(fb.livenessOf(r)))
+    }
 
     // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
     // authenticator; others fall back to the manager-wide auth.google block.
@@ -1763,7 +1771,15 @@ object Main extends IOApp with LazyLogging:
         branches = branchHandlers,
         fleet =
           if FleetConfig.isFleet(mgrCfg.runtimeType) then
-            Some(new ai.starlake.quack.ondemand.api.FleetHandlers(store, mgrCfg.fleet))
+            Some(
+              new ai.starlake.quack.ondemand.api.FleetHandlers(
+                store,
+                mgrCfg.fleet,
+                backend = fleetBackend,
+                publish = publisher,
+                audit = auditRecorder
+              )
+            )
           else None,
         patAuth = Some(patAuthenticator),
         scim = Some(

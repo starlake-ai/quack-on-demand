@@ -77,7 +77,9 @@ final class PoolHandlers(
             duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
             duckdbSpillFiles = engine.map(_.spillFiles),
             duckdbSpillBytes = engine.map(_.spillBytes),
-            catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt)
+            catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt),
+            serverName = n.serverName,
+            serverState = n.serverName.flatMap(sup.serverLiveness)
           )
         },
         status = if p.disabled then "disabled" else "ready",
