@@ -1582,7 +1582,7 @@ servers exist is fine: the pool shows `pending` (reason `none_free` or `none_fit
 
 The join token is as sensitive as the control-plane Postgres password: whoever holds it can join a
 server and receive the credentials of every pool scheduled onto it. Keep unit files root-only, rotate
-on suspicion (rotation stops new joins, evicts nobody), and check `qod fleet servers` for names you
+on suspicion (every heartbeat carries the token, so after a rotation restart each agent with the new value; an agent left on the old token goes unreachable, then dead), and check `qod fleet servers` for names you
 did not install. Managers and servers must share a private network: the manager-to-node hop is
 plain HTTP.
 

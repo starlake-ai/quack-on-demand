@@ -265,7 +265,7 @@ final case class DefaultMetastoreConfig(
 final case class HaConfig(
     @field @ConfigField(
       envVar = "QOD_HA_ENABLED",
-      description = "Enable active-active multi-replica manager mode (Kubernetes runtime only)."
+      description = "Enable active-active multi-replica manager mode (kubernetes or fleet runtime)."
     )
     enabled: Boolean = false,
     @field @ConfigField(
@@ -476,7 +476,9 @@ final case class ManagerConfig(
     apiKey: Option[String],
     @field @ConfigField(
       envVar = "QOD_RUNTIME_TYPE",
-      description = "Quack node runtime backend: 'local' (child processes) or 'kubernetes'."
+      description =
+        "Quack node runtime backend: 'local' (child processes), 'kubernetes' (pods) or 'fleet' " +
+          "(one node per server joined through qod agent)."
     )
     runtimeType: String,
     @field @ConfigField(
