@@ -7,41 +7,51 @@
 # authType = none. oauth2 / token / sigv4 rendering is unit-tested instead, in
 # IcebergSetupSqlSpec.
 #
-# The MinIO images come from quay.io, not Docker Hub: the docker.io/minio/minio
-# and docker.io/minio/mc repositories no longer serve pinned RELEASE.* tags
-# ("pull access denied ... repository does not exist"), while quay.io still does.
-# Tags stay pinned so a CI run and a local run drive the same fixture.
+# The object store is rustfs, the same S3-compatible store the operator docs use.
+# The fixture used to run MinIO, but its pinned images (quay.io/minio/minio and
+# quay.io/minio/mc, and the docker.io/minio repositories before them) were removed
+# from the public registries, which broke `up` with "unauthorized". Tags stay
+# pinned so a CI run and a local run drive the same fixture.
+#
+# The bucket is private: the REST fixture and the specs both sign their requests
+# with admin / password (IcebergFixture.storagePrelude), so no anonymous policy.
 services:
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data --console-address ":9001"
+  rustfs:
+    image: docker.io/rustfs/rustfs:1.0.0
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password
+      RUSTFS_ACCESS_KEY: admin
+      RUSTFS_SECRET_KEY: password
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
     ports:
       - "9000:9000"
     healthcheck:
-      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+  rustfs-init:
+    image: docker.io/amazon/aws-cli:2.37.3
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+    # Idempotent: a bucket left over from an earlier `up` (no `down -v`) is fine.
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 admin password &&
-      mc mb --ignore-existing local/warehouse &&
-      mc anonymous set public local/warehouse
+      out=$$(aws --endpoint-url http://rustfs:9000 s3 mb s3://warehouse 2>&1) ||
+      echo \"$$out\" | grep -q BucketAlreadyOwnedByYou ||
+      { echo \"$$out\"; exit 1; }
       "
 
   iceberg-rest:
     image: apache/iceberg-rest-fixture:1.9.0
     depends_on:
-      minio-init:
+      rustfs-init:
         condition: service_completed_successfully
     ports:
       - "8181:8181"
@@ -51,5 +61,5 @@ services:
       AWS_REGION: us-east-1
       CATALOG_WAREHOUSE: s3://warehouse/
       CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
-      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ENDPOINT: http://rustfs:9000
       CATALOG_S3_PATH__STYLE__ACCESS: "true"
