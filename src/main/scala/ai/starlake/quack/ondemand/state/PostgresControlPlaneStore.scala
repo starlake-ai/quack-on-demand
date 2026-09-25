@@ -47,6 +47,7 @@ final class PostgresControlPlaneStore(
     password: String,
     poolSize: Int = 20
 ) extends ControlPlaneStore
+    with FleetServerStore
     with LazyLogging:
 
   Class.forName("org.postgresql.Driver")
@@ -1562,6 +1563,224 @@ final class PostgresControlPlaneStore(
       )
     )
   }
+
+  // ---------------- Fleet ----------------
+
+  override def recordHeartbeat(hb: Heartbeat): HeartbeatOutcome = withConn { c =>
+    // 1. First contact: insert the server row; a no-op for a known name. No lock is taken on an
+    //    existing server row here, so a concurrent claim's FOR UPDATE SKIP LOCKED never skips it.
+    val ins = c.prepareStatement(
+      """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port)
+        |VALUES (?, ?, ?) ON CONFLICT (name) DO NOTHING""".stripMargin
+    )
+    val joined =
+      try {
+        ins.setString(1, hb.name); ins.setString(2, hb.advertiseHost); ins.setInt(3, hb.nodePort);
+        ins.executeUpdate() == 1
+      } finally ins.close()
+    // 2. Address guard against the server row (plain read).
+    val sel = c.prepareStatement(
+      "SELECT advertise_host, node_port, unschedulable, assignment_epoch FROM qodstate_fleet_server WHERE name = ?"
+    )
+    val (host, port, drained, rowEpoch) =
+      try
+        sel.setString(1, hb.name)
+        val rs = sel.executeQuery()
+        try { rs.next(); (rs.getString(1), rs.getInt(2), rs.getBoolean(3), rs.getLong(4)) }
+        finally rs.close()
+      finally sel.close()
+    if !joined && !drained && (host != hb.advertiseHost || port != hb.nodePort) then
+      HeartbeatOutcome.AddressChangeRefused
+    else
+      if drained && (host != hb.advertiseHost || port != hb.nodePort) then
+        val addr = c.prepareStatement(
+          "UPDATE qodstate_fleet_server SET advertise_host = ?, node_port = ? WHERE name = ?"
+        )
+        try {
+          addr.setString(1, hb.advertiseHost); addr.setInt(2, hb.nodePort);
+          addr.setString(3, hb.name); addr.executeUpdate()
+        } finally addr.close()
+      // 3. Heartbeat row: the only row this handler rewrites every interval.
+      val up = c.prepareStatement(
+        """INSERT INTO qodstate_fleet_heartbeat
+          |  (name, last_heartbeat_at, agent_version, os, duckdb_version, cpus, memory_bytes,
+          |   node_state, node_error, node_pid, node_started_at)
+          |VALUES (?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          |ON CONFLICT (name) DO UPDATE SET
+          |  last_heartbeat_at = now(), agent_version = EXCLUDED.agent_version, os = EXCLUDED.os,
+          |  duckdb_version = EXCLUDED.duckdb_version, cpus = EXCLUDED.cpus, memory_bytes = EXCLUDED.memory_bytes,
+          |  node_state = EXCLUDED.node_state, node_error = EXCLUDED.node_error, node_pid = EXCLUDED.node_pid,
+          |  node_started_at = EXCLUDED.node_started_at""".stripMargin
+      )
+      try
+        up.setString(1, hb.name)
+        setNullable(up, 2, hb.agentVersion); setNullable(up, 3, hb.os);
+        setNullable(up, 4, hb.duckdbVersion)
+        setNullableInt(up, 5, hb.cpus)
+        setNullableLong(up, 6, hb.memoryBytes)
+        up.setString(7, FleetServerStore.effectiveState(hb.node, rowEpoch))
+        setNullable(up, 8, hb.node.error); setNullableLong(up, 9, hb.node.pid);
+        setNullableInstant(up, 10, hb.node.startedAt)
+        up.executeUpdate()
+      finally up.close()
+      if joined then HeartbeatOutcome.Joined else HeartbeatOutcome.Updated
+  }
+
+  override def claim(
+      a: FleetAssignment,
+      reachableWithinSec: Int,
+      requiredMemoryBytes: Option[Long]
+  ): Either[ClaimMiss, FleetServerRow] =
+    withConn { c =>
+      c.setAutoCommit(false)
+      try
+        val pick = c.prepareStatement(
+          """SELECT s.name, s.assignment_epoch FROM qodstate_fleet_server s
+            |JOIN qodstate_fleet_heartbeat h USING (name)
+            |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
+            |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
+            |  AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
+            |ORDER BY s.joined_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
+        )
+        pick.setInt(1, reachableWithinSec)
+        requiredMemoryBytes match
+          case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
+          case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
+        val rs     = pick.executeQuery()
+        val chosen = if rs.next() then Some((rs.getString(1), rs.getLong(2))) else None
+        rs.close(); pick.close()
+        val result: Either[ClaimMiss, FleetServerRow] = chosen match
+          case Some((name, epoch0)) =>
+            val epoch = epoch0 + 1
+            val upd   = c.prepareStatement(
+              """UPDATE qodstate_fleet_server SET assigned_node_id = ?, assignment = ?::jsonb,
+                |  assignment_epoch = ?, claimed_at = now() WHERE name = ?""".stripMargin
+            )
+            upd.setString(1, a.nodeId); upd.setString(2, a.copy(epoch = epoch).asJson.noSpaces)
+            upd.setLong(3, epoch); upd.setString(4, name)
+            upd.executeUpdate(); upd.close()
+            Right(readFleetRow(c, name).get)
+          case None =>
+            // Distinguish "nothing free" from "nothing fits" with the predicate dropped.
+            val any = c.prepareStatement(
+              """SELECT 1 FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
+                |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
+                |  AND h.last_heartbeat_at > now() - make_interval(secs => ?) LIMIT 1""".stripMargin
+            )
+            any.setInt(1, reachableWithinSec)
+            val r2      = any.executeQuery()
+            val anyFree = r2.next()
+            r2.close(); any.close()
+            Left(
+              if anyFree && requiredMemoryBytes.isDefined then ClaimMiss.NoneFits
+              else ClaimMiss.NoneFree
+            )
+        c.commit()
+        result
+      catch
+        case t: Throwable =>
+          c.rollback()
+          throw t
+      finally c.setAutoCommit(true)
+    }
+
+  override def setAssignment(name: String, a: FleetAssignment): Unit = withConn { c =>
+    val ps =
+      c.prepareStatement("UPDATE qodstate_fleet_server SET assignment = ?::jsonb WHERE name = ?")
+    try { ps.setString(1, a.asJson.noSpaces); ps.setString(2, name); ps.executeUpdate(); () }
+    finally ps.close()
+  }
+
+  override def release(nodeId: String): Option[String] = withConn { c =>
+    val ps = c.prepareStatement(
+      """UPDATE qodstate_fleet_server SET assigned_node_id = NULL, assignment = NULL, claimed_at = NULL,
+        |  assignment_epoch = assignment_epoch + 1 WHERE assigned_node_id = ? RETURNING name""".stripMargin
+    )
+    try
+      ps.setString(1, nodeId)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(rs.getString(1)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  override def get(name: String): Option[FleetServerRow] = withConn(c => readFleetRow(c, name))
+
+  override def list(): List[FleetServerRow] = withConn { c =>
+    val ps = c.prepareStatement(FleetSelect + " ORDER BY s.joined_at, s.name")
+    try
+      val rs = ps.executeQuery()
+      try drain(rs)(fleetRowOf)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  override def byNodeId(nodeId: String): Option[FleetServerRow] = withConn { c =>
+    val ps = c.prepareStatement(FleetSelect + " WHERE s.assigned_node_id = ?")
+    try
+      ps.setString(1, nodeId)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(fleetRowOf(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  override def setUnschedulable(name: String, value: Boolean): Boolean = withConn { c =>
+    val ps = c.prepareStatement("UPDATE qodstate_fleet_server SET unschedulable = ? WHERE name = ?")
+    try { ps.setBoolean(1, value); ps.setString(2, name); ps.executeUpdate() == 1 }
+    finally ps.close()
+  }
+
+  override def delete(name: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_fleet_server WHERE name = ?")
+    try { ps.setString(1, name); ps.executeUpdate() == 1 }
+    finally ps.close()
+  }
+
+  private val FleetSelect =
+    """SELECT s.name, s.advertise_host, s.node_port, s.joined_at, s.unschedulable, s.assigned_node_id,
+      |  s.assignment::text AS assignment, s.assignment_epoch, s.claimed_at,
+      |  h.last_heartbeat_at, EXTRACT(EPOCH FROM now() - h.last_heartbeat_at)::bigint AS silent_seconds,
+      |  h.agent_version, h.os, h.duckdb_version, h.cpus, h.memory_bytes,
+      |  h.node_state, h.node_error, h.node_pid, h.node_started_at
+      |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)""".stripMargin
+
+  private def readFleetRow(c: Connection, name: String): Option[FleetServerRow] =
+    val ps = c.prepareStatement(FleetSelect + " WHERE s.name = ?")
+    try
+      ps.setString(1, name)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(fleetRowOf(rs)) else None
+      finally rs.close()
+    finally ps.close()
+
+  private def fleetRowOf(rs: ResultSet): FleetServerRow =
+    FleetServerRow(
+      name = rs.getString("name"),
+      advertiseHost = rs.getString("advertise_host"),
+      nodePort = rs.getInt("node_port"),
+      joinedAt = rs.getTimestamp("joined_at").toInstant,
+      unschedulable = rs.getBoolean("unschedulable"),
+      assignedNodeId = Option(rs.getString("assigned_node_id")),
+      assignment = Option(rs.getString("assignment")).map(str =>
+        io.circe.parser
+          .decode[FleetAssignment](str)
+          .fold(e => throw new IllegalStateException(s"bad assignment json: $e"), identity)
+      ),
+      assignmentEpoch = rs.getLong("assignment_epoch"),
+      claimedAt = Option(rs.getTimestamp("claimed_at")).map(_.toInstant),
+      lastHeartbeatAt = rs.getTimestamp("last_heartbeat_at").toInstant,
+      silentSeconds = rs.getLong("silent_seconds"),
+      agentVersion = Option(rs.getString("agent_version")),
+      os = Option(rs.getString("os")),
+      duckdbVersion = Option(rs.getString("duckdb_version")),
+      cpus = Option(rs.getObject("cpus")).map(_.asInstanceOf[Number].intValue),
+      memoryBytes = Option(rs.getObject("memory_bytes")).map(_.asInstanceOf[Number].longValue),
+      nodeState = rs.getString("node_state"),
+      nodeError = Option(rs.getString("node_error")),
+      nodePid = Option(rs.getObject("node_pid")).map(_.asInstanceOf[Number].longValue),
+      nodeStartedAt = Option(rs.getTimestamp("node_started_at")).map(_.toInstant)
+    )
 
   // ---------------- helpers ----------------
 
