@@ -303,7 +303,13 @@ locked by claims). `FleetQuackBackend` (`ondemand/runtime/`) claims with one
 report `running`. Liveness comes from the database clock (`silent_seconds`), never the JVM's, so
 HA replicas agree. `NoFreeServer(reason)` is the one failure the supervisor tolerates: the slot
 stays pending and reconcile fills it when a server joins (`MissingSlots`). Silent past
-`heartbeatTimeoutSec` = unroutable but kept; past `reassignAfterSec` = dead, respawned elsewhere.
+`heartbeatTimeoutSec` = unroutable but kept; past `reassignAfterSec` = dead, respawned elsewhere
+through `claimReplacing` (release the dead holder and claim the replacement in ONE store
+transaction, rolled back when no server qualifies). With no free server the dead server keeps
+its assignment and its node row, so if it returns first its agent still runs the node at the
+same epoch and reconcile adopts it with no restart; a drained or removed holder's node goes
+pending instead. A partial or cancelled spawn rolls back the nodes it started (`spawnAll`,
+`guaranteeCase`).
 A known name reporting a new address is refused unless drained (shared-token takeover guard).
 `QOD_FLEET_EPHEMERAL=local` runs maintenance and merge nodes on the manager host instead of a
 fleet server. Manager-to-node is plain HTTP: fleet mode needs a private network. Design:
