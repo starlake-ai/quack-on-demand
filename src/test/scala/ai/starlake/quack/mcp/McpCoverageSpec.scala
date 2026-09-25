@@ -131,7 +131,8 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     // Branch merge is human-gated by design (Epic 1): the approver must be a different
     // principal than the proposing agent, and no agent tool may perform it.
     "POST /api/branch/merge",
-    "POST /api/scim/", // IdP wire protocol
+    "POST /api/fleet/", // fleet servers are operator infrastructure, no agent tool
+    "POST /api/scim/",  // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
     "DELETE /api/scim/"

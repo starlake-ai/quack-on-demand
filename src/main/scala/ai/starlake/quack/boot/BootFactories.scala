@@ -1,7 +1,7 @@
 package ai.starlake.quack.boot
 
 import java.util.Locale
-import ai.starlake.quack.ManagerConfig
+import ai.starlake.quack.{FleetConfig, ManagerConfig}
 import ai.starlake.quack.edge.config.AclConfig
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -15,7 +15,13 @@ import ai.starlake.quack.ondemand.federation.{
   SecretResolver,
   VaultSecretResolver
 }
-import ai.starlake.quack.ondemand.runtime.{KubernetesQuackBackend, LocalQuackBackend, QuackBackend}
+import ai.starlake.quack.ondemand.runtime.{
+  FleetQuackBackend,
+  KubernetesQuackBackend,
+  LocalQuackBackend,
+  QuackBackend
+}
+import ai.starlake.quack.ondemand.state.FleetServerStore
 import com.typesafe.scalalogging.LazyLogging
 
 /** Config-driven component selection extracted from Main.bootManager: each factory turns one config
@@ -23,7 +29,7 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootFactories extends LazyLogging:
 
-  def quackBackend(mgrCfg: ManagerConfig): QuackBackend =
+  def quackBackend(mgrCfg: ManagerConfig, fleetStore: => FleetServerStore): QuackBackend =
     mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
       case "local" =>
         new LocalQuackBackend(
@@ -47,7 +53,23 @@ object BootFactories extends LazyLogging:
           runAsUser = mgrCfg.k8s.runAsUser,
           stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
         )
-      case other => sys.error(s"unknown runtime: $other")
+      case "fleet" => new FleetQuackBackend(fleetStore, mgrCfg.fleet)
+      case other   => sys.error(s"unknown runtime: $other")
+
+  /** Backend for maintenance and branch-merge nodes. Same as `main` unless fleet mode asks for them
+    * to run on the manager host (QOD_FLEET_EPHEMERAL=local).
+    */
+  def ephemeralBackend(mgrCfg: ManagerConfig, main: QuackBackend): QuackBackend =
+    if FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
+      logger.info(
+        "fleet: ephemeral maintenance/merge nodes run on the manager host (local backend)"
+      )
+      new LocalQuackBackend(
+        mgrCfg.minPort,
+        mgrCfg.maxPort,
+        commandFor = LocalQuackBackend.defaultCommand(mgrCfg.spawnScript, mgrCfg.spawnScriptWindows)
+      )
+    else main
 
   /** `dispatch` routes per-secret based on the row's shape (value -> Postgres, externalRef prefix
     * -> matching cloud / env / vault resolver). Other values force a single backend; useful only

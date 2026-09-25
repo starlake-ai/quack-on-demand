@@ -173,6 +173,7 @@ Pick the deployment shape in the docs:
 - **[Single-server production deployment](https://docs.starlake.ai/qod/operating/deploy-single-server)** - end-to-end walkthrough on one large server: sizing, existing Postgres + S3-compatible store, pool provisioning, RBAC, monitoring, with runnable scripts
 - **[Docker Compose](https://docs.starlake.ai/qod/operating/deploy-docker)** - manager + Postgres as containers on a single host, persistent state bind-mounted
 - **[Kubernetes](https://docs.starlake.ai/qod/operating/deploy-kubernetes)** - manager pod spawning node pods on demand; the Helm chart and a kind smoke-test rig live under [`charts/quack-on-demand/`](charts/quack-on-demand/)
+- **Fleet of servers, no Kubernetes** - run the manager with `QOD_RUNTIME_TYPE=fleet` and a join token, then start `qod agent` (for example `uvx qod agent --manager https://mgr:20900 --advertise-host <data-ip>`) under systemd or launchd on each Linux or macOS server; every joined server runs one node, and pools are scheduled onto free servers as they join
 
 Then harden it: **[Production hardening](https://docs.starlake.ai/qod/operating/hardening)**, **[TLS](https://docs.starlake.ai/qod/operating/tls)**, and the **[configuration reference](https://docs.starlake.ai/qod/reference/configuration)** (every `QOD_*` / `PROXY_*` env var).
 

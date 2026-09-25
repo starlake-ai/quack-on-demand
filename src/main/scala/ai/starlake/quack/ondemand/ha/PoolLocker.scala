@@ -1,9 +1,11 @@
 package ai.starlake.quack.ondemand.ha
 
 import ai.starlake.quack.model.PoolKey
-import cats.effect.IO
+import cats.effect.{IO, SyncIO}
+import cats.effect.std.Semaphore
 
 import java.sql.{Connection, DriverManager}
+import java.util.concurrent.ConcurrentHashMap
 
 /** Serializes pool mutations across manager replicas. A pool-mutating handler on any replica and
   * the leader's reconcile pass take the same per-pool lock, so neither ever sees half-written node
@@ -16,6 +18,22 @@ object PoolLocker:
   /** Non-HA default: no cross-process locking (single manager). */
   val noop: PoolLocker = new PoolLocker:
     def withLock[A](key: PoolKey)(io: IO[A]): IO[A] = io
+
+  /** Single-manager serialization: one in-process permit per pool, the same contract as
+    * [[PgPoolLocker]] without a database (and the same no-nesting rule: a second `withLock` on the
+    * same key from inside the first waits forever). Wired for every non-HA manager: a scale-down's
+    * stop takes seconds on any backend (agent confirmation, pod deletion, process wait), and an
+    * unserialized reconcile pass in that window reads the node as dead and respawns it on the
+    * stale target.
+    */
+  def inProcess(): PoolLocker = new PoolLocker:
+    private val permits = new ConcurrentHashMap[PoolKey, Semaphore[IO]]()
+    def withLock[A](key: PoolKey)(io: IO[A]): IO[A] =
+      IO.defer {
+        val permit =
+          permits.computeIfAbsent(key, _ => Semaphore.in[SyncIO, IO](1).unsafeRunSync())
+        permit.permit.surround(io)
+      }
 
 /** Session advisory lock on a dedicated connection per acquisition (mirrors DuckLakeInitializer).
   * Session scope means a crashed holder's lock frees as soon as Postgres notices the dead session -

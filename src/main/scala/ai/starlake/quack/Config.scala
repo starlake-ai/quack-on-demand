@@ -265,7 +265,7 @@ final case class DefaultMetastoreConfig(
 final case class HaConfig(
     @field @ConfigField(
       envVar = "QOD_HA_ENABLED",
-      description = "Enable active-active multi-replica manager mode (Kubernetes runtime only)."
+      description = "Enable active-active multi-replica manager mode (kubernetes or fleet runtime)."
     )
     enabled: Boolean = false,
     @field @ConfigField(
@@ -476,7 +476,9 @@ final case class ManagerConfig(
     apiKey: Option[String],
     @field @ConfigField(
       envVar = "QOD_RUNTIME_TYPE",
-      description = "Quack node runtime backend: 'local' (child processes) or 'kubernetes'."
+      description =
+        "Quack node runtime backend: 'local' (child processes), 'kubernetes' (pods) or 'fleet' " +
+          "(one node per server joined through qod agent)."
     )
     runtimeType: String,
     @field @ConfigField(
@@ -550,6 +552,7 @@ final case class ManagerConfig(
     autoscale: AutoscaleConfig = AutoscaleConfig(),
     hibernation: HibernationConfig = HibernationConfig(),
     branching: BranchingConfig = BranchingConfig(),
+    fleet: FleetConfig = FleetConfig(),
     managedObjectStore: ManagedObjectStoreConfig = ManagedObjectStoreConfig(),
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
@@ -720,6 +723,77 @@ final case class HibernationConfig(
     Option.when(defaultIdleMinutes > 0)(
       scala.concurrent.duration.DurationInt(math.max(5, defaultIdleMinutes)).minutes
     )
+
+/** Fleet runtime (`runtimeType = fleet`): quack nodes on bare servers that join through
+  * `qod agent`. See docs/superpowers/specs/2026-09-25-fleet-backend-design.md.
+  */
+final case class FleetConfig(
+    @field @ConfigField(
+      envVar = "QOD_FLEET_JOIN_TOKEN",
+      description = "Shared secret every agent heartbeat carries. Required when runtimeType=fleet.",
+      sensitive = true
+    )
+    joinToken: String = "",
+    @field @ConfigField(
+      envVar = "QOD_FLEET_HEARTBEAT_SEC",
+      description = "Agent heartbeat interval in seconds; returned to agents in every reply."
+    )
+    heartbeatSec: Int = 5,
+    @field @ConfigField(
+      envVar = "QOD_FLEET_HEARTBEAT_TIMEOUT_SEC",
+      description = "Silence beyond this many seconds marks a server unreachable."
+    )
+    heartbeatTimeoutSec: Int = 30,
+    @field @ConfigField(
+      envVar = "QOD_FLEET_REASSIGN_AFTER_SEC",
+      description =
+        "Unreachable beyond this many seconds moves the server's node slot to a free server. " +
+          "0 = at once, -1 = never."
+    )
+    reassignAfterSec: Int = 600,
+    @field @ConfigField(
+      envVar = "QOD_FLEET_STARTUP_TIMEOUT_SEC",
+      description = "How long a claim waits for the agent to report the node running."
+    )
+    startupTimeoutSec: Int = 120,
+    @field @ConfigField(
+      envVar = "QOD_FLEET_STOP_TIMEOUT_SEC",
+      description = "How long a release waits for the agent to report the node stopped."
+    )
+    stopTimeoutSec: Int = 60,
+    @field @ConfigField(
+      envVar = "QOD_FLEET_EPHEMERAL",
+      description =
+        "Where maintenance and branch-merge nodes run: 'fleet' claims a server like any node, " +
+          "'local' runs them on the manager host through the local backend."
+    )
+    ephemeral: String = "fleet"
+):
+  require(heartbeatSec >= 1, "fleet: heartbeatSec must be >= 1")
+  require(Set("fleet", "local").contains(ephemeral), "fleet: ephemeral must be 'fleet' or 'local'")
+  require(heartbeatTimeoutSec > heartbeatSec, "fleet: heartbeatTimeoutSec must be > heartbeatSec")
+  require(
+    reassignAfterSec == 0 || reassignAfterSec == -1 || reassignAfterSec >= heartbeatTimeoutSec,
+    "fleet: reassignAfterSec must be 0, -1, or >= heartbeatTimeoutSec"
+  )
+  require(startupTimeoutSec >= 1, "fleet: startupTimeoutSec must be >= 1")
+  require(stopTimeoutSec >= 1, "fleet: stopTimeoutSec must be >= 1")
+
+  def ephemeralLocal: Boolean = ephemeral == "local"
+
+  def validateForRuntime(runtimeType: String, duckdbOnHost: => Boolean): Either[String, Unit] =
+    if !FleetConfig.isFleet(runtimeType) then Right(())
+    else if joinToken.trim.isEmpty then
+      Left("QOD_FLEET_JOIN_TOKEN must be set when runtimeType=fleet")
+    else if ephemeralLocal && !duckdbOnHost then
+      Left(
+        "QOD_FLEET_EPHEMERAL=local needs a duckdb binary on the manager host (DUCKDB_BIN or PATH)"
+      )
+    else Right(())
+
+object FleetConfig:
+  def isFleet(runtimeType: String): Boolean =
+    runtimeType.toLowerCase(java.util.Locale.ROOT) == "fleet"
 
 /** Writable branches of DuckLake tenant-dbs (Epic 1): a branch is a cloned catalog served by its
   * own one-node pool; agents write there, a human reviews the change set and fast-forward merges.

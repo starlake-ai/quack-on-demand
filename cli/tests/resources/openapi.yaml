@@ -2082,6 +2082,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/servers:
+    get:
+      operationId: getApiFleetServers
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetServerListResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/group/list:
     get:
       operationId: getApiGroupList
@@ -4524,6 +4558,148 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UpdateTenantDbResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/heartbeat:
+    post:
+      operationId: postApiFleetHeartbeat
+      parameters:
+      - name: X-Fleet-Token
+        in: header
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FleetHeartbeatRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetHeartbeatResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-Fleet-Token'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/server/drain:
+    post:
+      operationId: postApiFleetServerDrain
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FleetServerOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/server/remove:
+    post:
+      operationId: postApiFleetServerRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FleetServerOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/fleet/server/undrain:
+    post:
+      operationId: postApiFleetServerUndrain
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FleetServerOpRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
         '400':
           description: 'Invalid value for: body, Invalid value for: header X-API-Key,
             Invalid value for: cookie qod_session'
@@ -7427,6 +7603,192 @@ components:
           type: boolean
         attachStatus:
           type: string
+    FleetAssignmentDto:
+      title: FleetAssignmentDto
+      type: object
+      required:
+      - epoch
+      - nodeId
+      - poolKey
+      - port
+      - token
+      - kind
+      - env
+      - dbInitSql
+      - objectStoreSql
+      - extraSetupSql
+      - lockdownSql
+      properties:
+        epoch:
+          type: integer
+          format: int64
+        nodeId:
+          type: string
+        poolKey:
+          $ref: '#/components/schemas/FleetPoolKeyDto'
+        port:
+          type: integer
+          format: int32
+        token:
+          type: string
+        kind:
+          type: string
+        env:
+          $ref: '#/components/schemas/Map_String'
+        dbInitSql:
+          type: string
+        objectStoreSql:
+          type: string
+        extraSetupSql:
+          type: string
+        lockdownSql:
+          type: string
+    FleetHeartbeatRequest:
+      title: FleetHeartbeatRequest
+      type: object
+      required:
+      - name
+      - advertiseHost
+      - nodePort
+      - node
+      properties:
+        name:
+          type: string
+        advertiseHost:
+          type: string
+        nodePort:
+          type: integer
+          format: int32
+        agentVersion:
+          type: string
+        os:
+          type: string
+        duckdbVersion:
+          type: string
+        cpus:
+          type: integer
+          format: int32
+        memoryBytes:
+          type: integer
+          format: int64
+        node:
+          $ref: '#/components/schemas/FleetNodeReportDto'
+    FleetHeartbeatResponse:
+      title: FleetHeartbeatResponse
+      type: object
+      required:
+      - heartbeatSec
+      properties:
+        heartbeatSec:
+          type: integer
+          format: int32
+        assignment:
+          $ref: '#/components/schemas/FleetAssignmentDto'
+    FleetNodeReportDto:
+      title: FleetNodeReportDto
+      type: object
+      required:
+      - assignmentEpoch
+      - state
+      properties:
+        assignmentEpoch:
+          type: integer
+          format: int64
+        nodeId:
+          type: string
+        state:
+          type: string
+        pid:
+          type: integer
+          format: int64
+        error:
+          type: string
+        startedAt:
+          type: string
+    FleetPoolKeyDto:
+      title: FleetPoolKeyDto
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+    FleetServerDto:
+      title: FleetServerDto
+      type: object
+      required:
+      - name
+      - advertiseHost
+      - nodePort
+      - liveness
+      - silentSeconds
+      - unschedulable
+      - nodeState
+      - joinedAt
+      - lastHeartbeatAt
+      properties:
+        name:
+          type: string
+        advertiseHost:
+          type: string
+        nodePort:
+          type: integer
+          format: int32
+        liveness:
+          type: string
+        silentSeconds:
+          type: integer
+          format: int64
+        unschedulable:
+          type: boolean
+        assignedNodeId:
+          type: string
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        nodeState:
+          type: string
+        nodeError:
+          type: string
+        agentVersion:
+          type: string
+        duckdbVersion:
+          type: string
+        cpus:
+          type: integer
+          format: int32
+        memoryBytes:
+          type: integer
+          format: int64
+        joinedAt:
+          type: string
+        lastHeartbeatAt:
+          type: string
+    FleetServerListResponse:
+      title: FleetServerListResponse
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/FleetServerDto'
+    FleetServerOpRequest:
+      title: FleetServerOpRequest
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
     ForgotPasswordRequest:
       title: ForgotPasswordRequest
       type: object
@@ -7950,6 +8312,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CatalogAttachFailureDto'
+        serverName:
+          type: string
+        serverState:
+          type: string
     NodeOpRequest:
       title: NodeOpRequest
       type: object
@@ -8249,6 +8615,7 @@ components:
       - memory
       - lockdown
       - lockdownEffective
+      - pending
       properties:
         tenant:
           type: string
@@ -8290,6 +8657,11 @@ components:
         maxNodes:
           type: integer
           format: int32
+        pending:
+          type: integer
+          format: int32
+        pendingReason:
+          type: string
     PreviewColumn:
       title: PreviewColumn
       type: object

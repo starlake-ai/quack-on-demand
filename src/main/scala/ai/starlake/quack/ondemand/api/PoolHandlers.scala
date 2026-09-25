@@ -44,8 +44,21 @@ final class PoolHandlers(
   private def redact(metastore: Map[String, String]): Map[String, String] =
     HandlerResolvers.redactPassword(metastore)
 
-  /** Build the response for an existing pool by looking up its supervisor state. */
-  private def respond(key: PoolKey): Option[PoolResponse] =
+  /** Fleet server liveness by name, read ONCE per listing request off the compute pool. Any error
+    * degrades to empty (serverState None): server state is decoration, the listing must not fail
+    * because the fleet table is unreadable.
+    */
+  private def serverLiveness: IO[Map[String, String]] =
+    IO.blocking(sup.serverLivenessAll()).handleError { t =>
+      logger.warn(s"fleet server liveness lookup failed, listing without it: $t", t)
+      Map.empty
+    }
+
+  /** Build the response for an existing pool by looking up its supervisor state. `liveness` is the
+    * fleet server liveness by name (from [[serverLiveness]]); pass `Map.empty` where the response
+    * does not need server state (mutation replies).
+    */
+  private def respond(key: PoolKey, liveness: Map[String, String]): Option[PoolResponse] =
     sup.get(key).map { p =>
       val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
       // Same pool-row resolution as the lockdown fields below; None on a fixed-size pool.
@@ -77,7 +90,9 @@ final class PoolHandlers(
             duckdbTempStorageBytes = engine.map(_.tempStorageBytes),
             duckdbSpillFiles = engine.map(_.spillFiles),
             duckdbSpillBytes = engine.map(_.spillBytes),
-            catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt)
+            catalogAttachFailures = attachFailuresOf(n.nodeId, n.startedAt),
+            serverName = n.serverName,
+            serverState = n.serverName.flatMap(liveness.get)
           )
         },
         status = if p.disabled then "disabled" else "ready",
@@ -94,7 +109,9 @@ final class PoolHandlers(
         ),
         lockdownEffective = sup.effectiveLockdown(key),
         minNodes = band.map(_._1),
-        maxNodes = band.map(_._2)
+        maxNodes = band.map(_._2),
+        pending = sup.pendingCount(key),
+        pendingReason = sup.pendingReason(key)
       )
     }
 
@@ -291,7 +308,7 @@ final class PoolHandlers(
                         detail = Map("size" -> req.size.toString)
                       )
                       Right(
-                        respond(key).getOrElse(
+                        respond(key, Map.empty).getOrElse(
                           PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
                         )
                       )
@@ -399,7 +416,7 @@ final class PoolHandlers(
                         )
                         IO.pure(
                           Right(
-                            respond(key).getOrElse(
+                            respond(key, Map.empty).getOrElse(
                               PoolResponse(
                                 req.tenant,
                                 req.tenantDb,
@@ -528,8 +545,8 @@ final class PoolHandlers(
 
   def listPools(apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
-  ): Out[PoolListResponse] = IO.delay {
-    val all      = sup.list().flatMap(p => respond(p.key))
+  ): Out[PoolListResponse] = serverLiveness.map { liveness =>
+    val all      = sup.list().flatMap(p => respond(p.key, liveness))
     val filtered = apiKey.flatMap(scopeOf) match
       case None                   => all // no session => static-key trusted admin
       case Some(s) if s.superuser => all
@@ -543,10 +560,11 @@ final class PoolHandlers(
 
   def poolStatus(tenant: String, tenantDb: String, pool: String): Out[PoolResponse] =
     val key = PoolKey(tenant, tenantDb, pool)
-    respond(key) match
-      case Some(r) => IO.pure(Right(r))
-      case None    =>
-        IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+    serverLiveness.map { liveness =>
+      respond(key, liveness) match
+        case Some(r) => Right(r)
+        case None => Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found")))
+    }
 
   def setPoolDisabled(req: SetPoolDisabledRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -574,7 +592,7 @@ final class PoolHandlers(
               target = Some(key.toString),
               detail = Map("disabled" -> req.disabled.toString)
             )
-            respond(key) match
+            respond(key, Map.empty) match
               case Some(r) => Right(r)
               case None    =>
                 Left(
@@ -642,7 +660,7 @@ final class PoolHandlers(
                 target = Some(key.toString),
                 detail = cpuDetail ++ memoryDetail
               )
-              respond(key) match
+              respond(key, Map.empty) match
                 case Some(r) => Right(r)
                 case None    =>
                   Left(
@@ -703,7 +721,7 @@ final class PoolHandlers(
                     tenant = Some(req.tenant),
                     target = Some(key.toString)
                   )
-                  respond(key) match
+                  respond(key, Map.empty) match
                     case Some(r) => Right(r)
                     case None    =>
                       Left(
@@ -781,7 +799,7 @@ final class PoolHandlers(
                       target = Some(key.toString),
                       detail = Map("lockdown" -> req.lockdown)
                     )
-                    respond(key) match
+                    respond(key, Map.empty) match
                       case Some(r) => Right(r)
                       case None    =>
                         Left(
@@ -857,7 +875,7 @@ final class PoolHandlers(
                       .getOrElse("cleared")
                   )
                 )
-                respond(key) match
+                respond(key, Map.empty) match
                   case Some(r) => Right(r)
                   case None    =>
                     Left(

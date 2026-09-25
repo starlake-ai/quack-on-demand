@@ -24,7 +24,8 @@ import scala.collection.concurrent.TrieMap
 final class StubQuackBackend(
     portBase: Int = 21000,
     tokenFor: String => String = StubQuackBackend.DefaultToken,
-    startedAt: Instant = Instant.EPOCH
+    startedAt: Instant = Instant.EPOCH,
+    serverName: Option[String] = None // fleet mode: the server every node reports
 ) extends QuackBackend:
   private val nodes = TrieMap.empty[String, RunningNode]
 
@@ -39,7 +40,8 @@ final class StubQuackBackend(
       Some(1L),
       None,
       startedAt,
-      maxConcurrent = spec.maxConcurrent
+      maxConcurrent = spec.maxConcurrent,
+      serverName = serverName
     )
     nodes.put(spec.nodeId, n); n
   }

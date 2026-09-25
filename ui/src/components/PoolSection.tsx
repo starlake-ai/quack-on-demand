@@ -227,7 +227,18 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                   {p.disabled && <span className="subtle"> (disabled)</span>}
                   {p.suspended && <span className="subtle"> (hibernated)</span>}
                 </td>
-                <td align="right">{p.nodes.length}</td>
+                <td align="right">
+                  {p.nodes.length}
+                  {!!p.pending && (
+                    <span
+                      className="badge warn"
+                      style={{ marginLeft: 6 }}
+                      title={p.pendingReason ?? ''}
+                    >
+                      {p.pending} pending{p.pendingReason === 'none_fits' ? ' (no server fits)' : ''}
+                    </span>
+                  )}
+                </td>
                 <td align="right">
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
                     <input

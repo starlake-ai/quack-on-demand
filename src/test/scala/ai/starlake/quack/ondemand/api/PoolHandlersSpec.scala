@@ -1,12 +1,18 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.runtime.QuackBackend
+import ai.starlake.quack.ondemand.runtime.{FleetQuackBackend, QuackBackend}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{
+  Heartbeat,
+  InMemoryControlPlaneStore,
+  InMemoryFleetServerStore,
+  NodeReport
+}
 import ai.starlake.quack.spi.StructureMutation
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -751,3 +757,59 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     val Right(resp) = out: @unchecked
     resp.nodes.map(_.catalogAttachFailures) shouldBe List(Nil)
+
+  // --- Fleet: server name + liveness on NodeInfo ------------------------------
+
+  private def fleetPool(): (PoolSupervisor, PoolHandlers) =
+    val tracker = new NodeLoadTracker
+    val sup     = new PoolSupervisor(
+      new StubQuackBackend(serverName = Some("srv-1")),
+      tracker,
+      new InMemoryControlPlaneStore()
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
+    val h = new PoolHandlers(sup, tracker)
+    h.createPool(req(size = 2, dist = RoleDistribution(0, 1, 1)), None)((_: String) => None)
+      .unsafeRunSync()
+    (sup, h)
+
+  "the pool listing" should "show each fleet node's server liveness from ONE batched lookup" in:
+    val (sup, h) = fleetPool()
+    val t0       = Instant.parse("2026-09-25T10:00:00Z")
+    val fleet    = new InMemoryFleetServerStore(clock = () => t0)
+    val cfg      = FleetConfig(joinToken = "s", reassignAfterSec = 60)
+    val backend  = new FleetQuackBackend(fleet, cfg, clock = () => t0)
+    fleet.recordHeartbeat(
+      Heartbeat(
+        "srv-1",
+        "10.0.0.1",
+        21900,
+        None,
+        None,
+        None,
+        None,
+        None,
+        NodeReport(0, None, "none", None, None, None)
+      )
+    )
+    fleet.backdate("srv-1", 100)
+    var calls = 0
+    sup.serverLivenessAll = () =>
+      calls += 1
+      FleetHandlers.livenessByName(fleet, backend)
+    val Right(list) = h.listPools(None)((_: String) => None).unsafeRunSync(): @unchecked
+    list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
+      List.fill(2)((Some("srv-1"), Some("dead")))
+    calls shouldBe 1
+    val Right(status) = h.poolStatus("acme", "acme_default", "sales").unsafeRunSync(): @unchecked
+    status.nodes.map(_.serverState) shouldBe List.fill(2)(Some("dead"))
+
+  it should "degrade to no server state, never fail, when the lookup throws" in:
+    val (sup, h) = fleetPool()
+    sup.serverLivenessAll = () => throw new IllegalStateException("postgres unreachable")
+    val Right(list) = h.listPools(None)((_: String) => None).unsafeRunSync(): @unchecked
+    list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
+      List.fill(2)((Some("srv-1"), None))
+    h.poolStatus("acme", "acme_default", "sales").unsafeRunSync().map(_.nodes.size) shouldBe
+      Right(2)

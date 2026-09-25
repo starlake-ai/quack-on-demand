@@ -94,6 +94,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
   given ProductHint[BranchingConfig]           = ProductHint[BranchingConfig](camelMapping)
+  given ProductHint[FleetConfig]               = ProductHint[FleetConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
   given ProductHint[EmbeddedPostgresConfig]    = ProductHint[EmbeddedPostgresConfig](camelMapping)
   given ProductHint[SmtpConfig]                = ProductHint[SmtpConfig](camelMapping)
@@ -261,6 +262,11 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
+    mgrCfg.fleet
+      .validateForRuntime(mgrCfg.runtimeType, duckdbOnHost = BootPreflight.duckdbOnHost())
+      .left
+      .foreach(msg => sys.error(msg))
+
     TelemetryConfig
       .validate(mgrCfg.telemetry.store, mgrCfg.telemetry.stmtHistoryRetentionDays)
       .left
@@ -332,8 +338,6 @@ object Main extends IOApp with LazyLogging:
       grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.role))
     )
 
-    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg)
-
     val secretResolver: SecretResolver =
       BootFactories.secretResolver(mgrCfg.federation.secretStore)
     logger.info(
@@ -350,6 +354,15 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // After the store: the fleet backend claims servers through it (FleetServerStore).
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store)
+    val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
+      backend match
+        case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
+        case _                                                       => None
+    fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
+    // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
+    val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
     // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
@@ -427,10 +440,15 @@ object Main extends IOApp with LazyLogging:
       sweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
     )
 
-    // With HA off these stay no-ops: no advisory locks, no NOTIFY, no extra connection.
+    // With HA off the publisher stays a no-op (no NOTIFY, no extra connection), but pool mutations
+    // are still serialized per pool, in-process: a scale-down's stop can take seconds (fleet: until
+    // the agent confirms; K8s: until the pod object is gone; local: the process wait), and an
+    // unserialized reconcile pass in that window reads the node as dead and respawns it on the
+    // pre-scale target (a scale to 0 undone, a leaked pod or process plus a stray node row). Same
+    // contract as the HA advisory lock, without a database.
     val poolLocks =
       if haOn then new PgPoolLocker(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
-      else PoolLocker.noop
+      else PoolLocker.inProcess()
     val publisher =
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
@@ -472,6 +490,11 @@ object Main extends IOApp with LazyLogging:
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
     )
     supRef.set(sup)
+    // Fleet mode: the pool listing shows each node's server and its liveness.
+    fleetBackend.foreach { fb =>
+      sup.serverLivenessAll =
+        () => ai.starlake.quack.ondemand.api.FleetHandlers.livenessByName(store, fb)
+    }
 
     // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
     // authenticator; others fall back to the manager-wide auth.google block.
@@ -1590,8 +1613,8 @@ object Main extends IOApp with LazyLogging:
           resolveReader = catalogReader,
           cloneCatalog = (meta, parentDb, branchDb, path) =>
             ai.starlake.quack.ondemand.branch.BranchCloner(meta).clone(parentDb, branchDb, path),
-          mergeExecutor =
-            ai.starlake.quack.boot.BranchWiring.mergeExecutor(mgrCfg.branching, backend, adapter),
+          mergeExecutor = ai.starlake.quack.boot.BranchWiring
+            .mergeExecutor(mgrCfg.branching, ephemeralBackend, adapter),
           counter = ai.starlake.quack.boot.BranchWiring.changeCounter(
             previewExecutor,
             b => branchService.poolKeyOf(b),
@@ -1750,6 +1773,17 @@ object Main extends IOApp with LazyLogging:
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,
+        // Always mounted: outside fleet mode `fleetBackend` is None and every fleet route answers
+        // 400 fleet_disabled (the UI and `qod fleet` key on it) instead of a bare 404.
+        fleet = Some(
+          new ai.starlake.quack.ondemand.api.FleetHandlers(
+            store,
+            mgrCfg.fleet,
+            backend = fleetBackend,
+            publish = publisher,
+            audit = auditRecorder
+          )
+        ),
         patAuth = Some(patAuthenticator),
         scim = Some(
           new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)
@@ -1917,7 +1951,7 @@ object Main extends IOApp with LazyLogging:
                 val maintenanceWiring = new ai.starlake.quack.boot.MaintenanceWiring(
                   store = store,
                   sup = sup,
-                  backend = backend,
+                  backend = ephemeralBackend,
                   adapter = adapter,
                   poolLocks = poolLocks,
                   catalogReader = catalogReader,

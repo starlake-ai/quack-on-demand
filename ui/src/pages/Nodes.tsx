@@ -4,6 +4,7 @@ import { api, errorMessage } from '../api/client';
 import type { PoolResponse, NodeInfo, StatementHistoryEntry, ActiveStatementInfo } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import SqlHighlight from '../components/SqlHighlight';
+import { fmtBytes } from '../format';
 
 interface Row extends NodeInfo {
   tenant:   string;
@@ -301,7 +302,12 @@ export default function Nodes() {
                 </td>
                 <td><RoleBadge role={n.role} /></td>
                 <td><HealthBadge healthy={n.healthy} draining={n.draining} quarantined={n.quarantined} /></td>
-                <td><code>{n.host}:{n.port}</code></td>
+                <td>
+                  <code>{n.serverName ? `${n.serverName} (${n.host}:${n.port})` : `${n.host}:${n.port}`}</code>
+                  {n.serverState && n.serverState !== 'reachable' && (
+                    <span className="badge warn" style={{ marginLeft: 6 }}>server unreachable</span>
+                  )}
+                </td>
                 <td style={{ textAlign: 'right' }}>{n.inFlight}</td>
                 <td style={{ textAlign: 'right' }}>{n.qps.toFixed(1)}</td>
                 <td style={{ textAlign: 'right' }}>{n.totalServed.toLocaleString()}</td>
@@ -492,18 +498,6 @@ function fmtElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
-/** Human-readable byte count (binary units, one decimal). Undefined/null means
-  * the node's engine stats have not been scraped yet - render as a dash. */
-function fmtBytes(n: number | null | undefined): string {
-  if (n == null) return '-';
-  if (n < 1024) return `${n} B`;
-  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
-  let v = n;
-  let u = -1;
-  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
-  return `${v.toFixed(1)} ${units[u]}`;
 }
 
 /** Human-readable time-of-day for the table; full ISO on hover via title would

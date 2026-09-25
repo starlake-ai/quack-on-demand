@@ -13,6 +13,7 @@ import type {
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
   PoolResponse,
+  FleetServerListResponse,
   HealthResponse,
   TenantRequest,
   TenantResponse,
@@ -254,6 +255,12 @@ export const api = {
   setPoolDisabled:   (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
   setPoolResources:  (req: SetPoolResourcesRequest) => post<PoolResponse>('/pool/setResources', req),
   setPoolLockdown:   (req: SetPoolLockdownRequest)  => post<PoolResponse>('/pool/setLockdown', req),
+
+  // Fleet backend (QOD_RUNTIME_TYPE=fleet only; other backends 400 fleet_disabled)
+  listServers:   () => get<FleetServerListResponse>('/fleet/servers'),
+  drainServer:   (name: string) => post<void>('/fleet/server/drain', { name }),
+  undrainServer: (name: string) => post<void>('/fleet/server/undrain', { name }),
+  removeServer:  (name: string) => post<void>('/fleet/server/remove', { name }),
 
   // Tenants
   listTenants:      () => get<TenantListResponse>('/tenant/list'),

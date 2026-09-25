@@ -64,18 +64,30 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val stopped   = scala.collection.mutable.Set.empty[String]
     /** Node ids whose stop raises (simulated apiserver failure). */
     val failStops = scala.collection.mutable.Set.empty[String]
+    /** Node ids whose start raises (a non-NoFreeServer start failure). */
+    val failStarts = scala.collection.mutable.Set.empty[String]
+    /** Node ids whose start never completes (cancellation tests); `hangEntered` records the
+      * starts that reached the hang. */
+    val hangStarts  = scala.collection.mutable.Set.empty[String]
+    val hangEntered = TrieMap.empty[String, Unit]
     /** pid stamped on started nodes; None simulates the k8s backend. */
     var spawnPid: Option[Long] = Some(1L)
     /** liveNodeIds answer; None = cannot enumerate (default trait behavior). */
     var liveIds: Option[Set[String]] = None
 
-    def start(spec: NodeSpec): IO[RunningNode] = IO {
-      specs += spec
-      val n = RunningNode(spec.nodeId, spec.poolKey, spec.role,
-        "127.0.0.1", 21000 + nodes.size, "tok-" + spec.nodeId,
-        spawnPid, None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
-      nodes.put(spec.nodeId, n); n
-    }
+    def start(spec: NodeSpec): IO[RunningNode] =
+      if failStarts.contains(spec.nodeId) then
+        IO.raiseError(new RuntimeException(s"start of ${spec.nodeId} failed"))
+      else if hangStarts.contains(spec.nodeId) then
+        IO { hangEntered.put(spec.nodeId, ()); () } *> IO.never
+      else
+        IO {
+          specs += spec
+          val n = RunningNode(spec.nodeId, spec.poolKey, spec.role,
+            "127.0.0.1", 21000 + nodes.size, "tok-" + spec.nodeId,
+            spawnPid, None, Instant.EPOCH, maxConcurrent = spec.maxConcurrent)
+          nodes.put(spec.nodeId, n); n
+        }
     def stop(key: PoolKey, id: String): IO[Unit] =
       if failStops.contains(id) then
         IO.raiseError(new RuntimeException(s"apiserver 503 stopping $id"))
@@ -361,6 +373,51 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 3, 0)).unsafeRunSync()
     sup.scale(key, 1, RoleDistribution(0, 1, 0), force = false).unsafeRunSync()
     sup.get(key).get.nodes.size shouldBe 1
+
+  it should "stop the nodes started earlier in the same call when a later start fails" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val n1 = "quack-acme-acme-default-sales-1"
+    val n2 = "quack-acme-acme-default-sales-2"
+    val n3 = "quack-acme-acme-default-sales-3"
+    b.failStarts += n3
+    val err = intercept[RuntimeException] {
+      sup.scale(key, 3, RoleDistribution(0, 0, 3), force = true).unsafeRunSync()
+    }
+    err.getMessage should include(n3)
+    // -2 started, then -3 failed: -2 must be torn down, -1 left alone.
+    b.stopped.toSet shouldBe Set(n2)
+    b.isAlive(n2) shouldBe false
+    b.isAlive(n1) shouldBe true
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(n1)
+    sup.get(key).get.distribution shouldBe RoleDistribution(0, 0, 1)
+    val pid = st.snapshot().pools.head.id
+    st.listNodes(pid).map(_.nodeId) shouldBe List(n1)
+
+  it should "stop the nodes started earlier in the same call when the call is cancelled mid-start" in:
+    val (sup, b, st) = freshSupervisorWithStore()
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val n1 = "quack-acme-acme-default-sales-1"
+    val n2 = "quack-acme-acme-default-sales-2"
+    val n3 = "quack-acme-acme-default-sales-3"
+    b.hangStarts += n3
+    def awaitHang: IO[Unit] =
+      IO(b.hangEntered.contains(n3)).flatMap(if _ then IO.unit else IO.sleep(10.millis) *> awaitHang)
+    // -2 starts, -3 hangs forever, then the scale fiber is cancelled (request timeout, shutdown).
+    val outcome = (for
+      fib <- sup.scale(key, 3, RoleDistribution(0, 0, 3), force = true).start
+      _   <- awaitHang.timeout(10.seconds)
+      _   <- fib.cancel
+      o   <- fib.join
+    yield o).unsafeRunSync()
+    outcome.isCanceled shouldBe true
+    b.stopped.toSet shouldBe Set(n2)
+    b.isAlive(n2) shouldBe false
+    b.isAlive(n1) shouldBe true
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(n1)
+    sup.get(key).get.distribution shouldBe RoleDistribution(0, 0, 1)
+    val pid = st.snapshot().pools.head.id
+    st.listNodes(pid).map(_.nodeId) shouldBe List(n1)
 
   "PoolSupervisor.setMaxConcurrent" should "mutate one node's cap" in:
     val sup = freshSupervisor()

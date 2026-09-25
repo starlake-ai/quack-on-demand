@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.nio.file.{Files, Path}
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.ManagerConfig
@@ -280,3 +281,46 @@ object BootPreflight extends LazyLogging:
             "since DuckDB treats catalog names case-insensitively."
       logger.error(s"tenant-db '$tenantDbId': federated source alias '$alias' $detail")
     }
+
+  /** True when a `duckdb` binary is usable on the manager host: `DUCKDB_BIN` naming an executable
+    * file, or `duckdb` resolving on `PATH`. Backs `QOD_FLEET_EPHEMERAL=local`, which runs
+    * maintenance and branch-merge nodes through the local backend instead of claiming a fleet
+    * server for them.
+    *
+    * Mirrors `scripts/spawn-quack-node.sh`'s `DUCKDB="${DUCKDB_BIN:-duckdb}"; command -v
+    * "$DUCKDB"`: a blank `DUCKDB_BIN` (unset, or set to only whitespace) is treated the same as
+    * unset, and a `DUCKDB_BIN` value with no path separator is resolved on `PATH` like a bare
+    * command name rather than relative to this JVM's working directory -- only a value that already
+    * contains a separator (an absolute or relative path) is checked directly. Takes `env` so tests
+    * can supply a fake `DUCKDB_BIN` / `PATH` instead of the real process environment; the zero-arg
+    * call at every production call site defaults to `sys.env`.
+    */
+  def duckdbOnHost(env: Map[String, String] = sys.env): Boolean =
+    val exeName =
+      if sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win") then
+        "duckdb.exe"
+      else "duckdb"
+    env.get("DUCKDB_BIN").map(_.trim).filter(_.nonEmpty) match
+      case Some(bin) if bin.contains('/') || bin.contains(java.io.File.separatorChar) =>
+        isExecutableSafe(bin)
+      case Some(bin) => onPath(bin, env)
+      case None      => onPath(exeName, env)
+
+  private def onPath(name: String, env: Map[String, String]): Boolean =
+    env
+      .get("PATH")
+      .toList
+      .flatMap(_.split(java.io.File.pathSeparatorChar))
+      .exists(dir => isExecutableSafe(dir, name))
+
+  /** `Files.isExecutable` guarded against a malformed path (e.g. a stray `PATH` entry, or an
+    * operator typo in `DUCKDB_BIN`): `Path.of` throws `InvalidPathException` rather than returning
+    * false, and one bad entry must not abort the whole lookup.
+    */
+  private def isExecutableSafe(path: String): Boolean =
+    try Files.isExecutable(Path.of(path))
+    catch case _: java.nio.file.InvalidPathException => false
+
+  private def isExecutableSafe(dir: String, name: String): Boolean =
+    try Files.isExecutable(Path.of(dir, name))
+    catch case _: java.nio.file.InvalidPathException => false

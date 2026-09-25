@@ -1,0 +1,44 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0040-fleet-server
+      author: qod
+      changes:
+        - createTable:
+            tableName: qodstate_fleet_server
+            columns:
+              - column: { name: name, type: text, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: advertise_host, type: text, constraints: { nullable: false } }
+              - column: { name: node_port, type: int, constraints: { nullable: false } }
+              - column: { name: labels, type: jsonb, defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
+              - column: { name: joined_at, type: timestamptz, defaultValueComputed: "now()", constraints: { nullable: false } }
+              - column: { name: unschedulable, type: boolean, defaultValueBoolean: false, constraints: { nullable: false } }
+              - column: { name: assigned_node_id, type: text, constraints: { unique: true } }
+              - column: { name: assignment, type: jsonb }
+              - column: { name: assignment_epoch, type: bigint, defaultValueNumeric: 0, constraints: { nullable: false } }
+              - column: { name: claimed_at, type: timestamptz }
+        - createTable:
+            tableName: qodstate_fleet_heartbeat
+            columns:
+              - column:
+                  name: name
+                  type: text
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+                    references: qodstate_fleet_server(name)
+                    foreignKeyName: fk_fleet_heartbeat_server
+                    deleteCascade: true
+              - column: { name: last_heartbeat_at, type: timestamptz, defaultValueComputed: "now()", constraints: { nullable: false } }
+              - column: { name: agent_version, type: text }
+              - column: { name: os, type: text }
+              - column: { name: duckdb_version, type: text }
+              - column: { name: cpus, type: int }
+              - column: { name: memory_bytes, type: bigint }
+              - column: { name: node_state, type: text, defaultValue: "none", constraints: { nullable: false } }
+              - column: { name: node_error, type: text }
+              - column: { name: node_pid, type: bigint }
+              - column: { name: node_started_at, type: timestamptz }
+        - addColumn:
+            tableName: qodstate_node
+            columns:
+              - column: { name: server_name, type: text }

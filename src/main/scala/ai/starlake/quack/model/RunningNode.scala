@@ -15,5 +15,6 @@ final case class RunningNode(
     startedAt: Instant,
     maxConcurrent: Int = 0, // 0 = unlimited; mutable via /api/node/setMaxConcurrent
     lastSeen: Option[Instant] =
-      None // refreshed by the health-probe; round-tripped to qodstate_node
+      None, // refreshed by the health-probe; round-tripped to qodstate_node
+    serverName: Option[String] = None // fleet mode only: qodstate_fleet_server.name
 )
