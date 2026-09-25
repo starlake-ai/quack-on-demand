@@ -345,6 +345,28 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "answer 400 fleet_disabled (not 404) on the fleet routes outside fleet mode" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    try
+      val list = get(h.httpClient, s"${h.baseUrl}/api/fleet/servers", apiKey = Some("k1"))
+      withClue(s"GET /api/fleet/servers body: ${list.body()}") {
+        list.statusCode() shouldBe 400
+        parse(list.body()).toOption.flatMap(_.hcursor.get[String]("error").toOption) shouldBe
+          Some("fleet_disabled")
+      }
+      // A static-key caller passes the guard but must not be able to write a server row.
+      val body = """{"name":"srv-1","advertiseHost":"10.0.0.1","nodePort":21900,""" +
+        """"node":{"assignmentEpoch":0,"state":"none"}}"""
+      val hb = post(h.httpClient, s"${h.baseUrl}/api/fleet/heartbeat", body, apiKey = Some("k1"))
+      withClue(s"POST /api/fleet/heartbeat body: ${hb.body()}") {
+        hb.statusCode() shouldBe 400
+        parse(hb.body()).toOption.flatMap(_.hcursor.get[String]("error").toOption) shouldBe
+          Some("fleet_disabled")
+      }
+    finally h.shutdown()
+  }
+
   // ------------------------------------------------------------------
   // C. Login admin gate (AuthHandlers.login)
   // ------------------------------------------------------------------

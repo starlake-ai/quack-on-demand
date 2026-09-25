@@ -75,7 +75,8 @@ final class ManagerServer(
     pat: Option[PatHandlers] = None,
     // Branches (Epic 1). None (tests / branching disabled) leaves the routes unmounted.
     branches: Option[BranchHandlers] = None,
-    // Fleet agent heartbeat (runtimeType=fleet). None leaves the route unmounted.
+    // Fleet agent heartbeat + server admin. None leaves the routes unmounted; Main always wires
+    // it (outside fleet mode the handler answers 400 fleet_disabled).
     fleet: Option[FleetHandlers] = None,
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /

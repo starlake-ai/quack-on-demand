@@ -1772,18 +1772,17 @@ object Main extends IOApp with LazyLogging:
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,
-        fleet =
-          if FleetConfig.isFleet(mgrCfg.runtimeType) then
-            Some(
-              new ai.starlake.quack.ondemand.api.FleetHandlers(
-                store,
-                mgrCfg.fleet,
-                backend = fleetBackend,
-                publish = publisher,
-                audit = auditRecorder
-              )
-            )
-          else None,
+        // Always mounted: outside fleet mode `fleetBackend` is None and every fleet route answers
+        // 400 fleet_disabled (the UI and `qod fleet` key on it) instead of a bare 404.
+        fleet = Some(
+          new ai.starlake.quack.ondemand.api.FleetHandlers(
+            store,
+            mgrCfg.fleet,
+            backend = fleetBackend,
+            publish = publisher,
+            audit = auditRecorder
+          )
+        ),
         patAuth = Some(patAuthenticator),
         scim = Some(
           new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, auditRecorder)

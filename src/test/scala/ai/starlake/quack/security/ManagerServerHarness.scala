@@ -616,6 +616,15 @@ object ManagerServerHarness:
       pat = patHandlers,
       patAuth = patAuth,
       scim = Some(new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, audit)),
+      // Mirrors Main: the fleet routes are always mounted; outside fleet mode the handler has no
+      // backend and answers 400 fleet_disabled.
+      fleet = Some(
+        new ai.starlake.quack.ondemand.api.FleetHandlers(
+          new ai.starlake.quack.ondemand.state.InMemoryFleetServerStore(),
+          mgrCfg.fleet,
+          backend = None
+        )
+      ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes
     )

@@ -25,9 +25,11 @@ import java.time.Instant
 
 class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private val t0        = Instant.parse("2026-09-25T10:00:00Z")
+  private val hbCfg     = FleetConfig(joinToken = "secret", heartbeatSec = 7)
   private def fixture() =
-    val store = new InMemoryFleetServerStore(clock = () => t0)
-    (store, new FleetHandlers(store, FleetConfig(joinToken = "secret", heartbeatSec = 7)))
+    val store   = new InMemoryFleetServerStore(clock = () => t0)
+    val backend = new FleetQuackBackend(store, hbCfg, clock = () => t0)
+    (store, new FleetHandlers(store, hbCfg, backend = Some(backend)))
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
     FleetHeartbeatRequest(
       name,
@@ -123,10 +125,24 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       def byNodeId(nodeId: String): Option[FleetServerRow]        = None
       def setUnschedulable(name: String, value: Boolean): Boolean = false
       def delete(name: String): Boolean                           = false
-    val h = new FleetHandlers(failing, FleetConfig(joinToken = "secret", heartbeatSec = 7))
+    val h = new FleetHandlers(
+      failing,
+      hbCfg,
+      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0))
+    )
     val e = h.heartbeat(req(), Some("secret")).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
-    e._2.message should include("server row vanished")
+    // A fixed message: the cause goes to the manager log, never to the caller.
+    e._2.message shouldBe "fleet store error, see manager log"
+    e._2.message should not include "vanished"
+  }
+
+  it should "400 fleet_disabled and write no server row when the manager is not in fleet mode" in {
+    val store = new InMemoryFleetServerStore(clock = () => t0)
+    val h     = new FleetHandlers(store, hbCfg, backend = None)
+    h.heartbeat(req(), Some("secret")).unsafeRunSync().left.map(e => (e._1, e._2.error)) shouldBe
+      Left((StatusCode.BadRequest, "fleet_disabled"))
+    store.list() shouldBe Nil
   }
 
   // --- Admin surface (Task 8) ----------------------------------------------------------------

@@ -52,9 +52,30 @@ final class FleetHandlers(
   private def fail[A](status: StatusCode, error: String, message: String): Out[A] =
     IO.pure(Left((status, ErrorResponse(error, message))))
 
+  private val disabled =
+    (StatusCode.BadRequest, ErrorResponse("fleet_disabled", "runtimeType is not fleet"))
+
+  /** A raised store error becomes `502 backend_error` with a fixed message: the cause (SQL text,
+    * constraint names, hosts) is logged at WARN, never echoed to the caller. `onRaised` runs after
+    * the log line, e.g. to write an "error" audit row.
+    */
+  private def storeErrorTo502[A](what: String)(onRaised: Throwable => Unit)(
+      io: => Out[A]
+  ): Out[A] =
+    IO.defer(io).attempt.map {
+      case Right(r) => r
+      case Left(t)  =>
+        logger.warn(s"fleet: $what failed: ${t.getMessage}", t)
+        onRaised(t)
+        Left((StatusCode.BadGateway, ErrorResponse("backend_error", FleetHandlers.StoreError)))
+    }
+
   def heartbeat(req: FleetHeartbeatRequest, token: Option[String]): Out[FleetHeartbeatResponse] =
     val startedAt = req.node.startedAt.map(s => Try(Instant.parse(s)).toOption)
-    if !tokenOk(token) then
+    // Not a fleet manager: no server rows may be written, whoever the caller (on a local or K8s
+    // manager the route sits behind the API-key guard, so a static-key caller reaches it).
+    if backend.isEmpty then IO.pure(Left(disabled))
+    else if !tokenOk(token) then
       fail(StatusCode.Unauthorized, "fleet_unauthorized", "invalid or missing X-Fleet-Token")
     else if !ValidStates.contains(req.node.state) then
       fail(
@@ -113,16 +134,14 @@ final class FleetHandlers(
             }
         }
       // A store error (e.g. the server deleted concurrently, after the store's retry) must not
-      // become a bodyless 500: answer 502 backend_error like NodeHandlers; the agent retries.
-      HandlerErrors.raisedToBadGateway(s"heartbeat of '${req.name}' failed")(t =>
-        logger.warn(s"fleet: heartbeat of '${req.name}' failed: ${t.getMessage}", t)
-      )(record)
+      // become a bodyless 500: answer 502 backend_error; the agent retries.
+      storeErrorTo502(s"heartbeat of '${req.name}'")(_ => ())(record)
 
   // --- Admin surface ---------------------------------------------------------------------------
 
   private def fleetEnabled[A](f: FleetQuackBackend => Out[A]): Out[A] =
     backend match
-      case None    => fail(StatusCode.BadRequest, "fleet_disabled", "runtimeType is not fleet")
+      case None    => IO.pure(Left(disabled))
       case Some(b) => f(b)
 
   private def dto(b: FleetQuackBackend, r: FleetServerRow): FleetServerDto =
@@ -154,7 +173,7 @@ final class FleetHandlers(
       case Some(err) => IO.pure(Left(err))
       case None      =>
         fleetEnabled { b =>
-          HandlerErrors.raisedToBadGateway("listing fleet servers failed")(_ => ()) {
+          storeErrorTo502("listing servers")(_ => ()) {
             IO.blocking(store.list())
               .map(rows => Right(FleetServerListResponse(rows.map(dto(b, _)))))
           }
@@ -175,9 +194,7 @@ final class FleetHandlers(
         IO.pure(Left(err))
       case None =>
         fleetEnabled { b =>
-          HandlerErrors.raisedToBadGateway(s"$action of '${req.name}' failed")(_ =>
-            auditAs("error")
-          ) {
+          storeErrorTo502(s"$action of '${req.name}'")(_ => auditAs("error")) {
             IO.blocking(store.get(req.name)).flatMap {
               case None =>
                 fail(StatusCode.NotFound, "not_found", s"no such server '${req.name}'")
@@ -230,6 +247,9 @@ final class FleetHandlers(
     }
 
 object FleetHandlers:
+
+  /** The fixed message of every fleet `502 backend_error`; the cause is in the manager log. */
+  val StoreError = "fleet store error, see manager log"
 
   /** One store listing, every server's liveness by name (the pool listing's serverState). */
   def livenessByName(store: FleetServerStore, backend: FleetQuackBackend): Map[String, String] =
