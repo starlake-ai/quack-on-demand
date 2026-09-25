@@ -728,7 +728,8 @@ final case class HibernationConfig(
 final case class FleetConfig(
     @field @ConfigField(
       envVar = "QOD_FLEET_JOIN_TOKEN",
-      description = "Shared secret every agent heartbeat carries. Required when runtimeType=fleet."
+      description = "Shared secret every agent heartbeat carries. Required when runtimeType=fleet.",
+      sensitive = true
     )
     joinToken: String = "",
     @field @ConfigField(
