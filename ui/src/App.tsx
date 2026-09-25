@@ -66,6 +66,7 @@ import TenantList from './pages/TenantList';
 import TenantDetail from './pages/TenantDetail';
 import PoolDetail from './pages/PoolDetail';
 import Nodes from './pages/Nodes';
+import Servers from './pages/Servers';
 import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
 import Users from './pages/Users';
@@ -149,6 +150,9 @@ function Shell() {
         <NavLink to="/"        end className={({ isActive }) => isActive ? 'active' : ''}>Nodes</NavLink>
         <NavLink to="/tenants"     className={({ isActive }) => isActive ? 'active' : ''}>Tenants</NavLink>
         <NavLink to="/users"       className={({ isActive }) => isActive ? 'active' : ''}>Users</NavLink>
+        {role === 'admin' && isSuperuser && (
+          <NavLink to="/servers"    className={({ isActive }) => isActive ? 'active' : ''}>Servers</NavLink>
+        )}
         {role === 'admin' && telemetryEnabled && (
           <NavDropdown
             label="Audit"
@@ -189,6 +193,9 @@ function Shell() {
           <Route path="/tenant/:tenant"                   element={<TenantDetail />} />
           <Route path="/pool/:tenant/:tenantDb/:pool"              element={<PoolDetail />} />
           <Route path="/nodes"                                     element={<Nodes />} />
+          {isSuperuser && (
+            <Route path="/servers"                                 element={<Servers />} />
+          )}
           <Route path="/users"                                     element={<Users />} />
           <Route path="/catalog"                                   element={<Catalog />} />
           <Route path="/catalog/:tenant/:tenantDb/:schema/:table"  element={<CatalogTableDetail />} />

@@ -127,6 +127,14 @@ thead th {
 tbody tr { border-top: 1px solid var(--border); }
 tbody tr:hover { background: rgba(255,255,255,.025); }
 
+/* Whole-row tint for a fleet server that has gone unreachable or dead
+   (Servers page). Kept subtle so the per-cell liveness badge stays the
+   primary signal. */
+tbody tr.row-warn  { background: rgba(251,191,36,.06); }
+tbody tr.row-warn:hover  { background: rgba(251,191,36,.1); }
+tbody tr.row-dead  { background: rgba(248,113,113,.06); }
+tbody tr.row-dead:hover  { background: rgba(248,113,113,.1); }
+
 /* Right-aligned action cell (Edit/Delete buttons in the rightmost column
    of admin tables). nowrap keeps the two buttons on a single line. */
 th.actions, td.actions { text-align: right; white-space: nowrap; }

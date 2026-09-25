@@ -301,7 +301,12 @@ export default function Nodes() {
                 </td>
                 <td><RoleBadge role={n.role} /></td>
                 <td><HealthBadge healthy={n.healthy} draining={n.draining} quarantined={n.quarantined} /></td>
-                <td><code>{n.host}:{n.port}</code></td>
+                <td>
+                  <code>{n.serverName ? `${n.serverName} (${n.host}:${n.port})` : `${n.host}:${n.port}`}</code>
+                  {n.serverState && n.serverState !== 'reachable' && (
+                    <span className="badge warn" style={{ marginLeft: 6 }}>server unreachable</span>
+                  )}
+                </td>
                 <td style={{ textAlign: 'right' }}>{n.inFlight}</td>
                 <td style={{ textAlign: 'right' }}>{n.qps.toFixed(1)}</td>
                 <td style={{ textAlign: 'right' }}>{n.totalServed.toLocaleString()}</td>

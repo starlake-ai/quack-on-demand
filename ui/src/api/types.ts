@@ -47,6 +47,11 @@ export interface NodeInfo {
   duckdbTempStorageBytes?: number | null;
   duckdbSpillFiles?: number | null;
   duckdbSpillBytes?: number | null;
+  // Fleet backend only: the physical server this node is assigned to, and
+  // that server's own liveness ("reachable" | "unreachable" | "dead").
+  // Absent on the local/Kubernetes backends, which have no fleet servers.
+  serverName?: string | null;
+  serverState?: string | null;
 }
 
 export interface PoolResponse {
@@ -85,6 +90,40 @@ export interface PoolResponse {
   // attempt left them pending ("none_free" | "none_fits").
   pending?: number;
   pendingReason?: string | null;
+}
+
+// ----- Fleet backend: bare-metal / VM servers (QOD_RUNTIME_TYPE=fleet) -----
+
+/** One row of `GET /api/fleet/servers`. A server is a machine running
+  * `qod agent`; `assignedNodeId`/`tenant`/`tenantDb`/`pool` are set only
+  * while a pool node is scheduled onto it. */
+export interface FleetServer {
+  name: string;
+  advertiseHost: string;
+  nodePort: number;
+  liveness: 'reachable' | 'unreachable' | 'dead';
+  silentSeconds: number;
+  unschedulable: boolean;
+  assignedNodeId?: string | null;
+  tenant?: string | null;
+  tenantDb?: string | null;
+  pool?: string | null;
+  nodeState: string;
+  nodeError?: string | null;
+  agentVersion?: string | null;
+  duckdbVersion?: string | null;
+  cpus?: number | null;
+  memoryBytes?: number | null;
+  joinedAt: string;
+  lastHeartbeatAt: string;
+}
+
+export interface FleetServerListResponse {
+  servers: FleetServer[];
+}
+
+export interface FleetServerOpRequest {
+  name: string;
 }
 
 export interface SetPoolDisabledRequest {

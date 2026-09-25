@@ -455,7 +455,12 @@ export default function PoolDetailBody({
                 </Link>
               </td>
               <td>{n.role}</td>
-              <td>{n.host}</td>
+              <td>
+                {n.serverName ? `${n.serverName} (${n.host})` : n.host}
+                {n.serverState && n.serverState !== 'reachable' && (
+                  <span className="badge warn" style={{ marginLeft: 6 }}>server unreachable</span>
+                )}
+              </td>
               <td>{n.port}</td>
               <td>
                 <span className={
