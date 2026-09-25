@@ -197,7 +197,8 @@ See docs/superpowers/specs/2026-08-11-demand-scale-out-policy-design.md.
 All replicas serve REST + FlightSQL; one holds a Postgres session advisory lock
 (`HaCoordinator`) and runs the singleton duties (reconcile respawns, bootstrap,
 DuckLake init, revoked-jti purge). Pool mutations serialize across replicas via
-per-pool advisory locks (`PoolLocker`); caches propagate via LISTEN/NOTIFY on
+per-pool advisory locks (`PoolLocker`; a single non-HA manager serializes them in-process
+through `PoolLocker.inProcess()`, so pool mutations are per-pool serialized on every runtime); caches propagate via LISTEN/NOTIFY on
 `qod_topology` / `qod_rbac` / `qod_revocation` with a periodic snapshot-refresh
 fallback. JWT revocations persist in `qodstate_revoked_jti`. HA with the local
 backend is refused at config load. See

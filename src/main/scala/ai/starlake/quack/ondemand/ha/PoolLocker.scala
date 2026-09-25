@@ -21,9 +21,10 @@ object PoolLocker:
 
   /** Single-manager serialization: one in-process permit per pool, the same contract as
     * [[PgPoolLocker]] without a database (and the same no-nesting rule: a second `withLock` on the
-    * same key from inside the first waits forever). Wired for a non-HA fleet manager, where a
-    * scale-down's stop keeps the node id released until the agent confirms; an unserialized
-    * reconcile pass in that window reads the node as dead and respawns it on the stale target.
+    * same key from inside the first waits forever). Wired for every non-HA manager: a scale-down's
+    * stop takes seconds on any backend (agent confirmation, pod deletion, process wait), and an
+    * unserialized reconcile pass in that window reads the node as dead and respawns it on the
+    * stale target.
     */
   def inProcess(): PoolLocker = new PoolLocker:
     private val permits = new ConcurrentHashMap[PoolKey, Semaphore[IO]]()

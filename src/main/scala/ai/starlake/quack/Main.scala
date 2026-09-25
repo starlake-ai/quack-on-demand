@@ -440,14 +440,15 @@ object Main extends IOApp with LazyLogging:
       sweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
     )
 
-    // With HA off these stay no-ops: no advisory locks, no NOTIFY, no extra connection. Except the
-    // pool lock of a fleet manager, which is in-process: a fleet stop leaves the node id released
-    // until the agent confirms, and a reconcile pass in that window would respawn the node on the
-    // pre-scale target (a scale to 0 undone).
+    // With HA off the publisher stays a no-op (no NOTIFY, no extra connection), but pool mutations
+    // are still serialized per pool, in-process: a scale-down's stop can take seconds (fleet: until
+    // the agent confirms; K8s: until the pod object is gone; local: the process wait), and an
+    // unserialized reconcile pass in that window reads the node as dead and respawns it on the
+    // pre-scale target (a scale to 0 undone, a leaked pod or process plus a stray node row). Same
+    // contract as the HA advisory lock, without a database.
     val poolLocks =
       if haOn then new PgPoolLocker(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
-      else if FleetConfig.isFleet(mgrCfg.runtimeType) then PoolLocker.inProcess()
-      else PoolLocker.noop
+      else PoolLocker.inProcess()
     val publisher =
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
