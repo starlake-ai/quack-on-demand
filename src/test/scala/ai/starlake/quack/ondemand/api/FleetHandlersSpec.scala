@@ -118,6 +118,11 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
           reachableWithinSec: Int,
           requiredMemoryBytes: Option[Long]
       ): Either[ClaimMiss, FleetServerRow] = Left(ClaimMiss.NoneFree)
+      def claimReplacing(
+          assignment: FleetAssignment,
+          reachableWithinSec: Int,
+          requiredMemoryBytes: Option[Long]
+      ): Either[ClaimMiss, FleetServerRow] = Left(ClaimMiss.NoneFree)
       def setAssignment(name: String, a: FleetAssignment): Unit   = ()
       def release(nodeId: String): Option[String]                 = None
       def get(name: String): Option[FleetServerRow]               = None
@@ -255,6 +260,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         requiredMemoryBytes: Option[Long]
     ): Either[ClaimMiss, FleetServerRow] =
       inner.claim(assignment, reachableWithinSec, requiredMemoryBytes)
+    def claimReplacing(
+        assignment: FleetAssignment,
+        reachableWithinSec: Int,
+        requiredMemoryBytes: Option[Long]
+    ): Either[ClaimMiss, FleetServerRow] =
+      inner.claimReplacing(assignment, reachableWithinSec, requiredMemoryBytes)
     def setAssignment(name: String, a: FleetAssignment): Unit = inner.setAssignment(name, a)
     def release(nodeId: String): Option[String]               =
       released += nodeId
