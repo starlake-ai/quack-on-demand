@@ -102,7 +102,7 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
           val epoch   = r.assignmentEpoch + 1
           val updated = r.copy(
             assignedNodeId = Some(a.nodeId),
-            assignment = Some(a.copy(epoch = epoch)),
+            assignment = Some(a.copy(epoch = epoch, port = r.nodePort)),
             assignmentEpoch = epoch,
             claimedAt = Some(now)
           )

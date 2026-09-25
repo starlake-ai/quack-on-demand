@@ -5,19 +5,28 @@ import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.state.{
   FleetAssignment,
+  FleetServerRow,
+  FleetServerStore,
   Heartbeat,
   InMemoryFleetServerStore,
   NodeReport
 }
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration._
 
 class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
+
+  /** The one movable instant behind both the store's clock and the backend's deadline clock. A
+    * FakeAgent beat moves it one second forward first, so a heartbeat is always strictly later than
+    * the claim it answers (the backend only trusts reports from after the claim).
+    */
+  @volatile private var clockNow: Instant = Instant.EPOCH
 
   private val pk               = PoolKey("acme", "db", "bi")
   private def spec(id: String) =
@@ -39,6 +48,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
   ):
     @volatile var reportAs: String = "running"
     def beat(): Unit               =
+      clockNow = clockNow.plusSeconds(1)
       val node = store.get(name).flatMap(_.assignment) match
         case Some(a) =>
           NodeReport(
@@ -68,10 +78,30 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
   private def fixture(
       cfg: FleetConfig = FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 1)
   ) =
-    var now     = Instant.parse("2026-09-25T10:00:00Z")
-    val store   = new InMemoryFleetServerStore(clock = () => now)
-    val backend = new FleetQuackBackend(store, cfg, clock = () => now, pollInterval = 20.millis)
-    (store, backend, (t: Instant) => now = t, () => now)
+    clockNow = Instant.parse("2026-09-25T10:00:00Z")
+    val store   = new InMemoryFleetServerStore(clock = () => clockNow)
+    val backend =
+      new FleetQuackBackend(store, cfg, clock = () => clockNow, pollInterval = 20.millis)
+    (store, backend, (t: Instant) => clockNow = t, () => clockNow)
+
+  /** Advances the shared clock one second every 50ms while it runs. */
+  private val ticker: IO[Nothing] =
+    (IO.sleep(50.millis) *> IO.delay { clockNow = clockNow.plusSeconds(1) }).foreverM
+
+  /** Start `id` in a fiber, wait for its claim to land, then have `agent` beat exactly once. */
+  private def startThenBeatOnce(
+      store: InMemoryFleetServerStore,
+      backend: FleetQuackBackend,
+      agent: FakeAgent,
+      server: String,
+      id: String
+  ): IO[ai.starlake.quack.model.RunningNode] =
+    val claimed             = IO.blocking(store.get(server).flatMap(_.assignedNodeId).contains(id))
+    def waitClaim: IO[Unit] =
+      claimed.flatMap(c => if c then IO.unit else IO.sleep(10.millis) *> waitClaim)
+    backend.start(spec(id)).start.flatMap { fib =>
+      waitClaim *> IO.blocking(agent.beat()) *> fib.joinWithNever
+    }
 
   /** Run `io` while a fake agent keeps beating every 30ms in the background. */
   private def withAgent[A](agent: FakeAgent)(io: IO[A]): A =
@@ -184,7 +214,77 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       None
     )
     setNow(now().plusSeconds(10)); agent.beat()
+    // Until Main wires nodeRowExists, every claim counts as backed by a node row: release nothing.
+    backend.discoverExisting().unsafeRunSync() shouldBe Nil
+    store.get("srv-1").get.assignedNodeId shouldBe Some("orphan")
     backend.nodeRowExists = _ => false
     backend.discoverExisting().unsafeRunSync() shouldBe Nil
     store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  "start (stale reports)" should "ignore a failed state left by the previous assignment" in {
+    val (store, backend, _, _) = fixture()
+    val agent                  = new FakeAgent(store, "srv-1"); agent.reportAs = "failed"
+    agent.beat()
+    a[FleetNodeFailed] should be thrownBy
+      startThenBeatOnce(store, backend, agent, "srv-1", "n1").unsafeRunSync()
+    // Precondition: the server row still carries the old failure, and nobody beats again.
+    store.get("srv-1").get.nodeState shouldBe "failed"
+    a[FleetStartTimeout] should be thrownBy
+      ticker.background.use(_ => backend.start(spec("n2"))).unsafeRunSync()
+    store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  it should "not return on a running state left by the previous assignment" in {
+    val (store, backend, _, _) = fixture()
+    val agent                  = new FakeAgent(store, "srv-1"); agent.beat()
+    startThenBeatOnce(store, backend, agent, "srv-1", "n1").unsafeRunSync()
+    // stop runs out its deadline: no agent confirms, the state stays "running".
+    ticker.background.use(_ => backend.stop(pk, "n1")).unsafeRunSync()
+    store.get("srv-1").get.nodeState shouldBe "running"
+    val result = (for
+      done  <- Ref.of[IO, Option[String]](None)
+      fib   <- backend.start(spec("n2")).flatTap(n => done.set(n.serverName)).start
+      _     <- IO.sleep(300.millis)
+      early <- done.get
+      _     <- IO.blocking(store.get("srv-1").get.assignedNodeId shouldBe Some("n2"))
+      _     <- IO.blocking(agent.beat())
+      n     <- fib.joinWithNever
+    yield (early, n.serverName)).unsafeRunSync()
+    result shouldBe (None, Some("srv-1"))
+  }
+
+  "start (claim safety)" should "release the claim when the poll fails after the claim" in {
+    val (inner, _, _, _) = fixture()
+    final class ThrowingGet(underlying: InMemoryFleetServerStore) extends FleetServerStore:
+      export underlying.{get as _, *}
+      def get(name: String): Option[FleetServerRow] = throw new RuntimeException("pg down")
+    val backend = new FleetQuackBackend(
+      new ThrowingGet(inner),
+      FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 1),
+      clock = () => clockNow,
+      pollInterval = 20.millis
+    )
+    new FakeAgent(inner, "srv-1").beat()
+    (the[RuntimeException] thrownBy backend.start(spec("n1")).unsafeRunSync()).getMessage shouldBe
+      "pg down"
+    inner.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  it should "release the claim when the start is cancelled" in {
+    val (store, backend, _, _) =
+      fixture(FleetConfig(joinToken = "j", startupTimeoutSec = 600, stopTimeoutSec = 1))
+    val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
+    a[TimeoutException] should be thrownBy
+      withAgent(agent)(backend.start(spec("n1")).timeout(200.millis))
+    store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  "stop" should "never fail, even when the store does" in {
+    val (inner, _, _, _) = fixture()
+    final class ThrowingRelease(underlying: InMemoryFleetServerStore) extends FleetServerStore:
+      export underlying.{release as _, *}
+      def release(nodeId: String): Option[String] = throw new RuntimeException("pg down")
+    val backend = new FleetQuackBackend(new ThrowingRelease(inner), FleetConfig(joinToken = "j"))
+    noException should be thrownBy backend.stop(pk, "n1").unsafeRunSync()
   }

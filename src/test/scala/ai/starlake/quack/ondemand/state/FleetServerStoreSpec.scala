@@ -100,6 +100,14 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
       s.claim(assignment("n2"), 30, Some(8L << 30)).map(_.name) shouldBe Right("small")
     }
 
+    it should "stamp the server's node_port into the claimed assignment" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a", port = 21977))
+      val claimed = s.claim(assignment("n1").copy(port = 0), 30, None).toOption.get
+      claimed.assignment.map(_.port) shouldBe Some(21977)
+      s.get("a").get.assignment.map(_.port) shouldBe Some(21977)
+    }
+
     it should "release by node id, bump the epoch and clear claimedAt" in withStore { h =>
       val s = h.store
       s.recordHeartbeat(hb("a"))

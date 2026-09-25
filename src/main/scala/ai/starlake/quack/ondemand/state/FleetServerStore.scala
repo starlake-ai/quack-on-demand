@@ -97,8 +97,9 @@ trait FleetServerStore:
   /** Atomically claim one free server: unassigned, schedulable, heartbeat within
     * `reachableWithinSec` of the DB clock, and (when `requiredMemoryBytes` is set) either no
     * reported capacity or capacity >= the requirement; oldest join first. Writes the assignment
-    * with a bumped epoch and claimed_at = now(). `assignment.epoch` in the argument is ignored.
-    * Only the server row is locked (FOR UPDATE OF s SKIP LOCKED); heartbeats never block it.
+    * with a bumped epoch, the server's own node_port and claimed_at = now(); `assignment.epoch` and
+    * `assignment.port` in the argument are ignored. Only the server row is locked (FOR UPDATE OF s
+    * SKIP LOCKED); heartbeats never block it.
     */
   def claim(
       assignment: FleetAssignment,
@@ -106,8 +107,7 @@ trait FleetServerStore:
       requiredMemoryBytes: Option[Long]
   ): Either[ClaimMiss, FleetServerRow]
 
-  /** Rewrite the assignment JSON in place (no epoch change). Used to stamp the server's node_port.
-    */
+  /** Rewrite the assignment JSON in place (no epoch change). */
   def setAssignment(name: String, a: FleetAssignment): Unit
 
   /** Clear the assignment of the server holding `nodeId`, bump the epoch, clear claimed_at. Returns

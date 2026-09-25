@@ -1699,7 +1699,7 @@ final class PostgresControlPlaneStore(
       c.setAutoCommit(false)
       try
         val pick = c.prepareStatement(
-          """SELECT s.name, s.assignment_epoch FROM qodstate_fleet_server s
+          """SELECT s.name, s.assignment_epoch, s.node_port FROM qodstate_fleet_server s
             |JOIN qodstate_fleet_heartbeat h USING (name)
             |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
             |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
@@ -1711,16 +1711,19 @@ final class PostgresControlPlaneStore(
           case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
           case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
         val rs     = pick.executeQuery()
-        val chosen = if rs.next() then Some((rs.getString(1), rs.getLong(2))) else None
+        val chosen =
+          if rs.next() then Some((rs.getString(1), rs.getLong(2), rs.getInt(3))) else None
         rs.close(); pick.close()
         val result: Either[ClaimMiss, FleetServerRow] = chosen match
-          case Some((name, epoch0)) =>
+          case Some((name, epoch0, nodePort)) =>
             val epoch = epoch0 + 1
             val upd   = c.prepareStatement(
               """UPDATE qodstate_fleet_server SET assigned_node_id = ?, assignment = ?::jsonb,
                 |  assignment_epoch = ?, claimed_at = now() WHERE name = ?""".stripMargin
             )
-            upd.setString(1, a.nodeId); upd.setString(2, a.copy(epoch = epoch).asJson.noSpaces)
+            upd.setString(1, a.nodeId)
+            // Stamp the server's own node_port so the agent never has to remember it.
+            upd.setString(2, a.copy(epoch = epoch, port = nodePort).asJson.noSpaces)
             upd.setLong(3, epoch); upd.setString(4, name)
             upd.executeUpdate(); upd.close()
             Right(readFleetRow(c, name).get)

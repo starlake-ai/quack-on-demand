@@ -9,7 +9,7 @@ import ai.starlake.quack.ondemand.state.{
   FleetServerRow,
   FleetServerStore
 }
-import cats.effect.IO
+import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 import io.fabric8.kubernetes.api.model.Quantity
 
@@ -42,15 +42,17 @@ final class FleetQuackBackend(
   def livenessOf(row: FleetServerRow): ServerLiveness =
     FleetLiveness.classify(row.silentSeconds, cfg.heartbeatTimeoutSec, cfg.reassignAfterSec)
 
-  /** Injected by Main so the backend does not depend on the whole ControlPlaneStore. */
-  var nodeRowExists: String => Boolean = _ => false
+  /** Injected by Main so the backend does not depend on the whole ControlPlaneStore. Defaults to
+    * "exists" so an unwired backend releases nothing in `discoverExisting` (fail-safe).
+    */
+  var nodeRowExists: String => Boolean = _ => true
 
   private def assignmentFor(spec: NodeSpec, token: String): FleetAssignment =
     FleetAssignment(
       epoch = 0L, // the store bumps and writes the real epoch
       nodeId = spec.nodeId,
       poolKey = spec.poolKey,
-      port = 0, // stamped from the claimed row below
+      port = 0, // the store stamps the claimed server's node_port
       token = token,
       kind = spec.kindWire,
       env = spec.metastore,
@@ -63,9 +65,14 @@ final class FleetQuackBackend(
     )
 
   private def requiredMemoryBytes(spec: NodeSpec): Option[Long] =
-    spec.memory
-      .filter(_.nonEmpty)
-      .flatMap(m => Try(Quantity.getAmountInBytes(new Quantity(m)).longValue).toOption)
+    spec.memory.filter(_.nonEmpty).flatMap { m =>
+      val parsed = Try(Quantity.getAmountInBytes(new Quantity(m)).longValue).toOption
+      if parsed.isEmpty then
+        logger.warn(
+          s"fleet: unparsable memory '$m' for ${spec.nodeId}; claiming without a memory fit"
+        )
+      parsed
+    }
 
   def start(spec: NodeSpec): IO[RunningNode] =
     val token = LocalQuackBackend.randomToken()
@@ -78,7 +85,10 @@ final class FleetQuackBackend(
           store.release(spec.nodeId)
       }
     }
-    releaseStale *>
+    // Claim and arm the release atomically: a cancellation between the claim and the guarantee
+    // would otherwise leak a claimed server. Every non-success outcome after the claim (error,
+    // cancellation, failed report, timeout) releases it.
+    val claimAndWait: IO[RunningNode] = IO.uncancelable { poll =>
       IO.blocking(
         store.claim(assignmentFor(spec, token), cfg.heartbeatTimeoutSec, requiredMemoryBytes(spec))
       ).flatMap {
@@ -87,44 +97,57 @@ final class FleetQuackBackend(
         case Left(ClaimMiss.NoneFits) =>
           IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, "none_fits"))
         case Right(row) =>
-          // The claim wrote port=0; stamp the server's own node_port so the agent never has to
-          // remember what it advertised.
-          val withPort = row.assignment.get.copy(port = row.nodePort)
-          IO.blocking(store.setAssignment(row.name, withPort)) *>
-            awaitRunning(row.name, spec.nodeId).map { _ =>
-              RunningNode(
-                nodeId = spec.nodeId,
-                poolKey = spec.poolKey,
-                role = spec.role,
-                host = row.advertiseHost,
-                port = row.nodePort,
-                token = token,
-                pid = None,
-                podName = None,
-                startedAt = clock(),
-                maxConcurrent = spec.maxConcurrent,
-                serverName = Some(row.name)
-              )
-            }
+          val waited = awaitRunning(row.name, spec.nodeId).map { _ =>
+            RunningNode(
+              nodeId = spec.nodeId,
+              poolKey = spec.poolKey,
+              role = spec.role,
+              host = row.advertiseHost,
+              port = row.nodePort,
+              token = token,
+              pid = None,
+              podName = None,
+              startedAt = clock(),
+              maxConcurrent = spec.maxConcurrent,
+              serverName = Some(row.name)
+            )
+          }
+          poll(waited).guaranteeCase {
+            case Outcome.Succeeded(_) => IO.unit
+            case _                    => IO.blocking(store.release(spec.nodeId)).attempt.void
+          }
       }
+    }
+    releaseStale *> claimAndWait
+
+  /** True when `row`'s node state answers the current claim of `nodeId`. Claim and release never
+    * reset node_state, so a `running` or `failed` left by the previous assignment would otherwise
+    * read as the current one. Only a heartbeat recorded after the claim counts; both timestamps are
+    * the store's clock (Postgres now()), so HA replicas agree.
+    */
+  private def reportsFor(row: FleetServerRow, nodeId: String): Boolean =
+    row.assignedNodeId.contains(nodeId) && row.claimedAt.exists(c => row.lastHeartbeatAt.isAfter(c))
 
   private def awaitRunning(server: String, nodeId: String): IO[Unit] =
     val deadline       = clock().plusSeconds(cfg.startupTimeoutSec.toLong)
     def loop: IO[Unit] =
       IO.blocking(store.get(server)).flatMap {
-        case Some(row) if row.assignedNodeId.contains(nodeId) && row.nodeState == "running" =>
-          IO.unit // a report from a previous epoch reads as "stale", never as "running"
-        case Some(row) if row.assignedNodeId.contains(nodeId) && row.nodeState == "failed" =>
-          IO.blocking(store.release(nodeId)) *>
-            IO.raiseError(FleetNodeFailed(server, nodeId, row.nodeError.getOrElse("unknown")))
+        case Some(row) if reportsFor(row, nodeId) && row.nodeState == "running" => IO.unit
+        case Some(row) if reportsFor(row, nodeId) && row.nodeState == "failed"  =>
+          IO.raiseError(FleetNodeFailed(server, nodeId, row.nodeError.getOrElse("unknown")))
         case _ if !clock().isBefore(deadline) =>
-          IO.blocking(store.release(nodeId)) *>
-            IO.raiseError(FleetStartTimeout(server, nodeId, cfg.startupTimeoutSec))
+          IO.raiseError(FleetStartTimeout(server, nodeId, cfg.startupTimeoutSec))
         case _ => IO.sleep(pollInterval) *> loop
       }
     loop
 
+  /** Never fails: a store error is logged and swallowed, since callers tear down regardless. */
   def stop(key: PoolKey, nodeId: String): IO[Unit] =
+    stopOrFail(nodeId).handleErrorWith(e =>
+      IO.delay(logger.warn(s"fleet: stop of $nodeId failed: ${e.getMessage}", e))
+    )
+
+  private def stopOrFail(nodeId: String): IO[Unit] =
     IO.blocking(store.release(nodeId)).flatMap {
       case None         => IO.unit
       case Some(server) =>
@@ -155,8 +178,9 @@ final class FleetQuackBackend(
         .list()
         .collect {
           case r if r.assignment.exists(_.poolKey == key) && livenessOf(r) != ServerLiveness.Dead =>
-            r.assignedNodeId.get
+            r.assignment.map(_.nodeId)
         }
+        .flatten
         .toSet
     )
   }
