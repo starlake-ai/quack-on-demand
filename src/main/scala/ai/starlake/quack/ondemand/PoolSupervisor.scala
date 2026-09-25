@@ -354,6 +354,7 @@ final class PoolSupervisor(
     // nothing, so the hook stays silent there.
     val removedPoolKeys = pools.keys.toList.filterNot(snapPoolKeys)
     removedPoolKeys.foreach(pools.remove)
+    removedPoolKeys.foreach(pendingReasons.remove)
     removedPoolKeys.foreach(onPoolTeardown)
     poolIdByKey.keys.toList.filterNot(snapPoolKeys).foreach(poolIdByKey.remove)
     // A tenant-db a peer deleted directly in the store can no longer spawn anything, so any
@@ -983,14 +984,16 @@ final class PoolSupervisor(
         // loop runs every tick on every pool, and a pass that adopts everything must not cost a
         // federation round trip. Resolved ONCE here, not per dead node, so a multi-node heal makes
         // one call inside the advisory lock.
+        val blobRefreshed                 = keep.exists(n => !podAlive(n))
         val respawnStateIO: IO[PoolState] =
-          if keep.exists(n => !podAlive(n)) then stateWithFreshBlob(key, state) else IO.pure(state)
+          if blobRefreshed then stateWithFreshBlob(key, state) else IO.pure(state)
 
+        // The fold carries (surviving nodes, whether a respawn hit NoFreeServer this pass).
         pruneIO *> respawnStateIO.flatMap { spawnState =>
           keep
-            .foldLeft(IO.pure(List.empty[RunningNode])) { (acc, n) =>
-              acc.flatMap { kept =>
-                if podAlive(n) then backend.adopt(n).as(kept :+ n)
+            .foldLeft(IO.pure((List.empty[RunningNode], false))) { (acc, n) =>
+              acc.flatMap { case (kept, noFree) =>
+                if podAlive(n) then backend.adopt(n).as((kept :+ n, noFree))
                 else
                   logger.warn(
                     s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
@@ -1000,16 +1003,17 @@ final class PoolSupervisor(
                   IO.delay(tracker.remove(n.nodeId)) *>
                     startNodeEmitting(key, respawnSpec(key, spawnState, n)).attempt
                       .flatMap {
-                        case Left(NoFreeServer(_, id, reason)) =>
+                        case Left(NoFreeServer(_, _, reason)) =>
                           // Fleet: the node's server is gone and no other is free. Drop the dead
-                          // row; the missing-slot fill below recreates it when capacity appears.
+                          // row; the missing-slot fill of a later pass recreates it when
+                          // capacity appears.
                           IO.delay {
                             pendingReasons.put(key, reason)
                             logger.warn(
-                              s"fleet: $key/$id is dead and no server is free ($reason); " +
-                                "slot pending"
+                              s"fleet: $key/${n.nodeId} is dead and no server is free " +
+                                s"($reason); slot pending"
                             )
-                          } *> IO.blocking(store.deleteNode(id)).as(kept)
+                          } *> IO.blocking(store.deleteNode(n.nodeId)).as((kept, true))
                         case Left(t)      => IO.raiseError(t)
                         case Right(fresh) =>
                           // Re-apply the pre-remove quarantine so an operator quarantine survives
@@ -1022,21 +1026,24 @@ final class PoolSupervisor(
                           poolIdByKey.get(key) match
                             case Some(pid) =>
                               IO.blocking(store.upsertNode(fresh, pid)) *>
-                                restore.as(kept :+ fresh)
+                                restore.as((kept :+ fresh, noFree))
                             case None =>
-                              restore.as(kept :+ fresh)
+                              restore.as((kept :+ fresh, noFree))
                       }
               }
             }
-            .flatMap { newNodes =>
+            .flatMap { case (newNodes, noFree) =>
               // Fill (index, role) slots the distribution wants but no row holds: fleet slots left
-              // pending by a NoFreeServer, or a row genuinely missing on any backend.
+              // pending by a NoFreeServer, or a row genuinely missing on any backend. Skipped when
+              // a respawn already found no free server this pass (a second claim would fail too).
               val afterHeal = spawnState.copy(nodes = newNodes)
               val missing   = MissingSlots.compute(afterHeal.distribution, newNodes)
               val fillIO: IO[List[RunningNode]] =
-                if missing.isEmpty || afterHeal.suspended then IO.pure(Nil)
+                if missing.isEmpty || afterHeal.suspended || noFree then IO.pure(Nil)
                 else
-                  stateWithFreshBlob(key, afterHeal).flatMap { fresh =>
+                  val freshIO =
+                    if blobRefreshed then IO.pure(afterHeal) else stateWithFreshBlob(key, afterHeal)
+                  freshIO.flatMap { fresh =>
                     val specs = missing.map { case (idx, role) =>
                       val id = PoolSupervisor.nodeId(key, idx)
                       specFromState(
@@ -1166,7 +1173,11 @@ final class PoolSupervisor(
 
   /** Slots the distribution wants that no node row fills (fleet: waiting for a free server). */
   def pendingCount(key: PoolKey): Int =
-    pools.get(key).map(s => (s.distribution.total - s.nodes.size).max(0)).getOrElse(0)
+    pools
+      .get(key)
+      .filterNot(_.suspended) // suspended keeps its distribution with no nodes: not pending
+      .map(s => (s.distribution.total - s.nodes.size).max(0))
+      .getOrElse(0)
 
   /** Why the last spawn attempt left a slot of `key` pending (`none_free` | `none_fits`); None (and
     * the entry cleared) once nothing is pending.
@@ -2318,12 +2329,24 @@ final class PoolSupervisor(
           List.fill((newDist.countFor(role) - state.nodes.count(_.role == role)).max(0))(role)
         }
 
-        if toRemove.isEmpty && rolesToAdd.isEmpty then IO.pure(state.nodes)
+        if toRemove.isEmpty && rolesToAdd.isEmpty then
+          if newDist == state.distribution then IO.pure(state.nodes)
+          else
+            // No node moves, but the target changed: pending slots (fleet) were added or dropped.
+            // Persist it, or a stop / scale-down of pending slots is lost and the next reconcile
+            // spawns them back once a server frees up.
+            IO.blocking {
+              pools.put(key, state.copy(distribution = newDist))
+              updatePoolEntityDist(key, newDist, newDist.total)
+              publish.topologyChanged()
+              state.nodes
+            }
         else
-          // Fresh ids start above the current high-water mark so they never collide with survivors
-          // during a mixed add/remove. Scaling clears authored cohorts (updatePoolEntityDist below),
-          // so new nodes spawn placement-less by design.
-          val baseIndex = state.size
+          // Fresh ids start above the current high-water mark (highest present index, never below
+          // the node count) so they never collide with survivors during a mixed add/remove, nor
+          // with a live node left above a dropped mid-index row. Scaling clears authored cohorts
+          // (updatePoolEntityDist below), so new nodes spawn placement-less by design.
+          val baseIndex = MissingSlots.nextIndexBase(state.nodes)
           // A pure scale-DOWN adds no node, so it must not pay a federation round trip inside the
           // advisory lock; the cached state is only ever handed to specFromState when something
           // actually spawns.
@@ -2363,7 +2386,7 @@ final class PoolSupervisor(
               .map(survivors ++ _)
               .flatMap { combined =>
                 pools.put(key, spawnState.copy(nodes = combined, distribution = newDist))
-                updatePoolEntityDist(key, newDist, combined.size)
+                updatePoolEntityDist(key, newDist, newDist.total)
                 val added = combined.drop(survivors.size)
                 (if poolId.nonEmpty then
                    added
@@ -2531,6 +2554,7 @@ final class PoolSupervisor(
               poolRows.remove(pid)
             }
             pools.remove(key)
+            pendingReasons.remove(key)
             poolIdByKey.remove(key)
             publish.topologyChanged()
             events.emit(ManagerEvent.PoolDeleted(key.tenant, key.tenantDb, key.pool))
