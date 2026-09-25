@@ -155,12 +155,10 @@ final class PoolSupervisor(
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private val pendingReasons = TrieMap.empty[PoolKey, String]
   // Dead nodes the last reconcile pass KEPT because no other server was free (owner policy: the
-  // dead server keeps its assignment and row so it resumes its node if it returns first), with the
-  // federation blob resolved when they were first kept. They are not pending slots (the row is
-  // there) but still explain `pendingReason`. Replica-local, like pendingReasons; rewritten by
-  // every reconcile pass of the pool. The blob lets a pass whose only work is retrying kept nodes
-  // skip the per-pass federation round trip.
-  private val strandedNodes = TrieMap.empty[PoolKey, PoolSupervisor.Stranded]
+  // dead server keeps its assignment and row so it resumes its node if it returns first). They are
+  // not pending slots (the row is there) but still explain `pendingReason`. Replica-local, like
+  // pendingReasons; rewritten by every reconcile pass of the pool.
+  private val strandedNodes = TrieMap.empty[PoolKey, Set[String]]
 
   /** Every fleet server's liveness by name (`reachable | unreachable | dead`), for the pool
     * listing's NodeInfo.serverState: one batched store read per request. Main sets it in fleet
@@ -1024,20 +1022,13 @@ final class PoolSupervisor(
         // Re-resolve the federation blob only when this pass is actually going to respawn: the
         // loop runs every tick on every pool, and a pass that adopts everything must not cost a
         // federation round trip. Resolved ONCE here, not per dead node, so a multi-node heal makes
-        // one call inside the advisory lock.
-        //
-        // A pass whose only dead nodes are ones an earlier pass already kept (no free server) is a
-        // retry: it reuses the blob resolved when they were first kept instead of paying a
-        // federation round trip every tick for as long as the server stays dead.
-        val deadNodes   = keep.filterNot(podAlive)
-        val alreadyKept = strandedNodes.get(key)
-        val retryOnly   =
-          deadNodes.nonEmpty && alreadyKept.exists(k => deadNodes.forall(n => k.ids(n.nodeId)))
-        val blobRefreshed                 = deadNodes.nonEmpty && !retryOnly
+        // one call inside the advisory lock. This includes a pass that only retries nodes an earlier
+        // pass kept on their dead server: a retry that finds a free server IS a spawn and must carry
+        // the current blob, so the round trip is paid on every such pass.
+        val alreadyKept                   = strandedNodes.get(key)
+        val blobRefreshed                 = keep.exists(n => !podAlive(n))
         val respawnStateIO: IO[PoolState] =
-          if blobRefreshed then stateWithFreshBlob(key, state)
-          else if retryOnly then IO.pure(state.copy(extraSetupSql = alreadyKept.get.blob))
-          else IO.pure(state)
+          if blobRefreshed then stateWithFreshBlob(key, state) else IO.pure(state)
 
         // The fold carries (surviving nodes, whether a respawn hit NoFreeServer this pass, the dead
         // nodes kept on their server for lack of a free one).
@@ -1051,7 +1042,7 @@ final class PoolSupervisor(
                     s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
                       "is dead; respawning"
                   // Already kept on its dead server by an earlier pass: a per-pass retry, not news.
-                  if alreadyKept.exists(_.ids(n.nodeId)) then logger.info(msg)
+                  if alreadyKept.exists(_.contains(n.nodeId)) then logger.info(msg)
                   else logger.warn(msg)
                   // The tracker entry is cleared only when a fresh node replaces this one (or its
                   // row goes): a kept node keeps its full state, healthy = false included, so it
@@ -1113,11 +1104,7 @@ final class PoolSupervisor(
             }
             .flatMap { case (newNodes, noFree, stranded) =>
               if stranded.isEmpty then strandedNodes.remove(key)
-              else
-                strandedNodes.put(
-                  key,
-                  PoolSupervisor.Stranded(stranded, spawnState.extraSetupSql)
-                )
+              else strandedNodes.put(key, stranded)
               // Fill (index, role) slots the distribution wants but no row holds: fleet slots left
               // pending by a NoFreeServer, or a row genuinely missing on any backend. Skipped when
               // a respawn already found no free server this pass (a second claim would fail too).
@@ -1283,7 +1270,7 @@ final class PoolSupervisor(
   private def hasStrandedNode(key: PoolKey): Boolean =
     strandedNodes
       .get(key)
-      .exists(k => pools.get(key).exists(_.nodes.exists(n => k.ids.contains(n.nodeId))))
+      .exists(ids => pools.get(key).exists(_.nodes.exists(n => ids.contains(n.nodeId))))
 
   /** Surface the internal `qodstate_pool.id` for a (tenant, tenantDb, pool) triple so the RBAC
     * pool-grant UI can submit the id the grant endpoint expects. None until the pool is hydrated.
@@ -3604,11 +3591,6 @@ final class PoolSupervisor(
     }
 
 object PoolSupervisor:
-
-  /** Dead nodes a reconcile pass kept on their server (no other free), and the federation blob
-    * resolved when they were first kept.
-    */
-  final case class Stranded(ids: Set[String], blob: String)
   val AdminRoleName: String = "admin"
 
   /** Concatenate per-pool [[ai.starlake.quack.ondemand.PoolState.initSql]] with the federation blob

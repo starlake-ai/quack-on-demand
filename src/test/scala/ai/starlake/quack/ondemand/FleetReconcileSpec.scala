@@ -277,16 +277,16 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     val backend = new FleetQuackBackend(store, cfg, clock = () => clockNow, 10.millis)
     val cp      = new InMemoryControlPlaneStore()
     val tracker = new NodeLoadTracker
-    // Counts federation blob resolutions (one per respawn-state refresh).
-    val blobCalls = new java.util.concurrent.atomic.AtomicInteger(0)
-    val sup       =
+    // What the federation blob resolver answers; tests change it between passes.
+    @volatile var fedBlob: Option[String] = None
+    val sup                               =
       new PoolSupervisor(
         backend,
         tracker,
         cp,
         lockdownEnabled = false,
         locks = locker,
-        federationBlobOf = _ => IO { blobCalls.incrementAndGet(); None }
+        federationBlobOf = _ => IO(fedBlob)
       )
     val key    = PoolKey("acme", "acme_db", "bi")
     val agents = TrieMap.empty[String, Agent]
@@ -462,7 +462,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  it should "keep a kept dead node's tracker state (unroutable, counters) across passes and refresh the federation blob once per keep" in {
+  it should "keep a kept dead node's tracker state (unroutable, counters) across passes" in {
     val fx = new Fx
     fx.join("a")
     fx.run {
@@ -471,7 +471,6 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.tracker.snapshot(id(1)).totalServed shouldBe 1L
       fx.kill("a")
       fx.tracker.setHealthy(id(1), false) // the health probe marked it down
-      val blobsBefore = fx.blobCalls.get()
       fx.sup.reconcile().unsafeRunSync()
       fx.sup.reconcile().unsafeRunSync()
       fx.sup.reconcile().unsafeRunSync()
@@ -481,8 +480,6 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.tracker.snapshot(id(1)).healthy shouldBe false
       fx.tracker.snapshot(id(1)).routable shouldBe false
       fx.tracker.snapshot(id(1)).totalServed shouldBe 1L
-      // Only the pass that first kept the node resolved the blob; the retries reuse it.
-      fx.blobCalls.get() shouldBe blobsBefore + 1
     }
   }
 
@@ -495,9 +492,13 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.reconcile().unsafeRunSync()
       fx.holder(id(1)) shouldBe List("a")
       fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+      // The federation blob changes while the node is kept: the move is a spawn and must carry
+      // the blob resolved at the pass that moves it, not the one from when it was first kept.
+      fx.fedBlob = Some("ATTACH 'fed_v2.db' AS fed_v2;")
       fx.join("b")
       fx.sup.reconcile().unsafeRunSync()
       fx.holder(id(1)) shouldBe List("b")
+      fx.inner.get("b").get.assignment.map(_.extraSetupSql).get should include("fed_v2")
       fx.rowIds shouldBe List(id(1))
       fx.rowServer(id(1)) shouldBe Some("b")
       fx.inner.get("a").get.assignedNodeId shouldBe None
