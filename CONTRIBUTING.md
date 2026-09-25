@@ -69,6 +69,8 @@ Prefer one commit per logical unit. Squash before merge if a PR drifts.
 2. Make your changes; keep them focused on one concern per PR.
 3. `sbt scalafmtAll && sbt test` locally before pushing.
 4. Open the PR. Link the related issue with `Fixes #N` (or `Refs #N`).
+   The PR template ends with a licensing checkbox; tick it. The
+   `license-ack` check fails until you do, and `main` requires it.
 5. The CI must be green: snapshot build + tests + docker multi-arch
    build all pass.
 6. A maintainer reviews. We aim for a first response within a few days.
