@@ -466,8 +466,8 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_node
         |  (node_id, pool_id, host, port, token, role,
-        |   pid, pod_name, started_at, last_seen, max_concurrent)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        |   pid, pod_name, started_at, last_seen, max_concurrent, server_name)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (node_id) DO UPDATE SET
         |  pool_id        = EXCLUDED.pool_id,
         |  host           = EXCLUDED.host,
@@ -478,7 +478,8 @@ final class PostgresControlPlaneStore(
         |  pod_name       = EXCLUDED.pod_name,
         |  started_at     = EXCLUDED.started_at,
         |  last_seen      = EXCLUDED.last_seen,
-        |  max_concurrent = EXCLUDED.max_concurrent""".stripMargin
+        |  max_concurrent = EXCLUDED.max_concurrent,
+        |  server_name    = EXCLUDED.server_name""".stripMargin
     )
     try
       ps.setString(1, n.nodeId)
@@ -497,6 +498,9 @@ final class PostgresControlPlaneStore(
         case None    => ps.setNull(10, Types.TIMESTAMP)
       }
       ps.setInt(11, n.maxConcurrent)
+      n.serverName match
+        case Some(v) => ps.setString(12, v)
+        case None    => ps.setNull(12, Types.VARCHAR)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -504,7 +508,7 @@ final class PostgresControlPlaneStore(
   def listNodes(poolId: String): List[RunningNode] = withConn { c =>
     val ps = c.prepareStatement(
       """SELECT n.node_id, n.host, n.port, n.token, n.role,
-        |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
+        |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent, n.server_name,
         |       t.display_name AS tenant_name, td.name AS tenant_db_name, p.name AS pool_name
         |FROM qodstate_node n
         |JOIN qodstate_pool p       ON p.id  = n.pool_id
@@ -571,7 +575,8 @@ final class PostgresControlPlaneStore(
       podName = Option(rs.getString("pod_name")),
       startedAt = rs.getTimestamp("started_at").toInstant,
       maxConcurrent = rs.getInt("max_concurrent"),
-      lastSeen = Option(rs.getTimestamp("last_seen")).map(_.toInstant)
+      lastSeen = Option(rs.getTimestamp("last_seen")).map(_.toInstant),
+      serverName = Option(rs.getString("server_name"))
     )
 
   // ---------------- RBAC: users ----------------
@@ -1494,7 +1499,7 @@ final class PostgresControlPlaneStore(
       nodes = selectAll(
         c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
-          |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent,
+          |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent, n.server_name,
           |       t.display_name AS tenant_name,
           |       td.name        AS tenant_db_name,
           |       p.name         AS pool_name

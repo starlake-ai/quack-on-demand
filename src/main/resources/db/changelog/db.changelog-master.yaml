@@ -83,3 +83,5 @@ databaseChangeLog:
       file: db/changelog/0038-federated-source-iceberg.yaml
   - include:
       file: db/changelog/0039-tenant-db-encrypted.yaml
+  - include:
+      file: db/changelog/0040-fleet-server.yaml
