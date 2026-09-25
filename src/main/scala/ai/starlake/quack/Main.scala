@@ -261,6 +261,11 @@ object Main extends IOApp with LazyLogging:
       .left
       .foreach(msg => sys.error(msg))
 
+    mgrCfg.fleet
+      .validateForRuntime(mgrCfg.runtimeType, duckdbOnHost = BootPreflight.duckdbOnHost())
+      .left
+      .foreach(msg => sys.error(msg))
+
     TelemetryConfig
       .validate(mgrCfg.telemetry.store, mgrCfg.telemetry.stmtHistoryRetentionDays)
       .left

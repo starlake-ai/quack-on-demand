@@ -42,3 +42,7 @@ class HaPreconditionsSpec extends AnyFlatSpec with Matchers:
       embeddedPostgres = false
     ) shouldBe Right(())
   }
+
+  it should "accept ha enabled with the fleet runtime" in {
+    HaPreconditions.validate(haEnabled = true, "fleet", "s3cret") shouldBe Right(())
+  }

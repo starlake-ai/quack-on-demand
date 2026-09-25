@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.nio.file.{Files, Path}
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.ManagerConfig
@@ -280,3 +281,23 @@ object BootPreflight extends LazyLogging:
             "since DuckDB treats catalog names case-insensitively."
       logger.error(s"tenant-db '$tenantDbId': federated source alias '$alias' $detail")
     }
+
+  /** True when a `duckdb` binary is usable on the manager host: `DUCKDB_BIN` naming an executable
+    * file, or `duckdb` resolving on `PATH`. Backs `QOD_FLEET_EPHEMERAL=local`, which runs
+    * maintenance and branch-merge nodes through the local backend instead of claiming a fleet
+    * server for them.
+    */
+  def duckdbOnHost(): Boolean =
+    sys.env.get("DUCKDB_BIN") match
+      case Some(bin) if Files.isExecutable(Path.of(bin)) => true
+      case Some(_)                                       => false
+      case None =>
+        val exeName =
+          if sys.props.getOrElse("os.name", "").toLowerCase(Locale.ROOT).contains("win") then
+            "duckdb.exe"
+          else "duckdb"
+        sys.env
+          .get("PATH")
+          .toList
+          .flatMap(_.split(java.io.File.pathSeparatorChar))
+          .exists(dir => Files.isExecutable(Path.of(dir, exeName)))
