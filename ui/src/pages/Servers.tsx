@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, errorMessage } from '../api/client';
+import { api, ApiError, errorMessage } from '../api/client';
 import type { FleetServer } from '../api/types';
+import { fmtBytes } from '../format';
 
 const POLL_MS = 5000;
 
@@ -11,9 +12,17 @@ const POLL_MS = 5000;
   * explanatory sentence instead of an error banner. */
 export default function Servers() {
   const [servers, setServers] = useState<FleetServer[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Poll-cycle error (e.g. a transient fetch failure). Cleared on the next
+  // successful poll.
   const [err, setErr] = useState<string | null>(null);
+  // Error from a drain/undrain/remove click, kept separate from `err` so a
+  // subsequent successful poll doesn't silently wipe it before the operator
+  // has seen it - cleared only by starting another action or dismissing it.
+  const [actionErr, setActionErr] = useState<string | null>(null);
   const [disabled, setDisabled] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function load() {
     try {
@@ -22,24 +31,38 @@ export default function Servers() {
       setErr(null);
       setDisabled(false);
     } catch (e) {
-      const msg = errorMessage(e);
-      if (msg.includes('fleet_disabled')) setDisabled(true);
-      else setErr(msg);
+      if (e instanceof ApiError && e.code === 'fleet_disabled') {
+        setDisabled(true);
+        // Nothing will ever turn this manager into a fleet backend without a
+        // restart - stop polling a route that will keep 400ing.
+        if (pollRef.current != null) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } else {
+        setErr(errorMessage(e));
+      }
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => {
     void load();
-    const id = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(id);
+    pollRef.current = setInterval(() => void load(), POLL_MS);
+    return () => {
+      if (pollRef.current != null) clearInterval(pollRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function act(fn: () => Promise<void>) {
+    setActionErr(null);
     try {
       await fn();
       await load();
     } catch (e) {
-      setErr(errorMessage(e));
+      setActionErr(errorMessage(e));
     }
   }
 
@@ -58,6 +81,12 @@ export default function Servers() {
     <>
       <h1>Servers</h1>
       {err && <div className="login-err">{err}</div>}
+      {actionErr && (
+        <div className="login-err">
+          {actionErr}{' '}
+          <button type="button" className="copy-btn" onClick={() => setActionErr(null)}>Dismiss</button>
+        </div>
+      )}
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -74,73 +103,78 @@ export default function Servers() {
             </tr>
           </thead>
           <tbody>
-            {servers.length === 0 ? (
+            {loading ? (
+              <tr><td colSpan={9} className="empty">Loading…</td></tr>
+            ) : servers.length === 0 ? (
               <tr>
                 <td colSpan={9} className="empty">
                   No server has joined yet. Run <code>qod agent --manager ... --join-token ...</code> on a server.
                 </td>
               </tr>
-            ) : servers.map(s => (
-              <tr
-                key={s.name}
-                className={s.liveness === 'dead' ? 'row-dead' : s.liveness === 'unreachable' ? 'row-warn' : undefined}
-              >
-                <td>
-                  <code>{s.name}</code>
-                  {s.unschedulable && <span className="badge warn" style={{ marginLeft: 6 }}>drained</span>}
-                </td>
-                <td><code>{s.advertiseHost}:{s.nodePort}</code></td>
-                <td>
-                  <LivenessBadge liveness={s.liveness} />
-                  {s.liveness !== 'reachable' && (
-                    <span className="subtle" style={{ marginLeft: 6 }}>silent {s.silentSeconds}s</span>
-                  )}
-                </td>
-                <td>
-                  {s.cpus ?? '-'} cores / {s.memoryBytes ? fmtBytes(s.memoryBytes) : '-'}
-                </td>
-                <td>{s.assignedNodeId ? <code>{s.assignedNodeId}</code> : <span className="subtle">-</span>}</td>
-                <td>
-                  {s.tenant ? (
-                    <Link to={`/pool/${encodeURIComponent(s.tenant)}/${encodeURIComponent(s.tenantDb ?? '')}/${encodeURIComponent(s.pool ?? '')}`}>
-                      {s.tenant}/{s.tenantDb}/{s.pool}
-                    </Link>
-                  ) : <span className="subtle">-</span>}
-                </td>
-                <td title={s.nodeError ?? ''}>
-                  {s.nodeState}
-                  {s.nodeError && <span className="badge bad" style={{ marginLeft: 6 }}>error</span>}
-                </td>
-                <td>
-                  {s.agentVersion ?? '-'}
-                  {s.duckdbVersion && <span className="subtle"> / duckdb {s.duckdbVersion}</span>}
-                </td>
-                <td className="actions">
-                  {s.unschedulable
-                    ? <button type="button" className="copy-btn" onClick={() => void act(() => api.undrainServer(s.name))}>Undrain</button>
-                    : <button type="button" className="copy-btn" onClick={() => void act(() => api.drainServer(s.name))}>Drain</button>}
-                  {' '}
-                  {confirmRemove === s.name ? (
-                    <>
-                      <button type="button" className="danger" onClick={() => { setConfirmRemove(null); void act(() => api.removeServer(s.name)); }}>
-                        Confirm remove
-                      </button>{' '}
-                      <button type="button" className="copy-btn" onClick={() => setConfirmRemove(null)}>Cancel</button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="copy-btn"
-                      onClick={() => setConfirmRemove(s.name)}
-                      disabled={s.liveness === 'reachable' && !s.unschedulable}
-                      title="Drain first, then stop the agent"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
+            ) : servers.map(s => {
+              const removeDisabled = s.liveness === 'reachable' && !s.unschedulable;
+              return (
+                <tr
+                  key={s.name}
+                  className={s.liveness === 'dead' ? 'row-dead' : s.liveness === 'unreachable' ? 'row-warn' : undefined}
+                >
+                  <td>
+                    <code>{s.name}</code>
+                    {s.unschedulable && <span className="badge warn" style={{ marginLeft: 6 }}>drained</span>}
+                  </td>
+                  <td><code>{s.advertiseHost}:{s.nodePort}</code></td>
+                  <td>
+                    <LivenessBadge liveness={s.liveness} />
+                    {s.liveness !== 'reachable' && (
+                      <span className="subtle" style={{ marginLeft: 6 }}>silent {s.silentSeconds}s</span>
+                    )}
+                  </td>
+                  <td>
+                    {s.cpus != null ? `${s.cpus} cores` : '-'} / {fmtBytes(s.memoryBytes)}
+                  </td>
+                  <td>{s.assignedNodeId ? <code>{s.assignedNodeId}</code> : <span className="subtle">-</span>}</td>
+                  <td>
+                    {s.tenant ? (
+                      <Link to={`/pool/${encodeURIComponent(s.tenant)}/${encodeURIComponent(s.tenantDb ?? '')}/${encodeURIComponent(s.pool ?? '')}`}>
+                        {s.tenant}/{s.tenantDb}/{s.pool}
+                      </Link>
+                    ) : <span className="subtle">-</span>}
+                  </td>
+                  <td title={s.nodeError ?? ''}>
+                    {s.nodeState}
+                    {s.nodeError && <span className="badge bad" style={{ marginLeft: 6 }}>error</span>}
+                  </td>
+                  <td>
+                    {s.agentVersion ?? '-'}
+                    {s.duckdbVersion && <span className="subtle"> / duckdb {s.duckdbVersion}</span>}
+                  </td>
+                  <td className="actions">
+                    {s.unschedulable
+                      ? <button type="button" className="copy-btn" onClick={() => void act(() => api.undrainServer(s.name))}>Undrain</button>
+                      : <button type="button" className="copy-btn" onClick={() => void act(() => api.drainServer(s.name))}>Drain</button>}
+                    {' '}
+                    {confirmRemove === s.name ? (
+                      <>
+                        <button type="button" className="danger" onClick={() => { setConfirmRemove(null); void act(() => api.removeServer(s.name)); }}>
+                          Confirm remove
+                        </button>{' '}
+                        <button type="button" className="copy-btn" onClick={() => setConfirmRemove(null)}>Cancel</button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="copy-btn"
+                        onClick={() => setConfirmRemove(s.name)}
+                        disabled={removeDisabled}
+                        title={removeDisabled ? 'Drain first, then stop the agent' : undefined}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -154,14 +188,4 @@ export default function Servers() {
 function LivenessBadge({ liveness }: { liveness: FleetServer['liveness'] }) {
   const cls = liveness === 'reachable' ? 'good' : liveness === 'unreachable' ? 'warn' : 'bad';
   return <span className={`badge ${cls}`}>{liveness}</span>;
-}
-
-/** Human-readable byte count (binary units, one decimal). Mirrors Nodes.tsx's fmtBytes. */
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
-  let v = n;
-  let u = -1;
-  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
-  return `${v.toFixed(1)} ${units[u]}`;
 }

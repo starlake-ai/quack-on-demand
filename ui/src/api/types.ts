@@ -122,10 +122,6 @@ export interface FleetServerListResponse {
   servers: FleetServer[];
 }
 
-export interface FleetServerOpRequest {
-  name: string;
-}
-
 export interface SetPoolDisabledRequest {
   tenant: string;
   tenantDb: string;
