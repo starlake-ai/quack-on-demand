@@ -98,7 +98,13 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
       fit.sortBy(_.joinedAt).headOption match
         case None if free.isEmpty => Left(ClaimMiss.NoneFree)
         case None                 => Left(ClaimMiss.NoneFits)
-        case Some(r)              =>
+        case Some(_) if rows.values.exists(_.assignedNodeId.contains(a.nodeId)) =>
+          // Mirrors the UNIQUE constraint on qodstate_fleet_server.assigned_node_id.
+          throw new java.sql.SQLException(
+            s"duplicate key value violates unique constraint (assigned_node_id)=(${a.nodeId})",
+            "23505"
+          )
+        case Some(r) =>
           val epoch   = r.assignmentEpoch + 1
           val updated = r.copy(
             assignedNodeId = Some(a.nodeId),

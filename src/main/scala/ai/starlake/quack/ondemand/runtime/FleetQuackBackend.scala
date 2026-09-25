@@ -21,6 +21,10 @@ final case class NoFreeServer(poolKey: PoolKey, nodeId: String, reason: String)
     extends RuntimeException(s"no fleet server for $poolKey/$nodeId ($reason)")
 final case class FleetStartTimeout(server: String, nodeId: String, seconds: Int)
     extends RuntimeException(s"fleet server $server did not report $nodeId running in ${seconds}s")
+final case class FleetClaimLost(server: String, nodeId: String)
+    extends RuntimeException(
+      s"fleet server $server no longer holds $nodeId (drained, removed or released while starting)"
+    )
 final case class FleetNodeFailed(server: String, nodeId: String, error: String)
     extends RuntimeException(s"fleet server $server reports $nodeId failed: $error")
 
@@ -76,13 +80,20 @@ final class FleetQuackBackend(
 
   def start(spec: NodeSpec): IO[RunningNode] =
     val token = LocalQuackBackend.randomToken()
-    // A stale holder of the same node id (a server past the grace window, or drained) must be
-    // released first, otherwise the unique assigned_node_id refuses the new claim.
+    // The supervisor only starts a node id it believes has no live node, so any server still
+    // holding this id is stale, whatever its liveness: a dead or drained server, a crash orphan
+    // (claimed and running, but the manager died before writing the node row), or a server that
+    // came back between the reconcile pass's read and this start. Release it unconditionally,
+    // otherwise the unique assigned_node_id refuses the new claim with a raw SQL error on every
+    // tick. The holder's agent sees no assignment on its next heartbeat and stops its node; the
+    // freed server is immediately claimable (possibly by this very claim).
     val releaseStale: IO[Unit] = IO.blocking {
       store.byNodeId(spec.nodeId).foreach { row =>
-        if livenessOf(row) == ServerLiveness.Dead || row.unschedulable then
-          logger.warn(s"fleet: releasing stale assignment of ${spec.nodeId} on ${row.name}")
-          store.release(spec.nodeId)
+        logger.warn(
+          s"fleet: releasing previous assignment of ${spec.nodeId} on ${row.name} " +
+            s"(liveness=${livenessOf(row)}, drained=${row.unschedulable}, state=${row.nodeState})"
+        )
+        store.release(spec.nodeId)
       }
     }
     // Claim and arm the release atomically: a cancellation between the claim and the guarantee
@@ -135,6 +146,11 @@ final class FleetQuackBackend(
         case Some(row) if reportsFor(row, nodeId) && row.nodeState == "running" => IO.unit
         case Some(row) if reportsFor(row, nodeId) && row.nodeState == "failed"  =>
           IO.raiseError(FleetNodeFailed(server, nodeId, row.nodeError.getOrElse("unknown")))
+        // The claim was taken away (drain, remove, a concurrent release): nothing can answer it
+        // any more, so fail now instead of holding the per-pool lock to the startup deadline.
+        // The caller's release on failure is then a no-op.
+        case r if !r.exists(_.assignedNodeId.contains(nodeId)) =>
+          IO.raiseError(FleetClaimLost(server, nodeId))
         case _ if !clock().isBefore(deadline) =>
           IO.raiseError(FleetStartTimeout(server, nodeId, cfg.startupTimeoutSec))
         case _ => IO.sleep(pollInterval) *> loop
@@ -187,6 +203,15 @@ final class FleetQuackBackend(
 
   /** Leader duty at boot / promotion. Nothing to adopt (node rows live in the store already); the
     * useful work is releasing claims a crashed manager left behind before the node row was written.
+    *
+    * Only claims that never reached `running` are released here. A `running` claim with no node row
+    * is deliberately left alone, for two reasons:
+    *   - ephemeral maintenance and merge nodes are claimed, run and released without ever getting a
+    *     node row; releasing them here would kill a job in flight. They are safe only because of
+    *     this `running` exemption.
+    *   - a `running` crash orphan is owned by the reconcile's missing-slot fill: the supervisor
+    *     starts the slot's node id again and `start` releases ANY holder of that id before
+    *     claiming, so the orphan's agent stops its node on the next heartbeat.
     */
   def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
     val cutoff = clock().minusSeconds(cfg.startupTimeoutSec.toLong)

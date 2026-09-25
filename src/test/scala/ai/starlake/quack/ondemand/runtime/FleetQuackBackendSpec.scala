@@ -47,10 +47,14 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       memoryBytes: Option[Long] = Some(64L << 30)
   ):
     @volatile var reportAs: String = "running"
-    def beat(): Unit               =
+    // Like the real agent: once unassigned, it keeps reporting `stopped` with the epoch and node
+    // id of the assignment it last ran (never the server row's bumped epoch).
+    @volatile private var lastRun: Option[FleetAssignment] = None
+    def beat(): Unit                                       =
       clockNow = clockNow.plusSeconds(1)
       val node = store.get(name).flatMap(_.assignment) match
         case Some(a) =>
+          lastRun = Some(a)
           NodeReport(
             a.epoch,
             Some(a.nodeId),
@@ -59,7 +63,10 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
             if reportAs == "failed" then Some("boom") else None,
             Some(Instant.EPOCH)
           )
-        case None => NodeReport(0, None, "none", None, None, None)
+        case None =>
+          lastRun match
+            case Some(a) => NodeReport(a.epoch, Some(a.nodeId), "stopped", None, None, None)
+            case None    => NodeReport(0, None, "none", None, None, None)
       store.recordHeartbeat(
         Heartbeat(
           name,
@@ -180,12 +187,61 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     store.get("a").get.assignedNodeId shouldBe None
   }
 
+  it should "release a reachable running holder of the same node id before claiming" in {
+    val (store, backend, _, _) = fixture()
+    val a                      = new FakeAgent(store, "a"); a.beat()
+    val b                      = new FakeAgent(store, "b"); b.beat()
+    // A crash orphan: claimed and running on `a`, no node row, `a` reachable and schedulable.
+    withAgent(a)(backend.start(spec("n1"))).serverName shouldBe Some("a")
+    store.get("a").get.nodeState shouldBe "running"
+    val beats = (IO.blocking { a.beat(); b.beat() } *> IO.sleep(30.millis)).foreverM
+    val n     = beats.background.use(_ => backend.start(spec("n1"))).unsafeRunSync()
+    store.list().count(_.assignedNodeId.contains("n1")) shouldBe 1
+    n.serverName.flatMap(store.get).flatMap(_.assignedNodeId) shouldBe Some("n1")
+  }
+
+  it should "fail fast with FleetClaimLost when the claim is taken away while waiting" in {
+    val (store, backend, _, _) =
+      fixture(FleetConfig(joinToken = "j", startupTimeoutSec = 600, stopTimeoutSec = 1))
+    val agent   = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
+    val claimed = IO.blocking(store.get("srv-1").flatMap(_.assignedNodeId).isDefined)
+    def waitClaim: IO[Unit] =
+      claimed.flatMap(c => if c then IO.unit else IO.sleep(10.millis) *> waitClaim)
+    // A drain releases the assignment under the waiting start. Without the fast fail the wait
+    // runs to the 600s deadline (18s of wall time at one beat per 30ms); 5s is the ceiling.
+    val run = backend.start(spec("n1")).start.flatMap { fib =>
+      waitClaim *> IO.blocking {
+        store.setUnschedulable("srv-1", true); store.release("n1")
+      } *> fib.joinWithNever
+    }
+    val e = the[FleetClaimLost] thrownBy withAgent(agent)(run.timeout(5.seconds))
+    (e.server, e.nodeId) shouldBe ("srv-1", "n1")
+    store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
   "stop" should "release and return even when the server is unreachable" in {
     val (store, backend, setNow, now) = fixture()
     val agent                         = new FakeAgent(store, "srv-1"); agent.beat()
     withAgent(agent)(backend.start(spec("n1")))
     setNow(now().plusSeconds(3600))
     backend.stop(pk, "n1").unsafeRunSync()
+    store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  it should "return as soon as the agent reports stopped" in {
+    val (store, backend, _, now) =
+      fixture(FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 600))
+    val agent = new FakeAgent(store, "srv-1"); agent.beat()
+    withAgent(agent)(backend.start(spec("n1")))
+    val before = now()
+    val wall0  = System.nanoTime()
+    // The agent beats every 30ms (one simulated second each): running the 600s deadline out
+    // would take 18s of wall time and 600 simulated seconds.
+    withAgent(agent)(backend.stop(pk, "n1"))
+    val wallMs = (System.nanoTime() - wall0) / 1000000
+    java.time.Duration.between(before, now()).getSeconds should be < 10L
+    wallMs should be < 3000L
+    store.get("srv-1").get.nodeState shouldBe "stopped"
     store.get("srv-1").get.assignedNodeId shouldBe None
   }
 
@@ -220,6 +276,17 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     backend.nodeRowExists = _ => false
     backend.discoverExisting().unsafeRunSync() shouldBe Nil
     store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
+  it should "leave a running claim with no node row alone" in {
+    val (store, backend, setNow, now) = fixture()
+    val agent                         = new FakeAgent(store, "srv-1"); agent.beat()
+    // An ephemeral maintenance/merge node: claimed and running, never given a node row.
+    withAgent(agent)(backend.start(spec("quack-acme-db-bi__maint-1")))
+    setNow(now().plusSeconds(3600)); agent.beat() // far past the startup timeout, still reachable
+    backend.nodeRowExists = _ => false
+    backend.discoverExisting().unsafeRunSync() shouldBe Nil
+    store.get("srv-1").get.assignedNodeId shouldBe Some("quack-acme-db-bi__maint-1")
   }
 
   "start (stale reports)" should "ignore a failed state left by the previous assignment" in {

@@ -1013,14 +1013,21 @@ final class PoolSupervisor(
                         case Left(NoFreeServer(_, _, reason)) =>
                           // Fleet: the node's server is gone and no other is free. Drop the dead
                           // row; the missing-slot fill of a later pass recreates it when
-                          // capacity appears.
+                          // capacity appears. Release the node id together with the row: the
+                          // fill renumbers the slot (highest + 1), so an assignment left on the
+                          // old server would never be requested again and a returning server
+                          // would run an untracked node forever. The fleet stop releases and
+                          // returns at once for an unreachable server; `start` already released
+                          // any holder before its claim, so this is normally a no-op, kept as
+                          // the row deletion's own guarantee.
                           IO.delay {
                             pendingReasons.put(key, reason)
                             logger.warn(
                               s"fleet: $key/${n.nodeId} is dead and no server is free " +
                                 s"($reason); slot pending"
                             )
-                          } *> IO.blocking(store.deleteNode(n.nodeId)).as((kept, true))
+                          } *> stopNodeBestEffort(key, n.nodeId, "reconcile-pending") *>
+                            IO.blocking(store.deleteNode(n.nodeId)).as((kept, true))
                         case Left(t)      => IO.raiseError(t)
                         case Right(fresh) =>
                           // Re-apply the pre-remove quarantine so an operator quarantine survives

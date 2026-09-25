@@ -359,7 +359,7 @@ object Main extends IOApp with LazyLogging:
     val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
       backend match
         case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
-        case _                                                        => None
+        case _                                                       => None
     fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
     // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
     val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
@@ -440,9 +440,13 @@ object Main extends IOApp with LazyLogging:
       sweepIntervalMin = catalogReaderCfg.getInt("sweepIntervalMin").toLong
     )
 
-    // With HA off these stay no-ops: no advisory locks, no NOTIFY, no extra connection.
+    // With HA off these stay no-ops: no advisory locks, no NOTIFY, no extra connection. Except the
+    // pool lock of a fleet manager, which is in-process: a fleet stop leaves the node id released
+    // until the agent confirms, and a reconcile pass in that window would respawn the node on the
+    // pre-scale target (a scale to 0 undone).
     val poolLocks =
       if haOn then new PgPoolLocker(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
+      else if FleetConfig.isFleet(mgrCfg.runtimeType) then PoolLocker.inProcess()
       else PoolLocker.noop
     val publisher =
       if haOn then new PgStateChangePublisher(store) else StateChangePublisher.noop

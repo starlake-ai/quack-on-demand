@@ -161,6 +161,17 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
         s.get("a").get.nodeState shouldBe "stale"
     }
 
+    it should "store a stopped report with a stale epoch as stopped" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a"))
+      s.claim(assignment("n1"), 30, None)
+      s.recordHeartbeat(hb("a", node = NodeReport(1, Some("n1"), "running", Some(4L), None, None)))
+      s.release("n1") shouldBe Some("a") // epoch 2, no node id
+      // The agent confirms the stop of the node it last ran, under that node's epoch.
+      s.recordHeartbeat(hb("a", node = NodeReport(1, Some("n1"), "stopped", None, None, None)))
+      s.get("a").get.nodeState shouldBe "stopped"
+    }
+
     it should "let setAssignment rewrite the json without touching the epoch" in withStore { h =>
       val s = h.store
       s.recordHeartbeat(hb("a"))

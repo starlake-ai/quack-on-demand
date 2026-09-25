@@ -89,8 +89,9 @@ trait FleetServerStore:
   /** First contact inserts the server row (joined_at from the DB clock). Every call upserts the
     * heartbeat row with last_heartbeat_at = DB now(). A known name reporting a different address is
     * refused unless the server row is `unschedulable` (drained): with a shared join token an idle
-    * name must not be claimable by another machine. A report whose `assignmentEpoch` is not the
-    * server row's (and is not `none`) is stored with node_state = stale.
+    * name must not be claimable by another machine. A report whose `assignmentEpoch` or node id is
+    * not the server row's is stored with node_state = stale, except `none` and `stopped`, which are
+    * stored as reported (see `FleetServerStore.effectiveState`).
     */
   def recordHeartbeat(hb: Heartbeat): HeartbeatOutcome
 
@@ -122,12 +123,18 @@ trait FleetServerStore:
   def delete(name: String): Boolean                           // heartbeat row cascades
 
 object FleetServerStore:
-  /** The stale rule both implementations share: a `none` report is stored as is; any other report
-    * is stored as `stale` unless both its epoch and its node id match the server row's. The node id
-    * matters because epochs restart at 0 after `delete` + re-join, so an agent still running a
-    * pre-delete node could otherwise match a fresh assignment's epoch.
+  /** The stale rule both implementations share: a `none` or `stopped` report is stored as is; any
+    * other report is stored as `stale` unless both its epoch and its node id match the server
+    * row's. The node id matters because epochs restart at 0 after `delete` + re-join, so an agent
+    * still running a pre-delete node could otherwise match a fresh assignment's epoch.
+    *
+    * `stopped` is exempt because the agent confirms a stop under the epoch and node id of the node
+    * it stopped, while `release` has already bumped the row's epoch and cleared its node id: judged
+    * stale, a stop confirmation could never be seen and every manager-driven stop would run out
+    * `stopTimeoutSec`. It is safe: nothing waiting on a claim accepts `stopped` (only `running` and
+    * `failed` answer a claim), so a late stop confirmation can never satisfy a newer assignment.
     */
   def effectiveState(node: NodeReport, rowEpoch: Long, assignedNodeId: Option[String]): String =
-    if node.state == "none" then node.state
+    if node.state == "none" || node.state == "stopped" then node.state
     else if node.assignmentEpoch == rowEpoch && node.nodeId == assignedNodeId then node.state
     else "stale"
