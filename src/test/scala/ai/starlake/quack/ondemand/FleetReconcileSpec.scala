@@ -276,13 +276,17 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     val store   = new HookedStore(inner)
     val backend = new FleetQuackBackend(store, cfg, clock = () => clockNow, 10.millis)
     val cp      = new InMemoryControlPlaneStore()
-    val sup     =
+    val tracker = new NodeLoadTracker
+    // Counts federation blob resolutions (one per respawn-state refresh).
+    val blobCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val sup       =
       new PoolSupervisor(
         backend,
-        new NodeLoadTracker,
+        tracker,
         cp,
         lockdownEnabled = false,
-        locks = locker
+        locks = locker,
+        federationBlobOf = _ => IO { blobCalls.incrementAndGet(); None }
       )
     val key    = PoolKey("acme", "acme_db", "bi")
     val agents = TrieMap.empty[String, Agent]
@@ -455,6 +459,30 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         List((before.nodeId, before.token, before.serverName))
       fx.rowIds shouldBe List(id(1))
       fx.sup.pendingReason(fx.key) shouldBe None
+    }
+  }
+
+  it should "keep a kept dead node's tracker state (unroutable, counters) across passes and refresh the federation blob once per keep" in {
+    val fx = new Fx
+    fx.join("a")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      fx.tracker.onStart(id(1)); fx.tracker.onFinish(id(1), 5L)
+      fx.tracker.snapshot(id(1)).totalServed shouldBe 1L
+      fx.kill("a")
+      fx.tracker.setHealthy(id(1), false) // the health probe marked it down
+      val blobsBefore = fx.blobCalls.get()
+      fx.sup.reconcile().unsafeRunSync()
+      fx.sup.reconcile().unsafeRunSync()
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      // Before the fix every pass reset the entry to NodeLoad.empty (healthy = true): routable
+      // again until the next probe tick, counters lost.
+      fx.tracker.snapshot(id(1)).healthy shouldBe false
+      fx.tracker.snapshot(id(1)).routable shouldBe false
+      fx.tracker.snapshot(id(1)).totalServed shouldBe 1L
+      // Only the pass that first kept the node resolved the blob; the retries reuse it.
+      fx.blobCalls.get() shouldBe blobsBefore + 1
     }
   }
 

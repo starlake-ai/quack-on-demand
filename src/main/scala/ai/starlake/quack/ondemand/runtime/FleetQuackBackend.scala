@@ -17,9 +17,10 @@ import java.time.Instant
 import scala.concurrent.duration._
 import scala.util.Try
 
-/** No server is free (or none fits) for `nodeId`. `heldBy` names the server that still holds the
-  * node id's assignment (kept, since the replacement claim rolled back), None when nothing holds
-  * it.
+/** No server is free (or none fits) for `nodeId`. `heldBy` names the schedulable server that still
+  * holds the node id's assignment (kept, since the replacement claim rolled back), None when
+  * nothing holds it or the holder is drained: a drained holder (a crash between drain's release and
+  * its flag) must not keep the node forever.
   */
 final case class NoFreeServer(
     poolKey: PoolKey,
@@ -114,7 +115,9 @@ final class FleetQuackBackend(
           val reason = miss match
             case ClaimMiss.NoneFree => "none_free"
             case ClaimMiss.NoneFits => "none_fits"
-          IO.blocking(store.byNodeId(spec.nodeId).map(_.name)).flatMap { holder =>
+          val holderIO =
+            IO.blocking(store.byNodeId(spec.nodeId).filterNot(_.unschedulable).map(_.name))
+          holderIO.flatMap { holder =>
             IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, reason, holder))
           }
         case Right(row) =>

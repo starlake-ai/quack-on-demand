@@ -213,17 +213,20 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     withAgent(old)(backend.start(spec("n1"))).serverName shouldBe Some("old")
     val epochBefore = store.get("old").get.assignmentEpoch
     setNow(now().plusSeconds(120)) // old is now Dead (silent 120s > 60s grace), nothing else free
-    (the[NoFreeServer] thrownBy backend.start(spec("n1")).unsafeRunSync()).reason shouldBe
-      "none_free"
+    val miss = the[NoFreeServer] thrownBy backend.start(spec("n1")).unsafeRunSync()
+    (miss.reason, miss.heldBy) shouldBe ("none_free", Some("old"))
     // The dead holder keeps its assignment: if its server returns first it resumes its node.
     store.get("old").get.assignedNodeId shouldBe Some("n1")
     store.get("old").get.assignmentEpoch shouldBe epochBefore
-    // A drained holder with nowhere to go keeps it too.
+    // A drained holder (a crash between drain's two statements left it assigned) is not reported
+    // as a holder to keep for: the store rolls back, but heldBy is None, so the supervisor drops
+    // the row and releases it instead of keeping the node on a drained server forever.
     val (store2, backend2, _, _) = fixture()
     val d                        = new FakeAgent(store2, "d"); d.beat()
     withAgent(d)(backend2.start(spec("n2")))
     store2.setUnschedulable("d", true)
-    a[NoFreeServer] should be thrownBy backend2.start(spec("n2")).unsafeRunSync()
+    val drained = the[NoFreeServer] thrownBy backend2.start(spec("n2")).unsafeRunSync()
+    (drained.reason, drained.heldBy) shouldBe ("none_free", None)
     store2.get("d").get.assignedNodeId shouldBe Some("n2")
   }
 

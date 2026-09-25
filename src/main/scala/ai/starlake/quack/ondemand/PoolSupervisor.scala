@@ -155,10 +155,12 @@ final class PoolSupervisor(
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private val pendingReasons = TrieMap.empty[PoolKey, String]
   // Dead nodes the last reconcile pass KEPT because no other server was free (owner policy: the
-  // dead server keeps its assignment and row so it resumes its node if it returns first). They are
-  // not pending slots (the row is there) but still explain `pendingReason`. Replica-local, like
-  // pendingReasons; rewritten by every reconcile pass of the pool.
-  private val strandedNodes = TrieMap.empty[PoolKey, Set[String]]
+  // dead server keeps its assignment and row so it resumes its node if it returns first), with the
+  // federation blob resolved when they were first kept. They are not pending slots (the row is
+  // there) but still explain `pendingReason`. Replica-local, like pendingReasons; rewritten by
+  // every reconcile pass of the pool. The blob lets a pass whose only work is retrying kept nodes
+  // skip the per-pass federation round trip.
+  private val strandedNodes = TrieMap.empty[PoolKey, PoolSupervisor.Stranded]
 
   /** Every fleet server's liveness by name (`reachable | unreachable | dead`), for the pool
     * listing's NodeInfo.serverState: one batched store read per request. Main sets it in fleet
@@ -1023,9 +1025,19 @@ final class PoolSupervisor(
         // loop runs every tick on every pool, and a pass that adopts everything must not cost a
         // federation round trip. Resolved ONCE here, not per dead node, so a multi-node heal makes
         // one call inside the advisory lock.
-        val blobRefreshed                 = keep.exists(n => !podAlive(n))
+        //
+        // A pass whose only dead nodes are ones an earlier pass already kept (no free server) is a
+        // retry: it reuses the blob resolved when they were first kept instead of paying a
+        // federation round trip every tick for as long as the server stays dead.
+        val deadNodes   = keep.filterNot(podAlive)
+        val alreadyKept = strandedNodes.get(key)
+        val retryOnly   =
+          deadNodes.nonEmpty && alreadyKept.exists(k => deadNodes.forall(n => k.ids(n.nodeId)))
+        val blobRefreshed                 = deadNodes.nonEmpty && !retryOnly
         val respawnStateIO: IO[PoolState] =
-          if blobRefreshed then stateWithFreshBlob(key, state) else IO.pure(state)
+          if blobRefreshed then stateWithFreshBlob(key, state)
+          else if retryOnly then IO.pure(state.copy(extraSetupSql = alreadyKept.get.blob))
+          else IO.pure(state)
 
         // The fold carries (surviving nodes, whether a respawn hit NoFreeServer this pass, the dead
         // nodes kept on their server for lack of a free one).
@@ -1035,67 +1047,77 @@ final class PoolSupervisor(
               acc.flatMap { case (kept, noFree, stranded) =>
                 if podAlive(n) then backend.adopt(n).as((kept :+ n, noFree, stranded))
                 else
-                  logger.warn(
+                  val msg =
                     s"reconcile: $key/${n.nodeId} (pid=${n.pid.getOrElse("?")} port=${n.port}) " +
                       "is dead; respawning"
-                  )
+                  // Already kept on its dead server by an earlier pass: a per-pass retry, not news.
+                  if alreadyKept.exists(_.ids(n.nodeId)) then logger.info(msg)
+                  else logger.warn(msg)
+                  // The tracker entry is cleared only when a fresh node replaces this one (or its
+                  // row goes): a kept node keeps its full state, healthy = false included, so it
+                  // stays unroutable and keeps its counters and an operator draining flag.
                   val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
-                  IO.delay(tracker.remove(n.nodeId)) *>
-                    startNodeEmitting(key, respawnSpec(key, spawnState, n)).attempt
-                      .flatMap {
-                        case Left(NoFreeServer(_, _, reason, None)) =>
-                          // Fleet: no server holds the node any more (drained, removed or
-                          // released) and no other is free. Drop the row; the missing-slot fill
-                          // of a later pass recreates it when capacity appears. The stop is a
-                          // no-op release, kept as the row deletion's own guarantee that no
-                          // server is left assigned to an id no row tracks.
-                          IO.delay {
-                            pendingReasons.put(key, reason)
-                            logger.warn(
-                              s"fleet: $key/${n.nodeId} has no server and none is free " +
-                                s"($reason); slot pending"
-                            )
-                          } *> stopNodeBestEffort(key, n.nodeId, "reconcile-pending") *>
-                            IO.blocking(store.deleteNode(n.nodeId)).as((kept, true, stranded))
-                        case Left(NoFreeServer(_, _, reason, Some(_))) =>
-                          // Fleet, owner policy: the node's server is dead and no other is free.
-                          // KEEP the row and the assignment (claimReplacing rolled back, so the
-                          // dead server still holds it): if that server returns first, its agent
-                          // still runs the node under the same epoch, liveNodeIds lists it again
-                          // and the next pass adopts it with no restart. If capacity appears
-                          // first, the next respawn's claimReplacing moves it and the returning
-                          // server stops its orphan. Kept as the same instance, so the pass
-                          // reports no change for it; the row keeps the slot's index, so the fill
-                          // never renumbers it; the router skips it (its probe fails).
-                          IO.delay {
-                            pendingReasons.put(key, reason)
-                            if wasQuarantined then tracker.setQuarantined(n.nodeId, true)
-                            logger.info(
-                              s"fleet: $key/${n.nodeId} is dead and no other server is free " +
-                                s"($reason); keeping it on its server until one frees or it returns"
-                            )
-                          }.as((kept :+ n, true, stranded + n.nodeId))
-                        case Left(t)      => IO.raiseError(t)
-                        case Right(fresh) =>
-                          // Re-apply the pre-remove quarantine so an operator quarantine survives
-                          // a node crash. Only automatic reconcile respawn preserves it;
-                          // restartNode clears it.
-                          val restore: IO[Unit] =
-                            if wasQuarantined then
-                              IO.delay(tracker.setQuarantined(fresh.nodeId, true))
-                            else IO.unit
-                          poolIdByKey.get(key) match
-                            case Some(pid) =>
-                              IO.blocking(store.upsertNode(fresh, pid)) *>
-                                restore.as((kept :+ fresh, noFree, stranded))
-                            case None =>
+                  startNodeEmitting(key, respawnSpec(key, spawnState, n)).attempt
+                    .flatMap {
+                      case Left(NoFreeServer(_, _, reason, None)) =>
+                        // Fleet: no server holds the node any more (drained, removed or
+                        // released) and no other is free. Drop the row; the missing-slot fill
+                        // of a later pass recreates it when capacity appears. The stop is a
+                        // no-op release, kept as the row deletion's own guarantee that no
+                        // server is left assigned to an id no row tracks.
+                        IO.delay {
+                          pendingReasons.put(key, reason)
+                          logger.warn(
+                            s"fleet: $key/${n.nodeId} has no server and none is free " +
+                              s"($reason); slot pending"
+                          )
+                        } *> stopNodeBestEffort(key, n.nodeId, "reconcile-pending") *>
+                          IO.blocking(store.deleteNode(n.nodeId)) *>
+                          IO.delay(tracker.remove(n.nodeId)).as((kept, true, stranded))
+                      case Left(NoFreeServer(_, _, reason, Some(_))) =>
+                        // Fleet, owner policy: the node's server is dead and no other is free.
+                        // KEEP the row and the assignment (claimReplacing rolled back, so the
+                        // dead server still holds it): if that server returns first, its agent
+                        // still runs the node under the same epoch, liveNodeIds lists it again
+                        // and the next pass adopts it with no restart. If capacity appears
+                        // first, the next respawn's claimReplacing moves it and the returning
+                        // server stops its orphan. Kept as the same instance, so the pass
+                        // reports no change for it; the row keeps the slot's index, so the fill
+                        // never renumbers it; the router skips it (its probe fails).
+                        IO.delay {
+                          pendingReasons.put(key, reason)
+                          logger.info(
+                            s"fleet: $key/${n.nodeId} is dead and no other server is free " +
+                              s"($reason); keeping it on its server until one frees or it returns"
+                          )
+                        }.as((kept :+ n, true, stranded + n.nodeId))
+                      case Left(t)      => IO.raiseError(t)
+                      case Right(fresh) =>
+                        // Reset the replaced node's tracker entry (a reused id must not inherit
+                        // its health, counters or draining flag), then re-apply the quarantine
+                        // so an operator quarantine survives a node crash. Only automatic
+                        // reconcile respawn preserves it; restartNode clears it.
+                        val restore: IO[Unit] =
+                          IO.delay(tracker.remove(fresh.nodeId)) *>
+                            (if wasQuarantined then
+                               IO.delay(tracker.setQuarantined(fresh.nodeId, true))
+                             else IO.unit)
+                        poolIdByKey.get(key) match
+                          case Some(pid) =>
+                            IO.blocking(store.upsertNode(fresh, pid)) *>
                               restore.as((kept :+ fresh, noFree, stranded))
-                      }
+                          case None =>
+                            restore.as((kept :+ fresh, noFree, stranded))
+                    }
               }
             }
             .flatMap { case (newNodes, noFree, stranded) =>
               if stranded.isEmpty then strandedNodes.remove(key)
-              else strandedNodes.put(key, stranded)
+              else
+                strandedNodes.put(
+                  key,
+                  PoolSupervisor.Stranded(stranded, spawnState.extraSetupSql)
+                )
               // Fill (index, role) slots the distribution wants but no row holds: fleet slots left
               // pending by a NoFreeServer, or a row genuinely missing on any backend. Skipped when
               // a respawn already found no free server this pass (a second claim would fail too).
@@ -1261,7 +1283,7 @@ final class PoolSupervisor(
   private def hasStrandedNode(key: PoolKey): Boolean =
     strandedNodes
       .get(key)
-      .exists(ids => pools.get(key).exists(_.nodes.exists(n => ids.contains(n.nodeId))))
+      .exists(k => pools.get(key).exists(_.nodes.exists(n => k.ids.contains(n.nodeId))))
 
   /** Surface the internal `qodstate_pool.id` for a (tenant, tenantDb, pool) triple so the RBAC
     * pool-grant UI can submit the id the grant endpoint expects. None until the pool is hydrated.
@@ -3582,6 +3604,11 @@ final class PoolSupervisor(
     }
 
 object PoolSupervisor:
+
+  /** Dead nodes a reconcile pass kept on their server (no other free), and the federation blob
+    * resolved when they were first kept.
+    */
+  final case class Stranded(ids: Set[String], blob: String)
   val AdminRoleName: String = "admin"
 
   /** Concatenate per-pool [[ai.starlake.quack.ondemand.PoolState.initSql]] with the federation blob
