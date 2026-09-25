@@ -14,6 +14,9 @@ trait FleetStoreHarness:
   def store: FleetServerStore
   def backdate(name: String, seconds: Long): Unit
 
+  /** Moves a server's claimed_at `seconds` into the past (the store clock advancing on a claim). */
+  def backdateClaim(name: String, seconds: Long): Unit
+
 trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
 
   def hb(
@@ -98,6 +101,20 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
       ) // no capacity = eligible
       s.claim(assignment("n2"), 30, Some(64L << 30)) shouldBe Left(ClaimMiss.NoneFits)
       s.claim(assignment("n2"), 30, Some(8L << 30)).map(_.name) shouldBe Right("small")
+    }
+
+    it should "report claimAgeSeconds from the store clock, None when free" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a"))
+      s.get("a").get.claimAgeSeconds shouldBe None
+      s.claim(assignment("n1"), 30, None).isRight shouldBe true
+      s.get("a").get.claimAgeSeconds.get should be < 5L
+      h.backdateClaim("a", 120)
+      s.get("a").get.claimAgeSeconds.get should be >= 120L
+      s.byNodeId("n1").get.claimAgeSeconds.get should be >= 120L
+      s.list().head.claimAgeSeconds.get should be >= 120L
+      s.release("n1") shouldBe Some("a")
+      s.get("a").get.claimAgeSeconds shouldBe None
     }
 
     it should "stamp the server's node_port into the claimed assignment" in withStore { h =>
@@ -197,8 +214,9 @@ class InMemoryFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
     var now = Instant.parse("2026-09-25T10:00:00Z")
     val mem = new InMemoryFleetServerStore(clock = () => now)
     test(new FleetStoreHarness:
-      def store: FleetServerStore                     = mem
-      def backdate(name: String, seconds: Long): Unit = mem.backdate(name, seconds))
+      def store: FleetServerStore                          = mem
+      def backdate(name: String, seconds: Long): Unit      = mem.backdate(name, seconds)
+      def backdateClaim(name: String, seconds: Long): Unit = mem.backdateClaim(name, seconds))
   "InMemoryFleetServerStore" should behave like storeBehaviour(withMem)
 
 class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetServerStoreBehaviour:
@@ -225,6 +243,11 @@ class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
           dbName,
           s"UPDATE qodstate_fleet_heartbeat SET last_heartbeat_at = now() - interval '$seconds seconds' WHERE name = '$name'; " +
             s"UPDATE qodstate_fleet_server SET joined_at = joined_at - interval '$seconds seconds' WHERE name = '$name'"
+        )
+      def backdateClaim(name: String, seconds: Long): Unit =
+        TestPostgres.psql(
+          dbName,
+          s"UPDATE qodstate_fleet_server SET claimed_at = claimed_at - interval '$seconds seconds' WHERE name = '$name'"
         ))
   }
 

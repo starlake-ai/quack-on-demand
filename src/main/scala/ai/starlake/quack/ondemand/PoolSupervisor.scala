@@ -743,7 +743,10 @@ final class PoolSupervisor(
     *
     * A [[NoFreeServer]] (fleet backend: no server free or none fits) leaves that slot pending
     * instead of failing the operation; reconcile fills it once capacity appears. Every other
-    * failure propagates unchanged.
+    * failure first stops (best effort) every node this call already started, then propagates
+    * unchanged: callers persist rows and the new distribution only after the whole call succeeds,
+    * so a node left running here would be capacity no row tracks (a fleet server kept assigned, a
+    * pod or process leaked).
     */
   private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
     specs.foldLeft(IO.pure(List.empty[RunningNode])) { (acc, spec) =>
@@ -755,6 +758,17 @@ final class PoolSupervisor(
                 pendingReasons.put(key, reason)
                 logger.info(s"fleet: slot $id of $key pending ($reason)")
               }.as(rs)
+            case t =>
+              IO.delay(
+                logger.warn(
+                  s"start of ${spec.nodeId} in $key failed (${t.getMessage}); stopping " +
+                    s"${rs.size} node(s) this call started: ${rs.map(_.nodeId).mkString(", ")}"
+                )
+              ) *>
+                rs.foldLeft(IO.unit)((a, n) =>
+                  a *> stopNodeBestEffort(key, n.nodeId, "spawn-rollback")
+                ) *>
+                IO.raiseError(t)
           }
       }
     }

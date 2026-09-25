@@ -49,6 +49,10 @@ final case class FleetServerRow(
     // heartbeat side
     lastHeartbeatAt: Instant,
     silentSeconds: Long,
+    // Seconds since claimed_at on the store clock (Postgres now()), None when unclaimed. Like
+    // silentSeconds, measured by the store so a manager whose JVM clock drifts from the
+    // database never misjudges how old a claim is.
+    claimAgeSeconds: Option[Long],
     agentVersion: Option[String],
     os: Option[String],
     duckdbVersion: Option[String],

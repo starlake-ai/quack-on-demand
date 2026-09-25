@@ -278,6 +278,32 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     store.get("srv-1").get.assignedNodeId shouldBe None
   }
 
+  it should "measure claim age on the store clock, not on a manager clock running ahead" in {
+    val (store, _, setNow, now) = fixture()
+    val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
+    store.claim(
+      FleetAssignment(0, "fresh", pk, 21900, "t", "memory", Map.empty, "", "", "", ""),
+      30,
+      None
+    )
+    // A newly promoted manager whose JVM clock runs an hour ahead of the database: the claim is
+    // one second old on the store clock, so another replica may still be starting it.
+    val ahead = new FleetQuackBackend(
+      store,
+      FleetConfig(joinToken = "j", startupTimeoutSec = 2, stopTimeoutSec = 1),
+      clock = () => now().plusSeconds(3600),
+      pollInterval = 20.millis
+    )
+    ahead.nodeRowExists = _ => false
+    setNow(now().plusSeconds(1))
+    ahead.discoverExisting().unsafeRunSync() shouldBe Nil
+    store.get("srv-1").get.assignedNodeId shouldBe Some("fresh")
+    // Past the startup timeout on the store clock it is an orphan, whatever the JVM clock says.
+    setNow(now().plusSeconds(10))
+    ahead.discoverExisting().unsafeRunSync() shouldBe Nil
+    store.get("srv-1").get.assignedNodeId shouldBe None
+  }
+
   it should "leave a running claim with no node row alone" in {
     val (store, backend, setNow, now) = fixture()
     val agent                         = new FakeAgent(store, "srv-1"); agent.beat()

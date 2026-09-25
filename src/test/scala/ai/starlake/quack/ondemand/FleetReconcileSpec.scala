@@ -192,7 +192,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
   import ai.starlake.quack.FleetConfig
   import ai.starlake.quack.ondemand.api.{FleetHandlers, FleetServerOpRequest}
   import ai.starlake.quack.ondemand.ha.PoolLocker
-  import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
+  import ai.starlake.quack.ondemand.runtime.{FleetNodeFailed, FleetQuackBackend}
   import ai.starlake.quack.ondemand.state.{
     FleetAssignment,
     FleetServerRow,
@@ -228,10 +228,15 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     * `stopped` under the epoch and node id it last ran, like the real agent.
     */
   private final class Agent(store: FleetServerStore, val name: String, host: String):
-    @volatile var paused: Boolean                          = false
+    @volatile var paused: Boolean = false
+    // When set, the agent reports its assignment `failed` instead of `running`.
+    @volatile var failing: Boolean                         = false
     @volatile private var lastRun: Option[FleetAssignment] = None
     def beat(): Unit                                       =
       val node = store.get(name).flatMap(_.assignment) match
+        case Some(a) if failing =>
+          lastRun = Some(a)
+          NodeReport(a.epoch, Some(a.nodeId), "failed", None, Some("boom"), None)
         case Some(a) =>
           lastRun = Some(a)
           NodeReport(a.epoch, Some(a.nodeId), "running", Some(1L), None, Some(Instant.EPOCH))
@@ -390,6 +395,29 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("b")
+    }
+  }
+
+  it should "roll back the second start when the third fails: no new assignment left on any server, rows and distribution unchanged" in {
+    val fx = new Fx
+    fx.join("a"); fx.join("b"); fx.join("c")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      // `c` (the last free server, so -3 lands there) reports every node it gets as failed.
+      fx.agents("c").failing = true
+      val err = intercept[FleetNodeFailed] {
+        fx.sup.scale(fx.key, 3, RoleDistribution(0, 0, 3), force = true).unsafeRunSync()
+      }
+      err.nodeId shouldBe id(3)
+      // -2 was started on `b` before -3 failed: it must be released, not left running on a
+      // server that the fill would never ask for again (the distribution is still 1).
+      fx.inner.list().flatMap(_.assignedNodeId) shouldBe List(id(1))
+      fx.holder(id(1)) shouldBe List("a")
+      fx.rowIds shouldBe List(id(1))
+      fx.sup.get(fx.key).get.distribution shouldBe RoleDistribution(0, 0, 1)
+      fx.sup.poolEntity(fx.sup.poolId(fx.key).get).get.distribution shouldBe
+        RoleDistribution(0, 0, 1)
     }
   }
 

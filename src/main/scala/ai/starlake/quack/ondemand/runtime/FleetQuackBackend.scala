@@ -214,10 +214,13 @@ final class FleetQuackBackend(
     *     claiming, so the orphan's agent stops its node on the next heartbeat.
     */
   def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
-    val cutoff = clock().minusSeconds(cfg.startupTimeoutSec.toLong)
     store.list().foreach { r =>
       r.assignedNodeId.foreach { id =>
-        val orphan = r.nodeState != "running" && r.claimedAt.exists(_.isBefore(cutoff))
+        // Claim age comes from the store's clock, never this JVM's: a newly promoted manager
+        // whose clock runs ahead would otherwise release a fresh claim another replica is still
+        // starting.
+        val orphan =
+          r.nodeState != "running" && r.claimAgeSeconds.exists(_ > cfg.startupTimeoutSec.toLong)
         if orphan && !nodeRowExists(id) then
           logger.warn(s"fleet: releasing orphan assignment $id on ${r.name} (state=${r.nodeState})")
           store.release(id)

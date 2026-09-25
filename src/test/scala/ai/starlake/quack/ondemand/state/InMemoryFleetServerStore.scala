@@ -8,7 +8,10 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
   private val rows = mutable.LinkedHashMap.empty[String, FleetServerRow]
 
   private def withSilent(r: FleetServerRow): FleetServerRow =
-    r.copy(silentSeconds = Duration.between(r.lastHeartbeatAt, clock()).getSeconds)
+    r.copy(
+      silentSeconds = Duration.between(r.lastHeartbeatAt, clock()).getSeconds,
+      claimAgeSeconds = r.claimedAt.map(c => Duration.between(c, clock()).getSeconds)
+    )
 
   /** Test hook: move a server's heartbeat (and join) `seconds` into the past. */
   def backdate(name: String, seconds: Long): Unit = synchronized {
@@ -23,6 +26,13 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
           )
         )
       )
+  }
+
+  /** Test hook: move a server's claimed_at `seconds` into the past. */
+  def backdateClaim(name: String, seconds: Long): Unit = synchronized {
+    rows
+      .get(name)
+      .foreach(r => rows.put(name, r.copy(claimedAt = r.claimedAt.map(_.minusSeconds(seconds)))))
   }
 
   def recordHeartbeat(hb: Heartbeat): HeartbeatOutcome = synchronized {
@@ -43,6 +53,7 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             None,
             now,
             0L,
+            None,
             hb.agentVersion,
             hb.os,
             hb.duckdbVersion,

@@ -1816,6 +1816,7 @@ final class PostgresControlPlaneStore(
   private val FleetSelect =
     """SELECT s.name, s.advertise_host, s.node_port, s.joined_at, s.unschedulable, s.assigned_node_id,
       |  s.assignment::text AS assignment, s.assignment_epoch, s.claimed_at,
+      |  EXTRACT(EPOCH FROM now() - s.claimed_at)::bigint AS claim_age_seconds,
       |  h.last_heartbeat_at, EXTRACT(EPOCH FROM now() - h.last_heartbeat_at)::bigint AS silent_seconds,
       |  h.agent_version, h.os, h.duckdb_version, h.cpus, h.memory_bytes,
       |  h.node_state, h.node_error, h.node_pid, h.node_started_at
@@ -1847,6 +1848,8 @@ final class PostgresControlPlaneStore(
       claimedAt = Option(rs.getTimestamp("claimed_at")).map(_.toInstant),
       lastHeartbeatAt = rs.getTimestamp("last_heartbeat_at").toInstant,
       silentSeconds = rs.getLong("silent_seconds"),
+      claimAgeSeconds =
+        Option(rs.getObject("claim_age_seconds")).map(_.asInstanceOf[Number].longValue),
       agentVersion = Option(rs.getString("agent_version")),
       os = Option(rs.getString("os")),
       duckdbVersion = Option(rs.getString("duckdb_version")),
