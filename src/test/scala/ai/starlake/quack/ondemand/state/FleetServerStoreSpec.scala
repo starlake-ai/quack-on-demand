@@ -142,6 +142,17 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
         s.get("a").get.nodeState shouldBe "stale"
     }
 
+    it should "mark a report for another node id stale even when the epoch matches" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("a"))
+        s.claim(assignment("n1"), 30, None).map(_.assignmentEpoch) shouldBe Right(1L)
+        s.recordHeartbeat(
+          hb("a", node = NodeReport(1, Some("other"), "running", Some(7L), None, None))
+        ) shouldBe HeartbeatOutcome.Updated
+        s.get("a").get.nodeState shouldBe "stale"
+    }
+
     it should "let setAssignment rewrite the json without touching the epoch" in withStore { h =>
       val s = h.store
       s.recordHeartbeat(hb("a"))
@@ -173,7 +184,9 @@ class InMemoryFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
 
 class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetServerStoreBehaviour:
   TestPostgres.dropStrayTestDatabases("qodfs")
-  private def withFresh(test: FleetStoreHarness => Unit): Unit =
+
+  /** A fresh migrated database, its store and its JDBC url, dropped afterwards. */
+  private def withDb(test: (PostgresControlPlaneStore, String, String) => Unit): Unit =
     TestPostgres.ensureReachable()
     val dbName = s"qodfs_test_${System.nanoTime()}"
     TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
@@ -181,15 +194,40 @@ class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
       val url = TestPostgres.dbUrl(dbName)
       new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
       val pg = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
-      try
-        test(new FleetStoreHarness:
-          def store: FleetServerStore                     = pg
-          def backdate(name: String, seconds: Long): Unit =
-            TestPostgres.psql(
-              dbName,
-              s"UPDATE qodstate_fleet_heartbeat SET last_heartbeat_at = now() - interval '$seconds seconds' WHERE name = '$name'; " +
-                s"UPDATE qodstate_fleet_server SET joined_at = joined_at - interval '$seconds seconds' WHERE name = '$name'"
-            ))
+      try test(pg, url, dbName)
       finally pg.close()
     finally Try(TestPostgres.dropDatabase(dbName))
+
+  private def withFresh(test: FleetStoreHarness => Unit): Unit = withDb { (pg, _, dbName) =>
+    test(new FleetStoreHarness:
+      def store: FleetServerStore                     = pg
+      def backdate(name: String, seconds: Long): Unit =
+        TestPostgres.psql(
+          dbName,
+          s"UPDATE qodstate_fleet_heartbeat SET last_heartbeat_at = now() - interval '$seconds seconds' WHERE name = '$name'; " +
+            s"UPDATE qodstate_fleet_server SET joined_at = joined_at - interval '$seconds seconds' WHERE name = '$name'"
+        ))
+  }
+
   "PostgresControlPlaneStore as FleetServerStore" should behave like storeBehaviour(withFresh)
+
+  it should "answer NoneFree, not NoneFits, when the only fitting server is locked by a concurrent claim" in withDb {
+    (pg, url, _) =>
+      pg.recordHeartbeat(hb("big", memoryBytes = Some(128L << 30)))
+      pg.recordHeartbeat(hb("small", memoryBytes = Some(8L << 30)))
+      // Hold "big" the way an in-flight claim does, from a second connection.
+      val other =
+        java.sql.DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        other.setAutoCommit(false)
+        val lock = other.prepareStatement(
+          "SELECT name FROM qodstate_fleet_server WHERE name = 'big' FOR UPDATE"
+        )
+        lock.executeQuery().next() shouldBe true
+        pg.claim(assignment("n1"), 30, Some(64L << 30)) shouldBe Left(ClaimMiss.NoneFree)
+        other.rollback()
+        lock.close()
+      finally other.close()
+      pg.claim(assignment("n1"), 30, Some(64L << 30)).map(_.name) shouldBe Right("big")
+      pg.claim(assignment("n2"), 30, Some(64L << 30)) shouldBe Left(ClaimMiss.NoneFits)
+  }

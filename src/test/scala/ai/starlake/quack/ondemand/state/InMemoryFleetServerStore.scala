@@ -48,7 +48,7 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             hb.duckdbVersion,
             hb.cpus,
             hb.memoryBytes,
-            FleetServerStore.effectiveState(hb.node, 0L),
+            FleetServerStore.effectiveState(hb.node, 0L, None),
             hb.node.error,
             hb.node.pid,
             hb.node.startedAt
@@ -70,7 +70,8 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             duckdbVersion = hb.duckdbVersion,
             cpus = hb.cpus,
             memoryBytes = hb.memoryBytes,
-            nodeState = FleetServerStore.effectiveState(hb.node, r.assignmentEpoch),
+            nodeState =
+              FleetServerStore.effectiveState(hb.node, r.assignmentEpoch, r.assignedNodeId),
             nodeError = hb.node.error,
             nodePid = hb.node.pid,
             nodeStartedAt = hb.node.startedAt

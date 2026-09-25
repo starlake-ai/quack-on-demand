@@ -1567,64 +1567,118 @@ final class PostgresControlPlaneStore(
   // ---------------- Fleet ----------------
 
   override def recordHeartbeat(hb: Heartbeat): HeartbeatOutcome = withConn { c =>
-    // 1. First contact: insert the server row; a no-op for a known name. No lock is taken on an
-    //    existing server row here, so a concurrent claim's FOR UPDATE SKIP LOCKED never skips it.
+    // One transaction, so a concurrent `delete(name)` cannot interleave between the statements
+    // below and leave a heartbeat pointing at a vanished server. Still no lock on an existing
+    // server row: INSERT ... ON CONFLICT DO NOTHING and a plain SELECT take none, so a concurrent
+    // claim's FOR UPDATE OF s SKIP LOCKED never skips it. A row deleted and committed between
+    // our statements (READ COMMITTED: each statement takes a fresh snapshot) shows up as an empty
+    // SELECT or an FK violation on the heartbeat insert; either rolls back and retries once, and
+    // the retry's INSERT re-creates the row (a re-join).
+    c.setAutoCommit(false)
+    try
+      def attempt(retriesLeft: Int): HeartbeatOutcome =
+        val outcome =
+          try heartbeatOnce(c, hb)
+          catch
+            case e: java.sql.SQLException if e.getSQLState == "23503" && retriesLeft > 0 =>
+              None // FK violation: the server row vanished under us
+        outcome match
+          case Some(o) =>
+            c.commit()
+            o
+          case None if retriesLeft > 0 =>
+            c.rollback()
+            attempt(retriesLeft - 1)
+          case None =>
+            throw new IllegalStateException(
+              s"fleet server '${hb.name}' vanished twice while recording its heartbeat"
+            )
+      attempt(1)
+    catch
+      case t: Throwable =>
+        c.rollback()
+        throw t
+    finally c.setAutoCommit(true)
+  }
+
+  /** One heartbeat pass inside the caller's transaction. `None` when the server row vanished
+    * between the INSERT-or-nothing and the SELECT (a concurrent delete committed in between).
+    */
+  private def heartbeatOnce(c: Connection, hb: Heartbeat): Option[HeartbeatOutcome] =
+    // 1. First contact: insert the server row; a no-op for a known name.
     val ins = c.prepareStatement(
       """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port)
         |VALUES (?, ?, ?) ON CONFLICT (name) DO NOTHING""".stripMargin
     )
     val joined =
-      try {
-        ins.setString(1, hb.name); ins.setString(2, hb.advertiseHost); ins.setInt(3, hb.nodePort);
+      try
+        ins.setString(1, hb.name)
+        ins.setString(2, hb.advertiseHost)
+        ins.setInt(3, hb.nodePort)
         ins.executeUpdate() == 1
-      } finally ins.close()
-    // 2. Address guard against the server row (plain read).
+      finally ins.close()
+    // 2. Address guard and stale-rule inputs, read from the server row (plain read, no lock).
     val sel = c.prepareStatement(
-      "SELECT advertise_host, node_port, unschedulable, assignment_epoch FROM qodstate_fleet_server WHERE name = ?"
+      """SELECT advertise_host, node_port, unschedulable, assignment_epoch, assigned_node_id
+        |FROM qodstate_fleet_server WHERE name = ?""".stripMargin
     )
-    val (host, port, drained, rowEpoch) =
+    val current =
       try
         sel.setString(1, hb.name)
         val rs = sel.executeQuery()
-        try { rs.next(); (rs.getString(1), rs.getInt(2), rs.getBoolean(3), rs.getLong(4)) }
+        try
+          if rs.next() then
+            Some(
+              (
+                rs.getString(1),
+                rs.getInt(2),
+                rs.getBoolean(3),
+                rs.getLong(4),
+                Option(rs.getString(5))
+              )
+            )
+          else None
         finally rs.close()
       finally sel.close()
-    if !joined && !drained && (host != hb.advertiseHost || port != hb.nodePort) then
-      HeartbeatOutcome.AddressChangeRefused
-    else
-      if drained && (host != hb.advertiseHost || port != hb.nodePort) then
-        val addr = c.prepareStatement(
-          "UPDATE qodstate_fleet_server SET advertise_host = ?, node_port = ? WHERE name = ?"
+    current.map { case (host, port, drained, rowEpoch, assignedNodeId) =>
+      if !joined && !drained && (host != hb.advertiseHost || port != hb.nodePort) then
+        HeartbeatOutcome.AddressChangeRefused
+      else
+        if drained && (host != hb.advertiseHost || port != hb.nodePort) then
+          val addr = c.prepareStatement(
+            "UPDATE qodstate_fleet_server SET advertise_host = ?, node_port = ? WHERE name = ?"
+          )
+          try
+            addr.setString(1, hb.advertiseHost)
+            addr.setInt(2, hb.nodePort)
+            addr.setString(3, hb.name)
+            addr.executeUpdate()
+          finally addr.close()
+        // 3. Heartbeat row: the only row this handler rewrites every interval.
+        val up = c.prepareStatement(
+          """INSERT INTO qodstate_fleet_heartbeat
+            |  (name, last_heartbeat_at, agent_version, os, duckdb_version, cpus, memory_bytes,
+            |   node_state, node_error, node_pid, node_started_at)
+            |VALUES (?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            |ON CONFLICT (name) DO UPDATE SET
+            |  last_heartbeat_at = now(), agent_version = EXCLUDED.agent_version, os = EXCLUDED.os,
+            |  duckdb_version = EXCLUDED.duckdb_version, cpus = EXCLUDED.cpus, memory_bytes = EXCLUDED.memory_bytes,
+            |  node_state = EXCLUDED.node_state, node_error = EXCLUDED.node_error, node_pid = EXCLUDED.node_pid,
+            |  node_started_at = EXCLUDED.node_started_at""".stripMargin
         )
-        try {
-          addr.setString(1, hb.advertiseHost); addr.setInt(2, hb.nodePort);
-          addr.setString(3, hb.name); addr.executeUpdate()
-        } finally addr.close()
-      // 3. Heartbeat row: the only row this handler rewrites every interval.
-      val up = c.prepareStatement(
-        """INSERT INTO qodstate_fleet_heartbeat
-          |  (name, last_heartbeat_at, agent_version, os, duckdb_version, cpus, memory_bytes,
-          |   node_state, node_error, node_pid, node_started_at)
-          |VALUES (?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          |ON CONFLICT (name) DO UPDATE SET
-          |  last_heartbeat_at = now(), agent_version = EXCLUDED.agent_version, os = EXCLUDED.os,
-          |  duckdb_version = EXCLUDED.duckdb_version, cpus = EXCLUDED.cpus, memory_bytes = EXCLUDED.memory_bytes,
-          |  node_state = EXCLUDED.node_state, node_error = EXCLUDED.node_error, node_pid = EXCLUDED.node_pid,
-          |  node_started_at = EXCLUDED.node_started_at""".stripMargin
-      )
-      try
-        up.setString(1, hb.name)
-        setNullable(up, 2, hb.agentVersion); setNullable(up, 3, hb.os);
-        setNullable(up, 4, hb.duckdbVersion)
-        setNullableInt(up, 5, hb.cpus)
-        setNullableLong(up, 6, hb.memoryBytes)
-        up.setString(7, FleetServerStore.effectiveState(hb.node, rowEpoch))
-        setNullable(up, 8, hb.node.error); setNullableLong(up, 9, hb.node.pid);
-        setNullableInstant(up, 10, hb.node.startedAt)
-        up.executeUpdate()
-      finally up.close()
-      if joined then HeartbeatOutcome.Joined else HeartbeatOutcome.Updated
-  }
+        try
+          up.setString(1, hb.name)
+          setNullable(up, 2, hb.agentVersion); setNullable(up, 3, hb.os);
+          setNullable(up, 4, hb.duckdbVersion)
+          setNullableInt(up, 5, hb.cpus)
+          setNullableLong(up, 6, hb.memoryBytes)
+          up.setString(7, FleetServerStore.effectiveState(hb.node, rowEpoch, assignedNodeId))
+          setNullable(up, 8, hb.node.error); setNullableLong(up, 9, hb.node.pid);
+          setNullableInstant(up, 10, hb.node.startedAt)
+          up.executeUpdate()
+        finally up.close()
+        if joined then HeartbeatOutcome.Joined else HeartbeatOutcome.Updated
+    }
 
   override def claim(
       a: FleetAssignment,
@@ -1661,20 +1715,27 @@ final class PostgresControlPlaneStore(
             upd.executeUpdate(); upd.close()
             Right(readFleetRow(c, name).get)
           case None =>
-            // Distinguish "nothing free" from "nothing fits" with the predicate dropped.
+            // Distinguish "nothing free" from "nothing fits". Plain read, no SKIP LOCKED, so rows
+            // a concurrent claim holds locked are counted: if one of them fits it was merely
+            // taken, and the honest answer is NoneFree. NoneFits only when free servers exist and
+            // none of them, locked or not, has the memory.
             val any = c.prepareStatement(
-              """SELECT 1 FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
+              """SELECT count(*) AS free,
+                |  count(*) FILTER (WHERE ? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
+                |    AS fitting
+                |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
                 |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
-                |  AND h.last_heartbeat_at > now() - make_interval(secs => ?) LIMIT 1""".stripMargin
+                |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)""".stripMargin
             )
-            any.setInt(1, reachableWithinSec)
-            val r2      = any.executeQuery()
-            val anyFree = r2.next()
+            requiredMemoryBytes match
+              case Some(b) => any.setLong(1, b); any.setLong(2, b)
+              case None    => any.setNull(1, Types.BIGINT); any.setNull(2, Types.BIGINT)
+            any.setInt(3, reachableWithinSec)
+            val r2 = any.executeQuery()
+            r2.next()
+            val (free, fitting) = (r2.getLong("free"), r2.getLong("fitting"))
             r2.close(); any.close()
-            Left(
-              if anyFree && requiredMemoryBytes.isDefined then ClaimMiss.NoneFits
-              else ClaimMiss.NoneFree
-            )
+            Left(if free > 0 && fitting == 0 then ClaimMiss.NoneFits else ClaimMiss.NoneFree)
         c.commit()
         result
       catch

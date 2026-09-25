@@ -123,7 +123,11 @@ trait FleetServerStore:
 
 object FleetServerStore:
   /** The stale rule both implementations share: a `none` report is stored as is; any other report
-    * whose epoch differs from the server row's is stored as `stale`.
+    * is stored as `stale` unless both its epoch and its node id match the server row's. The node id
+    * matters because epochs restart at 0 after `delete` + re-join, so an agent still running a
+    * pre-delete node could otherwise match a fresh assignment's epoch.
     */
-  def effectiveState(node: NodeReport, rowEpoch: Long): String =
-    if node.state == "none" || node.assignmentEpoch == rowEpoch then node.state else "stale"
+  def effectiveState(node: NodeReport, rowEpoch: Long, assignedNodeId: Option[String]): String =
+    if node.state == "none" then node.state
+    else if node.assignmentEpoch == rowEpoch && node.nodeId == assignedNodeId then node.state
+    else "stale"
