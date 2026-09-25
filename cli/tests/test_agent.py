@@ -1,11 +1,16 @@
 import io
 import signal
 import subprocess
+import sys
 
 import httpx
 import pytest
 
 from qod_cli.agent import Agent
+
+# qod agent is POSIX-only (Linux, macOS): it relies on process groups (os.killpg) and
+# start_new_session. The typer wrapper refuses to run on Windows, and so do these tests.
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="qod agent is POSIX-only")
 
 
 class FakeResponse:
@@ -51,7 +56,7 @@ def recorded_signals(monkeypatch):
     """Never signal a real process from a test: FakeProc pids are arbitrary numbers."""
     sent = []
     monkeypatch.setattr("qod_cli.agent.os.kill", lambda pid, sig: sent.append(("kill", pid, sig)))
-    monkeypatch.setattr("qod_cli.agent.os.killpg", lambda pgid, sig: sent.append(("killpg", pgid, sig)))
+    monkeypatch.setattr("qod_cli.agent.os.killpg", lambda pgid, sig: sent.append(("killpg", pgid, sig)), raising=False)
     return sent
 
 
