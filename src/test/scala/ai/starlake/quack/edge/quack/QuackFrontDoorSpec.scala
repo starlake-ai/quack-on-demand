@@ -48,12 +48,13 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
 
   /** Plays a node: records every request as a decoded frame and answers by message type. */
   private final class ScriptedTransport extends QuackTransport:
-    @volatile var prepareNeedsMore: Boolean = false
-    @volatile var fetchChunksBeforeEnd: Int = 1
-    val posted: ArrayBuffer[Frame]          = ArrayBuffer.empty
-    private val connections                 = new AtomicInteger(0)
-    private var fetchesServed               = 0
-    def types: List[Int]                    = posted.toList.map(_.header.msgType)
+    @volatile var prepareNeedsMore: Boolean    = false
+    @volatile var prepareError: Option[String] = None
+    @volatile var fetchChunksBeforeEnd: Int    = 1
+    val posted: ArrayBuffer[Frame]             = ArrayBuffer.empty
+    private val connections                    = new AtomicInteger(0)
+    private var fetchesServed                  = 0
+    def types: List[Int]                       = posted.toList.map(_.header.msgType)
 
     /** Traffic after a successful handshake, which itself costs one probe connection (a
       * CONNECTION_REQUEST and a DISCONNECT) that takes node connection id NODE1.
@@ -67,11 +68,13 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
         case Type.ConnectionRequest => connResp(s"NODE${connections.incrementAndGet()}")
         case Type.PrepareRequest    =>
           fetchesServed = 0
-          prepareResp(prepareNeedsMore)
+          prepareError.map(encodeError).getOrElse(prepareResp(prepareNeedsMore))
         case Type.FetchRequest =>
           fetchesServed += 1
           if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
-        case _ => success
+        // The pinned node refuses CANCEL_REQUEST; a fake that accepted it would hide that.
+        case Type.CancelRequest => encodeError("Unsupported message type for server")
+        case _                  => success
     }
 
   private final case class Fixture(
@@ -373,3 +376,149 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     live.head.user shouldBe "alice"
     fx.router.registry.kill(live.head.id)
     fx.transport.types.last shouldBe Type.Disconnect
+
+  "BEGIN" should "hand its node connection to the transaction instead of disconnecting it" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.sessions.get(connId).get.txLink.get().isDefined shouldBe true
+    fx.transport.typesSinceHandshake should not contain Type.Disconnect
+    // The next statement rides the same node connection: no second CONNECTION_REQUEST.
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
+    fx.transport.typesSinceHandshake.count(_ == Type.ConnectionRequest) shouldBe 1
+    fx.transport.typesSinceHandshake should not contain Type.Disconnect
+    prepare(fx, connId, "COMMIT") shouldBe prepareResp(false)
+    fx.transport.typesSinceHandshake.count(_ == Type.Disconnect) shouldBe 1
+    fx.sessions.get(connId).get.txLink.get() shouldBe None
+
+  "an admin statement" should "keep its rendering link open while the result needs FETCH" in:
+    val fx = setup(superuser = true, withAdmin = true)
+    fx.transport.prepareNeedsMore = true
+    val connId = connect(fx)
+    prepare(fx, connId, "CREATE ROLE analysts") shouldBe prepareResp(true)
+    fx.sessions.get(connId).get.current.get().isDefined shouldBe true
+    fetch(fx, connId) shouldBe fetchResp(true)
+
+  "DISCONNECT_MESSAGE" should "close the router session as well as the front door's" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "SELECT 1")
+    fx.router.sessions.size shouldBe 1
+    fx.door.handle(bare(Type.Disconnect, connId)).unsafeRunSync() shouldBe success
+    fx.sessions.size shouldBe 0
+    fx.router.sessions.size shouldBe 0
+
+  "sweep" should "read the session table when it runs, not when it is built" in:
+    val fx   = setup(ttlSec = 1)
+    val tick = fx.door.sweep(Instant.now().plusSeconds(5))
+    fx.transport.prepareNeedsMore = true
+    val connId = connect(fx)
+    prepare(fx, connId, "SELECT 1")
+    tick.unsafeRunSync()
+    fx.transport.types.last shouldBe Type.Disconnect
+    fx.sessions.get(connId) shouldBe None
+
+  "APPEND_REQUEST" should "answer a wire error when the USE prelude fails on the node" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    fx.transport.prepareError = Some("Catalog Error: schema does not exist")
+    val response = fx.door.handle(appendBytes(connId, "main", "t")).unsafeRunSync()
+    errorText(response) should include("schema does not exist")
+
+  "closeAll" should "release sessions opened after it was built" in:
+    val fx       = setup()
+    val shutdown = fx.door.closeAll()
+    fx.transport.prepareNeedsMore = true
+    val connId = connect(fx)
+    prepare(fx, connId, "SELECT 1")
+    shutdown.unsafeRunSync()
+    fx.transport.types.last shouldBe Type.Disconnect
+    fx.sessions.size shouldBe 0
+
+  "an admin kill" should "disconnect a transaction's connection and fence the session until ROLLBACK" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.transport.prepareNeedsMore = true
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+    val live = fx.router.registry.list()
+    live should have size 1
+    fx.router.registry.kill(live.head.id)
+    // The pinned node has no interrupt: DISCONNECT is the only kill, and it takes the
+    // transaction with it.
+    val last = fx.transport.posted.last
+    last.header.msgType shouldBe Type.Disconnect
+    last.header.connectionId shouldBe "NODE2"
+    fx.sessions.get(connId).get.txLink.get() shouldBe None
+    // The client still believes it is inside a transaction: nothing may run, and above all
+    // nothing may silently auto-commit, until it rolls back.
+    fx.transport.prepareNeedsMore = false
+    val posted = fx.transport.posted.size
+    errorText(prepare(fx, connId, "SELECT 2")) should include("killed by an administrator")
+    errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) should include("ROLLBACK")
+    errorText(prepare(fx, connId, "COMMIT")) should include("killed by an administrator")
+    fx.transport.posted.size shouldBe posted
+
+  it should "let the client ROLLBACK after a kill and carry on outside the transaction" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.transport.prepareNeedsMore = true
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+    fx.router.registry.kill(fx.router.registry.list().head.id)
+    fx.transport.prepareNeedsMore = false
+    val before = fx.transport.posted.size
+    // The ROLLBACK must answer with a genuine node response: a fresh connection is opened, put
+    // into a transaction, rolled back, and released.
+    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+    val recovery = fx.transport.posted.toList.drop(before)
+    recovery.map(_.header.msgType) shouldBe List(
+      Type.ConnectionRequest,
+      Type.PrepareRequest,
+      Type.PrepareRequest,
+      Type.Disconnect
+    )
+    decodePrepareRequest(recovery(1)).toOption.get.sql shouldBe "BEGIN"
+    decodePrepareRequest(recovery(2)).toOption.get.sql should include("ROLLBACK")
+    fx.sessions.get(connId).get.txLink.get() shouldBe None
+    prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+
+  /** BEGIN, a streaming SELECT, then an admin kill of that SELECT: the fenced session. */
+  private def killedInTx(fx: Fixture): String =
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.transport.prepareNeedsMore = true
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+    fx.router.registry.kill(fx.router.registry.list().head.id)
+    fx.transport.prepareNeedsMore = false
+    connId
+
+  "APPEND_REQUEST" should "be refused while the session's transaction is fenced" in:
+    val fx     = setup()
+    val connId = killedInTx(fx)
+    val posted = fx.transport.posted.size
+    errorText(fx.door.handle(appendBytes(connId, "main", "t")).unsafeRunSync()) should include(
+      "killed by an administrator"
+    )
+    fx.transport.posted.size shouldBe posted
+
+  "ROLLBACK after a kill" should "keep the fence up when the recovery itself fails" in:
+    val fx     = setup()
+    val connId = killedInTx(fx)
+    fx.transport.prepareError = Some("node went away")
+    errorText(prepare(fx, connId, "ROLLBACK")) should include("node went away")
+    fx.transport.prepareError = None
+    errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) should include(
+      "killed by an administrator"
+    )
+    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+    prepare(fx, connId, "INSERT INTO t VALUES (1)") shouldBe prepareResp(false)
+
+  "a kill inside a transaction" should "clear the router's transaction state with the fence" in:
+    val fx     = setup()
+    val connId = killedInTx(fx)
+    errorText(prepare(fx, connId, "COMMIT")) should include("killed by an administrator")
+    val routerSession = fx.router.sessions.get(connId).get
+    routerSession.txOpen shouldBe false
+    routerSession.pinnedNodeId shouldBe None
+    fx.router.sessions.inTransactionCount shouldBe 0

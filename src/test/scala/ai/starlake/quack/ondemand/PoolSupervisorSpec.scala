@@ -1591,6 +1591,20 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val eff = sup.effectiveSetForUser(user.id)
     eff.map(_.columnPolicies.map(_.columnName)) shouldBe Some(List("c_email"))
 
+  it should "key the cache on the JWT claim sets, not their hash codes" in:
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    val t     = sup.createTenant(Tenant("acme")).unsafeRunSync().toOption.get
+    val role  = sup.createRole(t.id, "Aa").unsafeRunSync().toOption.get
+    val user  = RbacUser(id = "u-hash", tenant = Some(t.id), username = "carol", role = "user")
+    store.upsertUserIdentity(user)
+    // Java string hashes collide for "Aa" / "BB", so the two claim sets share a hashCode.
+    Set("Aa").hashCode shouldBe Set("BB").hashCode
+    sup.effectiveSetForUser(user.id, jwtRoles = Set("Aa")).get.roles.map(_.id) should contain(
+      role.id
+    )
+    sup.effectiveSetForUser(user.id, jwtRoles = Set("BB")).get.roles shouldBe empty
+
   // ---------- column policy mutators + cache invalidation ----------
 
   it should "invalidate the EffectiveSet cache when a column policy is created" in:

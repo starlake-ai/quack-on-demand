@@ -45,6 +45,12 @@ final class QuackSession(
   val current: AtomicReference[Option[QuackStatement]]         = new AtomicReference(None)
   val txLink: AtomicReference[Option[(String, QuackNodeLink)]] = new AtomicReference(None)
 
+  /** Set when an admin kill disconnected `txLink` under a client transaction: the client still
+    * believes it is inside one, so every statement is refused until it rolls back (or its COMMIT
+    * fails, which also ends the transaction on the client side).
+    */
+  val txAborted: AtomicBoolean = new AtomicBoolean(false)
+
   @volatile private var leaseDeadline: Option[Instant] =
     if heartbeatSec > 0 then Some(Instant.now().plusSeconds(heartbeatSec)) else None
 

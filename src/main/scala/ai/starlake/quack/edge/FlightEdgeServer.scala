@@ -10,6 +10,7 @@ import org.apache.arrow.memory.RootAllocator
 
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 
 final class FlightEdgeServer(
     cfg: EdgeConfig,
@@ -51,8 +52,26 @@ final class FlightEdgeServer(
   /** The transport-agnostic handshake shared with the Quack front door. */
   private val handshake = new EdgeHandshake(authService, lookupPool, resolveTenant, authorize)
 
+  /** Sweeps expired [[ConnectionContext]] entries so a departed client's session state (the context
+    * entry and the router's session row) does not linger until the peer id happens to be presented
+    * again, which for a gone client is never.
+    */
+  private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
+
   def start(): Unit =
     val producer = new FlightProducerImpl(router)
+    ConnectionContext.onEvict(router.sessions.close)
+    sweeper = Executors.newSingleThreadScheduledExecutor { r =>
+      val t = new Thread(r, "flight-session-sweeper"); t.setDaemon(true); t
+    }
+    sweeper.scheduleAtFixedRate(
+      () =>
+        try ConnectionContext.evictExpired()
+        catch case t: Throwable => logger.warn(s"Flight session sweep failed: ${t.getMessage}"),
+      FlightEdgeServer.SweepSec,
+      FlightEdgeServer.SweepSec,
+      TimeUnit.SECONDS
+    )
     val location =
       if cfg.tlsEnabled then Location.forGrpcTls(cfg.host, cfg.port)
       else Location.forGrpcInsecure(cfg.host, cfg.port)
@@ -235,6 +254,13 @@ final class FlightEdgeServer(
         outgoing.insert("authorization", s"Bearer $peerId")
 
   def stop(): Unit =
+    if sweeper != null then
+      sweeper.shutdownNow()
+      sweeper = null.asInstanceOf[ScheduledExecutorService]
     if server != null then
       server.close()
       server = null.asInstanceOf[FlightServer]
+
+object FlightEdgeServer:
+  /** Seconds between sweeps of expired Flight sessions. */
+  val SweepSec: Long = 60L
