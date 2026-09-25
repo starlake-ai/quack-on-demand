@@ -2,10 +2,23 @@ package ai.starlake.quack
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import pureconfig.ConfigSource
 
 class FleetConfigSpec extends AnyFlatSpec with Matchers:
+  import Main.given
 
-  "FleetConfig" should "default to the spec values" in {
+  "FleetConfig" should "round-trip its defaults from the bundled application.conf" in {
+    val cfg = ConfigSource.default.at("quack-on-demand").loadOrThrow[ManagerConfig]
+    cfg.fleet.joinToken shouldBe ""
+    cfg.fleet.heartbeatSec shouldBe 5
+    cfg.fleet.heartbeatTimeoutSec shouldBe 30
+    cfg.fleet.reassignAfterSec shouldBe 600
+    cfg.fleet.startupTimeoutSec shouldBe 120
+    cfg.fleet.stopTimeoutSec shouldBe 60
+    cfg.fleet.ephemeral shouldBe "fleet"
+  }
+
+  it should "default to the spec values" in {
     val c = FleetConfig()
     (c.heartbeatSec, c.heartbeatTimeoutSec, c.reassignAfterSec, c.startupTimeoutSec, c.stopTimeoutSec) shouldBe
       (5, 30, 600, 120, 60)
