@@ -486,10 +486,8 @@ object Main extends IOApp with LazyLogging:
     supRef.set(sup)
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
-      sup.serverLiveness = name =>
-        store
-          .get(name)
-          .map(r => ai.starlake.quack.ondemand.api.FleetHandlers.livenessString(fb.livenessOf(r)))
+      sup.serverLivenessAll =
+        () => ai.starlake.quack.ondemand.api.FleetHandlers.livenessByName(store, fb)
     }
 
     // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant

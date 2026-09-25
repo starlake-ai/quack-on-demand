@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
 import ai.starlake.quack.ondemand.state.{
@@ -225,4 +226,88 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
+  }
+
+  /** Delegating store that records releases and can run a hook just before setUnschedulable. */
+  private final class ProbeStore(inner: InMemoryFleetServerStore) extends FleetServerStore:
+    var beforeSetUnschedulable: () => Unit = () => ()
+    val released                           = scala.collection.mutable.ListBuffer.empty[String]
+    def recordHeartbeat(hb: Heartbeat): HeartbeatOutcome = inner.recordHeartbeat(hb)
+    def claim(
+        assignment: FleetAssignment,
+        reachableWithinSec: Int,
+        requiredMemoryBytes: Option[Long]
+    ): Either[ClaimMiss, FleetServerRow] =
+      inner.claim(assignment, reachableWithinSec, requiredMemoryBytes)
+    def setAssignment(name: String, a: FleetAssignment): Unit = inner.setAssignment(name, a)
+    def release(nodeId: String): Option[String]               =
+      released += nodeId
+      inner.release(nodeId)
+    def get(name: String): Option[FleetServerRow]               = inner.get(name)
+    def list(): List[FleetServerRow]                            = inner.list()
+    def byNodeId(nodeId: String): Option[FleetServerRow]        = inner.byNodeId(nodeId)
+    def setUnschedulable(name: String, value: Boolean): Boolean =
+      beforeSetUnschedulable()
+      inner.setUnschedulable(name, value)
+    def delete(name: String): Boolean = inner.delete(name)
+
+  private final class CountingPublisher extends StateChangePublisher:
+    var topology                = 0
+    def topologyChanged(): Unit = topology += 1
+    def rbacChanged(): Unit     = ()
+
+  private def probeFixture() =
+    val inner   = new InMemoryFleetServerStore(clock = () => t0)
+    val probe   = new ProbeStore(inner)
+    val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
+    val backend = new FleetQuackBackend(probe, cfg, clock = () => t0)
+    val pub     = new CountingPublisher
+    val h       = new FleetHandlers(probe, cfg, backend = Some(backend), publish = pub)
+    (inner, probe, pub, h)
+
+  "drain" should "release an assignment claimed between its read and the unschedulable flip" in {
+    val (inner, probe, _, h) = probeFixture()
+    beat(inner, "a", "10.0.0.1")
+    // The row handed to drain is idle; the claim lands just before the flip.
+    probe.beforeSetUnschedulable = () =>
+      probe.beforeSetUnschedulable = () => ()
+      inner.claim(assignment("n-late"), 30, None)
+      ()
+    h.drain(FleetServerOpRequest("a"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
+    inner.get("a").map(r => (r.unschedulable, r.assignedNodeId)) shouldBe Some((true, None))
+    probe.released.toList shouldBe List("n-late")
+  }
+
+  it should "succeed on an idle server and release nothing" in {
+    val (inner, probe, pub, h) = probeFixture()
+    beat(inner, "a", "10.0.0.1")
+    h.drain(FleetServerOpRequest("a"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
+    inner.get("a").map(_.unschedulable) shouldBe Some(true)
+    probe.released shouldBe empty
+    pub.topology shouldBe 1
+  }
+
+  "undrain" should "publish topology like drain" in {
+    val (inner, _, pub, h) = probeFixture()
+    beat(inner, "a", "10.0.0.1")
+    h.drain(FleetServerOpRequest("a"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
+    h.undrain(FleetServerOpRequest("a"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
+    pub.topology shouldBe 2
+  }
+
+  "livenessString" should "name all three liveness classes" in {
+    FleetHandlers.livenessString(ServerLiveness.Reachable) shouldBe "reachable"
+    FleetHandlers.livenessString(ServerLiveness.Unreachable(42)) shouldBe "unreachable"
+    FleetHandlers.livenessString(ServerLiveness.Dead) shouldBe "dead"
+  }
+
+  "livenessByName" should "map every server to its liveness in one listing" in {
+    val store   = new InMemoryFleetServerStore(clock = () => t0)
+    val cfg     = FleetConfig(joinToken = "secret", heartbeatTimeoutSec = 15, reassignAfterSec = 60)
+    val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
+    beat(store, "up", "10.0.0.1")
+    beat(store, "late", "10.0.0.2"); store.backdate("late", 30)
+    beat(store, "gone", "10.0.0.3"); store.backdate("gone", 100)
+    FleetHandlers.livenessByName(store, backend) shouldBe
+      Map("up" -> "reachable", "late" -> "unreachable", "gone" -> "dead")
   }

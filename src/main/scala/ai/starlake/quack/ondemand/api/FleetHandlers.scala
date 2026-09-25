@@ -114,8 +114,8 @@ final class FleetHandlers(
         }
       // A store error (e.g. the server deleted concurrently, after the store's retry) must not
       // become a bodyless 500: answer 502 backend_error like NodeHandlers; the agent retries.
-      HandlerErrors.raisedToBadGateway(s"heartbeat of '${req.name}' failed")(
-        logger.warn(s"fleet: heartbeat of '${req.name}' failed")
+      HandlerErrors.raisedToBadGateway(s"heartbeat of '${req.name}' failed")(t =>
+        logger.warn(s"fleet: heartbeat of '${req.name}' failed: ${t.getMessage}", t)
       )(record)
 
   // --- Admin surface ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ final class FleetHandlers(
       case Some(err) => IO.pure(Left(err))
       case None      =>
         fleetEnabled { b =>
-          HandlerErrors.raisedToBadGateway("listing fleet servers failed")(()) {
+          HandlerErrors.raisedToBadGateway("listing fleet servers failed")(_ => ()) {
             IO.blocking(store.list())
               .map(rows => Right(FleetServerListResponse(rows.map(dto(b, _)))))
           }
@@ -175,7 +175,9 @@ final class FleetHandlers(
         IO.pure(Left(err))
       case None =>
         fleetEnabled { b =>
-          HandlerErrors.raisedToBadGateway(s"$action of '${req.name}' failed")(auditAs("error")) {
+          HandlerErrors.raisedToBadGateway(s"$action of '${req.name}' failed")(_ =>
+            auditAs("error")
+          ) {
             IO.blocking(store.get(req.name)).flatMap {
               case None =>
                 fail(StatusCode.NotFound, "not_found", s"no such server '${req.name}'")
@@ -186,7 +188,8 @@ final class FleetHandlers(
         }
 
   /** Stop scheduling onto the server and release its assignment; the next reconcile respawns the
-    * node elsewhere or leaves the slot pending.
+    * node elsewhere or leaves the slot pending. The router keeps routing to the node until that
+    * reconcile tick drops it (up to `reconcileIntervalSec`).
     */
   def drain(req: FleetServerOpRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -194,7 +197,10 @@ final class FleetHandlers(
     serverOp(req, apiKey, AuditActions.FleetDrain)(scopeOf) { (_, row) =>
       IO.blocking {
         store.setUnschedulable(row.name, true)
-        row.assignedNodeId.foreach(store.release)
+        // Release from a read taken AFTER the flip, not the pre-flip snapshot: a claim landing in
+        // between would otherwise leave a drained server holding a node. Once unschedulable, no
+        // further claim can land.
+        store.get(row.name).flatMap(_.assignedNodeId).foreach(store.release)
       } *> IO.delay(publish.topologyChanged()).as(Right(()))
     }
 
@@ -202,7 +208,9 @@ final class FleetHandlers(
       scopeOf: String => Option[SessionScope]
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetUndrain)(scopeOf) { (_, row) =>
-      IO.blocking(store.setUnschedulable(row.name, false)).as(Right(()))
+      // Published like drain: the server is schedulable again, peers should see it.
+      IO.blocking(store.setUnschedulable(row.name, false)) *>
+        IO.delay(publish.topologyChanged()).as(Right(()))
     }
 
   /** Refused while the server is reachable and still schedulable: a live agent would re-register on
@@ -222,6 +230,11 @@ final class FleetHandlers(
     }
 
 object FleetHandlers:
+
+  /** One store listing, every server's liveness by name (the pool listing's serverState). */
+  def livenessByName(store: FleetServerStore, backend: FleetQuackBackend): Map[String, String] =
+    store.list().map(r => r.name -> livenessString(backend.livenessOf(r))).toMap
+
   def livenessString(l: ServerLiveness): String = l match
     case ServerLiveness.Reachable      => "reachable"
     case ServerLiveness.Unreachable(_) => "unreachable"

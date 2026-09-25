@@ -25,7 +25,7 @@ final class NodeHandlers(
     * mutation beats the bodyless 500 it replaced.
     */
   private def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: => Out[A]): Out[A] =
-    HandlerErrors.raisedToBadGateway(describe)(onRaised)(io)
+    HandlerErrors.raisedToBadGateway(describe)(_ => onRaised)(io)
 
   private def withNode[A](tenant: String, tenantDb: String, pool: String, nodeId: String)(
       f: => IO[A]

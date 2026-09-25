@@ -8,13 +8,14 @@ object HandlerErrors:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
   /** Runs `io`, turning a raised error into `502 backend_error` (with `describe` as the message
-    * prefix) instead of a bodyless 500. `onRaised` runs first, e.g. to write an "error" audit row.
+    * prefix) instead of a bodyless 500. `onRaised` gets the error first, e.g. to log it or write an
+    * "error" audit row.
     */
-  def raisedToBadGateway[A](describe: String)(onRaised: => Unit)(io: => Out[A]): Out[A] =
+  def raisedToBadGateway[A](describe: String)(onRaised: Throwable => Unit)(io: => Out[A]): Out[A] =
     IO.defer(io).attempt.map {
       case Right(r) => r
       case Left(t)  =>
-        onRaised
+        onRaised(t)
         Left(
           (
             StatusCode.BadGateway,

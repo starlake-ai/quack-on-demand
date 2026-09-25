@@ -154,10 +154,12 @@ final class PoolSupervisor(
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private val pendingReasons = TrieMap.empty[PoolKey, String]
 
-  /** Fleet server name -> liveness (`reachable | unreachable | dead`), for the pool listing's
-    * NodeInfo.serverState. Main sets it in fleet mode; None everywhere else.
+  /** Every fleet server's liveness by name (`reachable | unreachable | dead`), for the pool
+    * listing's NodeInfo.serverState: one batched store read per request. Main sets it in fleet
+    * mode; empty everywhere else. May block and may throw: callers run it under IO.blocking and
+    * degrade to empty.
     */
-  @volatile var serverLiveness: String => Option[String] = _ => None
+  @volatile var serverLivenessAll: () => Map[String, String] = () => Map.empty
 
   // tenant-db.id -> the PreInitMismatchException message that blocked it (a dataPath or an
   // encryption disagreement between the control-plane row and the catalog's own metadata).
