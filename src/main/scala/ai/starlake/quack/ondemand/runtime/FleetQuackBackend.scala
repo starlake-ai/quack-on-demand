@@ -17,8 +17,16 @@ import java.time.Instant
 import scala.concurrent.duration._
 import scala.util.Try
 
-final case class NoFreeServer(poolKey: PoolKey, nodeId: String, reason: String)
-    extends RuntimeException(s"no fleet server for $poolKey/$nodeId ($reason)")
+/** No server is free (or none fits) for `nodeId`. `heldBy` names the server that still holds the
+  * node id's assignment (kept, since the replacement claim rolled back), None when nothing holds
+  * it.
+  */
+final case class NoFreeServer(
+    poolKey: PoolKey,
+    nodeId: String,
+    reason: String,
+    heldBy: Option[String] = None
+) extends RuntimeException(s"no fleet server for $poolKey/$nodeId ($reason)")
 final case class FleetStartTimeout(server: String, nodeId: String, seconds: Int)
     extends RuntimeException(s"fleet server $server did not report $nodeId running in ${seconds}s")
 final case class FleetClaimLost(server: String, nodeId: String)
@@ -81,32 +89,34 @@ final class FleetQuackBackend(
   def start(spec: NodeSpec): IO[RunningNode] =
     val token = LocalQuackBackend.randomToken()
     // The supervisor only starts a node id it believes has no live node, so any server still
-    // holding this id is stale, whatever its liveness: a dead or drained server, a crash orphan
-    // (claimed and running, but the manager died before writing the node row), or a server that
-    // came back between the reconcile pass's read and this start. Release it unconditionally,
-    // otherwise the unique assigned_node_id refuses the new claim with a raw SQL error on every
-    // tick. The holder's agent sees no assignment on its next heartbeat and stops its node; the
-    // freed server is immediately claimable (possibly by this very claim).
-    val releaseStale: IO[Unit] = IO.blocking {
-      store.byNodeId(spec.nodeId).foreach { row =>
-        logger.warn(
-          s"fleet: releasing previous assignment of ${spec.nodeId} on ${row.name} " +
-            s"(liveness=${livenessOf(row)}, drained=${row.unschedulable}, state=${row.nodeState})"
-        )
-        store.release(spec.nodeId)
-      }
-    }
+    // holding this id is stale: a dead or drained server, a crash orphan (claimed and running, but
+    // the manager died before writing the node row), or a server that came back between the
+    // reconcile pass's read and this start. `claimReplacing` releases that holder and claims in
+    // ONE transaction, and only when a replacement claim succeeds:
+    //   - on NoFreeServer the holder keeps its assignment (owner policy), so a dead server that
+    //     returns before capacity appears resumes its node without a restart;
+    //   - a reachable, schedulable stale holder (a crash orphan) is re-claimed in place under a
+    //     new epoch and token, and its agent restarts the node on the new assignment identity;
+    //   - otherwise the holder's agent sees no assignment on its next heartbeat and stops its node.
+    // Releasing first also keeps the unique assigned_node_id from refusing the claim.
     // Claim and arm the release atomically: a cancellation between the claim and the guarantee
     // would otherwise leak a claimed server. Every non-success outcome after the claim (error,
     // cancellation, failed report, timeout) releases it.
     val claimAndWait: IO[RunningNode] = IO.uncancelable { poll =>
       IO.blocking(
-        store.claim(assignmentFor(spec, token), cfg.heartbeatTimeoutSec, requiredMemoryBytes(spec))
+        store.claimReplacing(
+          assignmentFor(spec, token),
+          cfg.heartbeatTimeoutSec,
+          requiredMemoryBytes(spec)
+        )
       ).flatMap {
-        case Left(ClaimMiss.NoneFree) =>
-          IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, "none_free"))
-        case Left(ClaimMiss.NoneFits) =>
-          IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, "none_fits"))
+        case Left(miss) =>
+          val reason = miss match
+            case ClaimMiss.NoneFree => "none_free"
+            case ClaimMiss.NoneFits => "none_fits"
+          IO.blocking(store.byNodeId(spec.nodeId).map(_.name)).flatMap { holder =>
+            IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, reason, holder))
+          }
         case Right(row) =>
           val waited = awaitRunning(row.name, spec.nodeId).map { _ =>
             RunningNode(
@@ -129,7 +139,7 @@ final class FleetQuackBackend(
           }
       }
     }
-    releaseStale *> claimAndWait
+    claimAndWait
 
   /** True when `row`'s node state answers the current claim of `nodeId`. Claim and release never
     * reset node_state, so a `running` or `failed` left by the previous assignment would otherwise
@@ -210,8 +220,9 @@ final class FleetQuackBackend(
     *     node row; releasing them here would kill a job in flight. They are safe only because of
     *     this `running` exemption.
     *   - a `running` crash orphan is owned by the reconcile's missing-slot fill: the supervisor
-    *     starts the slot's node id again and `start` releases ANY holder of that id before
-    *     claiming, so the orphan's agent stops its node on the next heartbeat.
+    *     starts the slot's node id again and `start` (through `claimReplacing`) releases the holder
+    *     and claims in one transaction: a reachable orphan is re-claimed in place under a new epoch
+    *     (its agent restarts the node), otherwise the orphan's agent stops its node.
     */
   def discoverExisting(): IO[List[RunningNode]] = IO.blocking {
     store.list().foreach { r =>

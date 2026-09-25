@@ -33,7 +33,15 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     def start(spec: NodeSpec): IO[RunningNode] = IO.defer {
       if failWith.isDefined then IO.raiseError(failWith.get)
       else if freeServers <= 0 then
-        IO.raiseError(NoFreeServer(spec.poolKey, spec.nodeId, "none_free"))
+        // A node id this double started is still held by its (possibly dead) server.
+        IO.raiseError(
+          NoFreeServer(
+            spec.poolKey,
+            spec.nodeId,
+            "none_free",
+            nodes.get(spec.nodeId).flatMap(_.serverName)
+          )
+        )
       else
         freeServers -= 1
         val n = RunningNode(
@@ -94,18 +102,21 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     sup.pendingReason(key) shouldBe None
   }
 
-  it should "respawn a dead node elsewhere and keep it pending when nothing is free" in {
+  it should "keep a dead node's row when nothing is free and move it once a server is free" in {
     val (b, sup, st, key) = fixture(); b.freeServers = 1
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val before = sup.get(key).get.nodes.head
     b.liveIds.clear() // server went dead past the grace
     sup.reconcile().unsafeRunSync()
-    sup.get(key).get.nodes shouldBe Nil
-    storedIds(sup, st, key) shouldBe Nil
-    sup.pendingCount(key) shouldBe 1
+    // Owner policy: with no free server the dead holder keeps its row (and its assignment).
+    sup.get(key).get.nodes shouldBe List(before)
+    storedIds(sup, st, key) shouldBe List(id(1))
+    sup.pendingCount(key) shouldBe 0 // a node on an unreachable server, not a missing slot
     sup.pendingReason(key) shouldBe Some("none_free")
     b.freeServers = 1
     sup.reconcile().unsafeRunSync()
     sup.get(key).get.nodes.map(_.nodeId) shouldBe List(id(1))
+    sup.get(key).get.nodes.head should not be theSameInstanceAs(before)
     storedIds(sup, st, key) shouldBe List(id(1))
     sup.pendingCount(key) shouldBe 0
     sup.pendingReason(key) shouldBe None
@@ -152,18 +163,18 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     sup.get(key).get.nodes.map(_.nodeId) shouldBe List(id(1))
   }
 
-  it should "number new nodes above the highest present index, never reusing a live id" in {
+  it should "keep a dead node's id when scaling up and number new nodes above it" in {
     val (b, sup, st, key) = fixture(); b.freeServers = 3
     sup.createPool(key, RoleDistribution(0, 0, 3)).unsafeRunSync()
     b.liveIds -= id(2) // -2's server died; no server is free to respawn it
     sup.reconcile().unsafeRunSync()
-    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(id(1), id(3))
+    sup.get(key).get.nodes.map(_.nodeId) shouldBe List(id(1), id(2), id(3))
     b.freeServers = 2
     sup.scale(key, 4, RoleDistribution(0, 0, 4), force = true).unsafeRunSync()
     val ids = sup.get(key).get.nodes.map(_.nodeId)
-    ids.sorted shouldBe List(id(1), id(3), id(4), id(5))
+    ids.sorted shouldBe List(id(1), id(2), id(3), id(4))
     ids.distinct.size shouldBe ids.size
-    storedIds(sup, st, key) shouldBe List(id(1), id(3), id(4), id(5))
+    storedIds(sup, st, key) shouldBe List(id(1), id(2), id(3), id(4))
   }
 
   "pendingCount" should "be 0 for a suspended pool" in {
@@ -185,8 +196,9 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
   }
 
 /** PoolSupervisor over the REAL FleetQuackBackend and InMemoryFleetServerStore, with fake agents
-  * beating from a background ticker, so the supervisor/backend interactions (release before claim,
-  * release on a pending respawn, drain, remove) run end to end without Postgres or processes.
+  * beating from a background ticker, so the supervisor/backend interactions (release-and-claim in
+  * one step, a dead holder kept when nothing is free, drain, remove) run end to end without
+  * Postgres or processes.
   */
 class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
   import ai.starlake.quack.FleetConfig
@@ -194,6 +206,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
   import ai.starlake.quack.ondemand.ha.PoolLocker
   import ai.starlake.quack.ondemand.runtime.{FleetNodeFailed, FleetQuackBackend}
   import ai.starlake.quack.ondemand.state.{
+    ClaimMiss,
     FleetAssignment,
     FleetServerRow,
     FleetServerStore,
@@ -215,14 +228,18 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     stopTimeoutSec = 30
   )
 
-  /** Store wrapper with a hook run before `byNodeId`, to land a heartbeat inside the window between
-    * a reconcile pass's `liveNodeIds` read and the backend's `start`.
+  /** Store wrapper with a hook run before `claimReplacing`, to land a heartbeat inside the window
+    * between a reconcile pass's `liveNodeIds` read and the backend's claim.
     */
   private final class HookedStore(u: InMemoryFleetServerStore) extends FleetServerStore:
-    export u.{byNodeId as _, *}
-    @volatile var beforeByNodeId: String => Unit         = _ => ()
-    def byNodeId(nodeId: String): Option[FleetServerRow] =
-      beforeByNodeId(nodeId); u.byNodeId(nodeId)
+    export u.{claimReplacing as _, *}
+    @volatile var beforeClaimReplacing: String => Unit = _ => ()
+    override def claimReplacing(
+        a: FleetAssignment,
+        reachableWithinSec: Int,
+        requiredMemoryBytes: Option[Long]
+    ): Either[ClaimMiss, FleetServerRow] =
+      beforeClaimReplacing(a.nodeId); u.claimReplacing(a, reachableWithinSec, requiredMemoryBytes)
 
   /** A fake `qod agent`: reports the assignment it holds as running; once unassigned, reports
     * `stopped` under the epoch and node id it last ran, like the real agent.
@@ -325,6 +342,27 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "drop the row and leave the slot pending when a drained server's node has nowhere to go" in {
+    val fx = new Fx
+    fx.join("a")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
+      h.drain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      fx.sup.reconcile().unsafeRunSync()
+      // Nothing holds the node any more (the drain released it): no server to keep it for, so
+      // the row goes and the slot is pending, unlike a dead server that still holds it.
+      fx.rowIds shouldBe Nil
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+      fx.inner.get("a").get.assignedNodeId shouldBe None
+      h.undrain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      fx.sup.reconcile().unsafeRunSync()
+      fx.rowIds shouldBe List(id(1))
+      fx.holder(id(1)) shouldBe List("a")
+    }
+  }
+
   it should "free a dead server that returns mid-respawn instead of leaving it an untracked slot" in {
     val fx = new Fx
     fx.join("a"); fx.join("b")
@@ -333,10 +371,10 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       (fx.holder(id(1)), fx.holder(id(2))) shouldBe (List("a"), List("b"))
       fx.kill("a")
       // `a` comes back inside the window between the pass's liveNodeIds read (which saw it
-      // dead) and the respawn's start: its next beat lands right before the backend's lookup.
-      fx.store.beforeByNodeId = nodeId =>
+      // dead) and the respawn's start: its next beat lands right before the backend's claim.
+      fx.store.beforeClaimReplacing = nodeId =>
         if nodeId == id(1) then
-          fx.store.beforeByNodeId = _ => ()
+          fx.store.beforeClaimReplacing = _ => ()
           fx.agents("a").paused = false
           fx.agents("a").beat()
       fx.sup.reconcile().unsafeRunSync()
@@ -353,7 +391,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     }
   }
 
-  it should "fill a crash orphan's slot without a raw SQL error" in {
+  it should "re-claim a crash orphan (reachable stale holder) in place with a new epoch" in {
     val fx = new Fx
     fx.run {
       // No server yet: the pool is created all-pending.
@@ -361,20 +399,88 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.pendingCount(fx.key) shouldBe 1
       // A manager claimed -1 on `a` and died before writing the node row; the agent runs it.
       fx.join("a")
-      fx.inner
+      val orphan = fx.inner
         .claim(
           FleetAssignment(0, id(1), fx.key, 0, "t", "memory", Map.empty, "", "", "", ""),
           30,
           None
         )
-        .isRight shouldBe true
+        .toOption
+        .get
       fx.eventually(fx.inner.get("a").get.nodeState == "running")
       fx.join("b")
       noException should be thrownBy fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
-      fx.holder(id(1)).size shouldBe 1
-      fx.rowServer(id(1)) shouldBe fx.holder(id(1)).headOption
+      // Released and re-claimed in one transaction: `a` (oldest, reachable) keeps the slot under
+      // a new epoch and token; `b` stays free.
+      fx.holder(id(1)) shouldBe List("a")
+      fx.inner.get("a").get.assignmentEpoch shouldBe orphan.assignmentEpoch + 2
+      fx.inner.get("a").get.assignment.map(_.token) should not be Some("t")
+      fx.inner.get("b").get.assignedNodeId shouldBe None
+      fx.rowServer(id(1)) shouldBe Some("a")
       fx.sup.pendingCount(fx.key) shouldBe 0
+    }
+  }
+
+  it should "no free server: the dead node keeps its row and assignment; when its server returns before capacity appears the node is adopted and serves again (same epoch, no restart)" in {
+    val fx = new Fx
+    fx.join("a")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      val epoch  = fx.inner.get("a").get.assignmentEpoch
+      val before = fx.sup.get(fx.key).get.nodes.head
+      fx.kill("a")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.rowIds shouldBe List(id(1))
+      fx.rowServer(id(1)) shouldBe Some("a")
+      fx.holder(id(1)) shouldBe List("a")
+      fx.inner.get("a").get.assignmentEpoch shouldBe epoch
+      fx.sup.get(fx.key).get.nodes shouldBe List(before)
+      fx.sup.pendingCount(fx.key) shouldBe 0
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+      // A second pass while it is still dead changes nothing.
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      fx.inner.get("a").get.assignmentEpoch shouldBe epoch
+      // The server returns: its agent still runs the node under the same epoch.
+      fx.agents("a").paused = false
+      fx.agents("a").beat()
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      fx.inner.get("a").get.assignmentEpoch shouldBe epoch
+      fx.inner.get("a").get.nodeState shouldBe "running"
+      val after = fx.sup.get(fx.key).get.nodes
+      after.map(n => (n.nodeId, n.token, n.serverName)) shouldBe
+        List((before.nodeId, before.token, before.serverName))
+      fx.rowIds shouldBe List(id(1))
+      fx.sup.pendingReason(fx.key) shouldBe None
+    }
+  }
+
+  it should "no free server, then a server joins: the respawn moves the node there and the returning old server is told to stop" in {
+    val fx = new Fx
+    fx.join("a")
+    fx.run {
+      fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+      fx.kill("a")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("a")
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+      fx.join("b")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("b")
+      fx.rowIds shouldBe List(id(1))
+      fx.rowServer(id(1)) shouldBe Some("b")
+      fx.inner.get("a").get.assignedNodeId shouldBe None
+      fx.sup.pendingReason(fx.key) shouldBe None
+      // The old server returns: no assignment any more, so its agent stops the orphan node.
+      fx.agents("a").paused = false
+      fx.eventually(fx.inner.get("a").exists(_.nodeState == "stopped"))
+      fx.inner.get("a").get.assignedNodeId shouldBe None
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("b")
+      fx.rowIds shouldBe List(id(1))
     }
   }
 

@@ -112,6 +112,20 @@ trait FleetServerStore:
       requiredMemoryBytes: Option[Long]
   ): Either[ClaimMiss, FleetServerRow]
 
+  /** [[claim]] for a node id a server may still hold, in ONE transaction: release any current
+    * holder of `assignment.nodeId` (bump its epoch, clear its assignment and claimed_at), then run
+    * the claim. On a miss (`Left`) the whole transaction rolls back, so the old holder keeps its
+    * assignment, epoch and claim untouched: a dead server that returns before capacity appears
+    * resumes its node. A holder that is itself reachable and schedulable is a legitimate candidate
+    * once released, so a reachable stale holder (a crash orphan) is re-claimed in place under a new
+    * epoch and token.
+    */
+  def claimReplacing(
+      assignment: FleetAssignment,
+      reachableWithinSec: Int,
+      requiredMemoryBytes: Option[Long]
+  ): Either[ClaimMiss, FleetServerRow]
+
   /** Rewrite the assignment JSON in place (no epoch change). */
   def setAssignment(name: String, a: FleetAssignment): Unit
 

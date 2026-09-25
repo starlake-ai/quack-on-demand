@@ -156,7 +156,9 @@ final case class PoolResponse(
     minNodes: Option[Int] = None,
     maxNodes: Option[Int] = None,
     // Fleet: slots the distribution wants that no node fills yet, and why the last spawn attempt
-    // left them pending ("none_free" | "none_fits"); 0 / None on every other backend.
+    // left them pending ("none_free" | "none_fits"); 0 / None on every other backend. A dead node
+    // kept on its unreachable server because no other is free is a node, not a pending slot: it
+    // does not count in `pending`, but `pendingReason` still says why it was not moved.
     // `pendingReason` is replica-local (it explains the last spawn attempt of the replica that
     // answers): under HA a follower may report pending > 0 with pendingReason = None.
     pending: Int = 0,

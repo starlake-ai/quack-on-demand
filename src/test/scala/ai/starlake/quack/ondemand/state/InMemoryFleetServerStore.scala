@@ -126,6 +126,21 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
           rows.put(r.name, updated); Right(withSilent(updated))
     }
 
+  def claimReplacing(
+      a: FleetAssignment,
+      reachableWithinSec: Int,
+      requiredMemoryBytes: Option[Long]
+  ): Either[ClaimMiss, FleetServerRow] =
+    synchronized {
+      val before = rows.clone()
+      release(a.nodeId)
+      val result = claim(a, reachableWithinSec, requiredMemoryBytes)
+      if result.isLeft then
+        // Roll back: the old holder keeps its assignment when no replacement exists.
+        rows.clear(); rows ++= before
+      result
+    }
+
   def setAssignment(name: String, a: FleetAssignment): Unit = synchronized {
     rows.get(name).foreach(r => rows.put(name, r.copy(assignment = Some(a))))
   }

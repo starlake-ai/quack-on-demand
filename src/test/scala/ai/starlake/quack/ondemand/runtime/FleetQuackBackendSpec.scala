@@ -187,17 +187,44 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     store.get("a").get.assignedNodeId shouldBe None
   }
 
-  it should "release a reachable running holder of the same node id before claiming" in {
+  it should "re-claim a reachable stale holder of the same node id in place with a new epoch" in {
     val (store, backend, _, _) = fixture()
     val a                      = new FakeAgent(store, "a"); a.beat()
     val b                      = new FakeAgent(store, "b"); b.beat()
     // A crash orphan: claimed and running on `a`, no node row, `a` reachable and schedulable.
-    withAgent(a)(backend.start(spec("n1"))).serverName shouldBe Some("a")
+    val first = withAgent(a)(backend.start(spec("n1")))
+    first.serverName shouldBe Some("a")
     store.get("a").get.nodeState shouldBe "running"
-    val beats = (IO.blocking { a.beat(); b.beat() } *> IO.sleep(30.millis)).foreverM
-    val n     = beats.background.use(_ => backend.start(spec("n1"))).unsafeRunSync()
+    val epochBefore = store.get("a").get.assignmentEpoch
+    val beats       = (IO.blocking { a.beat(); b.beat() } *> IO.sleep(30.millis)).foreverM
+    val n           = beats.background.use(_ => backend.start(spec("n1"))).unsafeRunSync()
     store.list().count(_.assignedNodeId.contains("n1")) shouldBe 1
-    n.serverName.flatMap(store.get).flatMap(_.assignedNodeId) shouldBe Some("n1")
+    // Released and re-claimed in one transaction: `a` is the oldest free reachable server again.
+    n.serverName shouldBe Some("a")
+    store.get("a").get.assignmentEpoch shouldBe epochBefore + 2
+    n.token should not be first.token
+    store.get("b").get.assignedNodeId shouldBe None
+  }
+
+  it should "leave the existing holder assigned when no server is free" in {
+    val (store, backend, setNow, now) =
+      fixture(FleetConfig(joinToken = "j", startupTimeoutSec = 2, reassignAfterSec = 60))
+    val old = new FakeAgent(store, "old"); old.beat()
+    withAgent(old)(backend.start(spec("n1"))).serverName shouldBe Some("old")
+    val epochBefore = store.get("old").get.assignmentEpoch
+    setNow(now().plusSeconds(120)) // old is now Dead (silent 120s > 60s grace), nothing else free
+    (the[NoFreeServer] thrownBy backend.start(spec("n1")).unsafeRunSync()).reason shouldBe
+      "none_free"
+    // The dead holder keeps its assignment: if its server returns first it resumes its node.
+    store.get("old").get.assignedNodeId shouldBe Some("n1")
+    store.get("old").get.assignmentEpoch shouldBe epochBefore
+    // A drained holder with nowhere to go keeps it too.
+    val (store2, backend2, _, _) = fixture()
+    val d                        = new FakeAgent(store2, "d"); d.beat()
+    withAgent(d)(backend2.start(spec("n2")))
+    store2.setUnschedulable("d", true)
+    a[NoFreeServer] should be thrownBy backend2.start(spec("n2")).unsafeRunSync()
+    store2.get("d").get.assignedNodeId shouldBe Some("n2")
   }
 
   it should "fail fast with FleetClaimLost when the claim is taken away while waiting" in {

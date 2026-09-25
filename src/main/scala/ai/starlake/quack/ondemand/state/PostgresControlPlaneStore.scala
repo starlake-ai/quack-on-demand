@@ -1696,62 +1696,35 @@ final class PostgresControlPlaneStore(
       reachableWithinSec: Int,
       requiredMemoryBytes: Option[Long]
   ): Either[ClaimMiss, FleetServerRow] =
+    inFleetTx { c =>
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
+      c.commit()
+      result
+    }
+
+  override def claimReplacing(
+      a: FleetAssignment,
+      reachableWithinSec: Int,
+      requiredMemoryBytes: Option[Long]
+  ): Either[ClaimMiss, FleetServerRow] =
+    inFleetTx { c =>
+      // Release first, inside the transaction: the released holder's row is locked by this
+      // transaction (SKIP LOCKED never skips our own locks) and reads as unassigned, so a
+      // reachable, schedulable holder is re-claimed in place under a new epoch.
+      releaseIn(c, a.nodeId)
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
+      // No replacement: roll back so the old holder keeps its assignment, epoch and claim.
+      if result.isLeft then c.rollback() else c.commit()
+      result
+    }
+
+  /** Runs `f` on one connection with autocommit off; `f` commits or rolls back itself. Any throw
+    * rolls back.
+    */
+  private def inFleetTx[A](f: Connection => A): A =
     withConn { c =>
       c.setAutoCommit(false)
-      try
-        val pick = c.prepareStatement(
-          """SELECT s.name, s.assignment_epoch, s.node_port FROM qodstate_fleet_server s
-            |JOIN qodstate_fleet_heartbeat h USING (name)
-            |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
-            |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
-            |  AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-            |ORDER BY s.joined_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
-        )
-        pick.setInt(1, reachableWithinSec)
-        requiredMemoryBytes match
-          case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
-          case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
-        val rs     = pick.executeQuery()
-        val chosen =
-          if rs.next() then Some((rs.getString(1), rs.getLong(2), rs.getInt(3))) else None
-        rs.close(); pick.close()
-        val result: Either[ClaimMiss, FleetServerRow] = chosen match
-          case Some((name, epoch0, nodePort)) =>
-            val epoch = epoch0 + 1
-            val upd   = c.prepareStatement(
-              """UPDATE qodstate_fleet_server SET assigned_node_id = ?, assignment = ?::jsonb,
-                |  assignment_epoch = ?, claimed_at = now() WHERE name = ?""".stripMargin
-            )
-            upd.setString(1, a.nodeId)
-            // Stamp the server's own node_port so the agent never has to remember it.
-            upd.setString(2, a.copy(epoch = epoch, port = nodePort).asJson.noSpaces)
-            upd.setLong(3, epoch); upd.setString(4, name)
-            upd.executeUpdate(); upd.close()
-            Right(readFleetRow(c, name).get)
-          case None =>
-            // Distinguish "nothing free" from "nothing fits". Plain read, no SKIP LOCKED, so rows
-            // a concurrent claim holds locked are counted: if one of them fits it was merely
-            // taken, and the honest answer is NoneFree. NoneFits only when free servers exist and
-            // none of them, locked or not, has the memory.
-            val any = c.prepareStatement(
-              """SELECT count(*) AS free,
-                |  count(*) FILTER (WHERE ? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-                |    AS fitting
-                |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
-                |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
-                |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)""".stripMargin
-            )
-            requiredMemoryBytes match
-              case Some(b) => any.setLong(1, b); any.setLong(2, b)
-              case None    => any.setNull(1, Types.BIGINT); any.setNull(2, Types.BIGINT)
-            any.setInt(3, reachableWithinSec)
-            val r2 = any.executeQuery()
-            r2.next()
-            val (free, fitting) = (r2.getLong("free"), r2.getLong("fitting"))
-            r2.close(); any.close()
-            Left(if free > 0 && fitting == 0 then ClaimMiss.NoneFits else ClaimMiss.NoneFree)
-        c.commit()
-        result
+      try f(c)
       catch
         case t: Throwable =>
           // A failing rollback (connection already broken) must not hide the original error.
@@ -1760,6 +1733,65 @@ final class PostgresControlPlaneStore(
       finally c.setAutoCommit(true)
     }
 
+  /** The claim itself, on the caller's connection and transaction. */
+  private def claimIn(
+      c: Connection,
+      a: FleetAssignment,
+      reachableWithinSec: Int,
+      requiredMemoryBytes: Option[Long]
+  ): Either[ClaimMiss, FleetServerRow] =
+    val pick = c.prepareStatement(
+      """SELECT s.name, s.assignment_epoch, s.node_port FROM qodstate_fleet_server s
+        |JOIN qodstate_fleet_heartbeat h USING (name)
+        |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
+        |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
+        |  AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
+        |ORDER BY s.joined_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
+    )
+    pick.setInt(1, reachableWithinSec)
+    requiredMemoryBytes match
+      case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
+      case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
+    val rs     = pick.executeQuery()
+    val chosen =
+      if rs.next() then Some((rs.getString(1), rs.getLong(2), rs.getInt(3))) else None
+    rs.close(); pick.close()
+    chosen match
+      case Some((name, epoch0, nodePort)) =>
+        val epoch = epoch0 + 1
+        val upd   = c.prepareStatement(
+          """UPDATE qodstate_fleet_server SET assigned_node_id = ?, assignment = ?::jsonb,
+            |  assignment_epoch = ?, claimed_at = now() WHERE name = ?""".stripMargin
+        )
+        upd.setString(1, a.nodeId)
+        // Stamp the server's own node_port so the agent never has to remember it.
+        upd.setString(2, a.copy(epoch = epoch, port = nodePort).asJson.noSpaces)
+        upd.setLong(3, epoch); upd.setString(4, name)
+        upd.executeUpdate(); upd.close()
+        Right(readFleetRow(c, name).get)
+      case None =>
+        // Distinguish "nothing free" from "nothing fits". Plain read, no SKIP LOCKED, so rows
+        // a concurrent claim holds locked are counted: if one of them fits it was merely
+        // taken, and the honest answer is NoneFree. NoneFits only when free servers exist and
+        // none of them, locked or not, has the memory.
+        val any = c.prepareStatement(
+          """SELECT count(*) AS free,
+            |  count(*) FILTER (WHERE ? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
+            |    AS fitting
+            |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
+            |WHERE s.assigned_node_id IS NULL AND NOT s.unschedulable
+            |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)""".stripMargin
+        )
+        requiredMemoryBytes match
+          case Some(b) => any.setLong(1, b); any.setLong(2, b)
+          case None    => any.setNull(1, Types.BIGINT); any.setNull(2, Types.BIGINT)
+        any.setInt(3, reachableWithinSec)
+        val r2 = any.executeQuery()
+        r2.next()
+        val (free, fitting) = (r2.getLong("free"), r2.getLong("fitting"))
+        r2.close(); any.close()
+        Left(if free > 0 && fitting == 0 then ClaimMiss.NoneFits else ClaimMiss.NoneFree)
+
   override def setAssignment(name: String, a: FleetAssignment): Unit = withConn { c =>
     val ps =
       c.prepareStatement("UPDATE qodstate_fleet_server SET assignment = ?::jsonb WHERE name = ?")
@@ -1767,7 +1799,9 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
-  override def release(nodeId: String): Option[String] = withConn { c =>
+  override def release(nodeId: String): Option[String] = withConn(c => releaseIn(c, nodeId))
+
+  private def releaseIn(c: Connection, nodeId: String): Option[String] =
     val ps = c.prepareStatement(
       """UPDATE qodstate_fleet_server SET assigned_node_id = NULL, assignment = NULL, claimed_at = NULL,
         |  assignment_epoch = assignment_epoch + 1 WHERE assigned_node_id = ? RETURNING name""".stripMargin
@@ -1778,7 +1812,6 @@ final class PostgresControlPlaneStore(
       try if rs.next() then Some(rs.getString(1)) else None
       finally rs.close()
     finally ps.close()
-  }
 
   override def get(name: String): Option[FleetServerRow] = withConn(c => readFleetRow(c, name))
 

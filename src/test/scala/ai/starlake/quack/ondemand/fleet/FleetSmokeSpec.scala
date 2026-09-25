@@ -45,10 +45,11 @@ import scala.util.Try
   *      its pidfile and the node comes back on s1, capacity reported; 8b. scale the pool to 0 and
   *      back to 1: the scale-down returns in seconds, well under `stopTimeoutSec` (60 s here),
   *      because the agent's stop confirmation is seen; 8c. SIGSTOP the agent past the reassign
-  *      window: the node row goes, the slot goes pending and s1 keeps no assignment; SIGCONT: the
-  *      thawed agent stops its old node and the slot refills on s1;
-  *   9. SIGTERM the agent: its node stops; after the reassign window the node row is gone and the
-  *      slot is pending again;
+  *      window with no other server: s1 keeps its assignment (same epoch) and the node row, the
+  *      pool reports no pending slot but `none_free`; SIGCONT: the SAME node (same epoch, same pid)
+  *      is adopted and the pool serves again without a restart;
+  *   9. SIGTERM the agent: its node stops; after the reassign window the node row and s1's
+  *      assignment are kept (no other server is free), `none_free` reported;
   *   10. teardown (afterAll, also on failure, timed): agent and node processes, manager fiber,
   *       database.
   *
@@ -177,6 +178,20 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       .values
       .getOrElse(Nil)
       .find(j => j.hcursor.get[String]("name").contains(Server))
+
+  /** s1's assignment epoch, read from the control-plane database (the listing does not carry it).
+    */
+  private def serverEpoch(): Long =
+    val c = java.sql.DriverManager
+      .getConnection(TestPostgres.dbUrl(dbName), TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      val rs = c
+        .createStatement()
+        .executeQuery(
+          s"SELECT assignment_epoch FROM qodstate_fleet_server WHERE name = '$Server'"
+        )
+      if rs.next() then rs.getLong(1) else fail(s"$Server missing from qodstate_fleet_server")
+    finally c.close()
 
   private def str(j: Json, field: String): Option[String] =
     j.hcursor.get[Option[String]](field).toOption.flatten
@@ -532,43 +547,68 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     recordNodePid() should not be empty
   }
 
-  "fleet smoke 8c" should "free a frozen server's slot and refill it once the agent thaws" in step(
+  "fleet smoke 8c" should "keep a frozen server's node with no other server free and adopt it once the agent thaws" in step(
     "8c SIGSTOP agent past reassign window"
   ) {
     val agentPid   = agentHandles().headOption.map(_.pid()).getOrElse(fail("no agent process"))
     val frozenNode = recordNodePid().getOrElse(fail("no node pidfile before the freeze"))
+    val nodeId     = pool().nodes.headOption
+      .flatMap(str(_, "nodeId"))
+      .getOrElse(fail("no node before the freeze"))
+    val epoch = serverEpoch()
     signal("STOP", agentPid)
     try
-      // reassignAfterSec = 10, reconcile every 2 s: the node row goes, the slot goes pending.
-      await("node row gone and the slot pending while the agent is frozen") {
-        val p = pool()
-        Option.when(p.nodes.isEmpty && p.pending == 1)(())
+      // reassignAfterSec = 10, reconcile every 2 s: s1 goes dead, the respawn finds no free
+      // server and keeps the node on s1 (owner policy), reporting none_free.
+      await("s1 dead while the agent is frozen") {
+        server().filter(s => str(s, "liveness").contains("dead"))
       }
-      server().flatMap(str(_, "assignedNodeId")) shouldBe None
+      await("none_free reported for the kept node") {
+        Option.when(pool().reason.contains("none_free"))(())
+      }
+      val p = pool()
+      p.nodes.flatMap(str(_, "nodeId")) shouldBe List(nodeId)
+      p.pending shouldBe 0
+      server().flatMap(str(_, "assignedNodeId")) shouldBe Some(nodeId)
+      serverEpoch() shouldBe epoch
       alive(frozenNode) shouldBe true // the node itself never froze
     finally signal("CONT", agentPid)
-    // The thawed agent sees no assignment (or a fresh epoch) and stops the old node.
-    await("old node stopped by the thawed agent")(Option.when(!alive(frozenNode))(()))
-    val node = await("slot refilled on s1") {
-      val p = pool()
-      Option.when(p.nodes.size == 1 && p.pending == 0)(p.nodes.head)
+    // The thawed agent still holds the same assignment: the node is adopted, not restarted.
+    await("s1 reachable and running its node again") {
+      server().filter(s =>
+        str(s, "liveness").contains("reachable") && str(s, "nodeState").contains("running")
+      )
     }
-    str(node, "serverName") shouldBe Some(Server)
-    await("s1 running a fresh node") {
-      server().filter(s => str(s, "nodeState").contains("running"))
+    await("SELECT 42 through the edge after the thaw", 30.seconds)(
+      Try(selectFortyTwo()).toOption
+    ) shouldBe "42"
+    await("pendingReason cleared once the node is adopted") {
+      Option.when(pool().reason.isEmpty)(())
     }
-    recordNodePid().filterNot(_ == frozenNode) should not be empty
+    val p = pool()
+    p.nodes.flatMap(str(_, "nodeId")) shouldBe List(nodeId)
+    p.pending shouldBe 0
+    str(p.nodes.head, "serverName") shouldBe Some(Server)
+    serverEpoch() shouldBe epoch
+    recordNodePid() shouldBe Some(frozenNode)
+    alive(frozenNode) shouldBe true
   }
 
-  "fleet smoke 9" should "stop the node and free the slot when the agent is stopped" in step(
+  "fleet smoke 9" should "stop the node and keep its row on the dead server when the agent is stopped" in step(
     "9 SIGTERM agent, reassign window"
   ) {
     val nodePid = recordNodePid().getOrElse(fail("no node pidfile before the stop"))
+    val nodeId  = pool().nodes.headOption.flatMap(str(_, "nodeId")).getOrElse(fail("no node"))
     agentHandles().foreach(_.destroy()) // SIGTERM: the agent stops its node on the way out
     awaitAgentGone()
     await("node process stopped with the agent")(Option.when(!alive(nodePid))(()))
-    await("node row gone and the slot pending after the reassign window") {
-      val p = pool()
-      Option.when(p.nodes.isEmpty && p.pending == 1)(())
+    await("s1 dead after the reassign window") {
+      server().filter(s => str(s, "liveness").contains("dead"))
     }
+    // No other server is free: s1 keeps the assignment and the row until one frees or it returns.
+    await("node row kept on s1 with none_free reported") {
+      val p = pool()
+      Option.when(p.pending == 0 && p.reason.contains("none_free"))(p)
+    }.nodes.flatMap(str(_, "nodeId")) shouldBe List(nodeId)
+    server().flatMap(str(_, "assignedNodeId")) shouldBe Some(nodeId)
   }

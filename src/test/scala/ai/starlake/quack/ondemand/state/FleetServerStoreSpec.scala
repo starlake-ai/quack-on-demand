@@ -140,6 +140,61 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
       s.release("n1") shouldBe None
     }
 
+    it should "claimReplacing release the old holder only when a replacement exists" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("old"))
+        s.claim(assignment("n1"), 30, None).map(_.name) shouldBe Right("old")
+        h.backdate("old", 120) // unreachable holder, nothing else free
+        s.claimReplacing(assignment("n1"), 30, None) shouldBe Left(ClaimMiss.NoneFree)
+        // Rolled back: the old holder keeps its assignment, epoch and claim.
+        val kept = s.get("old").get
+        (kept.assignedNodeId, kept.assignmentEpoch, kept.assignment.map(_.epoch)) shouldBe (
+          Some("n1"),
+          1L,
+          Some(1L)
+        )
+        kept.claimedAt shouldBe defined
+        // A memory miss rolls back too.
+        s.recordHeartbeat(hb("small", memoryBytes = Some(8L << 30)))
+        s.claimReplacing(assignment("n1"), 30, Some(64L << 30)) shouldBe Left(ClaimMiss.NoneFits)
+        s.get("old").get.assignedNodeId shouldBe Some("n1")
+        // A replacement exists: the old holder is released (epoch bumped) and the new one claimed.
+        s.recordHeartbeat(hb("fresh"))
+        s.claimReplacing(assignment("n1"), 30, Some(16L << 30)).map(_.name) shouldBe Right("fresh")
+        val released = s.get("old").get
+        (released.assignedNodeId, released.assignment, released.assignmentEpoch) shouldBe (
+          None,
+          None,
+          2L
+        )
+        released.claimedAt shouldBe None
+        s.list().count(_.assignedNodeId.contains("n1")) shouldBe 1
+        // With no current holder it is a plain claim.
+        s.claimReplacing(assignment("n2"), 30, None).map(_.name) shouldBe Right("small")
+    }
+
+    it should "claimReplacing re-claim a reachable stale holder in place with a new epoch" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("a")); h.backdate("a", 1) // joined first
+        s.claim(assignment("n1"), 30, None).map(_.name) shouldBe Right("a")
+        s.recordHeartbeat(hb("a")) // still reachable
+        s.recordHeartbeat(hb("b"))
+        val row = s.claimReplacing(assignment("n1").copy(token = "tok2"), 30, None).toOption.get
+        row.name shouldBe "a"
+        row.assignmentEpoch shouldBe 3L // claim 1, release 2, re-claim 3
+        row.assignment.map(a => (a.epoch, a.token)) shouldBe Some((3L, "tok2"))
+        s.get("b").get.assignedNodeId shouldBe None
+        // A drained holder is never re-claimed in place, and keeps the slot with nowhere to go.
+        s.setUnschedulable("a", true)
+        s.claimReplacing(assignment("n1"), 30, None).map(_.name) shouldBe Right("b")
+        s.get("a").get.assignedNodeId shouldBe None
+        s.setUnschedulable("b", true)
+        s.claimReplacing(assignment("n1"), 30, None) shouldBe Left(ClaimMiss.NoneFree)
+        s.get("b").get.assignedNodeId shouldBe Some("n1")
+    }
+
     it should "refuse an address change on any known name unless drained" in withStore { h =>
       val s = h.store
       s.recordHeartbeat(hb("a", host = "10.0.0.1"))
