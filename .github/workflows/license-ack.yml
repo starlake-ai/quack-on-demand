@@ -1,0 +1,42 @@
+name: license-ack
+
+# Licensing acknowledgement gate for pull requests.
+#
+# .github/PULL_REQUEST_TEMPLATE.md prefills every PR description with the
+# line
+#
+#   - [ ] I license this contribution under the Apache License 2.0, ...
+#
+# and this workflow fails until the author ticks it. Listed as a required
+# status check on `main`, so the merge button stays grey for an unticked
+# PR, fork or not. Nothing here needs write access: the PR body comes from
+# the event payload, so the job runs with an empty permission set and a
+# plain `pull_request` trigger (never `pull_request_target`, which would
+# hand fork code a write token).
+#
+# Triggers: PR opened, reopened, new commits pushed, or description edited
+# (ticking the box is an edit, which re-runs the check).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  license-ack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the licensing box is ticked
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$PR_BODY" | tr -d '\r' | grep -qiE '^\s*-\s*\[x\]\s+I license this contribution under the Apache License 2\.0'; then
+            echo "Licensing acknowledgement found."
+          else
+            echo "::error::Licensing acknowledgement missing."
+            echo "Edit the PR description and tick the box:"
+            echo "  - [x] I license this contribution under the Apache License 2.0, the same license as the project."
+            echo "The line is prefilled by the PR template; restore it if it was removed."
+            exit 1
+          fi
