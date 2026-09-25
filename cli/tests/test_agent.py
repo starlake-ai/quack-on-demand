@@ -1,6 +1,8 @@
-import os
-import pathlib
+import io
+import signal
+import subprocess
 
+import httpx
 import pytest
 
 from qod_cli.agent import Agent
@@ -25,18 +27,32 @@ class FakeHttp:
 
 
 class FakeProc:
-    def __init__(self, pid=4242, alive=True):
+    def __init__(self, pid=4242, alive=True, stuck=False):
         self.pid, self._alive, self.terminated, self.killed = pid, alive, False, False
-        self.stderr = None
-        self.stderr_lines = [b"boot\n"]
+        self.stuck = stuck  # ignores SIGTERM: wait(timeout) expires
+        self.stderr = io.BytesIO(b"boot\n")
     def poll(self):
         return None if self._alive else 1
     def terminate(self):
-        self.terminated = True; self._alive = False
+        self.terminated = True
+        if not self.stuck:
+            self._alive = False
     def kill(self):
         self.killed = True; self._alive = False
     def wait(self, timeout=None):
+        if self._alive and timeout is not None:
+            raise subprocess.TimeoutExpired("spawn", timeout)
+        self._alive = False
         return 0
+
+
+@pytest.fixture(autouse=True)
+def recorded_signals(monkeypatch):
+    """Never signal a real process from a test: FakeProc pids are arbitrary numbers."""
+    sent = []
+    monkeypatch.setattr("qod_cli.agent.os.kill", lambda pid, sig: sent.append(("kill", pid, sig)))
+    monkeypatch.setattr("qod_cli.agent.os.killpg", lambda pgid, sig: sent.append(("killpg", pgid, sig)))
+    return sent
 
 
 def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
@@ -148,3 +164,140 @@ def test_refuses_plain_http_without_insecure(tmp_path):
               spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
     Agent("http://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
           spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=True)
+
+
+def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp_path, monkeypatch):
+    monkeypatch.setenv("QOD_FLEET_JOIN_TOKEN", "fleet-wide-secret")
+    monkeypatch.setenv("lockdownSql", "X")
+    monkeypatch.setenv("SOME_RANDOM_SECRET", "nope")
+    monkeypatch.setenv("QOD_S3_ENDPOINT", "minio:9000")
+    envs = []
+    def popen(cmd, env=None, **kw):
+        envs.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    make_agent(http, popen, tmp_path).run_once()
+    env = envs[0]
+    assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
+    assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
+    assert env["lockdownSql"] == "" and env["dbInitSql"] == ""
+    assert env["pgPassword"] == "pw" and env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
+
+
+def test_non_json_reply_is_a_failed_heartbeat_and_keeps_the_node(tmp_path):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(); procs.append(p); return p
+    bad = FakeResponse(200, None)
+    bad.json = lambda: (_ for _ in ()).throw(ValueError("not json"))
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)}), bad])
+    agent = make_agent(http, popen, tmp_path)
+    agent.run_once()
+    assert agent.run_once() == 5
+    assert not procs[0].terminated and agent.node is not None
+
+
+def test_malformed_assignment_is_a_failed_heartbeat_and_keeps_the_node(tmp_path):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(); procs.append(p); return p
+    broken = assignment(2); del broken["env"]
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)}),
+                     FakeResponse(200, {"heartbeatSec": 5, "assignment": broken})])
+    agent = make_agent(http, popen, tmp_path)
+    agent.run_once()
+    assert agent.run_once() == 5
+    assert len(procs) == 1 and not procs[0].terminated
+    assert agent.node.assignment["epoch"] == 1
+
+
+def test_network_error_keeps_the_node_running(tmp_path):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(); procs.append(p); return p
+    class Flaky(FakeHttp):
+        def post(self, url, json=None, headers=None, timeout=None):
+            if self.replies:
+                return super().post(url, json, headers, timeout)
+            raise httpx.ConnectError("manager down")
+    agent = make_agent(Flaky([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})]), popen, tmp_path)
+    agent.run_once()
+    assert agent.run_once() == 5
+    assert not procs[0].terminated and agent.node is not None
+
+
+def test_popen_failure_is_a_failed_heartbeat(tmp_path):
+    def popen(cmd, env=None, **kw):
+        raise OSError("no bash")
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    agent = make_agent(http, popen, tmp_path)
+    assert agent.run_once() == 5 and agent.node is None
+
+
+def test_stop_timeout_kills_the_process_group(tmp_path, recorded_signals):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(pid=777, stuck=True); procs.append(p); return p
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)}),
+                     FakeResponse(200, {"heartbeatSec": 5, "assignment": None})])
+    agent = make_agent(http, popen, tmp_path)
+    agent.run_once(); agent.run_once()
+    assert procs[0].terminated
+    assert ("killpg", 777, signal.SIGKILL) in recorded_signals
+
+
+def test_stop_kills_the_group_even_when_the_script_already_exited(tmp_path, recorded_signals):
+    procs = []
+    def popen(cmd, env=None, **kw):
+        p = FakeProc(pid=888); procs.append(p); return p
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)}),
+                     FakeResponse(200, {"heartbeatSec": 5, "assignment": None})])
+    agent = make_agent(http, popen, tmp_path)
+    agent.run_once()
+    procs[0]._alive = False          # script exited on its own; a duckdb child may survive it
+    agent.run_once()
+    assert not procs[0].terminated
+    assert ("killpg", 888, signal.SIGKILL) in recorded_signals
+
+
+def test_reap_orphan_waits_the_stop_grace_before_the_group_kill(tmp_path, monkeypatch, recorded_signals):
+    state = tmp_path / "state"; state.mkdir()
+    (state / "node.pid").write_text("31337")
+    monkeypatch.setattr("qod_cli.agent._cmdline", lambda pid: "bash spawn-quack-node.sh")
+    slept = []
+    agent = make_agent(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
+    agent.sleep = slept.append
+    assert agent.reap_orphan() == 31337
+    assert recorded_signals[0] == ("kill", 31337, signal.SIGTERM)
+    assert recorded_signals[1] == ("kill", -31337, signal.SIGKILL)
+    assert sum(slept) >= 60
+
+
+def test_reap_orphan_never_signals_pid_1(tmp_path, monkeypatch, recorded_signals):
+    state = tmp_path / "state"; state.mkdir()
+    (state / "node.pid").write_text("1")
+    monkeypatch.setattr("qod_cli.agent._cmdline", lambda pid: "bash spawn-quack-node.sh")
+    agent = make_agent(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
+    assert agent.reap_orphan() is None and recorded_signals == []
+
+
+def test_scheme_check_is_case_insensitive(tmp_path):
+    with pytest.raises(SystemExit):
+        Agent("HTTP://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
+              spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
+
+
+def test_default_advertise_host_refuses_loopback(monkeypatch):
+    import qod_cli.agent as agent_mod
+    class Sock:
+        def connect(self, addr): raise OSError("no route")
+        def getsockname(self): return ("0.0.0.0", 0)
+        def close(self): pass
+    monkeypatch.setattr(agent_mod.socket, "socket", lambda *a: Sock())
+    monkeypatch.setattr(agent_mod.socket, "gethostbyname", lambda h: "127.0.1.1")
+    with pytest.raises(SystemExit) as e:
+        agent_mod.default_advertise_host()
+    assert e.value.code == 2
+    def gai(h): raise agent_mod.socket.gaierror("unknown host")
+    monkeypatch.setattr(agent_mod.socket, "gethostbyname", gai)
+    with pytest.raises(SystemExit):
+        agent_mod.default_advertise_host()

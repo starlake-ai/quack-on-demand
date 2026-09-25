@@ -11,7 +11,7 @@ from ..agent import Agent, default_advertise_host
 
 def agent(
     manager: str = typer.Option(..., "--manager", envvar="QOD_MANAGER_URL", help="Manager base URL, https://host:20900."),
-    join_token: str = typer.Option(..., "--join-token", envvar="QOD_FLEET_JOIN_TOKEN"),
+    join_token: str = typer.Option(..., "--join-token", envvar="QOD_FLEET_JOIN_TOKEN", help="Fleet join token; prefer QOD_FLEET_JOIN_TOKEN, a flag value is visible in ps."),
     name: str = typer.Option(socket.gethostname(), "--name", help="Server identity; must be unique in the fleet."),
     advertise_host: str = typer.Option(None, "--advertise-host", help="Address the manager dials; default: first non-loopback IPv4. Set it explicitly on multi-NIC hosts."),
     bind_host: str = typer.Option(None, "--bind-host", help="Interface the node listens on; default: the advertise host. 0.0.0.0 to listen everywhere."),

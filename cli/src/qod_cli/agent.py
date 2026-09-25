@@ -30,18 +30,44 @@ BACKOFF_MIN_S = 5
 BACKOFF_MAX_S = 300
 STDERR_TAIL = 20
 PIDFILE = "node.pid"
+DRAIN_JOIN_S = 0.5
+
+# The node's environment is built from this allowlist, never from the agent's whole environment:
+# the agent holds QOD_FLEET_JOIN_TOKEN (the fleet-wide credential), and tenant SQL on a node
+# without lockdown can read /proc/self/environ.
+_ENV_PASSTHROUGH = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "SHELL",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "DUCKDB_BIN", "QOD_APP_HOME",
+)
+# Object-storage settings the spawn script reads.
+_ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
+_SQL_KEYS = ("dbInitSql", "objectStoreSql", "extraSetupSql", "lockdownSql")
+
+
+def _no_advertise_host(reason: str) -> SystemExit:
+    sys.stderr.write(f"qod agent: cannot pick an advertise host ({reason}); pass --advertise-host "
+                     f"with the address the manager should dial\n")
+    return SystemExit(2)
 
 
 def default_advertise_host() -> str:
-    """First non-loopback IPv4 of this host, via a connectionless UDP socket."""
+    """First non-loopback IPv4 of this host, via a connectionless UDP socket. Exits 2 with a
+    message naming --advertise-host when only a loopback address (or none) can be found."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("10.255.255.255", 1))
-        return s.getsockname()[0]
+        host = s.getsockname()[0]
     except OSError:
-        return socket.gethostbyname(socket.gethostname())
+        try:
+            host = socket.gethostbyname(socket.gethostname())
+        except OSError as exc:  # socket.gaierror is an OSError
+            raise _no_advertise_host(f"hostname does not resolve: {exc}") from None
     finally:
         s.close()
+    if host.startswith("127.") or host == "0.0.0.0":
+        raise _no_advertise_host(f"only found {host}")
+    return host
 
 
 def host_capacity() -> tuple[int | None, int | None]:
@@ -84,8 +110,10 @@ class _Node:
         self.state = "starting"
         self.error: str | None = None
         self.stderr = collections.deque(maxlen=STDERR_TAIL)
-        if getattr(proc, "stderr", None) is not None and hasattr(proc.stderr, "readline"):
-            threading.Thread(target=self._drain, daemon=True).start()
+        self.drainer: threading.Thread | None = None
+        if getattr(proc, "stderr", None) is not None:
+            self.drainer = threading.Thread(target=self._drain, daemon=True)
+            self.drainer.start()
 
     def _drain(self):
         for line in iter(self.proc.stderr.readline, b""):
@@ -94,8 +122,13 @@ class _Node:
             sys.stderr.write(text)
 
     def tail(self) -> str:
-        lines = list(self.stderr) or [l.decode(errors="replace").rstrip() for l in getattr(self.proc, "stderr_lines", [])]
-        return "\n".join(lines)
+        return "\n".join(self.stderr)
+
+    def exit_error(self) -> str:
+        # The process is gone: give the drain thread a moment to read the last lines it wrote.
+        if self.drainer is not None:
+            self.drainer.join(DRAIN_JOIN_S)
+        return f"exited with {self.proc.poll()}: {self.tail()}"
 
 
 class Agent:
@@ -105,7 +138,7 @@ class Agent:
                  port_open: Callable[[int], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  capacity: Callable[[], tuple[int | None, int | None]] = host_capacity,
                  duckdb_version: str | None = None):
-        if manager_url.startswith("http://") and not insecure:
+        if manager_url.lower().startswith("http://") and not insecure:
             sys.stderr.write("qod agent: refusing a plain http:// manager URL (the assignment carries credentials); pass --insecure to override\n")
             raise SystemExit(2)
         self.manager_url, self.join_token = manager_url.rstrip("/"), join_token
@@ -138,7 +171,8 @@ class Agent:
         except ValueError:
             pid = None
         self.pidfile.unlink(missing_ok=True)
-        if pid is None or "spawn-quack-node" not in _cmdline(pid):
+        # pid > 1 guards the -pid group kill below: -1 would signal every process we may signal.
+        if pid is None or pid <= 1 or "spawn-quack-node" not in _cmdline(pid):
             return None
         sys.stderr.write(f"qod agent: reaping orphan node pid {pid} from a previous agent\n")
         # TERM the script so its trap stops duckdb and removes the FIFO; if it lingers, KILL its
@@ -148,7 +182,7 @@ class Agent:
                 os.kill(target, sig)
             except ProcessLookupError:
                 break
-            for _ in range(50):
+            for _ in range(int(STOP_GRACE_S / 0.2)):
                 if not _cmdline(pid):
                     return pid
                 self.sleep(0.2)
@@ -162,30 +196,38 @@ class Agent:
         alive = n.proc.poll() is None
         if n.state == "starting":
             if not alive:
-                n.state, n.error = "failed", f"exited with {n.proc.poll()}: {n.tail()}"
+                n.state, n.error = "failed", n.exit_error()
             elif self.port_open(n.assignment["port"]):
                 n.state = "running"
             elif self.clock() - n.started_at > START_GRACE_S:
                 n.state, n.error = "failed", f"port {n.assignment['port']} not open after {START_GRACE_S}s: {n.tail()}"
         elif n.state == "running" and not alive:
-            n.state, n.error = "failed", f"exited with {n.proc.poll()}: {n.tail()}"
+            n.state, n.error = "failed", n.exit_error()
         return {"assignmentEpoch": n.assignment["epoch"], "nodeId": n.assignment["nodeId"], "state": n.state,
                 "pid": n.proc.pid if alive else None, "error": n.error,
                 "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(n.wall_started_at))}
 
     # ---- process control ----
-    def _start(self, assignment: dict) -> None:
-        env = dict(os.environ)
-        env.update(assignment["env"])
-        env["kind"] = assignment["kind"]
+    def _launch_spec(self, assignment: dict) -> tuple[list[str], dict[str, str]]:
+        """Command and environment for `assignment`. Raises KeyError/TypeError on a malformed
+        assignment, before anything is stopped."""
+        env = {k: v for k, v in os.environ.items()
+               if k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES)}
+        env.update({str(k): str(v) for k, v in assignment["env"].items()})
+        env["kind"] = str(assignment["kind"])
         env["QOD_NODE_BIND"] = self.bind_host
-        for key in ("dbInitSql", "objectStoreSql", "extraSetupSql", "lockdownSql"):
-            if assignment.get(key):
-                env[key] = assignment[key]
+        # Always from the assignment, empty when absent: a stray value in the agent's environment
+        # (a lockdownSql=... exported by hand) must never reach a node.
+        for key in _SQL_KEYS:
+            env[key] = str(assignment.get(key) or "")
         if self.duckdb_bin is not None:
             env["DUCKDB_BIN"] = str(self.duckdb_bin)
             env["PATH"] = str(Path(self.duckdb_bin).parent) + os.pathsep + env.get("PATH", "")
-        cmd = ["bash", str(self.spawn_script), str(assignment["port"]), assignment["token"]]
+        cmd = ["bash", str(self.spawn_script), str(int(assignment["port"])), str(assignment["token"])]
+        return cmd, env
+
+    def _start(self, assignment: dict, spec: tuple[list[str], dict[str, str]] | None = None) -> None:
+        cmd, env = spec or self._launch_spec(assignment)
         # Own session: a manager-side stop reaches the node through this agent, never through a
         # terminal signal. The pidfile is what lets the NEXT agent find it if this one dies.
         proc = self.popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -202,12 +244,16 @@ class Agent:
             try:
                 n.proc.wait(timeout=STOP_GRACE_S)
             except subprocess.TimeoutExpired:
-                # The script leads its own session: KILL the group so duckdb dies with it.
-                try:
-                    os.killpg(n.proc.pid, signal.SIGKILL)
-                except OSError:
-                    n.proc.kill()
+                n.proc.kill()
                 n.proc.wait()
+        # The script leads its own session, so its pid is the group id. KILL the group even when
+        # the script already exited: a surviving duckdb child would otherwise hold the port.
+        # ESRCH (group already empty) is the normal case and harmless.
+        if n.proc.pid > 1:
+            try:
+                os.killpg(n.proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
         self.pidfile.unlink(missing_ok=True)
         self.last_report = {"assignmentEpoch": n.assignment["epoch"], "nodeId": n.assignment["nodeId"],
                             "state": "stopped", "pid": None, "error": None, "startedAt": None}
@@ -221,10 +267,11 @@ class Agent:
                 self._stop()
             self.failures, self.next_restart_at = 0, None
         elif n is None or n.assignment["epoch"] != assignment["epoch"]:
+            spec = self._launch_spec(assignment)  # malformed: raise before stopping anything
             if n is not None:
                 self._stop()
             self.failures, self.next_restart_at = 0, None
-            self._start(assignment)
+            self._start(assignment, spec)
         elif n.state == "failed":
             # First sight of a failure schedules the restart (5 s, doubling to 5 min); a later
             # heartbeat past the deadline performs it. The failed state is reported meanwhile.
@@ -234,8 +281,9 @@ class Agent:
                 self.next_restart_at = self.clock() + delay
                 sys.stderr.write(f"qod agent: node failed ({n.error}); restarting in {delay}s\n")
             elif self.clock() >= self.next_restart_at:
+                spec = self._launch_spec(assignment)
                 self._stop()
-                self._start(assignment)
+                self._start(assignment, spec)
                 self.next_restart_at = None
         elif n.state == "running":
             self.failures = 0
@@ -254,9 +302,15 @@ class Agent:
         if not r.is_success:
             sys.stderr.write(f"qod agent: manager answered {r.status_code}: {getattr(r, 'text', '')}\n")
             return BACKOFF_MIN_S
-        reply = r.json()
-        self._reconcile(reply.get("assignment"))
-        return float(reply.get("heartbeatSec", 5))
+        # One bad reply (not JSON, a malformed assignment) or a failed spawn/pidfile write must not
+        # kill the agent: log it, keep whatever node runs, and heartbeat again after the backoff.
+        try:
+            reply = r.json()
+            self._reconcile(reply.get("assignment"))
+            return float(reply.get("heartbeatSec", 5))
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
+            sys.stderr.write(f"qod agent: could not act on the manager's reply: {exc!r}\n")
+            return BACKOFF_MIN_S
 
     def run_forever(self) -> None:
         self.reap_orphan()
