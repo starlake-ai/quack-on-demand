@@ -350,7 +350,11 @@ if [[ -n "${lockdownSql:-}" ]]; then
   INIT_SQL+="$lockdownSql"$'\n'
 fi
 
-INIT_SQL+="CALL quack_serve('quack:0.0.0.0:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
+# QOD_NODE_BIND: interface the node listens on. 0.0.0.0 keeps local and K8s nodes unchanged; the
+# fleet agent passes the server's advertised data interface so a node never listens on a
+# management NIC by accident.
+NODE_BIND="${QOD_NODE_BIND:-0.0.0.0}"
+INIT_SQL+="CALL quack_serve('quack:${NODE_BIND}:$PORT', token := '$TOKEN', allow_other_hostname := true);"$'\n'
 
 # Test seam: print the assembled init SQL and exit without launching duckdb.
 # Used by SpawnScriptEncryptionSpec to assert the emitted SQL, which is the only
