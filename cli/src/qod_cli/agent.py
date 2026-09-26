@@ -174,6 +174,9 @@ class Agent:
         self.last_report: dict = {"assignmentEpoch": 0, "nodeId": None, "state": "none", "pid": None, "error": None, "startedAt": None}
         self.duckdb_version = duckdb_version
         self.failures = 0
+        # None until the first successful heartbeat, then False while heartbeats fail: drives the
+        # one-line "connected" / "reconnected" status, never repeated on every heartbeat.
+        self.connected: bool | None = None
         # Monotonic deadline of the scheduled restart of a failed node; None while none is scheduled.
         self.next_restart_at: float | None = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -328,10 +331,16 @@ class Agent:
                                headers={"X-Fleet-Token": self.join_token}, timeout=10.0)
         except Exception as exc:  # network: keep the node running, retry later
             sys.stderr.write(f"qod agent: heartbeat failed: {exc}\n")
+            self._mark_disconnected()
             return BACKOFF_MIN_S
         if not r.is_success:
             sys.stderr.write(f"qod agent: WARN manager answered {r.status_code}: {_error_of(r)}\n")
+            self._mark_disconnected()
             return BACKOFF_MIN_S
+        if not self.connected:
+            verb = "connected" if self.connected is None else "reconnected"
+            sys.stderr.write(f"qod agent: {verb} to manager {self.manager_url} as server '{self.name}'\n")
+            self.connected = True
         # One bad reply (not JSON, a malformed assignment) or a failed spawn/pidfile write must not
         # kill the agent: log it, keep whatever node runs, and heartbeat again after the backoff.
         try:
@@ -341,6 +350,10 @@ class Agent:
         except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
             sys.stderr.write(f"qod agent: could not act on the manager's reply: {exc!r}\n")
             return BACKOFF_MIN_S
+
+    def _mark_disconnected(self) -> None:
+        if self.connected:
+            self.connected = False
 
     def run_forever(self) -> None:
         self.reap_orphan()

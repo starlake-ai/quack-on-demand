@@ -265,6 +265,26 @@ def test_non_2xx_reply_logs_the_manager_error_code_at_warn(tmp_path, capsys):
     assert "WARN" in err[2] and "502" in err[2] and "bad gateway" in err[2]
 
 
+def test_logs_connected_once_then_reconnected_after_a_failure(tmp_path, capsys):
+    ok = lambda: FakeResponse(200, {"heartbeatSec": 5, "assignment": None})
+    class Flaky(FakeHttp):
+        def post(self, url, json=None, headers=None, timeout=None):
+            reply = self.replies.pop(0)
+            if reply is None:
+                raise httpx.ConnectError("manager down")
+            return reply
+    refused = FakeResponse(401, {"error": "fleet_unauthorized", "message": "invalid token"})
+    agent = make_agent(Flaky([ok(), ok(), None, None, ok(), ok(), refused, ok()]), lambda *a, **k: FakeProc(), tmp_path)
+    for _ in range(8):
+        agent.run_once()
+    err = capsys.readouterr().err.splitlines()
+    status = [l for l in err if "connected to manager" in l]
+    assert len(status) == 3
+    assert "qod agent: connected to manager https://mgr:20900" in status[0]
+    assert "reconnected to manager https://mgr:20900" in status[1]
+    assert "reconnected to manager https://mgr:20900" in status[2]
+
+
 def test_non_json_reply_is_a_failed_heartbeat_and_keeps_the_node(tmp_path):
     procs = []
     def popen(cmd, env=None, **kw):
