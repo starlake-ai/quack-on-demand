@@ -28,7 +28,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       lookupPool = (t, p) =>
         if t == "acme" && p == "bi" then Right("acme_db") else Left(s"pool '$p' not found"),
       resolveTenant = raw =>
-        if raw == "acme" || raw == "t-0a1b2c3d" then Some(Tenant("t-0a1b2c3d", "acme")) else None,
+        if raw == "acme" then Some(Tenant("acme", "Acme Corporation")) else None,
       authorize = (_, _, _, _, _, _) => authorizeResult
     )
 
@@ -36,10 +36,17 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
     val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
     out shouldBe Right(HandshakeBound(PoolKey("acme", "acme_db", "bi"), "alice", eff, None))
 
-  it should "accept the tenant id form and normalize it to the display name" in:
+  it should "route by the tenant id, never the display name" in:
+    // Pools are keyed by tenant id: the display name must not replace the wire tenant.
     val out =
-      handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("t-0a1b2c3d"), false)
-    out.toOption.get.poolKey.tenant shouldBe "acme"
+      handshake().authenticate(
+        None,
+        Some(("alice", "pw")),
+        Some("bi"),
+        Some("Acme Corporation"),
+        false
+      )
+    out.isLeft shouldBe true
 
   it should "refuse a handshake without a tenant" in:
     val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), None, false)

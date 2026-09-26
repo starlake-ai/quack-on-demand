@@ -167,10 +167,7 @@ object FlightEdgeHarness:
                   case _ =>
                     Right(key.tenantDb)
 
-    val resolveTenant =
-      (raw: String) =>
-        if ai.starlake.quack.model.Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
-        else sup.getTenant(raw)
+    val resolveTenant = (raw: String) => sup.getTenant(raw)
 
     val authorize = (
         tenant: String,

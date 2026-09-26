@@ -65,40 +65,9 @@ class NamesSpec extends AnyFlatSpec with Matchers:
     val long = "a" * (Names.MaxLength - 4) // 4 = len("acme_")-1: composing pushes past 63
     Names.normalizeTenantDbName("acme", long).isLeft shouldBe true
 
-  "Names.looksLikeTenantId" should "match the surrogate shape minted by PoolSupervisor" in:
-    Names.looksLikeTenantId("t-02d0e86e") shouldBe true
-    Names.looksLikeTenantId("t-00000000") shouldBe true
-    Names.looksLikeTenantId("t-deadbeef") shouldBe true
-
-  it should "reject display names and other shapes" in:
-    Names.looksLikeTenantId("tpch")          shouldBe false  // valid display name, not an id
-    Names.looksLikeTenantId("t_02d0e86e")    shouldBe false  // underscore, not hyphen
-    Names.looksLikeTenantId("t-02D0E86E")    shouldBe false  // uppercase hex not minted
-    Names.looksLikeTenantId("t-02d0e86")     shouldBe false  // 7 hex
-    Names.looksLikeTenantId("t-02d0e86eX")   shouldBe false  // trailing junk
-    Names.looksLikeTenantId("td-02d0e86e")   shouldBe false  // wrong prefix
-    Names.looksLikeTenantId("")              shouldBe false
-    Names.looksLikeTenantId(null)            shouldBe false
-
-  it should "be disjoint from isValid (display-name shape)" in:
-    // Display names exclude hyphen; tenant ids require it. The two spaces never overlap,
-    // so the FlightSQL `tenant` connection param is unambiguous.
-    val ids   = List("t-00000000", "t-02d0e86e", "t-ffffffff")
-    val names = List("tpch", "acme", "_internal", "t1", "tenant1")
-    ids.foreach(s   => withClue(s)(Names.isValid(s)          shouldBe false))
-    names.foreach(s => withClue(s)(Names.looksLikeTenantId(s) shouldBe false))
-
-  it should "still accept the new 32-hex form alongside legacy 8-hex ids" in:
-    // Migrated 2026-06-12 from 8-char (32 bits, ~77K rows to 50% collision) to
-    // the full UUID hex form (128 bits, effectively no collisions). Both must
-    // continue to match so existing rows stay addressable.
-    Names.looksLikeTenantId("t-abc12345abc12345abc12345abc12345") shouldBe true
-    Names.looksLikeTenantId("t-02d0e86e9c5d4a3b8f6e1c2d4a3b8f6e") shouldBe true
-
   "Names.newSurrogateId" should "produce a prefix + 32 lowercase hex chars" in:
     val id = Names.newSurrogateId("t")
     id should fullyMatch regex "^t-[0-9a-f]{32}$"
-    Names.looksLikeTenantId(id) shouldBe true
 
   it should "honour the requested prefix" in:
     Names.newSurrogateId("td")   should startWith ("td-")

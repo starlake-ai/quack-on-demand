@@ -2,6 +2,7 @@
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestImporterValidationSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -30,6 +31,16 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
       ManifestUser(tenant = Some("ghost"), username = "alice")))
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
     err.exists(_.contains("ghost")) shouldBe true
+  }
+
+  it should "accept a DB tenant referenced by its id when the display name differs" in {
+    // The exporter writes tenant ids; a partial manifest (users only) must still validate
+    // against a DB tenant whose display name is not its id.
+    val store = emptyStore
+    store.upsertTenant(Tenant(id = "acme", displayName = "Acme Corporation"))
+    val m = baseManifest.copy(users = List(
+      ManifestUser(tenant = Some("acme"), username = "alice")))
+    ManifestImporter.validate(m, store) shouldBe Right(())
   }
 
   it should "reject duplicate (tenant, username) pairs" in {

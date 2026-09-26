@@ -24,7 +24,7 @@ import ai.starlake.quack.boot.{
 }
 import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
-import ai.starlake.quack.model.{Names, RunningNode, TenantDb}
+import ai.starlake.quack.model.{RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
   MaintenanceMetrics,
   MetricsBindings,
@@ -1197,11 +1197,9 @@ object Main extends IOApp with LazyLogging:
                     Left(s"pool '${key.pool}' in tenant '${key.tenant}' is disabled")
                   case _ =>
                     Right(key.tenantDb)
-      // The FlightSQL `tenant` param may be a surrogate id or a display
-      // name; the shapes are disjoint, so the check picks the right index.
+      // The FlightSQL `tenant` param is the tenant id (case-insensitive).
       val resolveTenantForEdge: String => Option[ai.starlake.quack.model.Tenant] = raw =>
-        if Names.looksLikeTenantId(raw) then sup.getTenantById(raw)
-        else sup.getTenant(raw)
+        sup.getTenant(raw)
       // Handshake authorize; failures bubble up as PERMISSION_DENIED.
       val authorizeForEdge: (String, String, String, Set[String], Set[String], Boolean) => Either[
         String,

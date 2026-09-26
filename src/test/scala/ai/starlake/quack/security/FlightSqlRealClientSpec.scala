@@ -105,35 +105,21 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
     }
 
   // -------------------------------------------------------------------------
-  // Case 2: surrogate-id tenant succeeds via Names.looksLikeTenantId normalization.
+  // Case 2: a tenant whose display name differs from its id is reached by id.
   //
-  // SecurityFixtures.TenantId ("t-acme0001") contains the non-hex char 'm',
-  // so Names.looksLikeTenantId rejects it. For this wire-level regression test
-  // we need an id that matches the real surrogate shape: t-[0-9a-f]{8}. We add
-  // a second tenant (id "t-ace00001") directly to the shared fixture store so
-  // both the display-name tests and this surrogate-id test share one harness
-  // lifecycle without touching the SecurityFixtures constants.
-  //
-  // The canonical surrogate format is minted by PoolSupervisor.newId("t"),
-  // which takes the first 8 hex chars of a UUID. "t-ace00001" is all hex.
+  // Pools are keyed by the tenant id, so the edge must route the wire tenant as
+  // the id and never swap in the display name.
   // -------------------------------------------------------------------------
 
-  /** Tenant id that satisfies Names.looksLikeTenantId (8 lowercase hex chars). */
-  private val HexTenantId = "t-ace00001"
+  private val HexTenantId = "hexcorp"
 
-  it should "succeed with surrogate-id tenant (Names.looksLikeTenantId=true)" in {
+  it should "succeed with a tenant whose display name differs from its id" in {
     import ai.starlake.quack.model.{Pool, RoleDistribution, Tenant, TenantDb, TenantDbKind}
     import ai.starlake.quack.ondemand.state.{PoolPermission, RolePermission}
-    // Build a fresh fixture store, then add a second tenant whose id matches
-    // the hex surrogate pattern so FlightEdgeServer's looksLikeTenantId branch
-    // is exercised on the real Flight wire.
     val fix = SecurityFixtures.freshStore()
     val s   = fix.store
 
-    // Post slug-id refactor a tenant's id IS its slug and the edge routes a
-    // looksLikeTenantId wire header by the resolved tenant's display name, so id
-    // and display name must coincide (the pool is keyed by id). Keep them equal.
-    val hexTenantDisplayName = HexTenantId
+    val hexTenantDisplayName = "Hex Corporation"
     val hexTenantDbId        = "td-hex0001"
     val hexPoolId            = "p-hex0001"
     val hexPoolPermId        = "pp-hex0001"
@@ -151,7 +137,7 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       TenantDb(
         id = hexTenantDbId,
         tenantId = HexTenantId,
-        name = s"${hexTenantDisplayName}_main",
+        name = s"${HexTenantId}_main",
         kind = TenantDbKind.InMemory,
         metastore = Map.empty,
         dataPath = ""
@@ -208,9 +194,7 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
     val h      = FlightEdgeHarness.boot(s, enableProviders = true, tls = false)
     val client = h.newClient()
     try
-      // Send the surrogate id on the wire. FlightEdgeServer.resolveTenant calls
-      // Names.looksLikeTenantId("t-ace00001") == true, then getTenantById,
-      // and normalises to the display name before calling lookupPool/authorize.
+      // Send the tenant id on the wire; lookupPool/authorize receive it unchanged.
       val opt = headersOpt(
         tenant = HexTenantId,
         pool = SecurityFixtures.PoolName,

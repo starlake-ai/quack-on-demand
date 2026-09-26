@@ -48,10 +48,8 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
 
   "authenticateBasic" should
     "succeed when wire-level tenant header is the display name (acme)" in {
-      // The FlightEdgeServer normalises the raw tenant header to a surrogate id
-      // before calling authenticateBasic, using Names.looksLikeTenantId + either
-      // getTenantById or getTenant.  After that normalisation both paths call
-      // authenticateBasic(Some(TenantId), ...).  This test documents that
+      // The edge resolves the raw tenant header to the tenant and calls
+      // authenticateBasic(Some(TenantId), ...). This test documents that
       // contract: the call reaching the service is always with the id, not the
       // display name.
       val fix = SecurityFixtures.freshStore()

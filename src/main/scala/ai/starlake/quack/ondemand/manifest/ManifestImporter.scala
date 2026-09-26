@@ -49,8 +49,10 @@ object ManifestImporter:
     // Tenants in YAML + tenants already in the DB form the set of valid tenants
     // a user/role/group may reference.
     val tenantsInYaml = m.tenants.map(_.name).toSet
-    val tenantsInDb   = store.listTenants().map(_.displayName).toSet
-    val knownTenants  = tenantsInYaml ++ tenantsInDb
+    // Both forms, matching tenantIdFor: the exporter writes ids, older manifests may carry the
+    // display name.
+    val tenantsInDb  = store.listTenants().flatMap(t => List(t.id, t.displayName)).toSet
+    val knownTenants = tenantsInYaml ++ tenantsInDb
 
     // Dup detection
     def dup[A, K](xs: List[A], key: A => K, label: String): Unit =

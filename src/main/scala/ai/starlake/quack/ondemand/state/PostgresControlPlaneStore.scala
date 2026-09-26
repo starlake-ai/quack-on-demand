@@ -510,7 +510,7 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """SELECT n.node_id, n.host, n.port, n.token, n.role,
         |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent, n.server_name,
-        |       t.display_name AS tenant_name, td.name AS tenant_db_name, p.name AS pool_name
+        |       t.id AS tenant_id, td.name AS tenant_db_name, p.name AS pool_name
         |FROM qodstate_node n
         |JOIN qodstate_pool p       ON p.id  = n.pool_id
         |JOIN qodstate_tenant_db td ON td.id = p.tenant_db_id
@@ -574,7 +574,7 @@ final class PostgresControlPlaneStore(
     RunningNode(
       nodeId = rs.getString("node_id"),
       poolKey = PoolKey(
-        rs.getString("tenant_name"),
+        rs.getString("tenant_id"),
         rs.getString("tenant_db_name"),
         rs.getString("pool_name")
       ),
@@ -1511,7 +1511,7 @@ final class PostgresControlPlaneStore(
         c,
         """SELECT n.node_id, n.host, n.port, n.token, n.role,
           |       n.pid, n.pod_name, n.started_at, n.last_seen, n.max_concurrent, n.server_name,
-          |       t.display_name AS tenant_name,
+          |       t.id           AS tenant_id,
           |       td.name        AS tenant_db_name,
           |       p.name         AS pool_name
           |FROM qodstate_node n

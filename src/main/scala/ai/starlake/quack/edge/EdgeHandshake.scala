@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
-import ai.starlake.quack.model.{Names, PoolKey, Tenant}
+import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
 import com.typesafe.scalalogging.LazyLogging
 
@@ -40,7 +40,7 @@ final case class HandshakeBound(
   * @param lookupPool
   *   `(tenant, pool) -> tenantDb`, enforcing the tenant and pool kill switches.
   * @param resolveTenant
-  *   accepts a tenant display name or surrogate id (`t-<8 hex>`) and returns the tenant.
+  *   resolves a wire tenant (the tenant id, case-insensitive) to the tenant.
   * @param authorize
   *   `(tenant, pool, username, jwtRoles, jwtGroups, superuserAdmissible)`; `superuserAdmissible` is
   *   false when the credential was validated by a TENANT realm, so such a principal can never bind
@@ -64,18 +64,12 @@ final class EdgeHandshake(
       superuser: Boolean
   ): Either[HandshakeFailure, HandshakeBound] =
     val basicUsername = basicPair.map(_._1)
-    // Normalize the wire `tenant` to its display name: clients may pass either the surrogate
-    // id or the display name. `lookupPool` / `authorize` operate in display-name space. If the
-    // id does not resolve we fall through with the raw value so the next stage fails with the
-    // usual "pool not found" rather than masking the cause.
-    val resolvedTenant: Option[Tenant]   = tenantHdr.flatMap(resolveTenant)
-    val tenantNormalized: Option[String] =
-      tenantHdr.map { raw =>
-        if Names.looksLikeTenantId(raw) then resolvedTenant.map(_.displayName).getOrElse(raw)
-        else raw
-      }
-    val hdrs = poolHdr.map("pool" -> _).toMap ++
-      tenantNormalized.map("tenant" -> _).toMap
+    // The wire `tenant` is the tenant id, the key `lookupPool` / `authorize` operate on. It is
+    // passed through as is: an unknown tenant then fails the next stage with the usual "pool not
+    // found" rather than masking the cause.
+    val resolvedTenant: Option[Tenant] = tenantHdr.flatMap(resolveTenant)
+    val hdrs                           = poolHdr.map("pool" -> _).toMap ++
+      tenantHdr.map("tenant" -> _).toMap
     val preResolved: Either[String, Resolved] = TenantSelector.resolve(
       bearer = bearer,
       headers = hdrs,

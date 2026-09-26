@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **A restarted manager keeps the nodes that are still running.** The control-plane store read node
+  rows back keyed by the tenant's display name, while pools are keyed by the tenant id, so after a
+  restart every node of a tenant whose display name differs from its id (`acme` / `Acme
+  Corporation`) was dropped from the in-memory pool. The row stayed and reconcile adopted the node,
+  but never wrote it back, so the pool showed no nodes and routed nothing. On the fleet runtime the
+  agents looked as if they never reconnected, even after restarting them; adopted Kubernetes pods
+  were hit the same way. Node rows are now keyed by tenant id.
+
+- **A manifest can reference an existing tenant by its id.** Import validation knew database
+  tenants only by display name, so a partial manifest (users, roles or groups without their tenant)
+  naming `tenant: acme` was refused with `tenant 'acme' not in YAML or DB` whenever the display name
+  differed. The exporter writes ids, so its own output could fail to re-import this way. Both forms
+  are now accepted.
+
+- **The FlightSQL and Quack `tenant` parameter is the tenant id, nothing else.** The handshake
+  swapped a value shaped like a legacy surrogate id (`t-<hex>`) for the tenant's display name
+  before looking up the pool, which could only miss since pools are keyed by id. The branch and
+  `Names.looksLikeTenantId` are gone.
+
 - **`QOD_HIBERNATE_SWEEP_SEC` and `QOD_HIBERNATE_IDLE_MIN` are honoured again.** The
   `quack-on-demand.hibernation` block had no camelCase pureconfig hint, so the derived reader looked
   for `sweep-seconds` / `default-idle-minutes`, found neither, and kept the defaults (300 s sweep,

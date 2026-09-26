@@ -92,7 +92,7 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
   )
   private val node = RunningNode(
     nodeId = "node-1",
-    poolKey = PoolKey("acme", "acme_default", "sales"),
+    poolKey = PoolKey("tenant-1", "acme_default", "sales"),
     role = Role.Dual,
     host = "127.0.0.1",
     port = 21900,
