@@ -70,5 +70,6 @@ object StatementHistoryHandlers:
       durationMs = r.durationMs,
       status = r.status,
       error = r.error,
-      prepareDurationMs = r.prepareDurationMs
+      prepareDurationMs = r.prepareDurationMs,
+      serverName = r.serverName
     )

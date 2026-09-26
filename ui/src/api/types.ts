@@ -733,6 +733,8 @@ export interface StatementHistoryEntry {
   // Wall-clock ms the FlightSQL Prepare-time LIMIT-0 probe spent on the node, when this Execute
   // belongs to a prepared-statement round. Rendered as subtext under the Execute duration.
   prepareDurationMs?: number | null;
+  // Fleet mode only: the server that hosted the node when the statement ran.
+  serverName?: string | null;
 }
 export interface StatementHistoryResponse {
   statements: StatementHistoryEntry[];

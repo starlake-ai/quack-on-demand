@@ -762,7 +762,9 @@ final case class StatementHistoryEntry(
       * ms / prep 28 ms"). Absent for one-shot statements and for SkipExecute Prepare paths (DML /
       * DDL / transaction control).
       */
-    prepareDurationMs: Option[Long] = None
+    prepareDurationMs: Option[Long] = None,
+    /** Fleet mode only: the server that hosted the node when the statement ran. */
+    serverName: Option[String] = None
 )
 final case class StatementHistoryResponse(statements: List[StatementHistoryEntry])
 

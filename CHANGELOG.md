@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`qod agent` says when it reaches the manager.** It printed nothing on success, so a healthy
+  agent looked identical to one silently waiting. It now logs `connected to manager <url> as server
+  '<name>'` on its first successful heartbeat and `reconnected ...` on the first success after any
+  failed one (network error or non-2xx reply), once per transition.
+
+- **Fleet: see which server runs each node and each statement.** New `qod node list`, one row per
+  node with its `server` and `serverState` (`--tenant` / `--pool` filters, `--json`). Statement
+  history records now carry `serverName`, stamped from the node id when the statement is recorded,
+  returned by `/api/node/statements` and `/api/profile/statements` (so `qod node statements` shows
+  it) and shown as a Server column on the admin UI's Recent statements table when any statement ran
+  on a fleet server. Empty on the local and Kubernetes runtimes. The persisted statement search
+  (History page) does not carry it yet.
+
 - **A restarted manager keeps the nodes that are still running.** The control-plane store read node
   rows back keyed by the tenant's display name, while pools are keyed by the tenant id, so after a
   restart every node of a tenant whose display name differs from its id (`acme` / `Acme

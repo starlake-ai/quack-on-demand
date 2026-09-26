@@ -1335,6 +1335,12 @@ final class PoolSupervisor(
     if catalog == null || catalog.isEmpty then None
     else tenantDbs.values.find(_.name.equalsIgnoreCase(catalog))
 
+  /** Fleet mode: the server currently hosting `nodeId`, from the in-memory topology. None for an
+    * unknown id and on every other runtime.
+    */
+  def serverOfNode(nodeId: String): Option[String] =
+    pools.values.iterator.flatMap(_.nodes).find(_.nodeId == nodeId).flatMap(_.serverName)
+
   /** Resolve `(tenant, poolName) -> PoolKey` so the edge can route a connection addressing only
     * `tenant` + `pool`. Pool names are unique within a tenant, so at most one match exists.
     */

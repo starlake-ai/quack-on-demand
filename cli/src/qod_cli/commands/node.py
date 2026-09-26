@@ -1,5 +1,8 @@
+from typing import Optional
+
 import typer
 
+from ..output import render
 from ..registry import covers
 from ._run import call
 
@@ -14,6 +17,26 @@ NODE = typer.Option(..., "--node-id")
 
 def _key(tenant: str, db: str, pool: str, node_id: str) -> dict:
     return {"tenant": tenant, "tenantDb": db, "pool": pool, "nodeId": node_id}
+
+
+@app.command("list")
+def list_(
+    ctx: typer.Context,
+    tenant: Optional[str] = typer.Option(None, "--tenant", help="Only this tenant's nodes."),
+    pool: Optional[str] = typer.Option(None, "--pool", help="Only this pool's nodes."),
+):
+    """One row per node, with the fleet server hosting it (server is empty off the fleet runtime)."""
+    data = call(ctx, "GET", "/api/pool/list", quiet=True)
+    rows = [
+        {"node": n.get("nodeId"), "tenant": p.get("tenant"), "db": p.get("tenantDb"), "pool": p.get("pool"),
+         "role": n.get("role"), "address": f"{n.get('host')}:{n.get('port')}",
+         "server": n.get("serverName"), "serverState": n.get("serverState"),
+         "healthy": n.get("healthy"), "quarantined": n.get("quarantined"), "inFlight": n.get("inFlight")}
+        for p in (data or {}).get("pools", [])
+        if (tenant is None or p.get("tenant") == tenant) and (pool is None or p.get("pool") == pool)
+        for n in p.get("nodes", [])
+    ]
+    render(rows, ctx.obj.json_output)
 
 
 @app.command()

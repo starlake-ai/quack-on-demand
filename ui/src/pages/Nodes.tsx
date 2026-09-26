@@ -35,6 +35,7 @@ export default function Nodes() {
   const [filter, setFilter]   = useState<string>(searchParams.get('tenant') ?? authTenant ?? '');
   const [nodeFilter, setNodeFilter] = useState<string>(searchParams.get('node') ?? '');
   const [history, setHistory] = useState<StatementHistoryEntry[]>([]);
+  const showServer = history.some(h => h.serverName);
   const [expanded, setExpanded] = useState<number | null>(null);
   // Row index whose Copy button was just clicked, for the brief "Copied"
   // feedback. Cleared on a timeout.
@@ -406,6 +407,7 @@ export default function Nodes() {
       </div>
 
       <h2 style={{ marginTop: '2rem' }}>Recent statements</h2>
+      {/* Server column only when some statement ran on a fleet server (fleet runtime). */}
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -414,6 +416,7 @@ export default function Nodes() {
               <th>User</th>
               <th>Tenant / Pool</th>
               <th>Node</th>
+              {showServer && <th>Server</th>}
               <th>Status</th>
               <th style={{ textAlign: 'right' }}>Duration</th>
               <th>SQL</th>
@@ -421,7 +424,7 @@ export default function Nodes() {
           </thead>
           <tbody>
             {history.length === 0 ? (
-              <tr><td colSpan={7} className="empty">No statements recorded yet.</td></tr>
+              <tr><td colSpan={showServer ? 8 : 7} className="empty">No statements recorded yet.</td></tr>
             ) : history
                 .filter(h => !filter || h.tenant === filter)
                 .filter(h => !nodeFilter || h.nodeId === nodeFilter)
@@ -445,6 +448,7 @@ export default function Nodes() {
                           <code>{h.nodeId}</code>
                         </Link>
                       </td>
+                      {showServer && <td><code>{h.serverName ?? ''}</code></td>}
                       <td><StatusBadge status={h.status} /></td>
                       <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                         <div>{h.durationMs} ms</div>

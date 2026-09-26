@@ -669,7 +669,8 @@ object Main extends IOApp with LazyLogging:
       )
     )
 
-    val stmtHistory        = new ai.starlake.quack.edge.StatementHistoryStore()
+    val stmtHistory =
+      new ai.starlake.quack.edge.StatementHistoryStore(serverOf = sup.serverOfNode)
     val activeStatements   = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeStatements,

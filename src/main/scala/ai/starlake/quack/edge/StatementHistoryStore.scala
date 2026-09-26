@@ -21,20 +21,35 @@ final case class StatementRecord(
       * SkipExecute prepare path (DML/DDL emit no probe). Surfaced by the UI as subtext under the
       * Execute duration.
       */
-    prepareDurationMs: Option[Long] = None
+    prepareDurationMs: Option[Long] = None,
+    /** Fleet mode only: the server that hosted `nodeId` when the statement was recorded. Stamped by
+      * [[StatementHistoryStore.record]] from its `serverOf` lookup when the caller leaves it unset;
+      * None on every other runtime and for pseudo node ids (`manager`, `-`).
+      */
+    serverName: Option[String] = None
 )
 
 /** Bounded ring buffer of recent statement executions. Lock-protected append + snapshot. Default
   * capacity ~ 256 records (≈ tens of KiB on average; bounded by `sqlPreviewChars` per record).
   */
-final class StatementHistoryStore(capacity: Int = 256, sqlPreviewChars: Int = 500):
+final class StatementHistoryStore(
+    capacity: Int = 256,
+    sqlPreviewChars: Int = 500,
+    serverOf: String => Option[String] = _ => None
+):
 
   private val buf    = new Array[StatementRecord](capacity)
   private var idx    = 0
   private var filled = 0
   private val lock   = new Object
 
-  def record(r: StatementRecord): Unit = lock.synchronized {
+  def record(r: StatementRecord): Unit =
+    // Resolved outside the lock: the lookup reads the supervisor's pool cache.
+    val stamped =
+      if r.serverName.isDefined then r else r.copy(serverName = serverOf(r.nodeId))
+    append(stamped)
+
+  private def append(r: StatementRecord): Unit = lock.synchronized {
     val trimmed =
       if r.sql.length <= sqlPreviewChars then r
       else r.copy(sql = r.sql.take(sqlPreviewChars) + "…")
