@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.9.7
+
+- **Fleet runtime: run nodes on bare servers, no Kubernetes (#123).** `QOD_RUNTIME_TYPE=fleet` plus
+  `QOD_FLEET_JOIN_TOKEN`. Linux and macOS servers join by running `qod agent`, which heartbeats the
+  manager (`POST /api/fleet/heartbeat`, header `X-Fleet-Token`) and runs the one node its reply
+  assigns through the bundled spawn script, bound to `QOD_NODE_BIND`. The manager claims a free
+  server whose reported memory fits the node, waits for the agent to report it running, and tracks
+  liveness on the database clock so HA replicas agree. With no free server the slot stays pending
+  and reconcile fills it as soon as a server joins. A server silent past `heartbeatTimeoutSec` is
+  unroutable but kept; past `reassignAfterSec` its node is respawned elsewhere in one store
+  transaction, and when no other server qualifies the dead holder keeps its assignment, so a server
+  that comes back resumes its node with no restart. A partial or cancelled spawn rolls back the
+  nodes it started. A known server name reporting a new address is refused unless drained.
+  `QOD_FLEET_EPHEMERAL=local` runs maintenance and merge nodes on the manager host. Operators get
+  `qod fleet servers | drain | undrain | remove` and a Servers page in the admin UI with pending and
+  server badges on pools. HA accepts the fleet runtime. Manager-to-node traffic is plain HTTP, so
+  fleet mode needs a private network.
+
+- **Native Quack front door: statement, session and kill lifecycle fixes (#121).** Twelve findings
+  from an external audit, each pinned by a regression test. `BEGIN` closed its own transaction link,
+  so every later statement of a client transaction reused a dead connection. The idle sweeper read
+  the clock and session table once at listener start and never again. A gen-1 `APPEND` whose `USE`
+  prelude failed escaped as a `MatchError`. Admin results closed their link before the client could
+  fetch them. An admin kill of a statement inside a client transaction was a no-op; it now
+  disconnects the transaction's link and fences the session until a `ROLLBACK` succeeds, so no later
+  statement can silently auto-commit on a fresh connection. Node load accounting leaked a phantom
+  in-flight request when a client dropped mid-call. The router's session registry was never closed
+  on either edge; the front door and the Flight edge now close and sweep it. The RBAC effective-set
+  cache keyed JWT claims by `Set.hashCode`, which collides (`"Aa"` / `"BB"`); the key now carries the
+  claim sets themselves.
 
 - **`qod agent` says when it reaches the manager.** It printed nothing on success, so a healthy
   agent looked identical to one silently waiting. It now logs `connected to manager <url> as server
