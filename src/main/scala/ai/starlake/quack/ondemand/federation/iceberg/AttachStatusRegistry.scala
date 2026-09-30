@@ -68,6 +68,10 @@ final class AttachStatusRegistry(
     failures.remove(key)
     attached.add(key)
 
+  /** Whether this node incarnation reported `alias` attached on its latest verification. */
+  def isAttached(nodeId: String, startedAtMs: Long, alias: String): Boolean =
+    attached.contains(((nodeId, startedAtMs), normalize(alias)))
+
   /** Returns true when this failure is NEW or its error text CHANGED, which is the only time the
     * caller should emit a WARN. A permanently broken catalog then costs one log line, not one per
     * health tick.
