@@ -18,6 +18,7 @@ import ai.starlake.quack.ondemand.api.{
 }
 import ai.starlake.quack.ondemand.api.Dtos.given
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.catalog.iceberg.IcebergCatalogSql
 import cats.effect.IO
 import io.circe.{Json, JsonObject}
 import io.circe.syntax._
@@ -333,7 +334,7 @@ final class McpDataTools(
         case Right((tenant, database, poolKey0, schema, table)) =>
           str(args, "iceberg") match
             case Some(alias) =>
-              describeIcebergTable(principal, tenant, database, alias, schema, table)
+              describeIcebergTable(principal, tenant, database, alias, schema, table, poolKey0)
             case None =>
               IO.blocking(
                 bridge(
@@ -381,8 +382,12 @@ final class McpDataTools(
               }
   )
 
-  /** `describe_table` routed at an Iceberg alias: table detail plus a small `sample` preview, both
-    * through [[IcebergCatalogHandlers]] rather than the DuckLake catalog reader.
+  /** `describe_table` routed at an Iceberg alias: the table detail from [[IcebergCatalogHandlers]]
+    * (admin-gated metadata), plus a small `sample` run like the DuckLake arm's: through the routed
+    * executor as the MCP principal (`callerFor`: the static key is the system caller, a PAT its
+    * owner with the token's restriction and id), capped by the token's maxRows. The sample never
+    * goes through a REST credential lookup, and any sample failure (no pool, ACL denial, router
+    * failure, a raised error) degrades to the detail alone instead of failing the call.
     */
   private def describeIcebergTable(
       principal: McpPrincipal,
@@ -390,7 +395,8 @@ final class McpDataTools(
       database: String,
       alias: String,
       schema: String,
-      table: String
+      table: String,
+      poolKey0: Option[ai.starlake.quack.model.PoolKey]
   ): IO[Either[String, Json]] =
     iceberg match
       case None      => IO.pure(Left(IcebergUnavailable))
@@ -401,31 +407,23 @@ final class McpDataTools(
           .flatMap {
             case Left(err)     => IO.pure(Left(err))
             case Right(detail) =>
-              ice
-                .preview(
-                  tenant,
-                  database,
-                  alias,
-                  schema,
-                  table,
-                  None,
-                  None,
-                  None,
-                  Some(SampleRows),
-                  principal.rawToken
-                )(scopeOf)
-                .map(bridge)
-                .map {
-                  case Left(err)      => Left(err)
-                  case Right(preview) =>
-                    Right(
-                      Json.obj(
-                        "table"   -> detail.asJson,
-                        "columns" -> detail.columns.asJson,
-                        "sample"  -> preview.asJson
-                      )
-                    )
-                }
+              val detailOnly = Json.obj(
+                "table"   -> detail.asJson,
+                "columns" -> detail.columns.asJson
+              )
+              poolKey0 match
+                case None          => IO.pure(Right(detailOnly))
+                case Some(poolKey) =>
+                  val caller = callerFor(principal)
+                  val eff    = caller.effectiveMaxRows(SampleRows, SampleRows)
+                  // One row past the cap so `truncated` marks that more rows exist.
+                  val sampleSql =
+                    IcebergCatalogSql.preview(detail.alias, schema, table, None, eff + 1)
+                  execute(caller, poolKey, sampleSql, eff).attempt.map {
+                    case Right(Right(sample)) =>
+                      Right(detailOnly.deepMerge(Json.obj("sample" -> sample)))
+                    case _ => Right(detailOnly)
+                  }
           }
 
   // ---------- table_history ----------

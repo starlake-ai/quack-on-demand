@@ -22,6 +22,7 @@ import ai.starlake.quack.ondemand.api.{
   CatalogPreviewHandlers,
   CatalogTableDetailResponse,
   CatalogTableEntry,
+  ExecCaller,
   IcebergCatalogHandlers,
   ProfileHandlers,
   RestCaller,
@@ -320,7 +321,10 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 
-    val scopeOf: String => Option[SessionScope] = _ => None
+    val scopeOf: String => Option[SessionScope] =
+      t =>
+        if t == patToken then Some(SessionScope(superuser = false, manageableTenants = Set(Tenant)))
+        else None
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
     val history = new CatalogHistoryHandlers((_, _) => stubReader, sup)
     val tags    = new TagHandlers(
@@ -801,6 +805,70 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     cols.flatMap(_.hcursor.get[String]("name").toOption) should contain("id")
     json.hcursor.downField("sample").downField("rows").as[List[Json]].toOption.get should
       have size 5
+  }
+
+  /** A tenant-acme admin PAT whose own maxRows (2) is below the sample cap. */
+  private val icebergPat: McpPrincipal =
+    new McpPrincipal.Pat(
+      PatPrincipal(
+        user = RbacUser(id = "u1", tenant = Some(Tenant), username = "alice", role = "admin"),
+        patId = "pat-1",
+        scope = SessionScope(superuser = false, manageableTenants = Set(Tenant)),
+        isAdmin = true,
+        restriction = TokenRestriction.Unrestricted.copy(maxRows = Some(2))
+      ),
+      patToken
+    )
+
+  private def describeIceberg(tools: McpDataTools, principal: McpPrincipal) =
+    // Only a superuser credential names the tenant; a PAT infers it.
+    val tenantArg =
+      if principal == McpPrincipal.StaticKey then List("tenant" -> Json.fromString(Tenant))
+      else Nil
+    call(
+      tools,
+      "describe_table",
+      principal,
+      (List(
+        "database" -> Json.fromString(TenantDb),
+        "schema"   -> Json.fromString(IcebergSchema),
+        "table"    -> Json.fromString(IcebergTable),
+        "iceberg"  -> Json.fromString(IcebergAlias)
+      ) ++ tenantArg)*
+    )
+
+  it should "run the iceberg sample as the PAT's owner with its restriction, never system" in {
+    val seen = scala.collection.mutable.ListBuffer.empty[ExecCaller]
+    val sqls = scala.collection.mutable.ListBuffer.empty[String]
+    val recording: CatalogPreviewHandlers.PreviewExecutor = (caller, key, sql) =>
+      seen += caller
+      sqls += sql
+      rangeExecutor(10)(caller, key, sql)
+    val out  = describeIceberg(icebergFixture(recording), icebergPat)
+    val json = out.toOption.getOrElse(fail(s"expected Right, got $out"))
+    seen.toList.map(c => (c.identity, c.restriction.maxRows, c.patId, c.system)) shouldBe
+      List(("alice", Some(2), Some("pat-1"), false))
+    // The PAT's maxRows lowers the sample: one row past the cap is fetched, the cap is returned.
+    sqls.toList shouldBe List(
+      s"""SELECT * FROM "$IcebergAlias"."$IcebergSchema"."$IcebergTable" LIMIT 3"""
+    )
+    json.hcursor.downField("sample").downField("rows").as[List[Json]].toOption.get should
+      have size 2
+    json.hcursor.downField("sample").get[Boolean]("truncated").toOption shouldBe Some(true)
+  }
+
+  it should "degrade to the iceberg detail alone when the sample is denied or fails" in {
+    val denied: CatalogPreviewHandlers.PreviewExecutor =
+      (_, _, _) => IO.pure(Left(RouterFailure.AccessDenied("no grant on ice.probe.t")))
+    val boom: CatalogPreviewHandlers.PreviewExecutor =
+      (_, _, _) => IO.raiseError(new java.util.concurrent.TimeoutException("slow node"))
+    for exec <- List(denied, boom); principal <- List(McpPrincipal.StaticKey, icebergPat) do
+      val out  = describeIceberg(icebergFixture(exec), principal)
+      val json = out.toOption.getOrElse(fail(s"expected Right, got $out"))
+      json.hcursor.downField("table").downField("alias").as[String].toOption shouldBe
+        Some(IcebergAlias)
+      json.hcursor.downField("columns").as[List[Json]].toOption.get should not be empty
+      json.hcursor.downField("sample").focus shouldBe None
   }
 
   it should "answer the iceberg-unavailable error when handlers are not wired" in {
