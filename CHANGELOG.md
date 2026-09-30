@@ -71,6 +71,23 @@
   admin UI, which now also explains what Warehouse means for glue (account id) and s3_tables
   (table bucket ARN). A stored source without AWS fields renders unchanged.
 
+- **Read-only management views for external Iceberg catalogs.** An attached `iceberg-rest`
+  federated source can now be browsed the same way as the tenant-db's own DuckLake catalog:
+  schema and table listing, table detail (columns and data/delete files), snapshot history,
+  preview at a past snapshot, and a row-level diff between two snapshots. New REST routes under
+  `/api/catalog/tenant/{tenant}/database/{db}/iceberg/{alias}/...`, `qod catalog ... --iceberg
+  ALIAS`, and an optional `iceberg` argument on the MCP `table_history` and `describe_table`
+  tools. Admin-only (tenant admins and superusers); preview and diff run as the calling identity,
+  so ACL, CLS and RLS apply exactly as on a normal query. Snapshot ids are strings everywhere on
+  the wire, since Iceberg ids are random 64-bit values too large for a JSON number to round-trip
+  safely. Table detail is current-snapshot only; time travel lives in preview (`--as-of` /
+  `--as-of-ts`, no `--as-of-tag`) and diff. New setting `QOD_CATALOG_ICEBERG_DIFF_MAX_FILES`
+  (default 200) refuses a diff (413) once either snapshot has more data files than that, since the
+  diff scans both versions in full. Iceberg format v1 tables are refused everywhere in these views
+  (400), because v1 carries no per-snapshot sequence number for history ordering and paging to use.
+  DuckLake-only operations (restore, undrop, tags, schema diff, catalog-wide snapshot list) are not
+  exposed on an Iceberg source; DuckDB's Iceberg extension does not support them.
+
 ## 0.9.8
 
 - **Security: a session expiring mid-request no longer gains superuser access (#130).** Handler

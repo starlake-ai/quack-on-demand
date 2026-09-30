@@ -1228,6 +1228,67 @@ logs `catalog '<alias>' attached on retry` when a transient failure heals. It
 stops retrying a node once every declared catalog is attached, so a source added
 to an ALREADY-RUNNING pool is not picked up until its nodes restart.
 
+### Inspect an Iceberg catalog
+
+Once an `iceberg-rest` source is attached, browse it, look at a table's snapshot
+history, preview it at a past snapshot, and diff two snapshots the same way you
+would a DuckLake tenant-db, by adding `--iceberg ALIAS` to the existing `qod
+catalog` commands:
+
+```bash
+qod catalog schemas acme acme_fed --iceberg icelake
+qod catalog tables acme acme_fed analytics --iceberg icelake
+qod catalog describe acme acme_fed analytics orders --iceberg icelake
+qod catalog history acme acme_fed analytics orders --iceberg icelake --limit 20
+qod catalog preview acme acme_fed analytics orders --iceberg icelake --as-of 7761858545720969174
+qod catalog data-diff acme acme_fed analytics orders --iceberg icelake --from <old id> --to <new id>
+```
+
+The same views are just SQL under the hood, usable directly through `qod sql`
+(or any DuckDB client behind the ATTACH):
+
+```sql
+-- what `qod catalog history ... --iceberg` pages and filters
+SELECT * FROM iceberg_snapshots(icelake.analytics.orders);
+
+-- what `qod catalog preview ... --iceberg --as-of <id>` runs
+SELECT * FROM icelake.analytics.orders AT (VERSION => 7761858545720969174);
+```
+
+Limits and differences from the DuckLake views:
+
+- **Admin-only**, same gate as the DuckLake catalog views (`TenantDbGate`: tenant
+  admins and superusers). Preview and diff run as the calling identity (a PAT
+  runs as its owner, carrying the token's restriction), so ACL, CLS and RLS
+  apply exactly as they do on a normal query.
+- **Snapshot ids are strings everywhere** - JSON fields, `--as-of`, `--before`,
+  `--from` / `--to`. Iceberg snapshot ids are random 64-bit values, too big for
+  a JSON number to round-trip safely.
+- `qod catalog describe ... --iceberg` is **current-snapshot only** - no
+  `--as-of` / `--as-of-tag` / `--as-of-ts` (refused). Time travel lives in
+  `preview` and `data-diff` only; `--as-of-tag` is refused there too (Iceberg
+  tags are not exposed through this path) - use `--as-of` (a snapshot id) or
+  `--as-of-ts`.
+- `qod catalog history --iceberg` pages with `--before <snapshot id>`, ordered by
+  sequence number rather than by the id itself (ids are random, not sequential).
+  No `--from` / `--to` / `--author` (refused with `--iceberg`).
+- Table detail's file listing shows each file's content as `DATA`,
+  `POSITION_DELETES` or `EQUALITY_DELETES`, plus format and record count - no
+  file sizes, because DuckDB's `iceberg_metadata()` does not report them.
+  `total-records` is not shown in history either: DuckDB's position deletes do
+  not reduce it, so it would misreport the live row count.
+- `qod catalog data-diff --iceberg` refuses with `413 diff_too_large` once
+  either snapshot has more than `QOD_CATALOG_ICEBERG_DIFF_MAX_FILES` (default
+  200) data files - the diff scans both versions in full. An UPDATE shows up as
+  one removed row plus one added row, not as a change in place.
+- **Iceberg format v1 tables are refused** everywhere in these views (`400
+  unsupported_for_iceberg`, "table uses Iceberg format v1 (no snapshot sequence
+  numbers); these views need format v2 or later") - v1 carries no per-snapshot
+  sequence number, which history ordering and paging need.
+- No restore, undrop, tags, schema diff or catalog-wide snapshot list on an
+  Iceberg source: none of those exist under `--iceberg` (DuckDB's Iceberg
+  extension does not support them).
+
 ### Switch the secret resolver
 
 `secretStore = postgres | env | aws-sm | gcp-sm | azure-kv | vault`. Set via `QOD_FEDERATION_SECRET_STORE=env` (and per-backend config keys). The four KMS backends are stubbed in v1; calling `resolve()` raises `NotImplementedError`. To enable one, fill in the corresponding resolver class with the real SDK call.
