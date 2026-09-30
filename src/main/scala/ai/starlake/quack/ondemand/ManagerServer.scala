@@ -98,8 +98,8 @@ final class ManagerServer(
     // The native Quack front door's listener config, surfaced to the UI's connection card.
     quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None,
     // Read-only views over an external Iceberg REST catalog (history, preview, diff, files).
-    // None (no federation store) leaves the six /iceberg routes unmounted. Last and named,
-    // not next to `preview`: the constructor is called positionally.
+    // None (no federation store) leaves the six /iceberg routes unmounted. Last, not next to
+    // `preview`: Main passes it by name (`icebergCatalog = ...`), so its position doesn't matter.
     icebergCatalog: Option[IcebergCatalogHandlers] = None
 ) extends LazyLogging:
 
