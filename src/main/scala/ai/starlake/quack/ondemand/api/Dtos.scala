@@ -1261,6 +1261,69 @@ final case class PreviewResponse(
     truncated: Boolean
 )
 
+/** One Iceberg snapshot in the history view. Ids are strings (random 64-bit values beyond
+  * JavaScript's 2^53). No total-records field: it is wrong under position deletes.
+  */
+final case class IcebergSnapshotEntry(
+    snapshotId: String,
+    parentId: Option[String],
+    sequenceNumber: Long,
+    committedAt: java.time.Instant,
+    operation: Option[String],
+    addedRecords: Option[Long],
+    deletedRecords: Option[Long],
+    addedDataFiles: Option[Long],
+    deletedDataFiles: Option[Long],
+    addedPositionDeletes: Option[Long],
+    totalDataFiles: Option[Long],
+    current: Boolean
+)
+
+final case class IcebergHistoryResponse(
+    alias: String,
+    schema: String,
+    table: String,
+    snapshots: List[IcebergSnapshotEntry],
+    hasMore: Boolean
+)
+
+final case class IcebergFileEntry(
+    path: String,
+    content: String,
+    format: String,
+    recordCount: Long,
+    sequenceNumber: Long
+)
+
+final case class IcebergTableDetailResponse(
+    alias: String,
+    schema: String,
+    table: String,
+    columns: List[CatalogColumnEntry],
+    files: List[IcebergFileEntry],
+    currentSnapshot: Option[String]
+)
+
+final case class IcebergPreviewResponse(
+    columns: List[PreviewColumn],
+    rows: List[List[Json]],
+    snapshotId: Option[String],
+    truncated: Boolean
+)
+
+final case class IcebergDiffRow(change: String, values: List[Json])
+
+final case class IcebergDiffResponse(
+    alias: String,
+    schema: String,
+    table: String,
+    from: String,
+    to: String,
+    columns: List[PreviewColumn],
+    rows: List[IcebergDiffRow],
+    truncated: Boolean
+)
+
 // ----- Catalog data diff (Spec 02) -----
 final case class DataDiffSummary(inserted: Long, deleted: Long, updated: Long)
 
@@ -1725,17 +1788,24 @@ object Dtos:
   given Codec[MaintenanceRunResponse]         = deriveCodec
 
   // Catalog data preview
-  given Codec[PreviewColumn]           = deriveCodec
-  given Codec[PreviewResponse]         = deriveCodec
-  given Codec[DataDiffSummary]         = deriveCodec
-  given Codec[DataDiffEntry]           = deriveCodec
-  given Codec[DataDiffResponse]        = deriveCodec
-  given Codec[RecoverableTableEntry]   = deriveCodec
-  given Codec[RecoverableListResponse] = deriveCodec
-  given Codec[UndropRequest]           = deriveCodec
-  given Codec[UndropResponse]          = deriveCodec
-  given Codec[RestoreRequest]          = deriveCodec
-  given Codec[RestoreResponse]         = deriveCodec
+  given Codec[PreviewColumn]              = deriveCodec
+  given Codec[PreviewResponse]            = deriveCodec
+  given Codec[IcebergSnapshotEntry]       = deriveCodec
+  given Codec[IcebergHistoryResponse]     = deriveCodec
+  given Codec[IcebergFileEntry]           = deriveCodec
+  given Codec[IcebergTableDetailResponse] = deriveCodec
+  given Codec[IcebergPreviewResponse]     = deriveCodec
+  given Codec[IcebergDiffRow]             = deriveCodec
+  given Codec[IcebergDiffResponse]        = deriveCodec
+  given Codec[DataDiffSummary]            = deriveCodec
+  given Codec[DataDiffEntry]              = deriveCodec
+  given Codec[DataDiffResponse]           = deriveCodec
+  given Codec[RecoverableTableEntry]      = deriveCodec
+  given Codec[RecoverableListResponse]    = deriveCodec
+  given Codec[UndropRequest]              = deriveCodec
+  given Codec[UndropResponse]             = deriveCodec
+  given Codec[RestoreRequest]             = deriveCodec
+  given Codec[RestoreResponse]            = deriveCodec
 
   // Schema diff (Task 6)
   given Codec[SchemaDiffColumnType]  = deriveCodec

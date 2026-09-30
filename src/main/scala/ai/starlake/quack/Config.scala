@@ -344,6 +344,13 @@ final case class CatalogConfig(
     )
     previewTimeoutSec: Int = 30,
     @field @ConfigField(
+      envVar = "QOD_CATALOG_ICEBERG_DIFF_MAX_FILES",
+      description =
+        "Refuse an Iceberg data diff when either snapshot has more data files than this: the " +
+          "diff is a full EXCEPT scan of both versions."
+    )
+    icebergDiffMaxFiles: Int = 200,
+    @field @ConfigField(
       envVar = "QOD_CATALOG_UNDROP_TIMEOUT_SEC",
       description =
         "Seconds before an undrop recovery CTAS is abandoned. Larger than the preview timeout " +
