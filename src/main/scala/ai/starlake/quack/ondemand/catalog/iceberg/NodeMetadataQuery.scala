@@ -16,6 +16,12 @@ enum MetadataFailure:
   case Remote(message: String)
   case TimedOut
 
+/** Internal signal for a `QuackResponse.Failed` raised INSIDE the `send`+decode region so a single
+  * `.attempt` after `.timeout` can tell it apart from a genuine timeout: both surface as `Left` of
+  * that `.attempt`, and only this one carries a message to scrub and report as `Remote`.
+  */
+private final case class RemoteFailure(message: String) extends RuntimeException(message)
+
 /** Runs one privileged metadata statement (session = None, the path `IcebergAttachVerifier` uses)
   * on a read node of the tenant-db where the Iceberg alias attached. Admin-only callers; never used
   * for preview or diff, which go through the routed executor as the caller.
@@ -48,20 +54,40 @@ final class NodeMetadataQuery(
                 Left(MetadataFailure.NotAttached(attachSummary(alias, nodes.map(_.nodeId).toSet)))
               )
             case Some(node) =>
+              // The decode has to live INSIDE the region `.timeout` and `.attempt` cover, not
+              // chained after them: draining the reader is itself blocking I/O against the node
+              // (the native client's `Ok` reader is a chained network reader), so a stall or a
+              // parse error mid-drain is exactly as much a remote-node failure as one raised by
+              // `send` itself, and must come back `Left(Remote(scrub(..)))` rather than escape as
+              // a raw failed/cancelled IO. `close()` runs via `guarantee` so it fires exactly once
+              // on every path: normal completion, a decode throw, or a cancellation from the
+              // timeout firing after the `Ok` already arrived.
+              //
+              // `IO.interruptible`, not `IO.blocking`: empirically (this project's cats-effect
+              // 3.7.0), `.timeout` racing a plain `IO.blocking` body does NOT preempt it -- it
+              // waits for the blocking call to finish on its own and then reports ITS outcome,
+              // discarding the deadline entirely (this matches the pre-existing, deliberately
+              // accepted "bounded wait, not cancellation" caveat on the routed-executor preview
+              // path in `Main.scala`, where an unbounded background node call is an acceptable
+              // trade-off). Admin metadata calls have no such tolerance: a stalled read node must
+              // not be able to hang this call past `timeoutSec` on a caller-facing REST endpoint,
+              // so the decode is interruptible and cancellation delivers a real `Thread.interrupt`.
               send(node, sql)
+                .flatMap {
+                  case QuackResponse.Failed(err, _) =>
+                    IO.raiseError(RemoteFailure(err.toString))
+                  case QuackResponse.Ok(reader, _, close) =>
+                    IO.interruptible(ArrowRowsDecoder.decode(reader, maxRows)._2)
+                      .guarantee(IO(close()))
+                }
                 .timeout(timeoutSec.seconds)
                 .attempt
                 .map {
+                  case Right(rows)                                    => Right(rows)
                   case Left(_: java.util.concurrent.TimeoutException) =>
                     Left(MetadataFailure.TimedOut)
+                  case Left(RemoteFailure(message)) => Left(MetadataFailure.Remote(scrub(message)))
                   case Left(t) => Left(MetadataFailure.Remote(scrub(String.valueOf(t.getMessage))))
-                  case Right(QuackResponse.Failed(err, _)) =>
-                    Left(MetadataFailure.Remote(scrub(err.toString)))
-                  case Right(QuackResponse.Ok(reader, _, close)) =>
-                    try
-                      val (_, rows, _) = ArrowRowsDecoder.decode(reader, maxRows)
-                      Right(rows)
-                    finally close()
                 }
 
   // Remote catalogs echo request bodies into their errors; the redactor's blanket arm masks

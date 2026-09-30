@@ -104,7 +104,9 @@ class NodeMetadataQuerySpec extends AnyFlatSpec with Matchers:
           IO.pure(QuackResponse.Failed(QuackError.Permanent("boom"), 0L))
         else IO.raiseError(new RuntimeException(s"unexpected send to ${n.nodeId}"))
     )
-    q.run("acme", "lake", "sales", "SELECT 1").unsafeRunSync()
+    q.run("acme", "lake", "sales", "SELECT 1").unsafeRunSync() shouldBe Left(
+      MetadataFailure.Remote("Permanent(boom)")
+    )
     hit.get() shouldBe 1
   }
 
@@ -185,26 +187,59 @@ class NodeMetadataQuerySpec extends AnyFlatSpec with Matchers:
     finally allocator.close()
   }
 
-  it should "still close the reader exactly once when decoding throws" in {
-    val closes = new AtomicInteger(0)
-    // A reader whose getVectorSchemaRoot throws stands in for a decode failure: ArrowRowsDecoder
-    // reads the schema before touching any batch, so this is enough to force the `finally`.
-    val brokenReader = new ArrowStreamReader(
-      new ByteArrayInputStream(Array.emptyByteArray),
-      new RootAllocator()
-    ) {
-      override def getVectorSchemaRoot: VectorSchemaRoot =
-        throw new RuntimeException("decode boom")
-    }
-    val q = newQuery(
-      readNodes = _ => List(node("n1")),
-      isAttached = (_, _) => true,
-      send = (_, _) => IO.pure(QuackResponse.Ok(brokenReader, 0L, () => closes.incrementAndGet()))
-    )
-    a[RuntimeException] should be thrownBy q
-      .run("acme", "lake", "sales", "SELECT 1")
-      .unsafeRunSync()
-    closes.get() shouldBe 1
+  it should "return Left(Remote(_)) and still close the reader exactly once when decoding throws" in {
+    val closes    = new AtomicInteger(0)
+    val allocator = new RootAllocator()
+    try
+      // A reader whose getVectorSchemaRoot throws stands in for a decode failure: ArrowRowsDecoder
+      // reads the schema before touching any batch, so this is enough to force the `finally`. A
+      // decode failure is just as much a remote-node failure as a network error, so it must be
+      // redacted and reported the same way -- not escape as a raw failed IO.
+      val brokenReader = new ArrowStreamReader(
+        new ByteArrayInputStream(Array.emptyByteArray),
+        allocator
+      ) {
+        override def getVectorSchemaRoot: VectorSchemaRoot =
+          throw new RuntimeException("decode boom")
+      }
+      val q = newQuery(
+        readNodes = _ => List(node("n1")),
+        isAttached = (_, _) => true,
+        send = (_, _) => IO.pure(QuackResponse.Ok(brokenReader, 0L, () => closes.incrementAndGet()))
+      )
+      q.run("acme", "lake", "sales", "SELECT 1").unsafeRunSync() shouldBe Left(
+        MetadataFailure.Remote("decode boom")
+      )
+      closes.get() shouldBe 1
+    finally allocator.close()
+  }
+
+  it should "return Left(TimedOut) and close once when the response arrives but decoding blocks past the timeout" in {
+    val closes    = new AtomicInteger(0)
+    val allocator = new RootAllocator()
+    try
+      // No batch is ever read -- getVectorSchemaRoot alone blocks past timeoutSec, standing in for
+      // a slow drain (e.g. a chained network reader stalling mid-stream). The decode must be
+      // covered by the same timeout as the network call, not just the `send` itself.
+      val slowReader = new ArrowStreamReader(
+        new ByteArrayInputStream(Array.emptyByteArray),
+        allocator
+      ) {
+        override def getVectorSchemaRoot: VectorSchemaRoot =
+          Thread.sleep(1500)
+          throw new RuntimeException("must not be reached: the timeout should win first")
+      }
+      val q = newQuery(
+        readNodes = _ => List(node("n1")),
+        isAttached = (_, _) => true,
+        send = (_, _) => IO.pure(QuackResponse.Ok(slowReader, 0L, () => closes.incrementAndGet())),
+        timeoutSec = 1
+      )
+      q.run("acme", "lake", "sales", "SELECT 1").unsafeRunSync() shouldBe Left(
+        MetadataFailure.TimedOut
+      )
+      closes.get() shouldBe 1
+    finally allocator.close()
   }
 
   "AttachStatusRegistry.isAttached" should "be false before recordAttached, true after, case-insensitive, and false again after recordFailure" in {
