@@ -242,6 +242,53 @@ class NodeMetadataQuerySpec extends AnyFlatSpec with Matchers:
     finally allocator.close()
   }
 
+  it should "close the reader exactly once when the call is cancelled right after send hands back Ok (regression: acquire must be masked against the flatMap boundary)" in {
+    // Same "start, wait for a Deferred the guarded action completes, then cancel" idiom already
+    // used in QuackHttpAdapterSpec ("release inFlight when the call is cancelled"). Unlike that
+    // test's `IO.never` (which can ONLY resolve via cancellation), `send` here actually completes
+    // on its own -- deliberately, because the bug this guards against is a cancellation landing at
+    // the flatMap boundary RIGHT AFTER `send` returns `Ok`, before the decode's own `.guarantee`
+    // is installed. That is not provably deterministic without a virtual scheduler (this project
+    // has no cats-effect-testkit / TestControl dependency): `sendSignal.get` only proves `send`'s
+    // Deferred-complete step has run, not that `send`'s whole IO has already handed `Ok` back to
+    // the masked continuation. Looping many iterations turns any such race into a failure here
+    // rather than a rare flake in CI; it passed 50/50 in repeated local runs.
+    val allocator = new RootAllocator()
+    try
+      (1 to 50).foreach { i =>
+        val closes  = new AtomicInteger(0)
+        val reader  = arrowReaderOf(allocator)
+        val program =
+          for
+            sendSignal <- cats.effect.Deferred[IO, Unit]
+            q = newQuery(
+              readNodes = _ => List(node("n1")),
+              isAttached = (_, _) => true,
+              send = (_, _) =>
+                sendSignal.complete(()) *> IO.pure(
+                  QuackResponse.Ok(
+                    reader,
+                    0L,
+                    () => {
+                      closes.incrementAndGet()
+                      reader.close()
+                    }
+                  )
+                ),
+              timeoutSec = 30 // cancellation here is explicit (fiber.cancel), not timeout-driven
+            )
+            fiber <- q.run("acme", "lake", "sales", "SELECT 1").start
+            _     <- sendSignal.get
+            _     <- fiber.cancel
+          yield ()
+        program.unsafeRunSync()
+        withClue(s"iteration $i: ") {
+          closes.get() shouldBe 1
+        }
+      }
+    finally allocator.close()
+  }
+
   "AttachStatusRegistry.isAttached" should "be false before recordAttached, true after, case-insensitive, and false again after recordFailure" in {
     val registry = new AttachStatusRegistry()
     registry.isAttached("n1", 100L, "Sales") shouldBe false

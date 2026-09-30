@@ -63,24 +63,35 @@ final class NodeMetadataQuery(
               // on every path: normal completion, a decode throw, or a cancellation from the
               // timeout firing after the `Ok` already arrived.
               //
-              // `IO.interruptible`, not `IO.blocking`: empirically (this project's cats-effect
-              // 3.7.0), `.timeout` racing a plain `IO.blocking` body does NOT preempt it -- it
-              // waits for the blocking call to finish on its own and then reports ITS outcome,
-              // discarding the deadline entirely (this matches the pre-existing, deliberately
-              // accepted "bounded wait, not cancellation" caveat on the routed-executor preview
-              // path in `Main.scala`, where an unbounded background node call is an acceptable
-              // trade-off). Admin metadata calls have no such tolerance: a stalled read node must
-              // not be able to hang this call past `timeoutSec` on a caller-facing REST endpoint,
-              // so the decode is interruptible and cancellation delivers a real `Thread.interrupt`.
-              send(node, sql)
-                .flatMap {
+              // `IO.uncancelable` + `poll` around both `send` and the decode: without it, a
+              // cancellation observed at the flatMap boundary right after `send` returns `Ok` --
+              // before the decode's own `.guarantee` has even been installed -- would cancel the
+              // whole `run` with NO finalizer registered yet, leaking the reader and its node
+              // connection (the native client's DISCONNECT chain never fires). Masking the gap
+              // between "resource arrived" and "finalizer installed" is the same acquisition
+              // discipline `bracket`/`Resource` use; `poll` re-admits cancellation only where it is
+              // actually safe (waiting on `send`, and inside the finalizer-guarded decode).
+              //
+              // `IO.interruptible`, not `IO.blocking`, for the decode: empirically (this project's
+              // cats-effect 3.7.0), `.timeout` racing a plain `IO.blocking` body does NOT preempt
+              // it -- it waits for the blocking call to finish on its own and then reports ITS
+              // outcome, discarding the deadline entirely (the pre-existing, deliberately accepted
+              // "bounded wait, not cancellation" caveat on the routed-executor preview path in
+              // `Main.scala`). `IO.interruptible` only buys real preemption for a reader that
+              // actually responds to `Thread.interrupt()`: the native client's chained network
+              // reader does. The JDBC/embedded fallback reader drains batches through native JNI
+              // calls, which ignore interrupts, so on that path this is still a bounded wait, same
+              // as `Main.scala`'s caveat -- `timeoutSec` bounds how long `run` itself waits either
+              // way, and `close()` still fires exactly once once the call (eventually) returns.
+              IO.uncancelable { poll =>
+                poll(send(node, sql)).flatMap {
                   case QuackResponse.Failed(err, _) =>
                     IO.raiseError(RemoteFailure(err.toString))
                   case QuackResponse.Ok(reader, _, close) =>
-                    IO.interruptible(ArrowRowsDecoder.decode(reader, maxRows)._2)
+                    poll(IO.interruptible(ArrowRowsDecoder.decode(reader, maxRows)._2))
                       .guarantee(IO(close()))
                 }
-                .timeout(timeoutSec.seconds)
+              }.timeout(timeoutSec.seconds)
                 .attempt
                 .map {
                   case Right(rows)                                    => Right(rows)
