@@ -6,6 +6,7 @@ import type {
   TenantDbResponse,
 } from '../api/types';
 import CatalogBrowser from '../components/CatalogBrowser';
+import IcebergCatalogBrowser from '../components/IcebergCatalogBrowser';
 import CatalogSnapshotsPanel from '../components/CatalogSnapshotsPanel';
 import { useAuth } from '../auth/AuthContext';
 
@@ -94,6 +95,7 @@ export default function Catalog() {
               tenantDb={tenantDb}
               onCatalogMutated={() => setCatalogGen(g => g + 1)}
             />
+            <IcebergCatalogBrowser tenant={tenant} tenantDb={tenantDb} />
             <CatalogSnapshotsPanel tenant={tenant} tenantDb={tenantDb} refreshToken={catalogGen} />
           </>
         )}

@@ -876,6 +876,75 @@ export interface SchemaDiffResponse {
   nullabilityChanged: SchemaDiffNullability[];
 }
 
+// ----- Iceberg catalog browser (external Iceberg REST catalogs) -----
+// Snapshot ids are STRINGS everywhere on the wire: DuckDB Iceberg snapshot ids
+// are random 64-bit values that can exceed JavaScript's safe integer range, so
+// they are never round-tripped through Number(...)/parseInt or a JSON number
+// field, here or in any component that reads these types.
+
+export interface IcebergSnapshotEntry {
+  snapshotId: string;
+  parentId: string | null;
+  sequenceNumber: number;
+  committedAt: string; // ISO-8601
+  operation: string | null;
+  addedRecords: number | null;
+  deletedRecords: number | null;
+  addedDataFiles: number | null;
+  deletedDataFiles: number | null;
+  addedPositionDeletes: number | null;
+  totalDataFiles: number | null;
+  current: boolean;
+}
+
+export interface IcebergHistoryResponse {
+  alias: string;
+  schema: string;
+  table: string;
+  snapshots: IcebergSnapshotEntry[];
+  hasMore: boolean;
+}
+
+export interface IcebergFileEntry {
+  path: string;
+  content: string;    // data | position-deletes | equality-deletes
+  format: string;
+  recordCount: number;
+  sequenceNumber: number;
+}
+
+export interface IcebergTableDetailResponse {
+  alias: string;
+  schema: string;
+  table: string;
+  columns: CatalogColumnEntry[];
+  files: IcebergFileEntry[];
+  currentSnapshot: string | null;
+}
+
+export interface IcebergPreviewResponse {
+  columns: PreviewColumn[];
+  rows: unknown[][];
+  snapshotId: string | null;
+  truncated: boolean;
+}
+
+export interface IcebergDiffRow {
+  change: string; // added | removed
+  values: unknown[];
+}
+
+export interface IcebergDiffResponse {
+  alias: string;
+  schema: string;
+  table: string;
+  from: string;
+  to: string;
+  columns: PreviewColumn[];
+  rows: IcebergDiffRow[];
+  truncated: boolean;
+}
+
 // ----- Catalog data diff (Spec 02) -----
 
 export interface DataDiffSummary {

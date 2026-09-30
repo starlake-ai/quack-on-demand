@@ -69,6 +69,7 @@ import Nodes from './pages/Nodes';
 import Servers from './pages/Servers';
 import Catalog from './pages/Catalog';
 import CatalogTableDetail from './pages/CatalogTableDetail';
+import IcebergTableDetail from './pages/IcebergTableDetail';
 import Users from './pages/Users';
 import Config from './pages/Config';
 import Profile from './pages/Profile';
@@ -199,6 +200,10 @@ function Shell() {
           <Route path="/users"                                     element={<Users />} />
           <Route path="/catalog"                                   element={<Catalog />} />
           <Route path="/catalog/:tenant/:tenantDb/:schema/:table"  element={<CatalogTableDetail />} />
+          <Route
+            path="/catalog/:tenant/:tenantDb/iceberg/:alias/:schema/:table"
+            element={<IcebergTableDetail />}
+          />
           {isSuperuser && (
             <Route path="/config"                                  element={<Config />} />
           )}

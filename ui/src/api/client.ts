@@ -53,6 +53,11 @@ import type {
   RestoreRequest,
   RestoreResponse,
   SchemaDiffResponse,
+  // Iceberg catalog browser
+  IcebergHistoryResponse,
+  IcebergPreviewResponse,
+  IcebergDiffResponse,
+  IcebergTableDetailResponse,
   // Branches
   BranchCreateRequest,
   BranchOpRequest,
@@ -455,6 +460,72 @@ export const api = {
         `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}${q}`
     );
   },
+
+  // ----- Iceberg catalog browser (external Iceberg REST catalogs) -----
+  // Snapshot ids are passed and returned as strings throughout - never through
+  // Number(...)/parseInt - matching the wire contract (see api/types.ts).
+  listIcebergSchemas: (tenant: string, tenantDb: string, alias: string) =>
+    get<CatalogSchemaEntry[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas`
+    ),
+  listIcebergTables: (tenant: string, tenantDb: string, alias: string, schema: string) =>
+    get<string[]>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas/${encodeURIComponent(schema)}/tables`
+    ),
+  getIcebergTable: (tenant: string, tenantDb: string, alias: string, schema: string, table: string) =>
+    get<IcebergTableDetailResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas/${encodeURIComponent(schema)}` +
+        `/tables/${encodeURIComponent(table)}`
+    ),
+  listIcebergHistory: (
+    tenant: string, tenantDb: string, alias: string, schema: string, table: string,
+    params?: { limit?: number; before?: string; operation?: string }
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.limit != null) qs.set('limit', String(params.limit));
+    if (params?.before) qs.set('before', params.before);
+    if (params?.operation) qs.set('operation', params.operation);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<IcebergHistoryResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas/${encodeURIComponent(schema)}` +
+        `/tables/${encodeURIComponent(table)}/history${q}`
+    );
+  },
+  previewIceberg: (
+    tenant: string, tenantDb: string, alias: string, schema: string, table: string,
+    params?: { asOf?: string; asOfTs?: string; limit?: number }
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.asOf) qs.set('asOf', params.asOf);
+    if (params?.asOfTs) qs.set('asOfTs', params.asOfTs);
+    if (params?.limit != null) qs.set('limit', String(params.limit));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    return get<IcebergPreviewResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas/${encodeURIComponent(schema)}` +
+        `/tables/${encodeURIComponent(table)}/preview${q}`
+    );
+  },
+  diffIceberg: (
+    tenant: string, tenantDb: string, alias: string, schema: string, table: string,
+    from: string, to: string, opts?: { limit?: number; changeType?: string }
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set('from', from);
+    qs.set('to', to);
+    if (opts?.limit != null) qs.set('limit', String(opts.limit));
+    if (opts?.changeType) qs.set('changeType', opts.changeType);
+    return get<IcebergDiffResponse>(
+      `/catalog/tenant/${encodeURIComponent(tenant)}/database/${encodeURIComponent(tenantDb)}` +
+        `/iceberg/${encodeURIComponent(alias)}/schemas/${encodeURIComponent(schema)}` +
+        `/tables/${encodeURIComponent(table)}/data-diff?${qs.toString()}`
+    );
+  },
+
   listCatalogSnapshots: (
     tenant: string, tenantDb: string, limit?: number, before?: number, table?: string
   ) => {
