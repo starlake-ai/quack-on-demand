@@ -310,11 +310,11 @@ export default function IcebergTableDetail() {
                     {preview && (
                       <>
                         <p className="subtle" style={{ marginBottom: 0 }}>
-                          {preview.snapshotId == null
-                            ? 'No snapshot yet.'
-                            : previewAsOf
-                              ? `Snapshot ${preview.snapshotId}`
-                              : `Current snapshot ${preview.snapshotId}`}
+                          {previewAsOf
+                            ? `Snapshot ${preview.snapshotId}`
+                            : detail.currentSnapshot == null
+                              ? 'No snapshot yet.'
+                              : `Current snapshot ${detail.currentSnapshot}`}
                         </p>
                         <PreviewTable
                           columns={preview.columns}
