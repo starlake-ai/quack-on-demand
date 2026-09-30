@@ -51,6 +51,15 @@ class IcebergCatalogSqlSpec extends AnyFlatSpec with Matchers:
       )
   }
 
+  it should "select the row the catalog's current-snapshot-id points at, never credentials" in {
+    val sql = IcebergCatalogSql.snapshots("ice", "probe", "t", SnapshotFilter.Current, 1)
+    sql should include("WHERE is_current")
+    sql should include("LIMIT 1")
+    sql should not include "storage_credentials"
+    sql should not include "config"
+    sql should not include "request_url"
+  }
+
   it should "select by ids and by timestamp" in {
     IcebergCatalogSql.snapshots("ice", "p", "t", SnapshotFilter.ById(List("1", "2")), 2) should
       include("snapshot_id IN ('1', '2')")

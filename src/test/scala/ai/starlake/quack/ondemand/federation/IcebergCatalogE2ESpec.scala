@@ -74,7 +74,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
       preview1Json: Json,
       preview2Json: Json,
       previewCurrentJson: Json,
-      diffJson: Json
+      diffJson: Json,
+      currentJson: Json
   )
 
   private var captured: Option[Captured] = None
@@ -245,6 +246,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
         None,
         1000
       )
+      val currentQuery =
+        IcebergCatalogSql.snapshots(alias, schema, tbl, SnapshotFilter.Current, 1)
 
       val second = runJson(
         Nil,
@@ -254,7 +257,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
           preview1Query,
           preview2Query,
           previewCurrentQuery,
-          diffQuery
+          diffQuery,
+          currentQuery
         )
       )
       val List(
@@ -263,7 +267,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
         (_, preview1Json),
         (_, preview2Json),
         (_, previewCurrentJson),
-        (_, diffJson)
+        (_, diffJson),
+        (_, currentJson)
       ) = second: @unchecked
 
       captured = Some(
@@ -279,7 +284,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
           preview1Json,
           preview2Json,
           previewCurrentJson,
-          diffJson
+          diffJson,
+          currentJson
         )
       )
 
@@ -324,6 +330,14 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
     // Ties the result back to the exact `beforeSeq` the query ran with (read from the live history,
     // not assumed from commit order): every returned row's own sequence is strictly below it.
     page.forall(_.sequence < overwriteSeq) shouldBe true
+  }
+
+  "the history builder's Current filter" should "return exactly the current snapshot" in {
+    requireFixture()
+    val current  = c.history.find(_.current).getOrElse(fail("no current snapshot in history"))
+    val resolved = parseSnapshots(c.currentJson)
+    resolved.map(_.snapshotId) shouldBe List(current.snapshotId)
+    resolved.head.current shouldBe true
   }
 
   "the history builder's AtOrBefore filter" should "resolve to the second append" in {

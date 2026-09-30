@@ -159,11 +159,12 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
       "is_current"   -> K.B
     )
 
-  private val InClause = "snapshot_id IN \\(([^)]*)\\)".r.unanchored
-  private val SeqLt    = "seq < (\\d+)".r.unanchored
-  private val OpEq     = "->>'operation' = '([a-z]+)'".r.unanchored
-  private val TsLe     = "ts_ms <= (\\d+)".r.unanchored
-  private val LimitN   = "LIMIT (\\d+)$".r.unanchored
+  private val InClause  = "snapshot_id IN \\(([^)]*)\\)".r.unanchored
+  private val SeqLt     = "seq < (\\d+)".r.unanchored
+  private val OpEq      = "->>'operation' = '([a-z]+)'".r.unanchored
+  private val TsLe      = "ts_ms <= (\\d+)".r.unanchored
+  private val IsCurrent = "WHERE is_current".r.unanchored
+  private val LimitN    = "LIMIT (\\d+)$".r.unanchored
 
   private val poolKey = PoolKey("acme", "acme_tpch1", "bi")
 
@@ -233,14 +234,18 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     )
 
     // metadata-node stub state
-    val metaSqls                             = ListBuffer.empty[String]
-    var metaPool: Option[PoolKey]            = Some(poolKey)
-    var metaNodes: List[RunningNode]         = List(node)
-    var attached                             = true
-    var attachSummary: Option[String]        = None
-    var metaFailure: Option[QuackError]      = None
-    var formatV1                             = false
-    var malformed                            = false
+    val metaSqls                        = ListBuffer.empty[String]
+    var metaPool: Option[PoolKey]       = Some(poolKey)
+    var metaNodes: List[RunningNode]    = List(node)
+    var attached                        = true
+    var attachSummary: Option[String]   = None
+    var metaFailure: Option[QuackError] = None
+    var formatV1                        = false
+    var malformed                       = false
+    // The id the stub reports as `is_current`; defaults to the fixture's newest snapshot (S4),
+    // same as its baked-in `current` flags. Override to put a snapshot other than the
+    // highest-sequence one behind `current-snapshot-id`, as a rollback or a WAP snapshot would.
+    var currentId                            = S4
     var columnsRows: List[List[Option[Any]]] = List(
       List(Some("id"), Some("BIGINT"), Some("YES")),
       List(Some("v"), Some("VARCHAR"), Some("NO"))
@@ -267,6 +272,9 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         case TsLe(n) => rows = rows.filter(_.ts <= n.toLong)
         case _       => ()
       sql match
+        case IsCurrent() => rows = rows.filter(_.id == currentId)
+        case _           => ()
+      sql match
         case LimitN(n) => rows = rows.take(n.toInt)
         case _         => ()
       arrow(
@@ -278,7 +286,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
             if formatV1 then None else Some(s.seq),
             Some(s.ts),
             Some(if malformed then "not json" else s.summary),
-            Some(s.current)
+            Some(s.id == currentId)
           )
         )
       )
@@ -487,6 +495,18 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     )
     out.currentSnapshot shouldBe Some(S4)
     out.alias shouldBe "ice"
+    metaSqls.exists(_.contains("WHERE is_current")) shouldBe true
+
+  it should "report the current snapshot even when it is not the newest by sequence" in new Stubs:
+    // A rollback or a staged/WAP snapshot on top leaves `current-snapshot-id` pointing at a
+    // row that is not the highest-sequence one; the newest-by-seq row (S4) must NOT win.
+    currentId = S2
+    val out = handlers()
+      .detail("acme", "acme_tpch1", "Ice", "probe", "t", NoKey)(NoScope)
+      .unsafeRunSync()
+      .toOption
+      .get
+    out.currentSnapshot shouldBe Some(S2)
 
   // ---- history --------------------------------------------------------------------------------
 
@@ -594,6 +614,18 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     errOf(preview()) shouldBe (StatusCode.Forbidden, "acl_denied")
     execResult = () => Left(RouterFailure.Unavailable("down"))
     errOf(preview()) shouldBe (StatusCode.BadGateway, "preview_failed")
+
+  it should "report a non-timeout executor exception's own message, not 'query timed out'" in new Stubs:
+    execResult = () => throw new RuntimeException("boom")
+    val out = preview()
+    errOf(out) shouldBe (StatusCode.BadGateway, "preview_failed")
+    out.left.toOption.get._2.message shouldBe "boom"
+
+  it should "fall back to a generic message when a non-timeout exception carries none" in new Stubs:
+    execResult = () => throw new RuntimeException()
+    val out = preview()
+    errOf(out) shouldBe (StatusCode.BadGateway, "preview_failed")
+    out.left.toOption.get._2.message shouldBe "preview query failed"
 
   it should "404 no_pool when the tenant-db has no pool" in new Stubs:
     override def withPool = false

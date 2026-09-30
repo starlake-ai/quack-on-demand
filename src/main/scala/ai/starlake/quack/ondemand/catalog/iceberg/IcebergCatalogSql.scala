@@ -50,6 +50,12 @@ object IcebergCatalogSql:
     /** The newest snapshot committed at or before `epochMs`. */
     case AtOrBefore(epochMs: Long)
 
+    /** The snapshot the catalog's `current-snapshot-id` names, regardless of its sequence number:
+      * after a rollback, or with a staged/WAP snapshot on top, that is not the highest-sequence
+      * row.
+      */
+    case Current
+
   def snapshots(
       alias: String,
       schema: String,
@@ -66,6 +72,7 @@ object IcebergCatalogSql:
         require(ids.nonEmpty, "ById needs at least one id")
         List(s"snapshot_id IN (${ids.map(i => lit(id(i))).mkString(", ")})")
       case SnapshotFilter.AtOrBefore(ms) => List(s"ts_ms <= $ms")
+      case SnapshotFilter.Current        => List("is_current")
     val whereSql = if where.isEmpty then "" else where.mkString(" WHERE ", " AND ", "")
     s"WITH m AS (SELECT metadata::JSON AS j FROM iceberg_load_table_response(${target(alias, schema, table)})), " +
       "s AS (SELECT unnest(from_json(j->'snapshots', '[\"JSON\"]')) AS s, j->>'current-snapshot-id' AS cur FROM m), " +

@@ -218,7 +218,7 @@ final class IcebergCatalogHandlers(
     metaRead("iceberg.detail", tenant, tenantDb, alias, apiKey)(scopeOf) { t =>
       runMeta(t, IcebergCatalogSql.columns(t.alias, schema, table)).andThen { colRows =>
         runMeta(t, IcebergCatalogSql.files(t.alias, schema, table)).andThen { fileRows =>
-          snapshots(t, schema, table, SnapshotFilter.Page(None, None), 1).map(_.map { snaps =>
+          snapshots(t, schema, table, SnapshotFilter.Current, 1).map(_.map { snaps =>
             val columns = colRows.zipWithIndex.collect { case (name :: tpe :: nul :: _, i) =>
               CatalogColumnEntry(
                 ordinal = i + 1,
@@ -231,8 +231,9 @@ final class IcebergCatalogHandlers(
             val files = fileRows.collect { case path :: content :: fmt :: count :: seq :: _ =>
               IcebergFileEntry(str(path), str(content), str(fmt), long(count), long(seq))
             }
-            // The newest snapshot by sequence number; reported only when it IS the current one.
-            val current = snaps.find(_.current).map(_.snapshotId)
+            // The row `current-snapshot-id` names, not the newest by sequence number: a
+            // rollback or a staged/WAP snapshot on top can leave those different.
+            val current = snaps.headOption.map(_.snapshotId)
             IcebergTableDetailResponse(t.alias, schema, table, columns, files, current)
           })
         }
@@ -341,8 +342,12 @@ final class IcebergCatalogHandlers(
         .timeout(cfg.previewTimeoutSec.seconds)
         .attempt
         .map {
-          case Left(_) =>
+          case Left(_: java.util.concurrent.TimeoutException) =>
             denied(err(StatusCode.BadGateway, "preview_failed", "query timed out"))
+          case Left(other) =>
+            val message =
+              Option(other.getMessage).filter(_.nonEmpty).getOrElse("preview query failed")
+            denied(err(StatusCode.BadGateway, "preview_failed", message))
           case Right(Left(RouterFailure.AccessDenied(reason))) =>
             denied(err(StatusCode.Forbidden, "acl_denied", reason))
           case Right(Left(failure)) =>
