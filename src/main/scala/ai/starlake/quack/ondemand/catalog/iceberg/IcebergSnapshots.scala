@@ -20,8 +20,7 @@ final case class IcebergSnapshot(
 object IcebergSnapshots:
 
   enum ParseError:
-    /** A row with a NULL sequence number: the table is Iceberg format v1, which these views refuse.
-      */
+    /** A NULL sequence number: the table is Iceberg format v1, which these views refuse. */
     case FormatV1
     case Malformed(message: String)
 
@@ -38,9 +37,11 @@ object IcebergSnapshots:
     * as VARCHAR on the node.
     */
   def parse(rows: List[List[Json]]): Either[ParseError, List[IcebergSnapshot]] =
-    rows.foldRight[Either[ParseError, List[IcebergSnapshot]]](Right(Nil)) { (row, acc) =>
-      acc.flatMap(tail => parseRow(row).map(_ :: tail))
-    }
+    if rows.exists(r => r.size == 6 && r(2).isNull) then Left(ParseError.FormatV1)
+    else
+      rows.foldRight[Either[ParseError, List[IcebergSnapshot]]](Right(Nil)) { (row, acc) =>
+        acc.flatMap(tail => parseRow(row).map(_ :: tail))
+      }
 
   private def parseRow(row: List[Json]): Either[ParseError, IcebergSnapshot] =
     row match

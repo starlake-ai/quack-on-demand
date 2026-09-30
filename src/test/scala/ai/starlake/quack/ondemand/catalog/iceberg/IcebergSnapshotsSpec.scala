@@ -25,6 +25,16 @@ class IcebergSnapshotsSpec extends AnyFlatSpec with Matchers:
       Json.fromBoolean(cur)
     )
 
+  // Identical to the last row of `rows` below, except seq is null: the format-v1 shape.
+  private val v1Row = row(
+    "7761858545720969174",
+    None,
+    1,
+    1790709486022L,
+    """{"operation":"append","total-records":"3","total-data-files":"1","added-records":"3","added-data-files":"1"}""",
+    false
+  ).updated(2, Json.Null)
+
   private val rows = List(
     row(
       "7557379181527318936",
@@ -91,31 +101,18 @@ class IcebergSnapshotsSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "refuse a format-v1 row (null seq) with ParseError.FormatV1" in {
-    val v1Row = List(
-      Json.fromString("7761858545720969174"),
-      Json.Null,
-      Json.Null,
-      Json.fromLong(1790709486022L),
-      Json.fromString(
-        """{"operation":"append","total-records":"3","total-data-files":"1","added-records":"3","added-data-files":"1"}"""
-      ),
-      Json.fromBoolean(false)
-    )
     IcebergSnapshots.parse(List(v1Row)) shouldBe Left(IcebergSnapshots.ParseError.FormatV1)
   }
 
   it should "refuse a mixed list containing any format-v1 (null seq) row" in {
-    val v1Row = List(
-      Json.fromString("7761858545720969174"),
-      Json.Null,
-      Json.Null,
-      Json.fromLong(1790709486022L),
-      Json.fromString(
-        """{"operation":"append","total-records":"3","total-data-files":"1","added-records":"3","added-data-files":"1"}"""
-      ),
-      Json.fromBoolean(false)
-    )
     IcebergSnapshots.parse(rows.take(1) ++ List(v1Row)) shouldBe Left(
+      IcebergSnapshots.ParseError.FormatV1
+    )
+  }
+
+  it should "let FormatV1 win over a later malformed row in the same list" in {
+    val malformedRow = row("1", None, 1, 1, "not json", false)
+    IcebergSnapshots.parse(List(v1Row, malformedRow)) shouldBe Left(
       IcebergSnapshots.ParseError.FormatV1
     )
   }
