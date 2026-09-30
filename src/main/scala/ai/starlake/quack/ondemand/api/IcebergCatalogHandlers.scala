@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.CatalogConfig
 import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.model.{FederatedAlias, FederatedSource, FederatedSourceType}
+import ai.starlake.quack.model.{FederatedAlias, FederatedSource, FederatedSourceType, PoolKey}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.iceberg.{
@@ -39,7 +39,9 @@ object IcebergCatalogHandlers:
   * alias in SQL. Metadata statements (browse, detail, history, snapshot-selector resolution) run
   * privileged through [[NodeMetadataQuery]]; the preview and diff DATA statements go through the
   * routed [[CatalogPreviewHandlers.PreviewExecutor]] as the caller, exactly like the DuckLake
-  * preview, so the ACL applies to them.
+  * preview, so the ACL applies to them: `callerOf` ([[RestCaller]]) turns the `apiKey` into the
+  * [[ExecCaller]] (static key: system; session: its user; PAT: its owner with the token's
+  * restriction and id; any other token: 401 `unauthorized` and the executor is never called).
   *
   * Audit: browse/detail/history emit [[AuditActions.CatalogRead]] only under
   * `cfg.auditCatalogReads` (outcome tracks the gate, like [[CatalogHandlers]]); preview and diff
@@ -50,7 +52,7 @@ final class IcebergCatalogHandlers(
     sourcesOf: String => List[FederatedSource],
     meta: NodeMetadataQuery,
     executor: CatalogPreviewHandlers.PreviewExecutor,
-    sessions: String => Option[SessionTokenStore.Session],
+    callerOf: RestCaller,
     cfg: CatalogConfig,
     audit: AuditRecorder = AuditRecorder.noop
 ):
@@ -301,17 +303,21 @@ final class IcebergCatalogHandlers(
 
   // ---- preview and diff (routed executor, always audited) -------------------------------------
 
-  /** Runs `sql` through the routed executor as the caller, decodes at most `cap` rows and hands the
-    * decoded result to `build`. Failures: `AccessDenied` 403 `acl_denied`, anything else or a
-    * timeout 502 `preview_failed`. Audits `action` ok (with `detail` + rowsReturned) or denied.
+  /** Runs `sqlFor(cap + 1)` through the routed executor as the caller (resolved by `callerOf`, 401
+    * without calling the executor when the token does not resolve), decodes at most `cap` rows and
+    * hands the decoded result to `build`. `cap` is the request `limit` clamped to
+    * `cfg.previewMaxRows` and to the caller's own maxRows (a PAT lowers it, never raises it); one
+    * row past it is fetched so the decoder can observe truncation. Failures: `AccessDenied` 403
+    * `acl_denied`, anything else or a timeout 502 `preview_failed`. Audits `action` ok (with
+    * `detail` + rowsReturned) or denied.
     */
   private def execute[T](
       t: Target,
       action: String,
       label: String,
       target: String,
-      sql: String,
-      cap: Int,
+      limit: Option[Int],
+      sqlFor: Int => String,
       apiKey: Option[String],
       detail: Map[String, String]
   )(build: (List[PreviewColumn], List[List[Json]], Boolean) => Either[Err, (T, Int)]): Out[T] =
@@ -325,6 +331,41 @@ final class IcebergCatalogHandlers(
         target = Some(target)
       )
       Left(e)
+    def run(caller: ExecCaller, poolKey: PoolKey): Out[T] =
+      // A PAT's own maxRows lowers the cap (never raises it), as on the DuckLake preview.
+      val cap = caller.effectiveMaxRows(
+        cfg.previewMaxRows,
+        limit.map(_.max(1)).getOrElse(cfg.previewMaxRows)
+      )
+      executor(caller, poolKey, sqlFor(cap + 1))
+        .timeout(cfg.previewTimeoutSec.seconds)
+        .attempt
+        .map {
+          case Left(_) =>
+            denied(err(StatusCode.BadGateway, "preview_failed", "query timed out"))
+          case Right(Left(RouterFailure.AccessDenied(reason))) =>
+            denied(err(StatusCode.Forbidden, "acl_denied", reason))
+          case Right(Left(failure)) =>
+            denied(err(StatusCode.BadGateway, "preview_failed", failure.reason))
+          case Right(Right(result)) =>
+            try
+              val (columns, rows, truncated) = ArrowRowsDecoder.decode(result.rows, cap)
+              build(columns, rows, truncated) match
+                case Left(e)             => denied(e)
+                case Right((out, count)) =>
+                  audit.rest(
+                    apiKey,
+                    "control-plane",
+                    action,
+                    "ok",
+                    tenant = Some(t.tid),
+                    target = Some(target),
+                    detail = detail + ("rowsReturned" -> count.toString)
+                  )
+                  Right(out)
+            finally result.close()
+        }
+
     PoolPicks.readPoolKey(sup, t.tid, t.db) match
       case None =>
         IO.pure(
@@ -338,38 +379,10 @@ final class IcebergCatalogHandlers(
           )
         )
       case Some(poolKey) =>
-        val user = CatalogPreviewHandlers.identityOf(sessions, apiKey)
-        executor(ExecCaller.unrestricted(s"$label-${t.tid}-${t.db}", user), poolKey, sql)
-          .timeout(cfg.previewTimeoutSec.seconds)
-          .attempt
-          .map {
-            case Left(_) =>
-              denied(err(StatusCode.BadGateway, "preview_failed", "query timed out"))
-            case Right(Left(RouterFailure.AccessDenied(reason))) =>
-              denied(err(StatusCode.Forbidden, "acl_denied", reason))
-            case Right(Left(failure)) =>
-              denied(err(StatusCode.BadGateway, "preview_failed", failure.reason))
-            case Right(Right(result)) =>
-              try
-                val (columns, rows, truncated) = ArrowRowsDecoder.decode(result.rows, cap)
-                build(columns, rows, truncated) match
-                  case Left(e)             => denied(e)
-                  case Right((out, count)) =>
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      action,
-                      "ok",
-                      tenant = Some(t.tid),
-                      target = Some(target),
-                      detail = detail + ("rowsReturned" -> count.toString)
-                    )
-                    Right(out)
-              finally result.close()
-          }
-
-  private def effectiveLimit(limit: Option[Int]): Int =
-    limit.map(_.max(1)).getOrElse(cfg.previewMaxRows).min(cfg.previewMaxRows)
+        // 401 on an unresolvable token: the executor is never called, never as the superuser.
+        callerOf(s"$label-${t.tid}-${t.db}", apiKey) match
+          case Left(e)       => IO.pure(denied(e))
+          case Right(caller) => run(caller, poolKey)
 
   def preview(
       tenant: String,
@@ -429,16 +442,13 @@ final class IcebergCatalogHandlers(
           selected.flatMap {
             case Left(e)           => deny(e)
             case Right(snapshotId) =>
-              val lim = effectiveLimit(limit)
-              // Fetch one row past the cap so the decoder can observe truncation.
-              val sql = IcebergCatalogSql.preview(t.alias, schema, table, snapshotId, lim + 1)
               execute(
                 t,
                 AuditActions.CatalogPreviewRead,
                 "iceberg-preview",
                 target,
-                sql,
-                lim,
+                limit,
+                fetch => IcebergCatalogSql.preview(t.alias, schema, table, snapshotId, fetch),
                 apiKey,
                 Map.empty
               ) { (columns, rows, truncated) =>
@@ -498,23 +508,14 @@ final class IcebergCatalogHandlers(
                       )
                     )
                   else
-                    val lim = effectiveLimit(limit)
-                    val sql = IcebergCatalogSql.diff(
-                      t.alias,
-                      schema,
-                      table,
-                      from,
-                      to,
-                      changeType,
-                      lim + 1
-                    )
                     execute(
                       t,
                       AuditActions.CatalogDataDiffRead,
                       "iceberg-diff",
                       target,
-                      sql,
-                      lim,
+                      limit,
+                      fetch =>
+                        IcebergCatalogSql.diff(t.alias, schema, table, from, to, changeType, fetch),
                       apiKey,
                       Map("from" -> from, "to" -> to)
                     ) { (columns, rows, truncated) =>

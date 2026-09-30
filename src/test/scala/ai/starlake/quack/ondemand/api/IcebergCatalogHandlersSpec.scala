@@ -14,7 +14,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
-import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.auth.{SessionScope, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.iceberg.NodeMetadataQuery
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
@@ -41,6 +41,10 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
   private val NoKey: Option[String]                   = None
   private val NoScope: String => Option[SessionScope] = _ => None
+
+  /** The gate's scope for a token caller: an admin of tenant `acme`. */
+  private val AcmeAdmin: String => Option[SessionScope] =
+    _ => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
 
   // ---- Arrow fixtures -------------------------------------------------------------------------
 
@@ -318,6 +322,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
     // routed-executor stub state
     val execSqls                                             = ListBuffer.empty[String]
+    val execCallers                                          = ListBuffer.empty[ExecCaller]
     var execResult: () => Either[RouterFailure, QueryResult] = () =>
       Right(
         QueryResult(
@@ -327,8 +332,9 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
           5L
         )
       )
-    val executor: CatalogPreviewHandlers.PreviewExecutor = (_, _, sql) =>
+    val executor: CatalogPreviewHandlers.PreviewExecutor = (caller, _, sql) =>
       IO {
+        execCallers += caller
         execSqls += sql
         execResult()
       }
@@ -349,13 +355,20 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         )
       )
 
-    def handlers(cfgOverride: CatalogConfig = cfg): IcebergCatalogHandlers =
+    def handlers(
+        cfgOverride: CatalogConfig = cfg,
+        callerOf: RestCaller = RestCaller(
+          Some(IdentityFixtures.StaticKey),
+          IdentityFixtures.sessionOf,
+          IdentityFixtures.patOf
+        )
+    ): IcebergCatalogHandlers =
       new IcebergCatalogHandlers(
         sup,
         id => sources.getOrElse(id, Nil),
         meta,
         executor,
-        _ => None,
+        callerOf,
         cfgOverride,
         audit
       )
@@ -375,10 +388,11 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         asOfTag: Option[String] = None,
         asOfTs: Option[Instant] = None,
         limit: Option[Int] = None,
-        h: IcebergCatalogHandlers = handlers()
+        h: IcebergCatalogHandlers = handlers(),
+        apiKey: Option[String] = NoKey
     ) =
-      h.preview("acme", "acme_tpch1", "Ice", "probe", "t", asOf, asOfTag, asOfTs, limit, NoKey)(
-        NoScope
+      h.preview("acme", "acme_tpch1", "Ice", "probe", "t", asOf, asOfTag, asOfTs, limit, apiKey)(
+        AcmeAdmin
       ).unsafeRunSync()
 
     def dataDiff(
@@ -386,10 +400,11 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         to: String = S4,
         limit: Option[Int] = None,
         changeType: Option[String] = None,
-        h: IcebergCatalogHandlers = handlers()
+        h: IcebergCatalogHandlers = handlers(),
+        apiKey: Option[String] = NoKey
     ) =
-      h.dataDiff("acme", "acme_tpch1", "Ice", "probe", "t", from, to, limit, changeType, NoKey)(
-        NoScope
+      h.dataDiff("acme", "acme_tpch1", "Ice", "probe", "t", from, to, limit, changeType, apiKey)(
+        AcmeAdmin
       ).unsafeRunSync()
 
   private def errOf[T](out: Either[(StatusCode, ErrorResponse), T]): (StatusCode, String) =
@@ -626,3 +641,63 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     val e = telemetryStore.events.last
     e.action shouldBe AuditActions.CatalogDataDiffRead
     e.outcome shouldBe "ok"
+
+  // ---- executor identity (RestCaller, the PAT regression of #137) -----------------------------
+
+  import IdentityFixtures.*
+
+  private def callers(execCallers: ListBuffer[ExecCaller]) =
+    execCallers.toList.map(c => (c.identity, c.restriction, c.patId, c.system))
+
+  "preview's executor caller" should "be the system caller for the static key" in new Stubs:
+    preview(apiKey = Some(StaticKey))
+    callers(execCallers) shouldBe
+      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None, true))
+
+  it should "be the session's user, unrestricted, for a session" in new Stubs:
+    preview(apiKey = Some(SessionTok))
+    callers(execCallers) shouldBe List(("alice", TokenRestriction.Unrestricted, None, false))
+
+  it should "be the PAT's owner with its restriction and id, never system, for a PAT" in new Stubs:
+    preview(apiKey = Some(PatTok))
+    callers(execCallers) shouldBe List(("alice", PatRestriction, Some(PatId), false))
+
+  it should "cap the fetch at the PAT's maxRows" in new Stubs:
+    preview(apiKey = Some(PatTok), limit = Some(50))
+    execSqls.last shouldBe s"""SELECT * FROM "ice"."probe"."t" LIMIT ${PatMaxRows + 1}"""
+
+  it should "401 an unresolvable token without calling the executor" in new Stubs:
+    errOf(preview(apiKey = Some("qod_pat_unknown"))) shouldBe
+      (StatusCode.Unauthorized, "unauthorized")
+    execCallers shouldBe empty
+    telemetryStore.events.last.outcome shouldBe "denied"
+
+  it should "run a tenant user NAMED 'superuser' as that user, not system" in new Stubs:
+    val h = handlers(callerOf = RestCaller(None, sentinelSessionOf, sentinelPatOf))
+    preview(h = h, apiKey = Some(SentinelSessionTok))
+    preview(h = h, apiKey = Some(SentinelPatTok))
+    execCallers.toList.map(c => (c.identity, c.system, c.patId)) shouldBe
+      List(("superuser", false, None), ("superuser", false, Some("pat-sentinel")))
+
+  "dataDiff's executor caller" should "be the system caller for the static key" in new Stubs:
+    execResult = () => diffResult()
+    dataDiff(apiKey = Some(StaticKey))
+    callers(execCallers) shouldBe
+      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None, true))
+
+  it should "be the session's user, unrestricted, for a session" in new Stubs:
+    execResult = () => diffResult()
+    dataDiff(apiKey = Some(SessionTok))
+    callers(execCallers) shouldBe List(("alice", TokenRestriction.Unrestricted, None, false))
+
+  it should "be the PAT's owner with its restriction and id, capped at its maxRows" in new Stubs:
+    execResult = () => diffResult()
+    dataDiff(apiKey = Some(PatTok), limit = Some(50))
+    callers(execCallers) shouldBe List(("alice", PatRestriction, Some(PatId), false))
+    execSqls.last should include(s"LIMIT ${PatMaxRows + 1}")
+
+  it should "401 an unresolvable token without calling the executor" in new Stubs:
+    errOf(dataDiff(apiKey = Some("qod_pat_unknown"))) shouldBe
+      (StatusCode.Unauthorized, "unauthorized")
+    execCallers shouldBe empty
+    telemetryStore.events.last.outcome shouldBe "denied"

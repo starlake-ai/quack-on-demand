@@ -655,7 +655,7 @@ object ManagerServerHarness:
             maxRows = 100
           ),
           executor = previewExecutor,
-          sessions = sessions.get,
+          callerOf = restCaller,
           cfg = CatalogConfig(),
           audit = audit
         )

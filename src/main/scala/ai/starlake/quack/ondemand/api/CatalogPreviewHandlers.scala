@@ -36,17 +36,6 @@ object CatalogPreviewHandlers:
     */
   val SuperuserIdentity = "superuser"
 
-  /** The executor `user` for a REST caller under the contract above: the session's username, else
-    * [[SuperuserIdentity]]. Shared with [[IcebergCatalogHandlers]].
-    */
-  private[api] def identityOf(
-      sessions: String => Option[SessionTokenStore.Session],
-      apiKey: Option[String]
-  ): String =
-    apiKey.flatMap(sessions) match
-      case Some(session) => session.profile.username
-      case None          => SuperuserIdentity
-
 /** Bounded, ACL-routed snapshot preview (Spec 00 time-travel viewer). `preview` runs the same
   * tenant-resolve -> [[TenantScopeCheck]] -> tenant-db-lookup gate as [[TagHandlers]] (a non-
   * DuckLake tenant-db is rejected with 400 `invalid_kind`: previews need the DuckLake `AT (VERSION

@@ -1466,7 +1466,7 @@ object Main extends IOApp with LazyLogging:
             sourcesOf = tdId => fedStore.listEnabledSources(tdId),
             meta = meta,
             executor = previewExecutor,
-            sessions = sessionTokens.get,
+            callerOf = restCaller,
             cfg = mgrCfg.catalog,
             audit = auditRecorder
           )

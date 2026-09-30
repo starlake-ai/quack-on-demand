@@ -24,6 +24,7 @@ import ai.starlake.quack.ondemand.api.{
   CatalogTableEntry,
   IcebergCatalogHandlers,
   ProfileHandlers,
+  RestCaller,
   TagHandlers,
   TenantDbHandlers
 }
@@ -315,7 +316,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       sourcesOf = id => sources.getOrElse(id, Nil),
       meta = icebergMeta(),
       executor = previewExec,
-      sessions = _ => None,
+      callerOf = RestCaller.staticOnly,
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 
