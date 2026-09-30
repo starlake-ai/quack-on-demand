@@ -131,13 +131,16 @@ object IcebergFixture:
   def script(parts: String*): String =
     parts.flatMap(_.linesIterator).map(_.trim).filter(_.nonEmpty).mkString("\n") + "\n"
 
-  /** Run SQL through the duckdb CLI's stdin. */
-  def duckdb(sql: String): DuckdbRun =
+  /** Run SQL through the duckdb CLI's stdin. `flags` defaults to this object's own `-noheader
+    * -list` convention; a caller needing a different output mode (e.g. `-json`, for a spec that
+    * needs typed columns rather than `-list`'s VARCHAR text) passes its own.
+    */
+  def duckdb(sql: String, flags: Seq[String] = Seq("-noheader", "-list")): DuckdbRun =
     val out  = new StringBuilder
     val err  = new StringBuilder
     val log  = ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n'))
     val in   = new java.io.ByteArrayInputStream(sql.getBytes("UTF-8"))
-    val code = (Process(Seq(duckdbBin, "-noheader", "-list")) #< in).!(log)
+    val code = (Process(duckdbBin +: flags) #< in).!(log)
     DuckdbRun(code, out.toString, err.toString)
 
   private def silent: ProcessLogger = ProcessLogger(_ => (), _ => ())

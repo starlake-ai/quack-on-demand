@@ -14,8 +14,6 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import scala.sys.process.{Process, ProcessLogger}
-
 /** End to end for the read-only Iceberg catalog view builders (`IcebergCatalogSql`, Task 2) and the
   * snapshot parser (`IcebergSnapshots`, Task 1), driving the real duckdb CLI against a live
   * `apache/iceberg-rest-fixture` catalog. Nothing here is wired into the manager yet: this pins the
@@ -31,9 +29,9 @@ import scala.sys.process.{Process, ProcessLogger}
   * JSON, not `-list`: `IcebergSnapshots.parse` reads BIGINT sequence/timestamp columns and a
   * BOOLEAN `is_current` column as real JSON numbers/booleans (matching what `ArrowRowsDecoder`
   * yields off the wire), which duckdb's `-list` output cannot carry - everything comes back as
-  * VARCHAR text in that mode. [[duckdbJson]] is a second, minimal CLI runner for that reason alone;
-  * [[IcebergFixture.duckdb]] (`-list -noheader`) is reused as-is for the schema/table teardown,
-  * which needs no typed columns.
+  * VARCHAR text in that mode. [[IcebergFixture.duckdb]] takes the CLI flags as a parameter for
+  * exactly this: [[runJson]] passes `-json`, and the schema/table teardown below keeps the default
+  * `-list -noheader`, which needs no typed columns.
   *
   * Cancelled, not failed, when the fixture or the duckdb CLI is absent (same convention as
   * `IcebergRestE2ESpec`, see `IcebergFixture`).
@@ -90,20 +88,6 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
   private val SnapshotColumns =
     List("snapshot_id", "parent_id", "seq", "ts_ms", "summary_json", "is_current")
 
-  private val duckdbBin: String = sys.env.getOrElse("DUCKDB_BIN", "duckdb")
-
-  /** Run SQL through the duckdb CLI's stdin in `-json` mode. Same shape as `IcebergFixture.duckdb`
-    * (stdin script, streams kept apart, non-zero exit on any failed statement while the CLI keeps
-    * running past it) - only the output format differs.
-    */
-  private def duckdbJson(sql: String): DuckdbRun =
-    val out  = new StringBuilder
-    val err  = new StringBuilder
-    val log  = ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n'))
-    val in   = new java.io.ByteArrayInputStream(sql.getBytes("UTF-8"))
-    val code = (Process(Seq(duckdbBin, "-json")) #< in).!(log)
-    DuckdbRun(code, out.toString, err.toString)
-
   /** Splits `-json` stdout into one string per statement that produced output. Verified against
     * DuckDB 1.5.6: a statement with no result set (`CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`,
     * `CREATE SCHEMA`, `ATTACH`, `INSTALL`, `LOAD`) prints nothing at all; every statement that DOES
@@ -133,7 +117,7 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
       IcebergFixture.script(
         IcebergFixture.storagePrelude +: rw +: (setup ++ queries.map(q => s"$q;"))*
       )
-    val r = duckdbJson(script)
+    val r = IcebergFixture.duckdb(script, Seq("-json"))
     withClue(r.clue)(r.code shouldBe 0)
     val blocks = splitJsonBlocks(r.stdout)
     // +1: CREATE SECRET (in the storage prelude) is the only setup statement that prints anything.
@@ -202,12 +186,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
         s"UPDATE ${table(tbl)} SET v = 'B' WHERE id = 2;",
         s"DELETE FROM ${table(tbl)} WHERE id = 3;"
       )
-      // The commit order is deterministic (append, append, overwrite, delete => seq 1..4), so the
-      // overwrite's sequence number for the `Page` filter is known without reading it back first.
       val historyQuery =
         IcebergCatalogSql.snapshots(alias, schema, tbl, SnapshotFilter.Page(None, None), 100)
-      val pageQuery =
-        IcebergCatalogSql.snapshots(alias, schema, tbl, SnapshotFilter.Page(Some(3L), None), 100)
       val filesQuery   = IcebergCatalogSql.files(alias, schema, tbl)
       val schemasQuery = IcebergCatalogSql.schemas(alias)
       val tablesQuery  = IcebergCatalogSql.tables(alias, schema)
@@ -215,11 +195,10 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
 
       val first = runJson(
         setup,
-        List(historyQuery, pageQuery, filesQuery, schemasQuery, tablesQuery, columnsQuery)
+        List(historyQuery, filesQuery, schemasQuery, tablesQuery, columnsQuery)
       )
       val List(
         (historyRaw, historyJson),
-        (_, pageJson),
         (_, filesJson),
         (_, schemasJson),
         (_, tablesJson),
@@ -231,7 +210,20 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
       val firstAppend  = appends.headOption.getOrElse(fail(s"no append snapshot in $history"))
       val secondAppend = appends.lift(1).getOrElse(fail(s"no second append snapshot in $history"))
       val current      = history.find(_.current).getOrElse(fail(s"no current snapshot in $history"))
+      val overwrite    =
+        history
+          .find(_.operation.contains("overwrite"))
+          .getOrElse(fail(s"no overwrite snapshot in $history"))
 
+      // The overwrite's own sequence number, read back from the parsed history rather than assumed
+      // from commit order, is what the `Page` filter's `beforeSeq` is exercised against.
+      val pageQuery = IcebergCatalogSql.snapshots(
+        alias,
+        schema,
+        tbl,
+        SnapshotFilter.Page(Some(overwrite.sequence), None),
+        100
+      )
       val atOrBeforeQuery = IcebergCatalogSql.snapshots(
         alias,
         schema,
@@ -256,9 +248,17 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
 
       val second = runJson(
         Nil,
-        List(atOrBeforeQuery, preview1Query, preview2Query, previewCurrentQuery, diffQuery)
+        List(
+          pageQuery,
+          atOrBeforeQuery,
+          preview1Query,
+          preview2Query,
+          previewCurrentQuery,
+          diffQuery
+        )
       )
       val List(
+        (_, pageJson),
         (_, atOrBeforeJson),
         (_, preview1Json),
         (_, preview2Json),
@@ -284,7 +284,9 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
       )
 
   /** `DROP SCHEMA ... CASCADE` is not supported for Iceberg schemas (see `IcebergRestE2ESpec`), so
-    * the table is dropped explicitly before the (now empty) schema.
+    * the table is dropped explicitly before the (now empty) schema. Both use `IF EXISTS`: a
+    * `beforeAll` that failed partway through (e.g. after `CREATE SCHEMA` but before `CREATE TABLE`)
+    * must not turn `afterAll` into a second, unrelated failure on top of the real one.
     */
   override def afterAll(): Unit =
     if available then
@@ -292,8 +294,8 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
         IcebergFixture.script(
           IcebergFixture.storagePrelude,
           rw,
-          s"DROP TABLE ${table(tbl)};",
-          s"""DROP SCHEMA "$alias"."$schema";"""
+          s"DROP TABLE IF EXISTS ${table(tbl)};",
+          s"""DROP SCHEMA IF EXISTS "$alias"."$schema";"""
         )
       )
       assert(r.code == 0, s"teardown of $schema failed: ${r.clue}")
@@ -312,8 +314,16 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
 
   "the history builder's Page filter" should "return only the snapshots before the overwrite" in {
     requireFixture()
+    val overwriteSeq =
+      c.history
+        .find(_.operation.contains("overwrite"))
+        .getOrElse(fail("no overwrite in history"))
+        .sequence
     val page = parseSnapshots(c.pageJson)
     page.map(_.operation) shouldBe List(Some("append"), Some("append"))
+    // Ties the result back to the exact `beforeSeq` the query ran with (read from the live history,
+    // not assumed from commit order): every returned row's own sequence is strictly below it.
+    page.forall(_.sequence < overwriteSeq) shouldBe true
   }
 
   "the history builder's AtOrBefore filter" should "resolve to the second append" in {

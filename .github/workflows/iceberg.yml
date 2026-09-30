@@ -23,6 +23,8 @@ on:
     paths:
       - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
       - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/catalog/iceberg/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/federation/IcebergCatalogE2ESpec.scala"
       - "src/main/scala/ai/starlake/quack/edge/sql/**"
       - "src/test/scala/ai/starlake/quack/edge/sql/**"
       - "src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala"
@@ -59,6 +61,8 @@ on:
     paths:
       - "src/main/scala/ai/starlake/quack/ondemand/federation/**"
       - "src/test/scala/ai/starlake/quack/ondemand/federation/**"
+      - "src/main/scala/ai/starlake/quack/ondemand/catalog/iceberg/**"
+      - "src/test/scala/ai/starlake/quack/ondemand/federation/IcebergCatalogE2ESpec.scala"
       - "src/main/scala/ai/starlake/quack/edge/sql/**"
       - "src/test/scala/ai/starlake/quack/edge/sql/**"
       - "src/main/scala/ai/starlake/quack/edge/FlightSqlRouter.scala"
