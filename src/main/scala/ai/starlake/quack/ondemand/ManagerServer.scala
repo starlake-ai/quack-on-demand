@@ -96,7 +96,11 @@ final class ManagerServer(
     // anyway -- mounting it here keeps that invariant explicit.
     mcpRoutes: Option[HttpRoutes[IO]] = None,
     // The native Quack front door's listener config, surfaced to the UI's connection card.
-    quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None
+    quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None,
+    // Read-only views over an external Iceberg REST catalog (history, preview, diff, files).
+    // None (no federation store) leaves the six /iceberg routes unmounted. Last and named,
+    // not next to `preview`: the constructor is called positionally.
+    icebergCatalog: Option[IcebergCatalogHandlers] = None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -436,6 +440,55 @@ final class ManagerServer(
         TimeTravelEndpoints.dataDiffEndpoint.serverLogic {
           case (tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token) =>
             h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, token)(
+              scopeOfToken
+            )
+        }
+      )
+    }
+
+    // Iceberg catalog views (history, preview, diff, files). Admin-only via TenantDbGate inside
+    // the handler; asOfTs is parsed here, like the DuckLake preview above.
+    val icebergCatalogEndpoints: List[ServerEndpoint[Any, IO]] = icebergCatalog.toList.flatMap { h =>
+      List[ServerEndpoint[Any, IO]](
+        IcebergCatalogEndpoints.schemasEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, token) =>
+            h.schemas(tenant, tenantDb, alias, token)(scopeOfToken)
+        },
+        IcebergCatalogEndpoints.tablesEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, schema, token) =>
+            h.tables(tenant, tenantDb, alias, schema, token)(scopeOfToken)
+        },
+        IcebergCatalogEndpoints.detailEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, schema, table, token) =>
+            h.detail(tenant, tenantDb, alias, schema, table, token)(scopeOfToken)
+        },
+        IcebergCatalogEndpoints.historyEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, schema, table, limit, before, operation, token) =>
+            h.history(tenant, tenantDb, alias, schema, table, limit, before, operation, token)(
+              scopeOfToken
+            )
+        },
+        IcebergCatalogEndpoints.previewEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, schema, table, asOf, asOfTag, asOfTsRaw, limit, token) =>
+            QueryParams.instantAs(asOfTsRaw, "asOfTs", "invalid_selector") match
+              case Left(e)       => IO.pure(Left(e))
+              case Right(asOfTs) =>
+                h.preview(
+                  tenant,
+                  tenantDb,
+                  alias,
+                  schema,
+                  table,
+                  asOf,
+                  asOfTag,
+                  asOfTs,
+                  limit,
+                  token
+                )(scopeOfToken)
+        },
+        IcebergCatalogEndpoints.dataDiffEndpoint.serverLogic {
+          case (tenant, tenantDb, alias, schema, table, from, to, limit, changeType, token) =>
+            h.dataDiff(tenant, tenantDb, alias, schema, table, from, to, limit, changeType, token)(
               scopeOfToken
             )
         }
@@ -956,7 +1009,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then

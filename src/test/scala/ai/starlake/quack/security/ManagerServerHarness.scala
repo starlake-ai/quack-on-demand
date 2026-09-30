@@ -284,7 +284,11 @@ object ManagerServerHarness:
       // global, if a future spec needs another env-tunable knob.
       env: Map[String, String] = Map.empty,
       // Session signer. Specs that need to control expiry pass one built on their own clock.
-      sessions: SessionTokenStore = new SessionTokenStore
+      sessions: SessionTokenStore = new SessionTokenStore,
+      // Iceberg catalog views (tenant-db id -> federated sources). None leaves the six
+      // /iceberg routes unmounted, like a Main boot without a federation store. When set, the
+      // metadata runner has no read pool, so a resolved alias answers 404 no_pool.
+      icebergSourcesOf: Option[String => List[ai.starlake.quack.model.FederatedSource]] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -636,7 +640,26 @@ object ManagerServerHarness:
         )
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
-      mcpRoutes = mcpRoutes
+      mcpRoutes = mcpRoutes,
+      icebergCatalog = icebergSourcesOf.map { sourcesOf =>
+        new IcebergCatalogHandlers(
+          sup,
+          sourcesOf = sourcesOf,
+          meta = new ai.starlake.quack.ondemand.catalog.iceberg.NodeMetadataQuery(
+            readPool = (_, _) => None,
+            readNodes = _ => Nil,
+            isAttached = (_, _) => false,
+            attachSummary = (_, _) => None,
+            send = (_, _) => IO.raiseError(new IllegalStateException("no node in this harness")),
+            timeoutSec = 5,
+            maxRows = 100
+          ),
+          executor = previewExecutor,
+          sessions = sessions.get,
+          cfg = CatalogConfig(),
+          audit = audit
+        )
+      }
     )
 
     // Bound the boot. http4s Ember on macOS occasionally stalls binding port

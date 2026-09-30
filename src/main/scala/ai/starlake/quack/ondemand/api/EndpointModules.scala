@@ -23,6 +23,7 @@ object EndpointModules:
     RbacEndpoints,
     ScimEndpoints,
     TimeTravelEndpoints,
+    IcebergCatalogEndpoints,
     UndropEndpoints,
     RestoreEndpoints,
     BranchEndpoints,

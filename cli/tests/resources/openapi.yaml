@@ -1296,6 +1296,425 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas:
+    get:
+      description: Namespaces of an attached Iceberg REST catalog (`alias` is the
+        federated source alias). tableCount is -1 (not counted).
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemas
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CatalogSchemaEntry'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas/{schema}/tables:
+    get:
+      description: Tables of one namespace of an attached Iceberg REST catalog.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemasSchemaTables
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas/{schema}/tables/{table}:
+    get:
+      description: Columns, current data and delete files, and the current snapshot
+        id of an Iceberg table.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemasSchemaTablesTable
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergTableDetailResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas/{schema}/tables/{table}/data-diff:
+    get:
+      description: Row-level diff of an Iceberg table between two snapshot ids (`from`,
+        `to`, strings). `changeType` filters to added | removed.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemasSchemaTablesTableData-diff
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: changeType
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergDiffResponse'
+        '400':
+          description: 'Invalid value for: query parameter from, Invalid value for:
+            query parameter to, Invalid value for: query parameter limit, Invalid
+            value for: query parameter changeType, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas/{schema}/tables/{table}/history:
+    get:
+      description: Snapshot history of an Iceberg table, newest first. `before` is
+        a snapshot id (string) to page past; `operation` filters to append | overwrite
+        | delete | replace.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemasSchemaTablesTableHistory
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: before
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: operation
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergHistoryResponse'
+        '400':
+          description: 'Invalid value for: query parameter limit, Invalid value for:
+            query parameter before, Invalid value for: query parameter operation,
+            Invalid value for: header X-API-Key, Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/catalog/tenant/{tenant}/database/{tenantDb}/iceberg/{alias}/schemas/{schema}/tables/{table}/preview:
+    get:
+      description: Bounded preview of an Iceberg table's rows, optionally as of a
+        snapshot id (asOf, a string) or a timestamp (asOfTs=<ISO-8601>); at most one
+        selector. asOfTag is unsupported for Iceberg. `limit` clamps the row cap downward.
+      operationId: getApiCatalogTenantTenantDatabaseTenantdbIcebergAliasSchemasSchemaTablesTablePreview
+      parameters:
+      - name: tenant
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: tenantDb
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: asOf
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: asOfTag
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: asOfTs
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IcebergPreviewResponse'
+        '400':
+          description: 'Invalid value for: query parameter asOf, Invalid value for:
+            query parameter asOfTag, Invalid value for: query parameter asOfTs, Invalid
+            value for: query parameter limit, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/catalog/tenant/{tenant}/database/{tenantDb}/recoverable:
     get:
       description: Recently dropped tables of a DuckLake tenant-db that are still
@@ -7927,6 +8346,110 @@ components:
         nodesCount:
           type: integer
           format: int32
+    IcebergDiffResponse:
+      title: IcebergDiffResponse
+      type: object
+      required:
+      - alias
+      - schema
+      - table
+      - from
+      - to
+      - truncated
+      properties:
+        alias:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreviewColumn'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/IcebergDiffRow'
+        truncated:
+          type: boolean
+    IcebergDiffRow:
+      title: IcebergDiffRow
+      type: object
+      required:
+      - change
+      properties:
+        change:
+          type: string
+        values:
+          type: array
+          items: {}
+    IcebergFileEntry:
+      title: IcebergFileEntry
+      type: object
+      required:
+      - path
+      - content
+      - format
+      - recordCount
+      - sequenceNumber
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+        format:
+          type: string
+        recordCount:
+          type: integer
+          format: int64
+        sequenceNumber:
+          type: integer
+          format: int64
+    IcebergHistoryResponse:
+      title: IcebergHistoryResponse
+      type: object
+      required:
+      - alias
+      - schema
+      - table
+      - hasMore
+      properties:
+        alias:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/IcebergSnapshotEntry'
+        hasMore:
+          type: boolean
+    IcebergPreviewResponse:
+      title: IcebergPreviewResponse
+      type: object
+      required:
+      - truncated
+      properties:
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreviewColumn'
+        rows:
+          type: array
+          items:
+            type: array
+            items: {}
+        snapshotId:
+          type: string
+        truncated:
+          type: boolean
     IcebergRestConfig:
       title: IcebergRestConfig
       type: object
@@ -7968,6 +8491,71 @@ components:
           type: array
           items:
             type: string
+    IcebergSnapshotEntry:
+      title: IcebergSnapshotEntry
+      type: object
+      required:
+      - snapshotId
+      - sequenceNumber
+      - committedAt
+      - current
+      properties:
+        snapshotId:
+          type: string
+        parentId:
+          type: string
+        sequenceNumber:
+          type: integer
+          format: int64
+        committedAt:
+          type: string
+          format: date-time
+        operation:
+          type: string
+        addedRecords:
+          type: integer
+          format: int64
+        deletedRecords:
+          type: integer
+          format: int64
+        addedDataFiles:
+          type: integer
+          format: int64
+        deletedDataFiles:
+          type: integer
+          format: int64
+        addedPositionDeletes:
+          type: integer
+          format: int64
+        totalDataFiles:
+          type: integer
+          format: int64
+        current:
+          type: boolean
+    IcebergTableDetailResponse:
+      title: IcebergTableDetailResponse
+      type: object
+      required:
+      - alias
+      - schema
+      - table
+      properties:
+        alias:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogColumnEntry'
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/IcebergFileEntry'
+        currentSnapshot:
+          type: string
     KillStatementRequest:
       title: KillStatementRequest
       type: object

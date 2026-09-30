@@ -1437,6 +1437,41 @@ object Main extends IOApp with LazyLogging:
         )
       )
 
+      // Iceberg catalog views: metadata statements run privileged on an attached read node
+      // (NodeMetadataQuery); preview and diff data go through the routed executor as the caller.
+      // `isAttached` keys on node.startedAt.toEpochMilli, the same incarnation key
+      // IcebergAttachVerifier records with, or the lookup never matches.
+      val icebergCatalogHandlers: Option[ai.starlake.quack.ondemand.api.IcebergCatalogHandlers] =
+        manifestFedStore.map { fedStore =>
+          val meta = new ai.starlake.quack.ondemand.catalog.iceberg.NodeMetadataQuery(
+            readPool = (t, td) => ai.starlake.quack.ondemand.api.PoolPicks.readPoolKey(sup, t, td),
+            readNodes = key =>
+              sup
+                .snapshot(key)
+                .toList
+                .flatMap(_.nodes)
+                .filter(n =>
+                  n.role == ai.starlake.quack.model.Role.ReadOnly ||
+                    n.role == ai.starlake.quack.model.Role.Dual
+                ),
+            isAttached =
+              (n, alias) => attachRegistry.isAttached(n.nodeId, n.startedAt.toEpochMilli, alias),
+            attachSummary = (alias, ids) => attachRegistry.aliasSummary(alias, ids),
+            send = (n, sql) => adapter.send(n, sql, session = None, recordLoad = false),
+            timeoutSec = mgrCfg.catalog.previewTimeoutSec,
+            maxRows = 10000
+          )
+          new ai.starlake.quack.ondemand.api.IcebergCatalogHandlers(
+            sup,
+            sourcesOf = tdId => fedStore.listEnabledSources(tdId),
+            meta = meta,
+            executor = previewExecutor,
+            sessions = sessionTokens.get,
+            cfg = mgrCfg.catalog,
+            audit = auditRecorder
+          )
+        }
+
       val undropHandlers: Option[ai.starlake.quack.ondemand.api.CatalogUndropHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogUndropHandlers(
           sup,
@@ -1657,7 +1692,8 @@ object Main extends IOApp with LazyLogging:
         canonicalTenantIdOf = t =>
           ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
         mcpRoutes = mcpRoutes,
-        quackCfg = Some(quackCfgResolved)
+        quackCfg = Some(quackCfgResolved),
+        icebergCatalog = icebergCatalogHandlers
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
