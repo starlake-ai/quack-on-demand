@@ -80,10 +80,10 @@ final class NodeMetadataQuery(
               // `Main.scala`). `IO.interruptible` only buys real preemption for a reader that
               // actually responds to `Thread.interrupt()`: the native client's chained network
               // reader does. The JDBC/embedded fallback reader drains batches through native JNI
-              // calls, which ignore interrupts, so on that path this is still a bounded wait, same
-              // as `Main.scala`'s caveat -- on a non-interruptible reader, or whenever `send` itself
-              // cannot be cancelled, `timeoutSec` is only observed once that step returns on its
-              // own; `close()` still fires exactly once once the call (eventually) returns.
+              // calls, which ignore interrupts, so on that path this too is only a bounded wait: on
+              // a non-interruptible reader, or whenever `send` itself cannot be cancelled,
+              // `timeoutSec` is only observed once that step returns on its own; `close()` still
+              // fires exactly once once the call (eventually) returns.
               IO.uncancelable { poll =>
                 poll(send(node, sql)).flatMap {
                   case QuackResponse.Failed(err, _) =>

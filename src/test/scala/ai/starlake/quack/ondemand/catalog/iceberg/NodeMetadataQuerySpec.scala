@@ -243,45 +243,32 @@ class NodeMetadataQuerySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "close the reader exactly once when cancelled right after send hands back Ok (regression: acquire must be masked against the flatMap boundary)" in {
-    // Deterministic version of the race `IO.uncancelable` + `poll` guards against: `send` blocks
-    // on `release` INSIDE its own `IO.uncancelable` region, so cancellation requested while `send`
-    // is in flight cannot be delivered until `release` completes -- there is no window where the
-    // fiber can observe cancellation before `send` has handed `Ok` back to the masked continuation.
-    // `started` proves `send` is blocked (not yet returned); `fiber.cancel` is raced on its own
-    // fiber because cancellation itself blocks until `release` unblocks `send`, so the driving fiber
-    // must be free to complete `release` concurrently. This pins the actual interleaving instead of
-    // looping and hoping, unlike the earlier `sendSignal`-only version this replaces.
+    // Single-fiber deterministic version of the race `IO.uncancelable` + `poll` guards against:
+    // `send` runs `IO.canceled` INSIDE its own `IO.uncancelable` region before handing back `Ok`.
+    // `IO.canceled` only sets this fiber's cancellation flag -- masked, it cannot act on it yet --
+    // so cancellation is provably already pending by the time `Ok` reaches the flatMap boundary,
+    // with no dependence on scheduler ordering between two fibers (the earlier started/release
+    // version this replaces relied on `fiber.cancel.start` running before `release.complete`
+    // resumed the query fiber, which work stealing could reorder).
     val allocator = new RootAllocator()
     try
-      val closes  = new AtomicInteger(0)
-      val reader  = arrowReaderOf(allocator)
-      val program =
-        for
-          started <- cats.effect.Deferred[IO, Unit]
-          release <- cats.effect.Deferred[IO, Unit]
-          ok = QuackResponse.Ok(
-            reader,
-            0L,
-            () => {
-              closes.incrementAndGet()
-              reader.close()
-            }
-          )
-          q = newQuery(
-            readNodes = _ => List(node("n1")),
-            isAttached = (_, _) => true,
-            send =
-              (_, _) => IO.uncancelable(_ => started.complete(()) *> release.get *> IO.pure(ok)),
-            timeoutSec = 30 // cancellation here is explicit (fiber.cancel), not timeout-driven
-          )
-          fiber   <- q.run("acme", "lake", "sales", "SELECT 1").start
-          _       <- started.get
-          c       <- fiber.cancel.start
-          _       <- release.complete(())
-          _       <- c.join
-          outcome <- fiber.join
-        yield outcome
-      val outcome = program.unsafeRunSync()
+      val closes = new AtomicInteger(0)
+      val reader = arrowReaderOf(allocator)
+      val ok     = QuackResponse.Ok(
+        reader,
+        0L,
+        () => {
+          closes.incrementAndGet()
+          reader.close()
+        }
+      )
+      val q = newQuery(
+        readNodes = _ => List(node("n1")),
+        isAttached = (_, _) => true,
+        send = (_, _) => IO.uncancelable(_ => IO.canceled *> IO.pure(ok)),
+        timeoutSec = 30 // cancellation here is self-inflicted, not timeout-driven
+      )
+      val outcome = q.run("acme", "lake", "sales", "SELECT 1").start.flatMap(_.join).unsafeRunSync()
       closes.get() shouldBe 1
       outcome shouldBe a[cats.effect.kernel.Outcome.Canceled[IO, Throwable, ?]]
     finally allocator.close()
