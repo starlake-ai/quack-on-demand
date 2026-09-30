@@ -907,7 +907,7 @@ export interface IcebergHistoryResponse {
 
 export interface IcebergFileEntry {
   path: string;
-  content: string;    // data | position-deletes | equality-deletes
+  content: string;    // DATA | POSITION_DELETES | EQUALITY_DELETES
   format: string;
   recordCount: number;
   sequenceNumber: number;
