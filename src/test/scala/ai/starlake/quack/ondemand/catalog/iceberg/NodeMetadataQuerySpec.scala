@@ -242,50 +242,48 @@ class NodeMetadataQuerySpec extends AnyFlatSpec with Matchers:
     finally allocator.close()
   }
 
-  it should "close the reader exactly once when the call is cancelled right after send hands back Ok (regression: acquire must be masked against the flatMap boundary)" in {
-    // Same "start, wait for a Deferred the guarded action completes, then cancel" idiom already
-    // used in QuackHttpAdapterSpec ("release inFlight when the call is cancelled"). Unlike that
-    // test's `IO.never` (which can ONLY resolve via cancellation), `send` here actually completes
-    // on its own -- deliberately, because the bug this guards against is a cancellation landing at
-    // the flatMap boundary RIGHT AFTER `send` returns `Ok`, before the decode's own `.guarantee`
-    // is installed. That is not provably deterministic without a virtual scheduler (this project
-    // has no cats-effect-testkit / TestControl dependency): `sendSignal.get` only proves `send`'s
-    // Deferred-complete step has run, not that `send`'s whole IO has already handed `Ok` back to
-    // the masked continuation. Looping many iterations turns any such race into a failure here
-    // rather than a rare flake in CI; it passed 50/50 in repeated local runs.
+  it should "close the reader exactly once when cancelled right after send hands back Ok (regression: acquire must be masked against the flatMap boundary)" in {
+    // Deterministic version of the race `IO.uncancelable` + `poll` guards against: `send` blocks
+    // on `release` INSIDE its own `IO.uncancelable` region, so cancellation requested while `send`
+    // is in flight cannot be delivered until `release` completes -- there is no window where the
+    // fiber can observe cancellation before `send` has handed `Ok` back to the masked continuation.
+    // `started` proves `send` is blocked (not yet returned); `fiber.cancel` is raced on its own
+    // fiber because cancellation itself blocks until `release` unblocks `send`, so the driving fiber
+    // must be free to complete `release` concurrently. This pins the actual interleaving instead of
+    // looping and hoping, unlike the earlier `sendSignal`-only version this replaces.
     val allocator = new RootAllocator()
     try
-      (1 to 50).foreach { i =>
-        val closes  = new AtomicInteger(0)
-        val reader  = arrowReaderOf(allocator)
-        val program =
-          for
-            sendSignal <- cats.effect.Deferred[IO, Unit]
-            q = newQuery(
-              readNodes = _ => List(node("n1")),
-              isAttached = (_, _) => true,
-              send = (_, _) =>
-                sendSignal.complete(()) *> IO.pure(
-                  QuackResponse.Ok(
-                    reader,
-                    0L,
-                    () => {
-                      closes.incrementAndGet()
-                      reader.close()
-                    }
-                  )
-                ),
-              timeoutSec = 30 // cancellation here is explicit (fiber.cancel), not timeout-driven
-            )
-            fiber <- q.run("acme", "lake", "sales", "SELECT 1").start
-            _     <- sendSignal.get
-            _     <- fiber.cancel
-          yield ()
-        program.unsafeRunSync()
-        withClue(s"iteration $i: ") {
-          closes.get() shouldBe 1
-        }
-      }
+      val closes  = new AtomicInteger(0)
+      val reader  = arrowReaderOf(allocator)
+      val program =
+        for
+          started <- cats.effect.Deferred[IO, Unit]
+          release <- cats.effect.Deferred[IO, Unit]
+          ok = QuackResponse.Ok(
+            reader,
+            0L,
+            () => {
+              closes.incrementAndGet()
+              reader.close()
+            }
+          )
+          q = newQuery(
+            readNodes = _ => List(node("n1")),
+            isAttached = (_, _) => true,
+            send =
+              (_, _) => IO.uncancelable(_ => started.complete(()) *> release.get *> IO.pure(ok)),
+            timeoutSec = 30 // cancellation here is explicit (fiber.cancel), not timeout-driven
+          )
+          fiber   <- q.run("acme", "lake", "sales", "SELECT 1").start
+          _       <- started.get
+          c       <- fiber.cancel.start
+          _       <- release.complete(())
+          _       <- c.join
+          outcome <- fiber.join
+        yield outcome
+      val outcome = program.unsafeRunSync()
+      closes.get() shouldBe 1
+      outcome shouldBe a[cats.effect.kernel.Outcome.Canceled[IO, Throwable, ?]]
     finally allocator.close()
   }
 
