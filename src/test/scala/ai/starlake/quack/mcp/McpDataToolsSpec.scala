@@ -48,6 +48,8 @@ import org.scalatest.matchers.should.Matchers
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.time.Instant
+import scala.collection.mutable.ListBuffer
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 /** Data-tier MCP tool contract: tenant inference, the run_sql row cap, error surfacing, and the
   * describe_table composition. Built over the in-memory supervisor + TestArrow readers; no Postgres
@@ -58,7 +60,8 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
   private val Tenant   = "acme"
   private val TenantDb = "acme_default"
 
-  private val patToken = "qod_pat_alice"
+  private val patToken       = "qod_pat_alice"
+  private val NonAdminPatTok = "qod_pat_bob"
 
   private def patFor(tenant: Option[String], admin: Boolean): McpPrincipal =
     val scope = SessionScope(
@@ -257,7 +260,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     * (columns) by substring match on the SQL, exactly like the respond() dispatch in
     * IcebergCatalogHandlersSpec.
     */
-  private def icebergMeta(): NodeMetadataQuery =
+  private def icebergMeta(
+      metaSqls: ListBuffer[String] = ListBuffer.empty
+  ): NodeMetadataQuery =
     val node = RunningNode(
       nodeId = "n1",
       poolKey = PoolKey(Tenant, TenantDb, "sales"),
@@ -276,6 +281,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       attachSummary = (_, _) => None,
       send = (_, sql) =>
         IO {
+          metaSqls += sql
           if sql.contains("iceberg_load_table_response") then
             QuackResponse.Ok(icebergSnapshotsReader(), 0L, () => ())
           else if sql.contains("iceberg_metadata") then
@@ -291,7 +297,11 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
   /** `McpDataTools` wired with a stub `IcebergCatalogHandlers` exposing one enabled `ice` alias on
     * `acme_default`; `previewExec` answers the routed preview/sample query.
     */
-  private def icebergFixture(previewExec: CatalogPreviewHandlers.PreviewExecutor): McpDataTools =
+  private def icebergFixture(
+      previewExec: CatalogPreviewHandlers.PreviewExecutor,
+      metaSqls: ListBuffer[String] = ListBuffer.empty,
+      sampleTimeout: FiniteDuration = 30.seconds
+  ): McpDataTools =
     val store   = new InMemoryControlPlaneStore()
     val backend = StubQuackBackend.noop()
     val tracker = new NodeLoadTracker
@@ -315,16 +325,21 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val icebergHandlers = new IcebergCatalogHandlers(
       sup,
       sourcesOf = id => sources.getOrElse(id, Nil),
-      meta = icebergMeta(),
+      meta = icebergMeta(metaSqls),
       executor = previewExec,
       callerOf = RestCaller.staticOnly,
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 
-    val scopeOf: String => Option[SessionScope] =
-      t =>
-        if t == patToken then Some(SessionScope(superuser = false, manageableTenants = Set(Tenant)))
-        else None
+    // Fail-closed like Main's mcpScopeOf: only the static key (none here) is "unrestricted";
+    // every other token resolves to its own scope, or to NoAccess when unknown.
+    val scopeOf: String => Option[SessionScope] = SessionScope.failClosed(
+      None,
+      Map(
+        patToken       -> SessionScope(superuser = false, manageableTenants = Set(Tenant)),
+        NonAdminPatTok -> SessionScope.NoAccess
+      ).get
+    )
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
     val history = new CatalogHistoryHandlers((_, _) => stubReader, sup)
     val tags    = new TagHandlers(
@@ -351,7 +366,8 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       tenantDbs,
       profile,
       scopeOf,
-      iceberg = Some(icebergHandlers)
+      iceberg = Some(icebergHandlers),
+      sampleTimeout = sampleTimeout
     )
 
   private def call(
@@ -820,22 +836,24 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       patToken
     )
 
-  private def describeIceberg(tools: McpDataTools, principal: McpPrincipal) =
+  private def describeIcebergIO(tools: McpDataTools, principal: McpPrincipal) =
     // Only a superuser credential names the tenant; a PAT infers it.
     val tenantArg =
       if principal == McpPrincipal.StaticKey then List("tenant" -> Json.fromString(Tenant))
       else Nil
-    call(
-      tools,
-      "describe_table",
-      principal,
-      (List(
-        "database" -> Json.fromString(TenantDb),
-        "schema"   -> Json.fromString(IcebergSchema),
-        "table"    -> Json.fromString(IcebergTable),
-        "iceberg"  -> Json.fromString(IcebergAlias)
-      ) ++ tenantArg)*
-    )
+    val args = List(
+      "database" -> Json.fromString(TenantDb),
+      "schema"   -> Json.fromString(IcebergSchema),
+      "table"    -> Json.fromString(IcebergTable),
+      "iceberg"  -> Json.fromString(IcebergAlias)
+    ) ++ tenantArg
+    tools.tools
+      .find(_.name == "describe_table")
+      .getOrElse(fail("tool describe_table not defined"))
+      .run(principal, JsonObject(args*))
+
+  private def describeIceberg(tools: McpDataTools, principal: McpPrincipal) =
+    describeIcebergIO(tools, principal).unsafeRunSync()
 
   it should "run the iceberg sample as the PAT's owner with its restriction, never system" in {
     val seen = scala.collection.mutable.ListBuffer.empty[ExecCaller]
@@ -871,7 +889,50 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       json.hcursor.downField("sample").focus shouldBe None
   }
 
-  it should "answer the iceberg-unavailable error when handlers are not wired" in {
+  it should "degrade to the iceberg detail alone when the sample never completes" in {
+    val never: CatalogPreviewHandlers.PreviewExecutor = (_, _, _) => IO.never
+    val tools = icebergFixture(never, sampleTimeout = 200.millis)
+    val out   = describeIcebergIO(tools, icebergPat).timeout(10.seconds).unsafeRunSync()
+    val json  = out.toOption.getOrElse(fail(s"expected Right, got $out"))
+    json.hcursor.downField("columns").as[List[Json]].toOption.get should not be empty
+    json.hcursor.downField("sample").focus shouldBe None
+  }
+
+  /** A tenant-scoped, NON-admin PAT: its scope manages no tenant. */
+  private val nonAdminPat: McpPrincipal =
+    new McpPrincipal.Pat(
+      PatPrincipal(
+        user = RbacUser(id = "u2", tenant = Some(Tenant), username = "bob", role = "user"),
+        patId = "pat-2",
+        scope = SessionScope.NoAccess,
+        isAdmin = false,
+        restriction = TokenRestriction.Unrestricted
+      ),
+      NonAdminPatTok
+    )
+
+  "the iceberg tools" should "refuse a non-admin PAT before any metadata read or statement" in {
+    val metaSqls                                     = ListBuffer.empty[String]
+    val execCalls                                    = ListBuffer.empty[String]
+    val exec: CatalogPreviewHandlers.PreviewExecutor = (caller, key, sql) =>
+      execCalls += sql
+      rangeExecutor(10)(caller, key, sql)
+    val tools  = icebergFixture(exec, metaSqls)
+    val common = List(
+      "database" -> Json.fromString(TenantDb),
+      "schema"   -> Json.fromString(IcebergSchema),
+      "table"    -> Json.fromString(IcebergTable),
+      "iceberg"  -> Json.fromString(IcebergAlias)
+    )
+    for tool <- List("describe_table", "table_history") do
+      val out = call(tools, tool, nonAdminPat, common*)
+      out.swap.toOption.getOrElse(fail(s"$tool: expected Left, got $out")) should
+        include("tenant_forbidden")
+    metaSqls shouldBe empty
+    execCalls shouldBe empty
+  }
+
+  "describe_table" should "answer the iceberg-unavailable error when handlers are not wired" in {
     val tools = fixture(rangeExecutor(10))
     val out   = call(
       tools,

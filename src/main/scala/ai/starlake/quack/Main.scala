@@ -1576,7 +1576,9 @@ object Main extends IOApp with LazyLogging:
                   .left
                   .map(_.message)
                   .map { case (b, key) => (b.tenantDbName, key) },
-              iceberg = icebergCatalogHandlers
+              iceberg = icebergCatalogHandlers,
+              sampleTimeout =
+                scala.concurrent.duration.DurationInt(mgrCfg.catalog.previewTimeoutSec).seconds
             )
             val branchTools =
               branchHandlers.map(bh => new ai.starlake.quack.mcp.McpBranchTools(bh, mcpScopeOf))

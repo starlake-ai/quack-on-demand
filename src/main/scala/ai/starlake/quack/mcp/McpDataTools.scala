@@ -24,6 +24,8 @@ import io.circe.{Json, JsonObject}
 import io.circe.syntax._
 import sttp.model.StatusCode
 
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
+
 /** The MCP data tier: the tools every authenticated principal gets. Each tool goes through the SAME
   * enforcement as the REST/FlightSQL surface it mirrors -- `run_sql` through the injected routed
   * executor (StatementValidator, classifier, router), the catalog reads through the handlers'
@@ -55,7 +57,11 @@ final class McpDataTools(
       * federation store wired -- every tool call naming an `iceberg` alias then answers the same
       * caller-facing error rather than routing to the DuckLake catalog handlers by accident.
       */
-    iceberg: Option[IcebergCatalogHandlers] = None
+    iceberg: Option[IcebergCatalogHandlers] = None,
+    /** Bound on the Iceberg `describe_table` sample (a remote scan): past it the call degrades to
+      * the detail alone. Main passes `catalog.previewTimeoutSec`, the REST preview's bound.
+      */
+    sampleTimeout: FiniteDuration = 30.seconds
 ):
 
   import McpDataTools._
@@ -387,7 +393,8 @@ final class McpDataTools(
     * executor as the MCP principal (`callerFor`: the static key is the system caller, a PAT its
     * owner with the token's restriction and id), capped by the token's maxRows. The sample never
     * goes through a REST credential lookup, and any sample failure (no pool, ACL denial, router
-    * failure, a raised error) degrades to the detail alone instead of failing the call.
+    * failure, a raised error, `sampleTimeout` elapsing) degrades to the detail alone instead of
+    * failing the call.
     */
   private def describeIcebergTable(
       principal: McpPrincipal,
@@ -419,7 +426,7 @@ final class McpDataTools(
                   // One row past the cap so `truncated` marks that more rows exist.
                   val sampleSql =
                     IcebergCatalogSql.preview(detail.alias, schema, table, None, eff + 1)
-                  execute(caller, poolKey, sampleSql, eff).attempt.map {
+                  execute(caller, poolKey, sampleSql, eff).timeout(sampleTimeout).attempt.map {
                     case Right(Right(sample)) =>
                       Right(detailOnly.deepMerge(Json.obj("sample" -> sample)))
                     case _ => Right(detailOnly)
