@@ -14,6 +14,7 @@ import SnapshotPicker, { parseSnapshotSelector, type SnapshotSelectorValue } fro
 import Tabs from '../components/Tabs';
 import CatalogHistoryPanel from '../components/CatalogHistoryPanel';
 import RestoreDialog from '../components/RestoreDialog';
+import PreviewTable from '../components/PreviewTable';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -515,44 +516,11 @@ export default function CatalogTableDetail() {
                       <p style={{ color: 'red', marginTop: 8 }}>Error: {previewError}</p>
                     )}
                     {preview && (
-                      <div style={{ marginTop: 12 }}>
-                        {preview.truncated && (
-                          <p className="subtle">
-                            Showing the first {preview.rows.length} rows; the result set is truncated.
-                          </p>
-                        )}
-                        {preview.rows.length === 0
-                          ? <em style={{ color: '#888' }}>no rows</em>
-                          : (
-                            <div style={{ overflowX: 'auto' }}>
-                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                <thead>
-                                  <tr>
-                                    {preview.columns.map(c => (
-                                      <th key={c.name} align="left">
-                                        {c.name}<br />
-                                        <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {preview.rows.map((row, i) => (
-                                    <tr key={i} style={{ borderTop: '1px solid #eee' }}>
-                                      {row.map((v, j) => (
-                                        <td key={j}>
-                                          {v === null || v === undefined
-                                            ? <em style={{ color: '#888' }}>null</em>
-                                            : String(v)}
-                                        </td>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                      </div>
+                      <PreviewTable
+                        columns={preview.columns}
+                        rows={preview.rows}
+                        truncated={preview.truncated}
+                      />
                     )}
                   </>
                 ),

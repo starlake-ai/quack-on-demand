@@ -9,6 +9,7 @@ import type {
 } from '../api/types';
 import Breadcrumb from '../components/Breadcrumb';
 import Tabs from '../components/Tabs';
+import PreviewTable from '../components/PreviewTable';
 
 const HISTORY_PAGE = 50;
 
@@ -23,10 +24,21 @@ function diffErrorMessage(e: unknown): string {
   return errorMessage(e);
 }
 
-function renderCell(v: unknown): React.ReactNode {
-  return v === null || v === undefined
-    ? <em style={{ color: '#888' }}>null</em>
-    : String(v);
+/** Builds one snapshot-id select's options from the loaded history plus any ids that must be
+  * shown even though they are not (or no longer) in that list -- typically the currently
+  * selected id, or the resolved current snapshot. `history` here can be the operation-filtered
+  * list backing the History tab: filtering that list must never make a select silently drop
+  * the id it is currently showing, so every id in `keep` is included even if history is empty
+  * or does not (yet) contain it. */
+function snapshotOptions(
+  history: IcebergSnapshotEntry[],
+  keep: (string | null | undefined)[]
+): { id: string; label: string }[] {
+  const opts = history.map(h => ({ id: h.snapshotId, label: h.snapshotId + (h.current ? ' (current)' : '') }));
+  for (const id of keep) {
+    if (id && !opts.some(o => o.id === id)) opts.unshift({ id, label: id });
+  }
+  return opts;
 }
 
 export default function IcebergTableDetail() {
@@ -51,6 +63,9 @@ export default function IcebergTableDetail() {
   const [preview, setPreview] = useState<IcebergPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // Sequence guard: a fast "As of" change (or the History tab's Preview action firing twice)
+  // must not let an older in-flight preview response render after a newer one already landed.
+  const previewSeq = useRef(0);
 
   // ----- Compare -----
   const [diffFrom, setDiffFrom] = useState('');
@@ -59,6 +74,8 @@ export default function IcebergTableDetail() {
   const [diff, setDiff] = useState<IcebergDiffResponse | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+  // Same guard as previewSeq, for the Compare tab's diff requests.
+  const diffSeq = useRef(0);
 
   const [activeTab, setActiveTab] = useState('columns');
 
@@ -102,15 +119,16 @@ export default function IcebergTableDetail() {
 
   function loadPreview(asOf: string) {
     if (!tenant || !tenantDb || !alias || !schema || !table) return;
+    const seq = ++previewSeq.current;
     setPreviewLoading(true);
     setPreviewError(null);
     api.previewIceberg(tenant, tenantDb, alias, schema, table, {
       asOf: asOf || undefined,
       limit: 100,
     })
-      .then(r => setPreview(r))
-      .catch(e => setPreviewError(errorMessage(e)))
-      .finally(() => setPreviewLoading(false));
+      .then(r => { if (seq === previewSeq.current) setPreview(r); })
+      .catch(e => { if (seq === previewSeq.current) setPreviewError(errorMessage(e)); })
+      .finally(() => { if (seq === previewSeq.current) setPreviewLoading(false); });
   }
 
   function loadDiff(from: string, to: string, changeType?: string) {
@@ -119,14 +137,15 @@ export default function IcebergTableDetail() {
       setDiffError('pick a "from" and a "to" snapshot.');
       return;
     }
+    const seq = ++diffSeq.current;
     setDiffLoading(true);
     setDiffError(null);
     api.diffIceberg(tenant, tenantDb, alias, schema, table, from, to, {
       changeType: (changeType !== undefined ? changeType : diffChangeType) || undefined,
     })
-      .then(r => setDiff(r))
-      .catch(e => setDiffError(diffErrorMessage(e)))
-      .finally(() => setDiffLoading(false));
+      .then(r => { if (seq === diffSeq.current) setDiff(r); })
+      .catch(e => { if (seq === diffSeq.current) setDiffError(diffErrorMessage(e)); })
+      .finally(() => { if (seq === diffSeq.current) setDiffLoading(false); });
   }
 
   /** History row action: switch to the Preview tab showing that snapshot. */
@@ -152,15 +171,11 @@ export default function IcebergTableDetail() {
   const tEnc = encodeURIComponent(tenant!);
   const tdEnc = encodeURIComponent(tenantDb!);
 
-  // Compare selects offer every loaded history id, plus the current snapshot if it isn't
-  // already among them (it usually is, as the newest entry with current=true).
-  const selectorOptions = (() => {
-    const opts = history.map(h => ({ id: h.snapshotId, label: h.snapshotId + (h.current ? ' (current)' : '') }));
-    if (detail?.currentSnapshot && !opts.some(o => o.id === detail.currentSnapshot)) {
-      opts.unshift({ id: detail.currentSnapshot, label: `${detail.currentSnapshot} (current)` });
-    }
-    return opts;
-  })();
+  // Both selects are built from `history`, which the History tab's own operation filter can
+  // narrow -- so each one also keeps whatever it is currently showing (and the resolved current
+  // snapshot) as an option even when that id has fallen out of the filtered list.
+  const previewOptions = snapshotOptions(history, [previewAsOf, detail?.currentSnapshot]);
+  const selectorOptions = snapshotOptions(history, [diffFrom, diffTo, detail?.currentSnapshot]);
 
   return (
     <div>
@@ -284,8 +299,8 @@ export default function IcebergTableDetail() {
                           }}
                         >
                           <option value="">Current</option>
-                          {history.map(h => (
-                            <option key={h.snapshotId} value={h.snapshotId}>{h.snapshotId}</option>
+                          {previewOptions.map(o => (
+                            <option key={o.id} value={o.id}>{o.label}</option>
                           ))}
                         </select>
                       </label>
@@ -293,38 +308,20 @@ export default function IcebergTableDetail() {
                     {previewLoading && <p className="subtle">Loading preview...</p>}
                     {previewError && <p style={{ color: 'red', marginTop: 8 }}>Error: {previewError}</p>}
                     {preview && (
-                      <div style={{ marginTop: 12 }}>
-                        {preview.truncated && (
-                          <p className="subtle">
-                            Showing the first {preview.rows.length} rows; the result set is truncated.
-                          </p>
-                        )}
-                        {preview.rows.length === 0
-                          ? <em style={{ color: '#888' }}>no rows</em>
-                          : (
-                            <div style={{ overflowX: 'auto' }}>
-                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                <thead>
-                                  <tr>
-                                    {preview.columns.map(c => (
-                                      <th key={c.name} align="left">
-                                        {c.name}<br />
-                                        <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {preview.rows.map((row, i) => (
-                                    <tr key={i} style={{ borderTop: '1px solid #eee' }}>
-                                      {row.map((v, j) => <td key={j}>{renderCell(v)}</td>)}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                      </div>
+                      <>
+                        <p className="subtle" style={{ marginBottom: 0 }}>
+                          {preview.snapshotId == null
+                            ? 'No snapshot yet.'
+                            : previewAsOf
+                              ? `Snapshot ${preview.snapshotId}`
+                              : `Current snapshot ${preview.snapshotId}`}
+                        </p>
+                        <PreviewTable
+                          columns={preview.columns}
+                          rows={preview.rows}
+                          truncated={preview.truncated}
+                        />
+                      </>
                     )}
                   </>
                 ),
@@ -374,42 +371,18 @@ export default function IcebergTableDetail() {
                         <p className="subtle">
                           Diffing snapshot {diff.from} against snapshot {diff.to}.
                         </p>
-                        {diff.truncated && (
-                          <p className="subtle">
-                            Showing the first {diff.rows.length} rows; the result set is truncated.
-                          </p>
-                        )}
-                        {diff.rows.length === 0
-                          ? <em style={{ color: '#888' }}>no row changes</em>
-                          : (
-                            <div style={{ overflowX: 'auto' }}>
-                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                                <thead>
-                                  <tr>
-                                    <th align="left">Change</th>
-                                    {diff.columns.map(c => (
-                                      <th key={c.name} align="left">
-                                        {c.name}<br />
-                                        <span className="subtle" style={{ fontWeight: 'normal' }}>{c.dataType}</span>
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {diff.rows.map((r, i) => (
-                                    <tr key={i} style={{ borderTop: '1px solid #eee' }}>
-                                      <td>
-                                        <span className={'badge ' + (r.change === 'added' ? 'good' : 'bad')}>
-                                          {r.change}
-                                        </span>
-                                      </td>
-                                      {r.values.map((v, j) => <td key={j}>{renderCell(v)}</td>)}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
+                        <PreviewTable
+                          columns={diff.columns}
+                          rows={diff.rows.map(r => r.values)}
+                          truncated={diff.truncated}
+                          emptyLabel="no row changes"
+                          leadingHeader="Change"
+                          leadingCell={(_row, i) => (
+                            <span className={'badge ' + (diff.rows[i].change === 'added' ? 'good' : 'bad')}>
+                              {diff.rows[i].change}
+                            </span>
                           )}
+                        />
                       </div>
                     )}
                   </>
