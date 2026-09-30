@@ -16,6 +16,14 @@ class IcebergCatalogSqlSpec extends AnyFlatSpec with Matchers:
     IcebergCatalogSql.tables("ice", "probe") should include("schema_name = 'probe'")
   }
 
+  "files" should "report DATA, not EXISTING, for a data file" in {
+    val sql = IcebergCatalogSql.files("ice", "probe", "t")
+    sql should include(
+      "CASE WHEN manifest_content = 'DATA' THEN 'DATA' ELSE content END AS content"
+    )
+    sql should include("iceberg_metadata(\"ice\".\"probe\".\"t\")")
+  }
+
   "snapshots" should "read only snapshots and current-snapshot-id, never credentials" in {
     val sql = IcebergCatalogSql.snapshots("ice", "probe", "t", SnapshotFilter.Page(None, None), 50)
     sql should include("iceberg_load_table_response(\"ice\".\"probe\".\"t\")")

@@ -32,8 +32,13 @@ object IcebergCatalogSql:
   def columns(alias: String, schema: String, table: String): String =
     s"SELECT column_name, column_type, \"null\" FROM (DESCRIBE ${target(alias, schema, table)})"
 
+  /** DuckDB 1.5.6's `iceberg_metadata()` reports `content = EXISTING` for a data file ("DATA" only
+    * appears in `manifest_content`) and `POSITION_DELETES` / `EQUALITY_DELETES` for delete files;
+    * the CASE folds the data-file case back to "DATA" so callers never see "EXISTING".
+    */
   def files(alias: String, schema: String, table: String): String =
-    "SELECT file_path, content, file_format, record_count, manifest_sequence_number " +
+    "SELECT file_path, CASE WHEN manifest_content = 'DATA' THEN 'DATA' ELSE content END AS content, " +
+      "file_format, record_count, manifest_sequence_number " +
       s"FROM iceberg_metadata(${target(alias, schema, table)}) " +
       "ORDER BY manifest_sequence_number DESC, file_path"
 

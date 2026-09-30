@@ -348,13 +348,10 @@ class IcebergCatalogE2ESpec extends AnyFlatSpec with Matchers with BeforeAndAfte
   "the files builder" should "list at least one live data file and one position-delete file" in {
     requireFixture()
     val contents = stringColumn(c.filesJson, "content")
-    // DuckDB 1.5.6's `iceberg_metadata()` prints "EXISTING" for a live data file's `content` column,
-    // never the literal "DATA" the Iceberg spec's FileContentType enum name would suggest - a
-    // separate `manifest_content` column (not selected by this builder) is what carries "DATA" vs
-    // "DELETE". "POSITION_DELETES" is unambiguous and is exactly what the builder selects. Verified
-    // against this fixture on 2026-09-30; noted here because the brief this spec was written from
-    // expected "DATA" and that string never appears in `content`.
-    contents should contain("EXISTING")
+    // DuckDB 1.5.6's `iceberg_metadata()` prints "EXISTING" in `content` for a live data file;
+    // the builder folds it to "DATA" through `manifest_content`, so "EXISTING" must never surface.
+    contents should contain("DATA")
+    contents should not contain "EXISTING"
     contents should contain("POSITION_DELETES")
   }
 
