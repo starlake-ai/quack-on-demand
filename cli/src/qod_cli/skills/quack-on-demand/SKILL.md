@@ -1248,7 +1248,8 @@ The same views are just SQL under the hood, usable directly through `qod sql`
 (or any DuckDB client behind the ATTACH):
 
 ```sql
--- what `qod catalog history ... --iceberg` pages and filters
+-- a raw snapshot list for ad hoc queries; `qod catalog history ... --iceberg` instead reads
+-- iceberg_load_table_response, which carries per-snapshot summary counts this function does not
 SELECT * FROM iceberg_snapshots(icelake.analytics.orders);
 
 -- what `qod catalog preview ... --iceberg --as-of <id>` runs
