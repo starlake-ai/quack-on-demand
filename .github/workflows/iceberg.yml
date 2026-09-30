@@ -122,6 +122,7 @@ jobs:
       # Kept in one place so the run step and the verify step cannot drift apart.
       SPECS: >-
         ai.starlake.quack.ondemand.federation.IcebergRestE2ESpec
+        ai.starlake.quack.ondemand.federation.IcebergCatalogE2ESpec
         ai.starlake.quack.ondemand.federation.IcebergAttachRecoverySpec
         ai.starlake.quack.ondemand.federation.FederationBlobBuilderSpec
         ai.starlake.quack.ondemand.federation.iceberg.IcebergSetupSqlSpec
