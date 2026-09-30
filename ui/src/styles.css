@@ -387,6 +387,15 @@ legend { color: var(--text-soft); padding: 0 .4rem; font-weight: 500; }
 .badge.role-readonly  { background: rgba(52,211,153,.15);  color: var(--good); }
 .badge.role-writeonly { background: rgba(245,158,11,.15); color: var(--accent); }
 
+/* ----- Catalog / Iceberg schema-namespace tree selection -----
+   Shared by CatalogBrowser's schema list and IcebergCatalogBrowser's
+   namespace list: the active row needs a theme-aware highlight, not a
+   hard-coded light background (unreadable under the app's dark text). */
+.tree-item.selected {
+  background: rgba(245, 158, 11, .15);
+  color: var(--accent);
+}
+
 /* ----- Metrics tiles ----- */
 .metric-grid {
   display: grid;

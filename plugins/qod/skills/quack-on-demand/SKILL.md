@@ -1265,8 +1265,9 @@ Limits and differences from the DuckLake views:
 - **Snapshot ids are strings everywhere** - JSON fields, `--as-of`, `--before`,
   `--from` / `--to`. Iceberg snapshot ids are random 64-bit values, too big for
   a JSON number to round-trip safely.
-- `qod catalog describe ... --iceberg` is **current-snapshot only** - no
-  `--as-of` / `--as-of-tag` / `--as-of-ts` (refused). Time travel lives in
+- The CLI refuses `--as-of` / `--as-of-tag` / `--as-of-ts` with `--iceberg` on
+  `qod catalog describe`: table detail is current-only, and the server's
+  table-detail route itself takes no selector. Time travel lives in
   `preview` and `data-diff` only; `--as-of-tag` is refused there too (Iceberg
   tags are not exposed through this path) - use `--as-of` (a snapshot id) or
   `--as-of-ts`.

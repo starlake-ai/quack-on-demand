@@ -145,11 +145,11 @@ export default function CatalogBrowser({
                     <li
                       key={s.name}
                       onClick={() => setSchema(s.name)}
+                      className={'tree-item' + (active ? ' selected' : '')}
                       style={{
                         cursor: 'pointer',
                         padding: '4px 8px',
                         borderRadius: 4,
-                        background: active ? '#e6f0ff' : 'transparent',
                         fontWeight: active ? 600 : 400,
                       }}
                     >

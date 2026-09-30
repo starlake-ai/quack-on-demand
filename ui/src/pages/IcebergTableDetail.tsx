@@ -434,10 +434,17 @@ export default function IcebergTableDetail() {
                                   <button type="button" onClick={() => previewFromHistory(h.snapshotId)}>
                                     Preview
                                   </button>
-                                  {' '}
-                                  <button type="button" onClick={() => compareWithCurrentFromHistory(h.snapshotId)}>
-                                    Compare with current
-                                  </button>
+                                  {!h.current && (
+                                    <>
+                                      {' '}
+                                      <button
+                                        type="button"
+                                        onClick={() => compareWithCurrentFromHistory(h.snapshotId)}
+                                      >
+                                        Compare with current
+                                      </button>
+                                    </>
+                                  )}
                                 </td>
                               </tr>
                             ))}

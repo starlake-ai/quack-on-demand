@@ -24,7 +24,8 @@ def _at_most_one(**selectors) -> None:
 def _refused_with_iceberg(**flags) -> None:
     given = [name for name, value in flags.items() if value is not None]
     if given:
-        raise typer.BadParameter(f"{' and '.join(given)} are not supported with --iceberg")
+        verb = "is" if len(given) == 1 else "are"
+        raise typer.BadParameter(f"{' and '.join(given)} {verb} not supported with --iceberg")
 
 
 def _snapshot_id(value: str | None, flag: str) -> int | None:
