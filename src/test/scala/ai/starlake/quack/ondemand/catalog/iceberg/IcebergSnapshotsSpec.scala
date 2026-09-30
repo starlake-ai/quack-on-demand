@@ -82,8 +82,42 @@ class IcebergSnapshotsSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "reject a malformed row instead of guessing" in {
-    IcebergSnapshots.parse(List(List(Json.fromString("1")))).isLeft shouldBe true
-    IcebergSnapshots.parse(List(row("1", None, 1, 1, "not json", false))).isLeft shouldBe true
+    IcebergSnapshots.parse(List(List(Json.fromString("1")))) should matchPattern {
+      case Left(IcebergSnapshots.ParseError.Malformed(_)) =>
+    }
+    IcebergSnapshots.parse(List(row("1", None, 1, 1, "not json", false))) should matchPattern {
+      case Left(IcebergSnapshots.ParseError.Malformed(_)) =>
+    }
+  }
+
+  it should "refuse a format-v1 row (null seq) with ParseError.FormatV1" in {
+    val v1Row = List(
+      Json.fromString("7761858545720969174"),
+      Json.Null,
+      Json.Null,
+      Json.fromLong(1790709486022L),
+      Json.fromString(
+        """{"operation":"append","total-records":"3","total-data-files":"1","added-records":"3","added-data-files":"1"}"""
+      ),
+      Json.fromBoolean(false)
+    )
+    IcebergSnapshots.parse(List(v1Row)) shouldBe Left(IcebergSnapshots.ParseError.FormatV1)
+  }
+
+  it should "refuse a mixed list containing any format-v1 (null seq) row" in {
+    val v1Row = List(
+      Json.fromString("7761858545720969174"),
+      Json.Null,
+      Json.Null,
+      Json.fromLong(1790709486022L),
+      Json.fromString(
+        """{"operation":"append","total-records":"3","total-data-files":"1","added-records":"3","added-data-files":"1"}"""
+      ),
+      Json.fromBoolean(false)
+    )
+    IcebergSnapshots.parse(rows.take(1) ++ List(v1Row)) shouldBe Left(
+      IcebergSnapshots.ParseError.FormatV1
+    )
   }
 
   "validId" should "accept 64-bit decimal ids only" in {

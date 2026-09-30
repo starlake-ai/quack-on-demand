@@ -19,6 +19,12 @@ final case class IcebergSnapshot(
 
 object IcebergSnapshots:
 
+  enum ParseError:
+    /** A row with a NULL sequence number: the table is Iceberg format v1, which these views refuse.
+      */
+    case FormatV1
+    case Malformed(message: String)
+
   val IdPattern = "-?\\d{1,19}".r
 
   /** Whether `raw` may be interpolated into SQL as a snapshot id. */
@@ -31,29 +37,36 @@ object IcebergSnapshots:
     * ts_ms, summary_json, is_current`. `summary_json` is the snapshot's summary object serialized
     * as VARCHAR on the node.
     */
-  def parse(rows: List[List[Json]]): Either[String, List[IcebergSnapshot]] =
-    rows.foldRight[Either[String, List[IcebergSnapshot]]](Right(Nil)) { (row, acc) =>
+  def parse(rows: List[List[Json]]): Either[ParseError, List[IcebergSnapshot]] =
+    rows.foldRight[Either[ParseError, List[IcebergSnapshot]]](Right(Nil)) { (row, acc) =>
       acc.flatMap(tail => parseRow(row).map(_ :: tail))
     }
 
-  private def parseRow(row: List[Json]): Either[String, IcebergSnapshot] =
+  private def parseRow(row: List[Json]): Either[ParseError, IcebergSnapshot] =
     row match
       case List(id, parent, seq, ts, summary, cur) =>
         for
-          sid <- id.asString.filter(validId).toRight(s"bad snapshot_id: $id")
+          _   <- Either.cond(!seq.isNull, (), ParseError.FormatV1)
+          sid <- id.asString
+            .filter(validId)
+            .toRight(ParseError.Malformed(s"bad snapshot_id: $id"))
           pid = parent.asString.filter(validId)
-          sq <- seq.asNumber.flatMap(_.toLong).toRight(s"bad seq: $seq")
-          t  <- ts.asNumber.flatMap(_.toLong).toRight(s"bad ts_ms: $ts")
-          sj <- summary.asString.toRight(s"bad summary: $summary")
-          sm <- parser.parse(sj).left.map(_.getMessage).flatMap(summaryMap)
-          c  <- cur.asBoolean.toRight(s"bad is_current: $cur")
+          sq <- seq.asNumber.flatMap(_.toLong).toRight(ParseError.Malformed(s"bad seq: $seq"))
+          t  <- ts.asNumber.flatMap(_.toLong).toRight(ParseError.Malformed(s"bad ts_ms: $ts"))
+          sj <- summary.asString.toRight(ParseError.Malformed(s"bad summary: $summary"))
+          sm <- parser
+            .parse(sj)
+            .left
+            .map(e => ParseError.Malformed(e.getMessage))
+            .flatMap(summaryMap)
+          c <- cur.asBoolean.toRight(ParseError.Malformed(s"bad is_current: $cur"))
         yield IcebergSnapshot(sid, pid, sq, t, sm, c)
-      case other => Left(s"expected 6 columns, got ${other.size}")
+      case other => Left(ParseError.Malformed(s"expected 6 columns, got ${other.size}"))
 
-  private def summaryMap(j: Json): Either[String, Map[String, String]] =
+  private def summaryMap(j: Json): Either[ParseError, Map[String, String]] =
     j.asObject
       .map(_.toMap.flatMap((k, v) => v.asString.orElse(v.asNumber.map(_.toString)).map(k -> _)))
-      .toRight("summary is not an object")
+      .toRight(ParseError.Malformed("summary is not an object"))
 
   def tooLargeForDiff(snaps: List[IcebergSnapshot], maxFiles: Int): Boolean =
     snaps.exists(_.count("total-data-files").exists(_ > maxFiles))
