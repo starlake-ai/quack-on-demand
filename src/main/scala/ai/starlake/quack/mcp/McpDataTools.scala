@@ -10,6 +10,7 @@ import ai.starlake.quack.ondemand.api.{
   CatalogPreviewHandlers,
   ErrorResponse,
   ExecCaller,
+  IcebergCatalogHandlers,
   PoolPicks,
   ProfileHandlers,
   TagHandlers,
@@ -48,7 +49,12 @@ final class McpDataTools(
     branchTarget: (String, String, String) => Either[
       String,
       (String, ai.starlake.quack.model.PoolKey)
-    ] = (_, _, b) => Left(s"branch '$b' not found (branching unavailable)")
+    ] = (_, _, b) => Left(s"branch '$b' not found (branching unavailable)"),
+    /** Read-only views over external Iceberg REST catalogs (Task 8). `None` on a manager with no
+      * federation store wired -- every tool call naming an `iceberg` alias then answers the same
+      * caller-facing error rather than routing to the DuckLake catalog handlers by accident.
+      */
+    iceberg: Option[IcebergCatalogHandlers] = None
 ):
 
   import McpDataTools._
@@ -300,9 +306,13 @@ final class McpDataTools(
     inputSchema = objectSchema(
       required = List("database", "schema", "table"),
       props = "database" -> strProp("Database (tenant-db) name."),
-      "schema" -> strProp("Schema name."),
-      "table"  -> strProp("Table name."),
-      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
+      "schema"  -> strProp("Schema name."),
+      "table"   -> strProp("Table name."),
+      "tenant"  -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
+      "iceberg" ->
+        strProp(
+          "Alias of an attached iceberg_rest source; the schema and table are inside that catalog."
+        ),
       branchProp
     ),
     adminOnly = false,
@@ -321,42 +331,102 @@ final class McpDataTools(
       yield (tenant, t._1, t._2, schema, table)) match
         case Left(err)                                          => IO.pure(Left(err))
         case Right((tenant, database, poolKey0, schema, table)) =>
-          IO.blocking(
-            bridge(
-              catalog
-                .getTable(tenant, database, schema, table, None, None, None, principal.rawToken)(
-                  scopeOf
+          str(args, "iceberg") match
+            case Some(alias) =>
+              describeIcebergTable(principal, tenant, database, alias, schema, table)
+            case None =>
+              IO.blocking(
+                bridge(
+                  catalog
+                    .getTable(
+                      tenant,
+                      database,
+                      schema,
+                      table,
+                      None,
+                      None,
+                      None,
+                      principal.rawToken
+                    )(
+                      scopeOf
+                    )
                 )
-            )
-          ).flatMap {
+              ).flatMap {
+                case Left(err)     => IO.pure(Left(err))
+                case Right(detail) =>
+                  poolKey0 match
+                    case None =>
+                      // No routable pool: the schema alone is still an answer.
+                      IO.pure(Right(Json.obj("table" -> detail.asJson)))
+                    case Some(poolKey) =>
+                      // LIMIT one past the sample cap so `truncated` marks that more rows exist.
+                      val sampleSql =
+                        s"""SELECT * FROM "$schema"."$table" LIMIT ${SampleRows + 1}"""
+                      val caller = callerFor(principal)
+                      // The token's maxRows must lower this preview too, not just run_sql: the
+                      // invariant is "a token can lower the cap and never raise it", stated
+                      // without qualifying it to one tool.
+                      val eff = caller.effectiveMaxRows(SampleRows, SampleRows)
+                      execute(caller, poolKey, sampleSql, eff).map {
+                        case Left(_)       => Right(Json.obj("table" -> detail.asJson))
+                        case Right(sample) =>
+                          Right(
+                            Json.obj(
+                              "table"   -> detail.asJson,
+                              "columns" -> detail.columns.asJson,
+                              "sample"  -> sample
+                            )
+                          )
+                      }
+              }
+  )
+
+  /** `describe_table` routed at an Iceberg alias: table detail plus a small `sample` preview, both
+    * through [[IcebergCatalogHandlers]] rather than the DuckLake catalog reader.
+    */
+  private def describeIcebergTable(
+      principal: McpPrincipal,
+      tenant: String,
+      database: String,
+      alias: String,
+      schema: String,
+      table: String
+  ): IO[Either[String, Json]] =
+    iceberg match
+      case None      => IO.pure(Left(IcebergUnavailable))
+      case Some(ice) =>
+        ice
+          .detail(tenant, database, alias, schema, table, principal.rawToken)(scopeOf)
+          .map(bridge)
+          .flatMap {
             case Left(err)     => IO.pure(Left(err))
             case Right(detail) =>
-              poolKey0 match
-                case None =>
-                  // No routable pool: the schema alone is still an answer.
-                  IO.pure(Right(Json.obj("table" -> detail.asJson)))
-                case Some(poolKey) =>
-                  // LIMIT one past the sample cap so `truncated` marks that more rows exist.
-                  val sampleSql =
-                    s"""SELECT * FROM "$schema"."$table" LIMIT ${SampleRows + 1}"""
-                  val caller = callerFor(principal)
-                  // The token's maxRows must lower this preview too, not just run_sql: the
-                  // invariant is "a token can lower the cap and never raise it", stated without
-                  // qualifying it to one tool.
-                  val eff = caller.effectiveMaxRows(SampleRows, SampleRows)
-                  execute(caller, poolKey, sampleSql, eff).map {
-                    case Left(_)       => Right(Json.obj("table" -> detail.asJson))
-                    case Right(sample) =>
-                      Right(
-                        Json.obj(
-                          "table"   -> detail.asJson,
-                          "columns" -> detail.columns.asJson,
-                          "sample"  -> sample
-                        )
+              ice
+                .preview(
+                  tenant,
+                  database,
+                  alias,
+                  schema,
+                  table,
+                  None,
+                  None,
+                  None,
+                  Some(SampleRows),
+                  principal.rawToken
+                )(scopeOf)
+                .map(bridge)
+                .map {
+                  case Left(err)      => Left(err)
+                  case Right(preview) =>
+                    Right(
+                      Json.obj(
+                        "table"   -> detail.asJson,
+                        "columns" -> detail.columns.asJson,
+                        "sample"  -> preview.asJson
                       )
-                  }
+                    )
+                }
           }
-  )
 
   // ---------- table_history ----------
 
@@ -364,14 +434,19 @@ final class McpDataTools(
     name = "table_history",
     description =
       "Snapshot history of one table: who changed it, when, and how (change verbs). Use the " +
-        "snapshot ids with run_sql time travel: AT (VERSION => n).",
+        "snapshot ids with run_sql time travel: AT (VERSION => n). For an iceberg source, " +
+        "snapshot ids are strings; time travel with run_sql AT (VERSION => <id>).",
     inputSchema = objectSchema(
       required = List("database", "schema", "table"),
       props = "database" -> strProp("Database (tenant-db) name."),
-      "schema" -> strProp("Schema name."),
-      "table"  -> strProp("Table name."),
-      "limit"  -> intProp("Max history entries (default 50)."),
-      "tenant" -> strProp("Tenant id; only for superuser credentials (PATs infer it).")
+      "schema"  -> strProp("Schema name."),
+      "table"   -> strProp("Table name."),
+      "limit"   -> intProp("Max history entries (default 50)."),
+      "tenant"  -> strProp("Tenant id; only for superuser credentials (PATs infer it)."),
+      "iceberg" ->
+        strProp(
+          "Alias of an attached iceberg_rest source; the schema and table are inside that catalog."
+        )
     ),
     adminOnly = false,
     run = (principal, args) =>
@@ -384,23 +459,42 @@ final class McpDataTools(
       yield (tenant, database, schema, table)) match
         case Left(err)                                => IO.pure(Left(err))
         case Right((tenant, database, schema, table)) =>
-          IO.blocking(
-            bridge(
-              history.history(
-                tenant,
-                database,
-                schema,
-                table,
-                int(args, "limit"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                principal.rawToken
-              )(scopeOf)
-            ).map(_.asJson)
-          )
+          str(args, "iceberg") match
+            case Some(alias) =>
+              iceberg match
+                case None      => IO.pure(Left(IcebergUnavailable))
+                case Some(ice) =>
+                  ice
+                    .history(
+                      tenant,
+                      database,
+                      alias,
+                      schema,
+                      table,
+                      int(args, "limit"),
+                      None,
+                      None,
+                      principal.rawToken
+                    )(scopeOf)
+                    .map(res => bridge(res).map(_.asJson))
+            case None =>
+              IO.blocking(
+                bridge(
+                  history.history(
+                    tenant,
+                    database,
+                    schema,
+                    table,
+                    int(args, "limit"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    principal.rawToken
+                  )(scopeOf)
+                ).map(_.asJson)
+              )
   )
 
   // ---------- list_snapshots ----------
@@ -473,3 +567,8 @@ object McpDataTools:
 
   /** Recent statements included in my_usage. */
   private val RecentStatements = 20
+
+  /** Answer for an `iceberg` argument on a manager with no [[IcebergCatalogHandlers]] wired (no
+    * federation store). Same text on every iceberg-routed tool.
+    */
+  private val IcebergUnavailable = "iceberg catalogs are not available on this manager"
