@@ -1370,3 +1370,377 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     okOf(first.joinWithNever.unsafeRunSync())
     okOf(alice.joinWithNever.unsafeRunSync())
   }
+
+  // ---- Arrow IPC, streamed ---------------------------------------------------------------------
+
+  private def streamedOf(ok: RestOk): RestBody.Streamed = ok.content match
+    case s: RestBody.Streamed => s
+    case other                => fail(s"expected a streamed body, got $other")
+
+  private def drain(s: RestBody.Streamed): Array[Byte] =
+    s.bytes.compile.to(Array).unsafeRunSync()
+
+  private def arrowIds(bytes: Array[Byte]): Vector[Int] =
+    val r = new org.apache.arrow.vector.ipc.ArrowStreamReader(
+      new java.io.ByteArrayInputStream(bytes),
+      TestArrow.sharedAllocator
+    )
+    try
+      val out = Vector.newBuilder[Int]
+      while r.loadNextBatch() do
+        val v =
+          r.getVectorSchemaRoot.getVector("c_id").asInstanceOf[org.apache.arrow.vector.IntVector]
+        (0 until r.getVectorSchemaRoot.getRowCount).foreach(i => out += v.get(i))
+      out.result()
+    finally r.close()
+
+  "format=arrow" should "stream the rows as Arrow IPC, the paging headers as trailers" in {
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(dataRows = 3, limiter = Some(lim))
+    val ok  = okOf(rows(fx, "customer", "format=arrow"))
+    header(ok.headers, "Content-Type") shouldBe Some("application/vnd.apache.arrow.stream")
+    header(ok.headers, "Trailer") shouldBe Some("Content-Range, X-QoD-Truncated")
+    header(ok.headers, "X-QoD-Snapshot") shouldBe Some("7")
+    header(ok.headers, "Content-Range") shouldBe None
+    // Up front, for the clients and proxies that drop trailers: the default limit here.
+    header(ok.headers, "X-QoD-Limit") shouldBe Some("1000")
+    val s = streamedOf(ok)
+    // The data result stays open, and its slot share held, until the body has been read.
+    fx.closes.get shouldBe 1
+    lim.inFlightTotal shouldBe 1
+    arrowIds(drain(s)) shouldBe Vector(0, 1, 2)
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+    s.trailers.unsafeRunSync().map(h => h.name -> h.value) shouldBe List("Content-Range" -> "0-2/*")
+  }
+
+  it should "be negotiated from Accept on /rows, and refused on the documents" in {
+    val fx     = fixture()
+    val arrow  = Some("application/vnd.apache.arrow.stream")
+    val viaAcc = fx.handlers
+      .rows("acme", "acme_lake", "main", "customer", req(accept = arrow))
+      .unsafeRunSync()
+    header(okOf(viaAcc).headers, "Content-Type") shouldBe arrow
+    drain(streamedOf(okOf(viaAcc)))
+    val listing = fx.handlers.schemas("acme", "acme_lake", req(accept = arrow)).unsafeRunSync()
+    (errOf(listing)._1, errOf(listing)._3.error) shouldBe (
+      StatusCode.NotAcceptable,
+      "unsupported_format"
+    )
+    val detail = fx.handlers
+      .table("acme", "acme_lake", "main", "customer", req("format=arrow"))
+      .unsafeRunSync()
+    errOf(detail)._3.error shouldBe "unsupported_format"
+  }
+
+  it should "cut at the server cap by slicing and say so in a trailer" in {
+    val fx  = fixture(cfg = baseCfg.copy(maxRows = 20, defaultLimit = 20), dataRows = 50)
+    val cut = okOf(rows(fx, "customer", "format=arrow&limit=30"))
+    // The effective limit, min(limit, maxRows): a page holding that many rows may continue.
+    header(cut.headers, "X-QoD-Limit") shouldBe Some("20")
+    val s = streamedOf(cut)
+    arrowIds(drain(s)) shouldBe (0 until 20).toVector
+    s.trailers.unsafeRunSync().map(h => h.name -> h.value) shouldBe
+      List("Content-Range" -> "0-19/*", "X-QoD-Truncated" -> "true")
+    // The client's own limit is not a truncation.
+    val ownOk = okOf(rows(fx, "customer", "format=arrow&limit=5"))
+    header(ownOk.headers, "X-QoD-Limit") shouldBe Some("5")
+    val own = streamedOf(ownOk)
+    arrowIds(drain(own)).size shouldBe 5
+    own.trailers.unsafeRunSync().map(_.name) shouldBe List("Content-Range")
+  }
+
+  it should "abort the stream at the byte cap with rows left, never end it as a whole page" in {
+    // 3000 rows arrive in batches of 1024; a 1 KiB cap is crossed by the first one.
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxResponseBytes = 1024),
+      dataRows = 3000,
+      limiter = Some(lim)
+    )
+    val s    = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=3000&order=c_id")))
+    val sent = ListBuffer.empty[Byte]
+    val out  = s.bytes.chunks.evalMap(c => IO(sent ++= c.toList)).compile.drain.attempt
+    out.unsafeRunSync().left.toOption.get shouldBe a[CappedArrowReader.ByteCapReached]
+    // The first batch went out; the connection then drops instead of ending the body.
+    arrowIds(sent.toArray) shouldBe (0 until 1024).toVector
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "end cleanly when the page fits under the byte cap" in {
+    val fx = fixture(cfg = baseCfg.copy(maxResponseBytes = 1024), dataRows = 1000)
+    val s  = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=1000&order=c_id")))
+    arrowIds(drain(s)) shouldBe (0 until 1000).toVector
+    s.trailers.unsafeRunSync().map(_.name) shouldBe List("Content-Range")
+  }
+
+  it should "abort a body still running at maxStreamSec and release its result and slot" in {
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxStreamSec = 1),
+      dataRows = 3000,
+      limiter = Some(lim)
+    )
+    val s = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=3000")))
+    // A slow reader: 600 ms per chunk, so the body cannot finish within the second.
+    val slow = s.bytes.chunks.evalMap(_ => IO.sleep(600.millis)).compile.drain.attempt
+    slow.unsafeRunSync().left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "read a view at the current state, unpinned and uncached, and refuse asOf on it" in {
+    val fx = fixture()
+    val ok = okOf(rows(fx, "v_customer", "format=arrow"))
+    drain(streamedOf(ok))
+    fx.calls.map(_.sql).foreach(_ should not include "AT (")
+    header(ok.headers, "X-QoD-Snapshot") shouldBe None
+    header(ok.headers, "Cache-Control") shouldBe Some("private, no-cache")
+    val e = errOf(rows(fixture(), "v_customer", "format=arrow&asOf=3"))
+    (e._1, e._3.error) shouldBe (StatusCode.BadRequest, "invalid_selector")
+  }
+
+  it should "answer a resuming or cold pool with the same 503s and Retry-After as JSON" in {
+    val resuming: AtomicInteger => Responder =
+      _ => _ => IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
+    val e = errOf(rows(fixture(respond = Some(resuming)), "customer", "format=arrow"))
+    (e._1, e._3.error, header(e._2, "Retry-After")) shouldBe
+      (StatusCode.ServiceUnavailable, "pool_resuming", Some("5"))
+    val stuck: AtomicInteger => Responder =
+      _ => _ => IO.sleep(5.seconds) *> IO.pure(Left(RouterFailure.Internal("never")))
+    val fx   = fixture(respond = Some(stuck), stmtTimeout = Some(150.millis))
+    val cold = errOf(rows(fx, "customer", "pool=cpool&format=arrow", db = "acme_cold"))
+    (cold._1, cold._3.error, header(cold._2, "Retry-After")) shouldBe
+      (StatusCode.ServiceUnavailable, "pool_resuming", Some("5"))
+  }
+
+  it should "answer an ordinary 502 when the first batch fails, and close the result" in {
+    val fx = fixture(respond = Some(failing(afterBatches = 0)))
+    val e  = errOf(rows(fx, "customer", "format=arrow"))
+    (e._1, e._3.error) shouldBe (StatusCode.BadGateway, "upstream_error")
+    fx.closes.get shouldBe 2
+  }
+
+  it should "fail the stream after the first byte, and still close the result once" in {
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(respond = Some(failing(afterBatches = 1)), limiter = Some(lim))
+    // A limit past the first batch, so the stream reads the failing second one.
+    val s   = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=2500")))
+    val out = s.bytes.compile.drain.attempt.unsafeRunSync()
+    out.isLeft shouldBe true
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "release a body that is never read at maxStreamSec" in {
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(cfg = baseCfg.copy(maxStreamSec = 1), limiter = Some(lim))
+    val s   = streamedOf(okOf(rows(fx, "customer", "format=arrow")))
+    awaitDrained(lim)
+    fx.closes.get shouldBe 2
+    // Too late to read: the stream fails rather than touch a released result.
+    s.bytes.compile.drain.attempt.unsafeRunSync().isLeft shouldBe true
+    fx.closes.get shouldBe 2
+  }
+
+  it should "keep a body that is not started yet for 30 s, however short the token's timeout" in {
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(limiter = Some(lim), stmtTimeout = Some(500.millis))
+    drain(streamedOf(okOf(rows(fx, "customer", "format=arrow")))) // warm
+    val s = streamedOf(okOf(rows(fx, "customer", "format=arrow")))
+    // Ember may take a moment to write the head; a short statement timeout is no reason to drop it.
+    Thread.sleep(1200)
+    lim.inFlightTotal shouldBe 1
+    fx.closes.get shouldBe 3
+    arrowIds(drain(s)) shouldBe Vector(0, 1, 2)
+    fx.closes.get shouldBe 4
+    lim.inFlightTotal shouldBe 0
+  }
+
+  /** A `/rows` request in `format` cancelled (the client went away) while the encoder pulls the
+    * first batch of the data result, which reads through a [[GatedReader]]. Returns once the
+    * cancellation has completed.
+    */
+  private def cancelledDuringFirstBatch(format: String): (UserLimiter, Fixture) =
+    val reading                            = new CountDownLatch(1)
+    val gate                               = new CountDownLatch(1)
+    val lim                                = new UserLimiter(perUser = 1, total = 64)
+    val stream: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+        else
+          IO {
+            val inner  = TestArrow.readerFor("SELECT range::INTEGER AS c_id FROM range(3)")
+            val reader = new GatedReader(inner, reading, gate)
+            Right(
+              QueryResult(reader, () => { closes.incrementAndGet(); reader.close() }, "n-data", 1L)
+            )
+          }
+    val fx    = fixture(respond = Some(stream), limiter = Some(lim))
+    val fiber = fx.handlers
+      .rows("acme", "acme_lake", "main", "customer", req(s"format=$format"))
+      .start
+      .unsafeRunSync()
+    reading.await(5, TimeUnit.SECONDS) shouldBe true
+    val cancel = fiber.cancel.start.unsafeRunSync()
+    Thread.sleep(50)
+    gate.countDown()
+    cancel.joinWithNever.unsafeRunSync()
+    (lim, fx)
+
+  it should "release the result and the slot when cancelled while it reads the first batch" in {
+    val (lim, fx) = cancelledDuringFirstBatch("arrow")
+    awaitDrained(lim)
+    fx.closes.get shouldBe 2 // probe and data, each exactly once
+    assertOneSlotLeft(lim)
+  }
+
+  /** Data answers 3000 rows in batches of 1024 whose batch `afterBatches + 1` fails. */
+  private def failing(afterBatches: Int): AtomicInteger => Responder = closes =>
+    sql =>
+      if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+      else
+        IO {
+          val inner  = TestArrow.readerFor("SELECT range::INTEGER AS c_id FROM range(3000)")
+          val reader = new FailingReader(inner, afterBatches)
+          Right(
+            QueryResult(reader, () => { closes.incrementAndGet(); reader.close() }, "n-data", 1L)
+          )
+        }
+
+  private final class FailingReader(inner: ArrowReader, afterBatches: Int)
+      extends ArrowReader(TestArrow.sharedAllocator):
+    private var served                    = 0
+    override def loadNextBatch(): Boolean =
+      if served >= afterBatches then throw new java.io.IOException("node connection reset")
+      served += 1
+      val more = inner.loadNextBatch()
+      if more then
+        val batch = new VectorUnloader(inner.getVectorSchemaRoot).getRecordBatch
+        try loadRecordBatch(batch)
+        finally batch.close()
+      more
+    override def bytesRead(): Long                 = inner.bytesRead()
+    override protected def closeReadSource(): Unit = inner.close()
+    override protected def readSchema(): Schema    = inner.getVectorSchemaRoot.getSchema
+
+  // ---- a stalled node --------------------------------------------------------------------------
+
+  /** What ends a stalled node read early: closing the result (a blocking socket read, deaf to
+    * interrupts), or interrupting the reading thread (the JDK HTTP client).
+    */
+  private enum Unblock:
+    case OnClose, OnInterrupt
+
+  /** Data: 3000 rows in batches of 1024, every batch from `stallFrom` on blocking `stallMs` first,
+    * as a node that stops sending.
+    */
+  private def stalledRows(stallFrom: Int, stallMs: Long, unblock: Unblock) =
+    (closes: AtomicInteger) =>
+      (sql: String) =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+        else
+          IO {
+            val inner  = TestArrow.readerFor("SELECT range::INTEGER AS c_id FROM range(3000)")
+            val reader = new StalledReader(inner, stallFrom, stallMs, unblock)
+            Right(
+              QueryResult(reader, () => { closes.incrementAndGet(); reader.close() }, "n-data", 1L)
+            )
+          }
+
+  private final class StalledReader(inner: ArrowReader, stallFrom: Int, stallMs: Long, by: Unblock)
+      extends ArrowReader(TestArrow.sharedAllocator):
+    private val closed                    = new CountDownLatch(1)
+    @volatile private var served          = 0
+    override def loadNextBatch(): Boolean =
+      if served >= stallFrom then stall()
+      served += 1
+      val more = inner.loadNextBatch()
+      if more then
+        val batch = new VectorUnloader(inner.getVectorSchemaRoot).getRecordBatch
+        try loadRecordBatch(batch)
+        finally batch.close()
+      more
+    private def stall(): Unit = by match
+      case Unblock.OnInterrupt => Thread.sleep(stallMs)
+      case Unblock.OnClose     =>
+        val until = System.nanoTime() + stallMs * 1000000L
+        var done  = false
+        while !done do
+          try done = closed.await(until - System.nanoTime(), TimeUnit.NANOSECONDS)
+          catch case _: InterruptedException => () // deaf to interrupts, like a socket read
+          done = done || System.nanoTime() >= until
+        if closed.getCount == 0 then throw new java.io.IOException("node connection closed")
+    override def bytesRead(): Long                 = inner.bytesRead()
+    override protected def closeReadSource(): Unit =
+      closed.countDown()
+      inner.close()
+    override protected def readSchema(): Schema = inner.getVectorSchemaRoot.getSchema
+
+  private def millisSince(t0: Long): Long = (System.nanoTime() - t0) / 1000000
+
+  private def awaitClosed(fx: Fixture, n: Int): Unit =
+    val deadline = System.nanoTime() + 5.seconds.toNanos
+    while fx.closes.get < n && System.nanoTime() < deadline do Thread.sleep(5)
+    fx.closes.get shouldBe n
+
+  "a stalled node" should "not hold an Arrow stream past maxStreamSec, whatever ends its read" in
+    Unblock.values.foreach { unblock =>
+      val lim = new UserLimiter(perUser = 4, total = 64)
+      val fx  = fixture(
+        cfg = baseCfg.copy(maxStreamSec = 1),
+        respond = Some(stalledRows(stallFrom = 1, stallMs = 8000, unblock)),
+        limiter = Some(lim)
+      )
+      val t0  = System.nanoTime()
+      val s   = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=3000")))
+      val out = s.bytes.compile.drain.attempt.unsafeRunSync()
+      val ms  = millisSince(t0)
+      info(s"$unblock: the stream ended after $ms ms")
+      out.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+      ms should be < 2500L
+      fx.closes.get shouldBe 2
+      lim.inFlightTotal shouldBe 0
+    }
+
+  it should "answer 504 at maxStreamSec when the first Arrow batch never comes" in
+    Unblock.values.foreach { unblock =>
+      val lim = new UserLimiter(perUser = 4, total = 64)
+      val fx  = fixture(
+        cfg = baseCfg.copy(maxStreamSec = 1),
+        respond = Some(stalledRows(stallFrom = 0, stallMs = 8000, unblock)),
+        limiter = Some(lim)
+      )
+      val t0 = System.nanoTime()
+      val e  = errOf(rows(fx, "customer", "format=arrow&limit=3000"))
+      val ms = millisSince(t0)
+      info(s"$unblock: answered after $ms ms")
+      (e._1, e._3.error) shouldBe (StatusCode.GatewayTimeout, "statement_timeout")
+      ms should be < 2500L
+      awaitClosed(fx, 2)
+      awaitDrained(lim)
+    }
+
+  it should "free a request cancelled while its encoder opens, within about a second" in {
+    // Arrow waits for its first batch.
+    val formats = List("arrow" -> 0)
+    for (format, stallFrom) <- formats; unblock <- Unblock.values do
+      val lim = new UserLimiter(perUser = 4, total = 64)
+      val fx  = fixture(
+        respond = Some(stalledRows(stallFrom, stallMs = 8000, unblock)),
+        limiter = Some(lim)
+      )
+      val fiber = fx.handlers
+        .rows("acme", "acme_lake", "main", "customer", req(s"format=$format&limit=3000"))
+        .start
+        .unsafeRunSync()
+      Thread.sleep(700)
+      val t0 = System.nanoTime()
+      fiber.cancel.unsafeRunSync()
+      val ms = millisSince(t0)
+      info(s"$format, $unblock: the cancel returned after $ms ms")
+      ms should be < 2000L
+      awaitClosed(fx, 2)
+      awaitDrained(lim)
+  }

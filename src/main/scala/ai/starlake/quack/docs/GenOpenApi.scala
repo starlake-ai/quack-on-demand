@@ -1,8 +1,8 @@
 package ai.starlake.quack.docs
 
-import ai.starlake.quack.edge.rest.RestEdgeEndpoints
-import sttp.apispec.SecurityScheme
-import sttp.apispec.openapi.{Components, OpenAPI}
+import ai.starlake.quack.edge.rest.{RestEdgeEndpoints, RestFormat}
+import sttp.apispec.{Schema, SchemaType, SecurityScheme}
+import sttp.apispec.openapi.{Components, MediaType, OpenAPI, ResponsesCodeKey}
 import sttp.apispec.openapi.circe.yaml.*
 import sttp.tapir.docs.openapi.OpenAPIDocsInterpreter
 
@@ -19,7 +19,40 @@ object GenOpenApi:
   def render(version: String): String =
     val openapi = OpenAPIDocsInterpreter()
       .toOpenAPI(DocEndpoints.all, "Quack on Demand REST API", version)
-    withRestEdgeBearer(openapi).toYaml
+    withRestEdgeMediaTypes(withRestEdgeBearer(openapi)).toYaml
+
+  /** Lists the media types each REST data edge operation answers with on 200. The routes declare a
+    * streamed binary body (one Tapir output serves every format), which the interpreter documents
+    * as `application/octet-stream`; the real types are the formats the route negotiates, so they
+    * are written here, to the document only: JSON and CSV everywhere, and the streamed formats on
+    * `/rows`.
+    */
+  private[docs] def withRestEdgeMediaTypes(api: OpenAPI): OpenAPI =
+    def schemaFor(format: RestFormat, detail: Boolean): Schema = format match
+      case RestFormat.Json if detail => Schema(SchemaType.Object)
+      case RestFormat.Json => Schema(SchemaType.Array).copy(items = Some(Schema(SchemaType.Object)))
+      case RestFormat.Csv  => Schema(SchemaType.String)
+      case _               => Schema(SchemaType.String).copy(format = Some("binary"))
+    val items = api.paths.pathItems.map { case (path, item) =>
+      path -> item.copy(get = item.get.map { op =>
+        if !op.tags.contains(RestEdgeEndpoints.Tag) then op
+        else
+          val formats =
+            if path.endsWith("/rows") then RestFormat.Rows.toList else RestFormat.Documents.toList
+          val content = ListMap.from(
+            formats.sortBy(_.ordinal).map { f =>
+              f.contentType.takeWhile(_ != ';') ->
+                MediaType(schema = Some(schemaFor(f, path.endsWith("{table}"))))
+            }
+          )
+          op.copy(responses = op.responses.copy(responses = op.responses.responses.map {
+            case (ResponsesCodeKey(200), Right(ok)) =>
+              ResponsesCodeKey(200) -> Right(ok.copy(content = content))
+            case other => other
+          }))
+      })
+    }
+    api.paths(api.paths.copy(pathItems = items))
 
   /** Declares the REST data edge's two bearers on its operations (the `rest-edge` tag), as
     * alternatives: a PAT, or a JWT of the path tenant's own OIDC provider. The edge reads

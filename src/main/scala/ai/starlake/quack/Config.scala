@@ -1727,7 +1727,7 @@ final case class RestEdgeConfig(
     @field @ConfigField(
       envVar = "QOD_REST_MAX_RESPONSE_BYTES",
       description =
-        "Largest /rows body, in bytes; a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated."
+        "Largest /rows body, in bytes; a page that would exceed it is cut at a row boundary and flagged X-QoD-Truncated. A streamed format (Arrow, Parquet) that reaches it with rows left is aborted (the connection drops, the body never ends cleanly): lower limit to page under it."
     )
     maxResponseBytes: Long,
     @field @ConfigField(
@@ -1808,7 +1808,18 @@ final case class RestEdgeConfig(
           "grows by doubling and so can briefly take up to three times that: size the heap for " +
           "up to 3 x this x that, on top of the manager's own needs."
     )
-    maxConcurrentTotal: Int = 16
+    maxConcurrentTotal: Int = 16,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_STREAM_SEC",
+      description =
+        "Longest a streamed /rows answer (Arrow, Parquet) may take, in seconds, from the moment " +
+          "its result arrives (a first batch still missing then is a 504); past it the stream is " +
+          "aborted, the node read in progress forced to return (result closed, thread " +
+          "interrupted) and the result and in-flight slot released. A read stalled inside the " +
+          "embedded node client (QOD_NATIVE_CLIENT=false) ignores both and holds that until the " +
+          "node answers."
+    )
+    maxStreamSec: Int = 600
 ):
   // `def`, not a val: ConfigRegistry pairs declared fields with constructor parameters by position.
   /** The parsed `trustedProxies`; empty (trust none) when it does not parse, which boot refuses. */
@@ -1866,6 +1877,7 @@ object RestEdgeConfig:
         atLeast(cfg.authThrottleMaxEntries, 1, "QOD_REST_AUTH_THROTTLE_MAX_ENTRIES"),
         atLeast(cfg.maxConcurrentPerUser, 1, "QOD_REST_MAX_CONCURRENT_PER_USER"),
         atLeast(cfg.maxConcurrentTotal, 1, "QOD_REST_MAX_CONCURRENT_TOTAL"),
+        atLeast(cfg.maxStreamSec, 1, "QOD_REST_MAX_STREAM_SEC"),
         otherPorts.collectFirst {
           case (door, p) if p == cfg.port =>
             s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"

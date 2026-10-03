@@ -75,8 +75,10 @@ object RestResultEncoder:
       maxRows: Int,
       maxBytes: Long = Long.MaxValue
   ): Encoded = format match
-    case RestFormat.Json => json(reader, maxRows, maxBytes)
-    case RestFormat.Csv  => csv(reader, maxRows, maxBytes)
+    case RestFormat.Json  => json(reader, maxRows, maxBytes)
+    case RestFormat.Csv   => csv(reader, maxRows, maxBytes)
+    case RestFormat.Arrow =>
+      throw new IllegalArgumentException("arrow is streamed by RestArrowWriter, never encoded here")
 
   def json(reader: ArrowReader, maxRows: Int, maxBytes: Long = Long.MaxValue): Encoded =
     val out   = new Utf8Buffer

@@ -43,7 +43,7 @@ enum RestError(val status: StatusCode, val code: String, val message: String):
       extends RestError(
         StatusCode.NotAcceptable,
         "unsupported_format",
-        "supported formats: json, csv"
+        "supported formats: json and csv, plus arrow on /rows"
       )
   // 410 / 422 / tag-404 from SnapshotSelector; see [[RestError.snapshot]].
   case Snapshot(override val status: StatusCode, override val code: String, msg: String)

@@ -48,20 +48,43 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     idleTimeoutSec = 5
   )
 
-  /** `/rows` echoes what the handler received; `/schemas` answers a handler-made 404. */
-  private val canned: List[ServerEndpoint[Any, IO]] = List(
-    RestEdgeEndpoints.readRows.serverLogic { case (tenant, _, _, _, req) =>
-      val body = Json.obj(
-        "tenant"    -> Json.fromString(tenant),
-        "rawQuery"  -> Json.fromString(req.rawQuery),
-        "requestId" -> Json.fromString(req.requestId),
-        "auth"      -> Json.fromInt(req.authorization.size),
-        "accept"    -> req.accept.fold(Json.Null)(Json.fromString),
-        "note"      -> Json.fromString("é漢😀"),
-        "client"    -> Json.fromString(req.client)
+  /** A streamed body: `chunks` pieces, then the trailers, or a failure after the first piece. */
+  private def streamed(chunks: Int, failAfterFirst: Boolean): RestOk =
+    val pieces = fs2.Stream.emits((1 to chunks).map(i => s"piece-$i;")).covary[IO]
+    val body   =
+      if failAfterFirst then
+        pieces.take(1) ++ fs2.Stream.raiseError[IO](new RuntimeException("node went away"))
+      else pieces
+    RestOk(
+      List(Header("Content-Type", "application/vnd.apache.arrow.stream")),
+      RestBody.Streamed(
+        body.through(fs2.text.utf8.encode),
+        IO.pure(List(Header("X-QoD-Truncated", "true")))
       )
-      val ok = RestOk(List(Header("Content-Type", "application/json")), BodyBytes.of(body.noSpaces))
-      IO.pure(RestEdgeServer.toTapir(Right(ok)))
+    )
+
+  /** `/rows` echoes what the handler received, or streams with `?stream=ok|fail`; `/schemas`
+    * answers a handler-made 404.
+    */
+  private val canned: List[ServerEndpoint[RestEdgeEndpoints.Caps, IO]] = List(
+    RestEdgeEndpoints.readRows.serverLogic { case (tenant, _, _, _, req) =>
+      if req.rawQuery == "stream=ok" then
+        IO.pure(RestEdgeServer.toTapir(req)(Right(streamed(3, failAfterFirst = false))))
+      else if req.rawQuery == "stream=fail" then
+        IO.pure(RestEdgeServer.toTapir(req)(Right(streamed(3, failAfterFirst = true))))
+      else
+        val body = Json.obj(
+          "tenant"    -> Json.fromString(tenant),
+          "rawQuery"  -> Json.fromString(req.rawQuery),
+          "requestId" -> Json.fromString(req.requestId),
+          "auth"      -> Json.fromInt(req.authorization.size),
+          "accept"    -> req.accept.fold(Json.Null)(Json.fromString),
+          "note"      -> Json.fromString("é漢😀"),
+          "client"    -> Json.fromString(req.client)
+        )
+        val ok =
+          RestOk(List(Header("Content-Type", "application/json")), BodyBytes.of(body.noSpaces))
+        IO.pure(RestEdgeServer.toTapir(req)(Right(ok)))
     },
     RestEdgeEndpoints.listSchemas.serverLogic { _ =>
       IO.pure(
@@ -322,6 +345,50 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
       // The proxy's own key is not the blocked client's either.
       get(s"$base$RowsPath").statusCode() shouldBe 200
     }
+
+  // ---- bodies: buffered, streamed, aborted --------------------------------------------------
+
+  "a buffered body" should "go out with its Content-Length" in
+    withServer(cfg(freePort())) { base =>
+      val resp = get(s"$base$RowsPath")
+      resp.headers().firstValue("content-length").orElse("") shouldBe
+        resp.body().getBytes(UTF_8).length.toString
+      resp.headers().firstValue("transfer-encoding").isPresent shouldBe false
+    }
+
+  "a streamed body" should "go out chunked, with its trailers after the last chunk" in {
+    val port = freePort()
+    withServer(cfg(port)) { _ =>
+      val resp = raw(
+        port,
+        s"GET $RowsPath?stream=ok HTTP/1.1\r\nHost: x\r\nTE: trailers\r\nConnection: close\r\n\r\n"
+      )
+      statusOf(resp) shouldBe 200
+      headerOf(resp, "Transfer-Encoding").map(_.toLowerCase) shouldBe Some("chunked")
+      headerOf(resp, "Content-Length") shouldBe None
+      val body = resp.split("\r\n\r\n", 2)(1)
+      body should include("piece-1;")
+      body should include("piece-3;")
+      // The last chunk, then the trailer field, then the end of the message.
+      body should endWith("0\r\nX-QoD-Truncated: true\r\n\r\n")
+    }
+  }
+
+  it should "abort the connection on an error after the first byte, never end it cleanly" in {
+    val port = freePort()
+    withServer(cfg(port)) { _ =>
+      val resp = raw(
+        port,
+        s"GET $RowsPath?stream=fail HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+      )
+      statusOf(resp) shouldBe 200
+      val body = resp.split("\r\n\r\n", 2)(1)
+      body should include("piece-1;")
+      body should not include "piece-2;"
+      // No terminating zero-length chunk: a client sees a broken transfer, not a short page.
+      body should not include "0\r\n\r\n"
+    }
+  }
 
   extension [A](o: java.util.Optional[A])
     private def toScala: Option[A] = if o.isPresent then Some(o.get) else None

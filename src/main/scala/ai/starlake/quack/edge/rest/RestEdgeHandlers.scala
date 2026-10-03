@@ -15,7 +15,7 @@ import ai.starlake.quack.ondemand.api.{
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import cats.data.EitherT
-import cats.effect.{IO, Outcome}
+import cats.effect.{IO, Outcome, Resource}
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import org.apache.arrow.vector.ipc.ArrowReader
@@ -33,6 +33,11 @@ object RestEdgeHandlers:
 
   /** The longest schema or object name a path segment may carry. */
   private val MaxObjectName = 1024
+
+  /** The least a body Ember has not started yet is kept for before it is released, whatever the
+    * token's statement timeout: writing the head can take a moment.
+    */
+  private val UnstartedFloor: FiniteDuration = 30.seconds
 
   /** The four routes: their template (for access logs, never the concrete path) and the parameters
     * each admits. `None` admits the whole `/rows` vocabulary; the listings and the detail refuse
@@ -216,6 +221,8 @@ final class RestEdgeHandlers(
               )
               .noSpaces
           case RestFormat.Csv => csv(List("name", "type"), cols)
+          // The table detail negotiates JSON or CSV only (RestFormat.Documents).
+          case RestFormat.Arrow => throw new IllegalStateException("arrow is not a document format")
         RestOk(
           baseHeaders(fmt, pinned(t, q, snap)) ++
             snap.map(id => Header("X-QoD-Snapshot", id.toString)),
@@ -231,13 +238,13 @@ final class RestEdgeHandlers(
         sch <- lift(schemaSegment(schema))
         tbl <- lift(objectSegment(name))
         q   <- lift(parseQuery(Route.Rows, req.rawQuery))
-        f   <- lift(RestFormat.negotiate(q.format, req.accept))
+        f   <- lift(RestFormat.negotiate(q.format, req.accept, RestFormat.Rows))
         t   <- resolveTarget(p, tenant, tenantDb, q.pool)
         // min(limit ?: defaultLimit, maxRows, token maxRows); the statement fetches one more.
         limit = t.caller.effectiveMaxRows(cfg.maxRows, q.limit.getOrElse(cfg.defaultLimit))
         // The probe and the data statement share ONE slot, taken before the catalog lookups so a
         // request over the cap costs nothing.
-        out <- withSlot(p) { slot =>
+        page <- withSlot(p) { slot =>
           for
             view <- viewNamed(tenant, t.td, sch, tbl, req.requestId)
             sn   <- if view then lift(Right(None)) else snapshotOf(tenant, t.td, q, req.requestId)
@@ -249,25 +256,39 @@ final class RestEdgeHandlers(
             pinned = t.copy(caller = t.caller.copy(preferredNode = Some(pr._2)))
             sql    = RestSql.render(at, rq, limit)
             onFailure = dataFailure(req.requestId, filtered = rq.filters.nonEmpty)
-            enc <- execute(pinned, sql, onFailure, req, slot)(
-              reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))
-            )
-          yield (sn, enc)
+            out <- execute(pinned, sql, onFailure, req, slot) { qr =>
+              if f.streamed then
+                streamArrow(qr, limit, req, timeoutFor(t.caller)).map(_.map(Right(_)))
+              else
+                reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))(qr)
+                  .map(_.map(Left(_)))
+            }
+          yield (sn, out)
         }
-        (sn, enc) = out
+        (sn, out) = page
       yield
-        val range =
-          if enc.rows == 0 then "*/*" else s"${q.offset}-${q.offset.toLong + enc.rows - 1}/*"
         // Truncated when the byte cap, or a server or token row cap (not the client's own limit),
         // cut the page.
-        val truncated = enc.cut || (enc.more && q.limit.forall(_ > limit))
-        RestOk(
-          baseHeaders(f, pinned(t, q, sn)) ++
-            sn.map(id => Header("X-QoD-Snapshot", id.toString)) ++
-            List(Header("Content-Range", range)) ++
-            Option.when(truncated)(Header("X-QoD-Truncated", "true")),
-          enc.bytes
-        )
+        def paging(rows: Long, more: Boolean, cut: Boolean): List[Header] =
+          val range = if rows == 0 then "*/*" else s"${q.offset}-${q.offset.toLong + rows - 1}/*"
+          val truncated = cut || (more && q.limit.forall(_ > limit))
+          Header("Content-Range", range) ::
+            Option.when(truncated)(Header("X-QoD-Truncated", "true")).toList
+        val head = baseHeaders(f, pinned(t, q, sn)) ++
+          sn.map(id => Header("X-QoD-Snapshot", id.toString))
+        out match
+          case Left(enc) => RestOk(head ++ paging(enc.rows.toLong, enc.more, enc.cut), enc.bytes)
+          case Right((bytes, w)) =>
+            // The row count is only known once the last batch is out, so the paging headers are
+            // trailers, announced here. Many clients and proxies drop trailers: the effective row
+            // limit goes up front instead, and a page holding that many rows may continue.
+            RestOk(
+              head ++ List(
+                Header("X-QoD-Limit", limit.toString),
+                Header("Trailer", "Content-Range, X-QoD-Truncated")
+              ),
+              RestBody.Streamed(bytes, IO(paging(w.rows, w.more, w.cut)))
+            )
     }
 
   // ---- step 2: authentication ----------------------------------------------------------------
@@ -590,6 +611,134 @@ final class RestEdgeHandlers(
   private def timeoutFor(caller: ExecCaller): FiniteDuration =
     val base = stmtTimeout.getOrElse(cfg.stmtTimeoutSec.seconds)
     caller.restriction.stmtTimeoutMs.filter(_ > 0).map(_.toLong.millis).fold(base)(_ min base)
+
+  /** The data statement's result as a streamed Arrow IPC body ([[RestArrowWriter]]) and the writer,
+    * which counts what it sent for the trailers. The `use` of [[execute]]: it owns `qr` from the
+    * first instruction on.
+    *
+    * The deadline, `maxStreamSec`, runs from here. The schema and the first batch are pulled HERE,
+    * before the answer is committed, so a node that fails on its first batch still gets an ordinary
+    * error response, and a first batch still missing at the deadline the ordinary 504. Every node
+    * read is forcible ([[ForcedReads]]): a request cancelled during it, or the deadline, ends it at
+    * once, closing `qr` (its usual close, the one an admin kill uses) and interrupting the read so
+    * that it returns, and the writer and the result are released. From then on the stream owns
+    * them: its finalizer closes the writer and then the result, once, which also releases the node
+    * call's share of the in-flight slot.
+    *
+    * The stream fails, and Ember then aborts the connection instead of ending the chunked body
+    * cleanly, when a batch after the first byte fails, when the response byte cap is reached with
+    * rows left (a client must lower `limit` to page under it), and at the deadline (a slow or
+    * stalled reader, or a stalled node: the read in progress is forced to return as above).
+    *
+    * A body Ember never starts (the client went away before the head was written) would otherwise
+    * hold the result forever, so a watchdog releases it after `wait` (at least [[UnstartedFloor]],
+    * at most until the deadline) unless the stream has started by then; the two can never both own
+    * it.
+    */
+  private def streamArrow(
+      qr: QueryResult,
+      limit: Int,
+      req: RestRequest,
+      wait: FiniteDuration
+  ): IO[Either[RestError, (fs2.Stream[IO, Byte], RestArrowWriter)]] =
+    val rid    = req.requestId
+    val closed = IO.blocking(qr.close()).attempt.void
+    val reads  = new ForcedReads(IO.blocking(qr.close()))
+    IO.uncancelable { poll =>
+      IO.monotonic.flatMap { handed =>
+        val deadline = handed + cfg.maxStreamSec.seconds
+        IO(new RestArrowWriter(qr.rows, limit, cfg.maxResponseBytes))
+          .flatMap { w =>
+            reads(ForcedReads.within(poll, deadline))(w.start())
+              .guaranteeCase {
+                case Outcome.Succeeded(_) => IO.unit
+                case _                    => reads.settled *> IO.blocking(w.close())
+              }
+              .map(first => (w, first))
+          }
+          .onCancel(closed)
+          .attempt
+          .flatMap {
+            case Left(t)           => closed.as(Left(openFailure(rid, t)))
+            case Right((w, first)) =>
+              // Cancelled while the first batch was read: nobody will stream it.
+              val (bytes, unstarted) = streamOf(w, first, reads, qr, rid, deadline)
+              poll(IO.unit).onCancel(unstarted) *>
+                IO.monotonic
+                  .flatMap { now =>
+                    val left = (deadline - now).max(Duration.Zero)
+                    (IO.sleep(wait.max(UnstartedFloor).min(left)) *> unstarted).start
+                  }
+                  .as(Right((bytes, w)))
+          }
+      }
+    }
+
+  /** The answer to a writer that failed on the first batch. */
+  private def openFailure(rid: String, t: Throwable): RestError = t match
+    case _: java.util.concurrent.TimeoutException =>
+      logger.warn(s"rest [$rid] no first batch within maxStreamSec")
+      RestError.StatementTimeout
+    case _ =>
+      logger.warn(s"rest [$rid] reading the first batch failed: ${t.getClass.getName}")
+      RestError.UpstreamError
+
+  /** The body over a started writer, and the release of a body never started (see [[streamArrow]]).
+    * Exactly one of the two owns `w` and `qr`.
+    */
+  private def streamOf(
+      w: RestArrowWriter,
+      first: Array[Byte],
+      reads: ForcedReads,
+      qr: QueryResult,
+      rid: String,
+      deadline: FiniteDuration
+  ): (fs2.Stream[IO, Byte], IO[Unit]) =
+    // 0: handed out, 1: streaming, 2: released.
+    val state   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val release = (reads.settled *> IO.blocking {
+      try w.close()
+      finally qr.close()
+    }).handleError { t =>
+      logger.warn(s"rest [$rid] closing a streamed result failed: ${t.getClass.getName}")
+      logger.debug(s"rest [$rid] closing a streamed result failed: ${t.getMessage}")
+    }
+    // Released other than by a whole body: whatever may still block is forced first.
+    val forced    = reads.abort.attempt *> release
+    val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced, IO.unit)
+    val expired   = IO.monotonic
+      .flatMap(now => IO.sleep((deadline - now).max(Duration.Zero)))
+      .as(Left(new java.util.concurrent.TimeoutException("maxStreamSec")))
+    val batches = fs2.Stream.chunk(fs2.Chunk.array(first)) ++
+      fs2.Stream
+        .repeatEval(IO.uncancelable(p => reads(p)(w.next())))
+        .unNoneTerminate
+        .flatMap(b => fs2.Stream.chunk(fs2.Chunk.array(b)))
+    // The transition to streaming is the acquire of a bracket, so its release is registered with
+    // it: no cancellation can fall between the two.
+    val bytes = fs2.Stream
+      .bracketCase(IO(state.compareAndSet(0, 1))) {
+        case (true, Resource.ExitCase.Succeeded) => IO(state.set(2)) *> release
+        case (true, _)                           => IO(state.set(2)) *> forced
+        case (false, _)                          => IO.unit
+      }
+      .flatMap { owned =>
+        if owned then batches.interruptWhen(expired)
+        else fs2.Stream.raiseError[IO](new IllegalStateException("result already released"))
+      }
+      .handleErrorWith(t =>
+        fs2.Stream.exec(IO(streamFailed(rid, t, w.cut))) ++ fs2.Stream.raiseError[IO](t)
+      )
+    (bytes, unstarted)
+
+  /** Logs why a streamed body failed after its first byte: the byte cap is the client's paging
+    * signal (INFO), anything else an abort (WARN). Only the class, never the text.
+    */
+  private def streamFailed(rid: String, t: Throwable, cut: Boolean): Unit =
+    if cut then logger.info(s"rest [$rid] stream aborted at the response byte cap")
+    else if t.isInstanceOf[java.util.concurrent.TimeoutException] then
+      logger.warn(s"rest [$rid] stream aborted past maxStreamSec")
+    else logger.warn(s"rest [$rid] stream aborted after the first byte: ${t.getClass.getName}")
 
   /** Reads a result under ONE finalizer that closes it (which also deregisters the statement from
     * the kill registry), on success, error and cancellation alike; the close is idempotent

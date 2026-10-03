@@ -2,6 +2,8 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.ondemand.api.Dtos.given
 import ai.starlake.quack.ondemand.api.ErrorResponse
+import cats.effect.IO
+import sttp.capabilities.fs2.Fs2Streams
 import sttp.model.{Header, StatusCode}
 import sttp.tapir.*
 import sttp.tapir.generic.auto.*
@@ -41,7 +43,8 @@ object RestEdgeEndpoints:
     "Served by the REST data edge on its own port (quack-rest, default 31339), never on the " +
       "manager port. Auth: `Authorization: Bearer <PAT>` (the token's tools axis must allow " +
       "`rest`) or `Bearer <JWT>` of the tenant's own OIDC provider. Parameters: `pool` (default: " +
-      "a read-capable pool of the database), `format` (`json` or `csv`; else `Accept`, else JSON)."
+      "a read-capable pool of the database), `format` (`json` or `csv`, and `arrow` on /rows; " +
+      "else `Accept`, else JSON)."
 
   private val TimeTravelNote =
     " DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601); " +
@@ -80,6 +83,17 @@ object RestEdgeEndpoints:
       r.attributes.lookup(ClientAttribute).getOrElse(ClientAddress.Unknown)
     case _ => ClientAddress.Unknown
 
+  /** Where [[RestEdgeServer]] parks the per-request slot a streamed answer leaves its trailer
+    * fields in.
+    */
+  private[rest] val TrailersAttribute: org.typelevel.vault.Key[RestTrailers] =
+    org.typelevel.vault.Key.newKey[cats.effect.SyncIO, RestTrailers].unsafeRunSync()
+
+  private def trailers(req: ServerRequest): RestTrailers = req.underlying match
+    case r: org.http4s.Request[?] =>
+      r.attributes.lookup(TrailersAttribute).getOrElse(new RestTrailers)
+    case _ => new RestTrailers
+
   private def accept(req: ServerRequest): Option[String] =
     val parked = req.underlying match
       case r: org.http4s.Request[?] => r.attributes.lookup(AcceptAttribute)
@@ -93,7 +107,8 @@ object RestEdgeEndpoints:
       accept = accept(req),
       rawQuery = rawQuery(req),
       requestId = values(req, RequestIdHeader).headOption.getOrElse(""),
-      client = client(req)
+      client = client(req),
+      trailers = trailers(req)
     )
   }
 
@@ -102,18 +117,24 @@ object RestEdgeEndpoints:
     .errorOut(statusCode.and(headers).and(jsonBody[ErrorResponse]))
     .out(headers)
     .out(
-      byteBufferBody.description(
-        "application/json (an array of objects) or text/csv, per `format` then `Accept`; the Content-Type header says which"
+      streamBinaryBody(Fs2Streams[IO])(CodecFormat.OctetStream()).description(
+        "application/json (an array of objects) or text/csv, and on /rows also " +
+          "application/vnd.apache.arrow.stream (streamed), per `format` then `Accept`; the " +
+          "Content-Type header says which"
       )
     )
     .tag(Tag)
 
   type Error = (StatusCode, List[Header], ErrorResponse)
 
-  /** A response body: the encoder's buffer, written to the client without a copy. */
-  type Body = java.nio.ByteBuffer
+  /** A response body: the bytes, streamed to the client as they are produced. */
+  type Body = fs2.Stream[IO, Byte]
 
-  val listSchemas: PublicEndpoint[(String, String, RestRequest), Error, (List[Header], Body), Any] =
+  /** The capability the endpoints need: an fs2 byte stream as the body. */
+  type Caps = Fs2Streams[IO]
+
+  val listSchemas
+      : PublicEndpoint[(String, String, RestRequest), Error, (List[Header], Body), Caps] =
     base
       .in("schemas")
       .in(request)
@@ -122,7 +143,7 @@ object RestEdgeEndpoints:
       )
 
   val listTables
-      : PublicEndpoint[(String, String, String, RestRequest), Error, (List[Header], Body), Any] =
+      : PublicEndpoint[(String, String, String, RestRequest), Error, (List[Header], Body), Caps] =
     base
       .in("schemas" / path[String]("schema") / "tables")
       .in(request)
@@ -135,7 +156,7 @@ object RestEdgeEndpoints:
     (String, String, String, String, RestRequest),
     Error,
     (List[Header], Body),
-    Any
+    Caps
   ] =
     base
       .in("schemas" / path[String]("schema") / "tables" / path[String]("table"))
@@ -149,7 +170,7 @@ object RestEdgeEndpoints:
     (String, String, String, String, RestRequest),
     Error,
     (List[Header], Body),
-    Any
+    Caps
   ] =
     base
       .in("schemas" / path[String]("schema") / "tables" / path[String]("table") / "rows")
@@ -161,6 +182,13 @@ object RestEdgeEndpoints:
           "`offset` (needs `order`). A reserved name (select, order, limit, offset, asOf, asOfTag, " +
           "asOfTs, pool, format, branch), in any case, with a filter-shaped value is a 400 " +
           "`reserved_column`. Headers: `Content-Range`, `X-QoD-Truncated` when a server or token " +
-          "row cap or the response byte cap cut the page. " +
+          "row cap or the response byte cap cut the page. With `format=arrow` the rows are " +
+          "streamed: `X-QoD-Limit`, the effective row limit " +
+          "min(limit, or QOD_REST_DEFAULT_LIMIT when absent; quack-rest.maxRows; token maxRows), " +
+          "comes up front, and a page holding " +
+          "that many rows may continue; `Content-Range` and `X-QoD-Truncated` follow as HTTP " +
+          "trailers, which many clients and proxies drop. A stream that reaches the response " +
+          "byte cap with rows left is aborted, never ended cleanly: lower `limit` to page under " +
+          "it. " +
           s"$PortNote$TimeTravelNote"
       )

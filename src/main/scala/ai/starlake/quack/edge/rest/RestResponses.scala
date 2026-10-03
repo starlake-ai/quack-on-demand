@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.ondemand.api.ErrorResponse
+import cats.effect.IO
 import io.circe.Json
 import org.apache.arrow.vector.ipc.ArrowReader
 import sttp.model.{Header, StatusCode}
@@ -10,21 +11,52 @@ import scala.jdk.CollectionConverters.*
 /** What the handlers read from one HTTP request: every `Authorization` value (two of them is a 401,
   * so they are not collapsed), `Accept`, the RAW query string (see [[RestQuery.parse]] on why the
   * edge decodes it itself), the request id the server minted for it and the client key the server
-  * resolved for the failed-auth throttle ([[ClientAddress]]).
+  * resolved for the failed-auth throttle ([[ClientAddress]]). `trailers` is where a streamed answer
+  * leaves the trailer fields the server writes after its last chunk.
   */
 final case class RestRequest(
     authorization: List[String],
     accept: Option[String],
     rawQuery: String,
     requestId: String,
-    client: String = ClientAddress.Unknown
+    client: String = ClientAddress.Unknown,
+    trailers: RestTrailers = new RestTrailers
 )
 
-/** A 200: its headers (content type included) and its body, buffered (bounded by the row cap and
-  * the response byte cap).
+/** The trailer fields of one streamed response, handed from the route to [[RestEdgeServer]], which
+  * attaches them to the HTTP response (Tapir has no notion of trailers). Evaluated only once the
+  * body has been written in full, so they can report what the stream counted.
   */
-final case class RestOk(headers: List[Header], bytes: BodyBytes):
+final class RestTrailers:
+  private val ref = new java.util.concurrent.atomic.AtomicReference[Option[IO[List[Header]]]](None)
+  def set(fields: IO[List[Header]]): Unit = ref.set(Some(fields))
+  def get: Option[IO[List[Header]]]       = ref.get
+
+/** The body of a 200. */
+enum RestBody:
+  /** Encoded in full before the answer goes out (bounded by the row cap and the response byte cap).
+    */
+  case Buffered(bytes: BodyBytes)
+
+  /** Produced while the answer goes out. The stream owns the query result: its finalizer closes it.
+    * An error raised after the first byte aborts the connection, so a client never mistakes a cut
+    * stream for a complete one. `trailers` is read once the stream has completed.
+    */
+  case Streamed(bytes: fs2.Stream[IO, Byte], trailers: IO[List[Header]])
+
+/** A 200: its headers (content type included) and its body. */
+final case class RestOk(headers: List[Header], content: RestBody):
+  /** The bytes of a buffered body; a streamed one has none. */
+  def bytes: BodyBytes = content match
+    case RestBody.Buffered(bytes) => bytes
+    case _: RestBody.Streamed     => throw new IllegalStateException("a streamed body has no bytes")
+
+  /** The text of a buffered body. */
   def body: String = bytes.text
+
+object RestOk:
+  def apply(headers: List[Header], bytes: BodyBytes): RestOk =
+    RestOk(headers, RestBody.Buffered(bytes))
 
 /** How the REST edge shapes its answers: the caching and paging headers, the listing bodies in JSON
   * or CSV, the error envelope with its extra headers, and the parameter names an access log line
@@ -72,8 +104,9 @@ object RestResponses:
       more: Boolean
   ): RestOk =
     val body = fmt match
-      case RestFormat.Json => Json.arr(rows.map(r => Json.obj(columns.zip(r)*))*).noSpaces
-      case RestFormat.Csv  => csv(columns, rows)
+      case RestFormat.Csv => csv(columns, rows)
+      // Listings negotiate JSON or CSV only (RestFormat.Documents).
+      case _ => Json.arr(rows.map(r => Json.obj(columns.zip(r)*))*).noSpaces
     RestOk(
       baseHeaders(fmt, pinned = false) ++ Option.when(more)(Header("X-QoD-Truncated", "true")),
       BodyBytes.of(body)

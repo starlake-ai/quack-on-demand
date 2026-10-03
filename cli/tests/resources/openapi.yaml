@@ -4214,7 +4214,7 @@ paths:
         never on the manager port. Auth: `Authorization: Bearer <PAT>` (the token''s
         tools axis must allow `rest`) or `Bearer <JWT>` of the tenant''s own OIDC
         provider. Parameters: `pool` (default: a read-capable pool of the database),
-        `format` (`json` or `csv`; else `Accept`, else JSON).'
+        `format` (`json` or `csv`, and `arrow` on /rows; else `Accept`, else JSON).'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemas
       parameters:
       - name: tenant
@@ -4229,13 +4229,18 @@ paths:
           type: string
       responses:
         '200':
-          description: application/json (an array of objects) or text/csv, per `format`
+          description: application/json (an array of objects) or text/csv, and on
+            /rows also application/vnd.apache.arrow.stream (streamed), per `format`
             then `Accept`; the Content-Type header says which
           content:
-            application/octet-stream:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+            text/csv:
               schema:
                 type: string
-                format: binary
         '400':
           description: Invalid value
           content:
@@ -4261,7 +4266,7 @@ paths:
         the manager port. Auth: `Authorization: Bearer <PAT>` (the token''s tools
         axis must allow `rest`) or `Bearer <JWT>` of the tenant''s own OIDC provider.
         Parameters: `pool` (default: a read-capable pool of the database), `format`
-        (`json` or `csv`; else `Accept`, else JSON).'
+        (`json` or `csv`, and `arrow` on /rows; else `Accept`, else JSON).'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTables
       parameters:
       - name: tenant
@@ -4281,13 +4286,18 @@ paths:
           type: string
       responses:
         '200':
-          description: application/json (an array of objects) or text/csv, per `format`
+          description: application/json (an array of objects) or text/csv, and on
+            /rows also application/vnd.apache.arrow.stream (streamed), per `format`
             then `Accept`; the Content-Type header says which
           content:
-            application/octet-stream:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+            text/csv:
               schema:
                 type: string
-                format: binary
         '400':
           description: Invalid value
           content:
@@ -4312,11 +4322,11 @@ paths:
         edge on its own port (quack-rest, default 31339), never on the manager port.
         Auth: `Authorization: Bearer <PAT>` (the token''s tools axis must allow `rest`)
         or `Bearer <JWT>` of the tenant''s own OIDC provider. Parameters: `pool` (default:
-        a read-capable pool of the database), `format` (`json` or `csv`; else `Accept`,
-        else JSON). DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`,
-        `asOfTs` (ISO-8601); the pinned snapshot comes back in `X-QoD-Snapshot`. A
-        view is read at the current state, with no `X-QoD-Snapshot`, and `asOf*` on
-        it is a 400 `invalid_selector`.'
+        a read-capable pool of the database), `format` (`json` or `csv`, and `arrow`
+        on /rows; else `Accept`, else JSON). DuckLake tables only: at most one of
+        `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601); the pinned snapshot
+        comes back in `X-QoD-Snapshot`. A view is read at the current state, with
+        no `X-QoD-Snapshot`, and `asOf*` on it is a 400 `invalid_selector`.'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTablesTable
       parameters:
       - name: tenant
@@ -4341,13 +4351,16 @@ paths:
           type: string
       responses:
         '200':
-          description: application/json (an array of objects) or text/csv, per `format`
+          description: application/json (an array of objects) or text/csv, and on
+            /rows also application/vnd.apache.arrow.stream (streamed), per `format`
             then `Accept`; the Content-Type header says which
           content:
-            application/octet-stream:
+            application/json:
+              schema:
+                type: object
+            text/csv:
               schema:
                 type: string
-                format: binary
         '400':
           description: Invalid value
           content:
@@ -4374,14 +4387,21 @@ paths:
         offset, asOf, asOfTag, asOfTs, pool, format, branch), in any case, with a
         filter-shaped value is a 400 `reserved_column`. Headers: `Content-Range`,
         `X-QoD-Truncated` when a server or token row cap or the response byte cap
-        cut the page. Served by the REST data edge on its own port (quack-rest, default
-        31339), never on the manager port. Auth: `Authorization: Bearer <PAT>` (the
-        token''s tools axis must allow `rest`) or `Bearer <JWT>` of the tenant''s
-        own OIDC provider. Parameters: `pool` (default: a read-capable pool of the
-        database), `format` (`json` or `csv`; else `Accept`, else JSON). DuckLake
-        tables only: at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601);
-        the pinned snapshot comes back in `X-QoD-Snapshot`. A view is read at the
-        current state, with no `X-QoD-Snapshot`, and `asOf*` on it is a 400 `invalid_selector`.'
+        cut the page. With `format=arrow` the rows are streamed: `X-QoD-Limit`, the
+        effective row limit min(limit, or QOD_REST_DEFAULT_LIMIT when absent; quack-rest.maxRows;
+        token maxRows), comes up front, and a page holding that many rows may continue;
+        `Content-Range` and `X-QoD-Truncated` follow as HTTP trailers, which many
+        clients and proxies drop. A stream that reaches the response byte cap with
+        rows left is aborted, never ended cleanly: lower `limit` to page under it.
+        Served by the REST data edge on its own port (quack-rest, default 31339),
+        never on the manager port. Auth: `Authorization: Bearer <PAT>` (the token''s
+        tools axis must allow `rest`) or `Bearer <JWT>` of the tenant''s own OIDC
+        provider. Parameters: `pool` (default: a read-capable pool of the database),
+        `format` (`json` or `csv`, and `arrow` on /rows; else `Accept`, else JSON).
+        DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs`
+        (ISO-8601); the pinned snapshot comes back in `X-QoD-Snapshot`. A view is
+        read at the current state, with no `X-QoD-Snapshot`, and `asOf*` on it is
+        a 400 `invalid_selector`.'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTablesTableRows
       parameters:
       - name: tenant
@@ -4406,10 +4426,19 @@ paths:
           type: string
       responses:
         '200':
-          description: application/json (an array of objects) or text/csv, per `format`
+          description: application/json (an array of objects) or text/csv, and on
+            /rows also application/vnd.apache.arrow.stream (streamed), per `format`
             then `Accept`; the Content-Type header says which
           content:
-            application/octet-stream:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+            text/csv:
+              schema:
+                type: string
+            application/vnd.apache.arrow.stream:
               schema:
                 type: string
                 format: binary

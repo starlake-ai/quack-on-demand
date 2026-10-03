@@ -3,7 +3,8 @@ package ai.starlake.quack.edge.rest
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Format negotiation: `format` beats `Accept`, only JSON and CSV are served, JSON is the fallback.
+/** Format negotiation: `format` beats `Accept`, JSON is the fallback, the documents serve JSON and
+  * CSV and `/rows` adds Arrow IPC.
   */
 class RestFormatSpec extends AnyFlatSpec with Matchers:
 
@@ -23,10 +24,24 @@ class RestFormatSpec extends AnyFlatSpec with Matchers:
     neg(Some("csv"), Some("application/vnd.apache.arrow.stream")) shouldBe Right(RestFormat.Csv)
   }
 
-  it should "refuse arrow, parquet and unknown formats with 406 unsupported_format" in {
+  it should "refuse arrow on a document, and parquet and unknown formats, with 406" in {
     for f <- List("arrow", "parquet", "xml", "JSONX", "") do
       withClue(f)(neg(Some(f), None) shouldBe Left("unsupported_format"))
     RestFormat.negotiate(Some("arrow"), None).left.map(_.status.code) shouldBe Left(406)
+  }
+
+  it should "serve arrow on /rows, by name or by Accept" in {
+    def rows(format: Option[String], accept: Option[String]) =
+      RestFormat.negotiate(format, accept, RestFormat.Rows).left.map(_.code)
+    rows(Some("arrow"), None) shouldBe Right(RestFormat.Arrow)
+    rows(Some("ARROW"), Some("application/json")) shouldBe Right(RestFormat.Arrow)
+    rows(None, Some("application/vnd.apache.arrow.stream")) shouldBe Right(RestFormat.Arrow)
+    rows(None, Some("application/json;q=0.5, application/vnd.apache.arrow.stream")) shouldBe
+      Right(RestFormat.Arrow)
+    rows(Some("parquet"), None) shouldBe Left("unsupported_format")
+    rows(None, None) shouldBe Right(RestFormat.Json)
+    RestFormat.Arrow.streamed shouldBe true
+    List(RestFormat.Json, RestFormat.Csv).foreach(_.streamed shouldBe false)
   }
 
   it should "read Accept with q-values and wildcards" in {
@@ -50,4 +65,5 @@ class RestFormatSpec extends AnyFlatSpec with Matchers:
   "content types" should "be JSON and UTF-8 CSV" in {
     RestFormat.Json.contentType shouldBe "application/json"
     RestFormat.Csv.contentType shouldBe "text/csv; charset=utf-8"
+    RestFormat.Arrow.contentType shouldBe "application/vnd.apache.arrow.stream"
   }

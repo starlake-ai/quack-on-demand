@@ -480,6 +480,25 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       r.body()
     )
 
+  /** A GET whose body is read as bytes (a streamed format): (status, lower-cased headers, body). */
+  private def getBytes(
+      base: String,
+      path: String,
+      token: Option[Pat],
+      query: String
+  ): (Int, Map[String, String], Array[Byte]) =
+    val b = HttpRequest
+      .newBuilder(URI.create(s"$base/api/v1/tenant/$path?$query"))
+      .timeout(java.time.Duration.ofSeconds(180))
+      .GET()
+    token.foreach(t => b.header("Authorization", s"Bearer ${t.raw}"))
+    val r = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray())
+    (
+      r.statusCode(),
+      r.headers().map().asScala.toMap.map((k, v) => k.toLowerCase -> v.asScala.mkString(",")),
+      r.body()
+    )
+
   private def lake(rest: String)    = s"$Acme/database/$LakeDb/$rest"
   private def lakeTable(t: String)  = lake(s"schemas/$LakeSchema/tables/$t")
   private def rowsOf(t: String)     = lakeTable(t) + "/rows"
@@ -618,6 +637,30 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       List(10, 20)
     okResp(get(env.base, rowsOf("v_orders"), alice, "o_id=eq.10&format=csv")).body shouldBe
       "o_id,o_total\r\n10,15.00\r\n"
+  }
+
+  it should "stream Arrow IPC with the effective row limit up front" in {
+    val (status, headers, body) =
+      getBytes(env.base, rowsOf("orders"), alice, "select=o_id&order=o_id&limit=4&format=arrow")
+    withClue(new String(body, java.nio.charset.StandardCharsets.UTF_8))(status shouldBe 200)
+    headers.get("content-type") shouldBe Some("application/vnd.apache.arrow.stream")
+    headers.get("x-qod-limit") shouldBe Some("4")
+    headers.get("x-qod-snapshot").flatMap(_.toLongOption) should not be empty
+    val alloc  = new RootAllocator()
+    val reader = new org.apache.arrow.vector.ipc.ArrowStreamReader(
+      new java.io.ByteArrayInputStream(body),
+      alloc
+    )
+    try
+      val ids = ListBuffer.empty[Int]
+      while reader.loadNextBatch() do
+        val root = reader.getVectorSchemaRoot
+        val v    = root.getVector("o_id").asInstanceOf[org.apache.arrow.vector.IntVector]
+        (0 until root.getRowCount).foreach(i => ids += v.get(i))
+      ids.toList shouldBe List(10, 20, 30, 40)
+    finally
+      reader.close()
+      alloc.close()
   }
 
   it should "answer an ungranted table exactly like a missing one" in {
