@@ -65,6 +65,17 @@ class SqlParserTimeTravelSpec extends AnyFlatSpec with Matchers:
       ) shouldBe "SELECT * FROM t  WHERE x = 1"
   }
 
+  "timeTravelClauses" should "return each removed clause verbatim with its offset in the stripped text" in {
+    val (stripped, clauses) = SqlParser.timeTravelClauses(
+      "SELECT * FROM a x at(version=>1) JOIN b AT (TIMESTAMP => now()) ON true"
+    )
+    stripped shouldBe "SELECT * FROM a x  JOIN b  ON true"
+    clauses shouldBe List(
+      SqlParser.TimeTravelClause(18, "at(version=>1)"),
+      SqlParser.TimeTravelClause(26, "AT (TIMESTAMP => now())")
+    )
+  }
+
   "extract" should "authorize a time-travel SELECT as a plain read" in {
     headExtracted("SELECT * FROM t AT (VERSION => 480)") shouldBe Set(
       "testdb.public.t" -> Verb.Read
