@@ -62,8 +62,10 @@ Quack on Demand has been installed.
     curl {{- if .Values.rest.tls.enabled }} -k{{- end }} -H "Authorization: Bearer <qod_pat_...>" \
       "{{ if .Values.rest.tls.enabled }}https{{ else }}http{{ end }}://localhost:{{ .Values.service.restData.port }}/api/v1/tenant/<tenant>/database/<db>/schemas/<schema>/tables/<table>/rows?limit=10"
 
-  Before exposing it to the internet, put a reverse proxy or WAF in front that
-  rate-limits per client and per Authorization value.
+  The edge throttles failed authentication per client. Behind a load balancer
+  or Ingress, set rest.trustedProxies: without it every client shares the
+  LB's budget, and one client's bad tokens block everyone. Before exposing it
+  to the internet, a WAF is still recommended for volumetric and DDoS limits.
 {{- end }}
 
 # Watch the Quack node pods the manager spawns

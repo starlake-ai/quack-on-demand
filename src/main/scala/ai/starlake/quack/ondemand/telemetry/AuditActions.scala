@@ -12,6 +12,9 @@ object AuditActions:
   // AuthApiKeyFailure (anonymous / bad key): the caller is authenticated, so the
   // row carries their real username and tenant.
   val AuthAdminRequired = "auth.admin.required"
+  // The REST data edge blocked a client address for repeated failed authentication.
+  // One row per block, not per refused request.
+  val AuthRestThrottled = "auth.rest.throttled"
   val AuthLogin         = "auth.login"
   val AuthLoginFailure  = "auth.login.failure"
   val AuthLogout        = "auth.logout"
@@ -144,6 +147,7 @@ object AuditActions:
   val all: List[String] = List(
     AuthApiKeyFailure,
     AuthAdminRequired,
+    AuthRestThrottled,
     AuthLogin,
     AuthLoginFailure,
     AuthLogout,

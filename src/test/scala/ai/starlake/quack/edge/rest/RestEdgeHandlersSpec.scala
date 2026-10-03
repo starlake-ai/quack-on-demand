@@ -48,6 +48,9 @@ import scala.jdk.CollectionConverters.*
   * The supervisor is the in-memory one the MCP specs use; the PAT resolver is a map. The edge's two
   * executors (recording, and the unrecording one for the probe) share the stub; each call notes
   * which one it came through.
+  *
+  * The failed-auth throttle is covered here too, over the same seam: the resolver counts its
+  * lookups.
   */
 class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
 
@@ -57,9 +60,14 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   private val SuperToken = "qod_pat_root"
   private val OtherToken = "qod_pat_bob"
 
-  private def principal(tenant: Option[String], r: TokenRestriction, patId: String) =
+  private def principal(
+      tenant: Option[String],
+      r: TokenRestriction,
+      patId: String,
+      userId: Option[String] = None
+  ) =
     PatPrincipal(
-      user = RbacUser(s"u-$patId", tenant, "alice", "user"),
+      user = RbacUser(userId.getOrElse(s"u-$patId"), tenant, "alice", "user"),
       patId = patId,
       scope = SessionScope(superuser = tenant.isEmpty, manageableTenants = Set.empty),
       isAdmin = tenant.isEmpty,
@@ -222,7 +230,11 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         closes
       )
 
-  final class Fixture(val handlers: RestEdgeHandlers, val calls: ListBuffer[Call]):
+  final class Fixture(
+      val handlers: RestEdgeHandlers,
+      val calls: ListBuffer[Call],
+      val lookups: AtomicInteger
+  ):
     val closes = new AtomicInteger()
 
   private val baseCfg = RestEdgeConfig(
@@ -247,14 +259,16 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       cfg: RestEdgeConfig = baseCfg,
       dataRows: Int = 3,
       respond: Option[AtomicInteger => Responder] = None,
-      stmtTimeout: Option[FiniteDuration] = None
+      stmtTimeout: Option[FiniteDuration] = None,
+      throttle: Option[AuthThrottle] = None
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
-      Token      -> principal(Some("acme"), restriction, "pat-1"),
+      Token      -> principal(Some("acme"), restriction, "pat-1", Some("u-alice")),
       SuperToken -> principal(None, TokenRestriction.Unrestricted, "pat-root"),
       OtherToken -> principal(Some("globex"), TokenRestriction.Unrestricted, "pat-bob")
     )
+    val lookups                                                             = new AtomicInteger()
     var fx: Fixture                                                         = null
     def executor(recorded: Boolean): CatalogPreviewHandlers.PreviewExecutor =
       (caller, key, sql) =>
@@ -264,14 +278,16 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       new RestEdgeHandlers(
         cfg,
         sup,
-        pats.get,
+        t => { lookups.incrementAndGet(); pats.get(t) },
         executor(recorded = true),
         executor(recorded = false),
         (_, _) => reader,
         tags,
-        stmtTimeout = stmtTimeout
+        stmtTimeout = stmtTimeout,
+        throttle = throttle
       ),
-      calls
+      calls,
+      lookups
     )
     fx
 
@@ -280,8 +296,9 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   private def req(
       query: String = "",
       auth: List[String] = List(s"Bearer $Token"),
-      accept: Option[String] = None
-  ) = RestRequest(auth, accept, query, "rid-0001")
+      accept: Option[String] = None,
+      client: String = ClientAddress.Unknown
+  ) = RestRequest(auth, accept, query, "rid-0001", client)
 
   private type Out = Either[(StatusCode, List[Header], ErrorResponse), RestOk]
 
@@ -1006,4 +1023,76 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     e._3.message should not include "not-a-uuid"
     // With no filter, the node's refusal is not the client's doing.
     errOf(rows(fixture(respond = Some(invalid)), "customer"))._1 shouldBe StatusCode.BadGateway
+  }
+
+  // ---- the failed-auth throttle ----------------------------------------------------------------
+
+  private def rowsAs(fx: Fixture, token: String, client: String, table: String = "customer") =
+    fx.handlers
+      .rows("acme", "acme_lake", "main", table, req(auth = List(s"Bearer $token"), client = client))
+      .unsafeRunSync()
+
+  "the failed-auth throttle" should "answer 429 to a blocked client, valid token included, before any PAT lookup" in {
+    val fx = fixture()
+    (1 to 20).foreach { i =>
+      withClue(s"failure $i")(
+        errOf(rowsAs(fx, "qod_pat_garbage", "198.51.100.9"))._1 shouldBe StatusCode.Unauthorized
+      )
+    }
+    // The 21st failure is one too many: it is answered 429 and blocks the client.
+    val blocked = errOf(rowsAs(fx, "qod_pat_garbage", "198.51.100.9"))
+    (blocked._1, blocked._3.error) shouldBe (StatusCode.TooManyRequests, "too_many_auth_failures")
+    header(blocked._2, "Retry-After") shouldBe Some("300")
+    val lookupsBefore = fx.lookups.get
+    val valid         = errOf(rowsAs(fx, Token, "198.51.100.9"))
+    (valid._1, valid._3.error) shouldBe (StatusCode.TooManyRequests, "too_many_auth_failures")
+    header(valid._2, "Retry-After") shouldBe Some("300")
+    fx.lookups.get shouldBe lookupsBefore
+    fx.calls shouldBe empty
+    // Another client is untouched.
+    okOf(rowsAs(fx, Token, "198.51.100.10"))
+  }
+
+  it should "count the tenant and tools 403s as authentication failures" in {
+    val tools = fixture(TokenRestriction.Unrestricted.copy(tools = Some(Set("run_sql"))))
+    (1 to 20).foreach(_ => errOf(rowsAs(tools, Token, "c1"))._3.error shouldBe "forbidden")
+    errOf(rowsAs(tools, Token, "c1"))._3.error shouldBe "too_many_auth_failures"
+    val tenant = fixture()
+    (1 to 20).foreach(_ => errOf(rowsAs(tenant, OtherToken, "c1"))._3.error shouldBe "forbidden")
+    errOf(rowsAs(tenant, OtherToken, "c1"))._3.error shouldBe "too_many_auth_failures"
+  }
+
+  it should "never throttle an authenticated principal's acl_denied, 404 or 400 floods" in {
+    val fx = fixture()
+    (1 to 30).foreach { _ =>
+      errOf(rowsAs(fx, Token, "c1", table = "ghost"))._3.error shouldBe "not_found"
+      errOf(
+        fx.handlers
+          .rows("acme", "acme_lake", "main", "customer", req("c_id=bogus.1", client = "c1"))
+          .unsafeRunSync()
+      )._3.error shouldBe "invalid_filter"
+      errOf(
+        fx.handlers
+          .rows("acme", "acme_lake", "main", "customer", req("pool=nope", client = "c1"))
+          .unsafeRunSync()
+      )._3.error shouldBe "not_found"
+    }
+    okOf(rowsAs(fx, Token, "c1"))
+    val acl      = fixture(TokenRestriction.Unrestricted.copy(pools = Some(Set("batch"))))
+    def denied() =
+      acl.handlers
+        .rows("acme", "acme_lake", "main", "customer", req("pool=sales", client = "c1"))
+        .unsafeRunSync()
+    (1 to 30).foreach(_ => errOf(denied())._3.error shouldBe "acl_denied")
+    okOf(rowsAs(acl, Token, "c1"))
+  }
+
+  it should "answer every other client's failing credential 401, however many clients fail" in {
+    val t  = new AuthThrottle(20, 60, 300, maxEntries = 100000, clock = () => 0L)
+    val fx = fixture(throttle = Some(t))
+    // A run spread over many keys blocks none of them, and never turns into 429 for the rest.
+    val statuses =
+      (1 to 200).map(i => errOf(rowsAs(fx, s"qod_pat_guess$i", s"10.0.${i / 250}.${i % 250}"))._1)
+    statuses.distinct shouldBe Vector(StatusCode.Unauthorized)
+    okOf(rowsAs(fx, Token, "c4"))
   }

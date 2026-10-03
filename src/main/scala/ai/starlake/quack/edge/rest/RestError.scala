@@ -58,6 +58,13 @@ enum RestError(val status: StatusCode, val code: String, val message: String):
       extends RestError(StatusCode.ServiceUnavailable, "pool_unavailable", "pool unavailable")
   case StatementTimeout
       extends RestError(StatusCode.GatewayTimeout, "statement_timeout", "statement timed out")
+  // A client key blocked for failed authentication. `retryAfterSec` becomes `Retry-After`.
+  case TooManyAuthFailures(retryAfterSec: Int)
+      extends RestError(
+        StatusCode.TooManyRequests,
+        "too_many_auth_failures",
+        "too many failed authentication attempts, retry later"
+      )
   // Node exception text is never passed through; the handler appends the request id.
   case UpstreamError extends RestError(StatusCode.BadGateway, "upstream_error", "upstream error")
 

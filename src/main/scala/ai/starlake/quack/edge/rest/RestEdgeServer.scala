@@ -42,15 +42,23 @@ import scala.util.Try
   *   - a fresh `X-Request-Id` per request, set on the request the handlers read (a client's own is
   *     replaced, never echoed) and on every response, including the ones Ember itself generates for
   *     an unparseable or oversized request head;
-  *   - the security headers and the default caching headers on every response.
+  *   - the security headers and the default caching headers on every response;
+  *   - the client key of the failed-auth throttle, resolved from the TCP peer and, only behind
+  *     `trustedProxies`, `X-Forwarded-For`, then handed to the handlers as a request attribute; and
+  *     the 429 a blocked client gets on every request, ahead of all of the above.
   */
 final class RestEdgeServer(
     cfg: RestEdgeConfig,
     endpoints: List[ServerEndpoint[Any, IO]],
-    newRequestId: () => String = () => UUID.randomUUID().toString
+    newRequestId: () => String = () => UUID.randomUUID().toString,
+    /** The failed-auth throttle, the SAME instance the handlers record failures in. */
+    throttle: Option[AuthThrottle] = None
 ) extends LazyLogging:
 
   import RestEdgeServer.*
+
+  private val authThrottle: AuthThrottle = throttle.getOrElse(AuthThrottle(cfg, _ => ()))
+  private val trustedProxies             = cfg.trustedProxyCidrs
 
   private val tapirRoutes: HttpRoutes[IO] = Http4sServerInterpreter[IO]().toRoutes(endpoints)
 
@@ -104,14 +112,39 @@ final class RestEdgeServer(
           .putHeaders(Connection.close)
       )
 
+  /** The throttle key of a request: the TCP peer, or behind a trusted proxy the right-most
+    * untrusted `X-Forwarded-For` hop ([[ClientAddress]]).
+    */
+  private def clientOf(req: Request[IO]): String =
+    ClientAddress.keyOf(
+      req.remote.map(_.host.toInetAddress),
+      req.headers.get(ci"X-Forwarded-For").fold(Nil)(_.toList.map(_.value)),
+      trustedProxies
+    )
+
+  /** A client blocked for failed authentication gets 429 on EVERY request, whatever its path or
+    * method, before anything else is looked at. The handlers check again (they are also reachable
+    * without this shell); this gate also covers what never reaches them.
+    */
+  private def blocked(client: String): Option[Response[IO]] =
+    authThrottle.blockedFor(client).map { left =>
+      val e = RestError.TooManyAuthFailures(left)
+      error(Status.TooManyRequests, e.code, e.message)
+        .putHeaders(Header.Raw(ci"Retry-After", left.toString))
+    }
+
   /** The whole app: request id, gates, routes, headers; an escaped error is a decorated 500. */
   val app: HttpApp[IO] = Kleisli { (req0: Request[IO]) =>
     val rid    = newRequestId()
+    val client = clientOf(req0)
     val accept = req0.headers.get(ci"Accept").map(_.toList.map(_.value).mkString(","))
     // `putHeaders` replaces: a client's own X-Request-Id never reaches the handlers.
-    val base   = req0.removeHeader(ci"Accept").putHeaders(Header.Raw(ci"X-Request-Id", rid))
+    val base = req0
+      .removeHeader(ci"Accept")
+      .putHeaders(Header.Raw(ci"X-Request-Id", rid))
+      .withAttribute(RestEdgeEndpoints.ClientAttribute, client)
     val req    = accept.fold(base)(a => base.withAttribute(RestEdgeEndpoints.AcceptAttribute, a))
-    val routed = gate(req) match
+    val routed = blocked(client).orElse(gate(req)) match
       case Some(refused) => IO.pure(refused)
       case None          => (tapirRoutes <+> notFound).orNotFound.run(req)
     routed

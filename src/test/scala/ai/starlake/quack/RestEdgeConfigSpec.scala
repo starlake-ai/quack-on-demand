@@ -36,6 +36,25 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
     defaults.idleTimeoutSec shouldBe 60
   }
 
+  it should "ship the abuse controls with their documented defaults" in {
+    defaults.trustedProxies shouldBe ""
+    defaults.trustedProxyCidrs shouldBe Nil
+    defaults.authFailuresPerWindow shouldBe 20
+    defaults.authWindowSec shouldBe 60
+    defaults.authBlockSec shouldBe 300
+    defaults.authThrottleMaxEntries shouldBe 100000
+  }
+
+  it should "parse trustedProxies as IPv4 and IPv6 CIDRs" in {
+    val cfg = ConfigSource
+      .string("""quack-rest { trustedProxies = "10.0.0.0/8, fd00::/8,192.168.1.1" }""")
+      .withFallback(ConfigSource.default)
+      .at("quack-rest")
+      .loadOrThrow[RestEdgeConfig]
+    cfg.trustedProxyCidrs.map(_.toString) shouldBe List("10.0.0.0/8", "fd00::/8", "192.168.1.1")
+    RestEdgeConfig.validate(cfg.copy(enabled = true), others, hold) shouldBe Right(())
+  }
+
   it should "read camelCase overrides through the Main ProductHint" in {
     val cfg = ConfigSource
       .string("quack-rest { enabled = true, port = 40000, maxRows = 50, defaultLimit = 10 }")
@@ -66,7 +85,11 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
       on.copy(maxConnections = 0)          -> "QOD_REST_DATA_MAX_CONNECTIONS",
       on.copy(maxHeaderBytes = 1023)       -> "QOD_REST_DATA_MAX_HEADER_BYTES",
       on.copy(headerReceiveTimeoutSec = 0) -> "QOD_REST_HEADER_RECEIVE_TIMEOUT_SEC",
-      on.copy(idleTimeoutSec = 0)          -> "QOD_REST_IDLE_TIMEOUT_SEC"
+      on.copy(idleTimeoutSec = 0)          -> "QOD_REST_IDLE_TIMEOUT_SEC",
+      on.copy(authFailuresPerWindow = 0)   -> "QOD_REST_AUTH_FAILURES_PER_WINDOW",
+      on.copy(authWindowSec = 0)           -> "QOD_REST_AUTH_WINDOW_SEC",
+      on.copy(authBlockSec = -1)           -> "QOD_REST_AUTH_BLOCK_SEC",
+      on.copy(authThrottleMaxEntries = 0)  -> "QOD_REST_AUTH_THROTTLE_MAX_ENTRIES"
     )
     cases.foreach { case (cfg, env) =>
       withClue(env) {
@@ -74,6 +97,17 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
       }
     }
   }
+
+  it should "refuse an unparsable trusted proxy, naming its env var" in
+    List("10.0.0.0/33", "not-a-cidr", "10.0.0.0/8, example.com", "fd00::/129").foreach { raw =>
+      withClue(raw) {
+        RestEdgeConfig
+          .validate(defaults.copy(enabled = true, trustedProxies = raw), others, hold)
+          .left
+          .toOption
+          .getOrElse("") should include("QOD_REST_TRUSTED_PROXIES")
+      }
+    }
 
   it should "refuse a port another door already binds" in {
     val msg = RestEdgeConfig

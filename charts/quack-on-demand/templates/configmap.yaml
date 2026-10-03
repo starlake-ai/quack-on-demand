@@ -38,6 +38,11 @@ data:
   # ---- Read-only REST data edge ---------------------------------------------
   QOD_REST_ENABLED:             {{ .Values.rest.enabled | quote }}
   QOD_REST_TLS_ENABLED:         {{ .Values.rest.tls.enabled | quote }}
+  QOD_REST_TRUSTED_PROXIES:     {{ .Values.rest.trustedProxies | quote }}
+  QOD_REST_AUTH_FAILURES_PER_WINDOW:     {{ .Values.rest.authThrottle.failuresPerWindow | quote }}
+  QOD_REST_AUTH_WINDOW_SEC:              {{ .Values.rest.authThrottle.windowSec | quote }}
+  QOD_REST_AUTH_BLOCK_SEC:               {{ .Values.rest.authThrottle.blockSec | quote }}
+  QOD_REST_AUTH_THROTTLE_MAX_ENTRIES:    {{ .Values.rest.authThrottle.maxEntries | quote }}
 
   # ---- Metrics sink ---------------------------------------------------------
   QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}

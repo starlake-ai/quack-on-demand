@@ -57,7 +57,8 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
         "requestId" -> Json.fromString(req.requestId),
         "auth"      -> Json.fromInt(req.authorization.size),
         "accept"    -> req.accept.fold(Json.Null)(Json.fromString),
-        "note"      -> Json.fromString("é漢😀")
+        "note"      -> Json.fromString("é漢😀"),
+        "client"    -> Json.fromString(req.client)
       )
       val ok = RestOk(List(Header("Content-Type", "application/json")), BodyBytes.of(body.noSpaces))
       IO.pure(RestEdgeServer.toTapir(Right(ok)))
@@ -71,8 +72,10 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   )
 
-  private def withServer[A](c: RestEdgeConfig)(body: String => A): A =
-    val server = new RestEdgeServer(c, canned)
+  private def withServer[A](c: RestEdgeConfig, throttle: Option[AuthThrottle] = None)(
+      body: String => A
+  ): A =
+    val server = new RestEdgeServer(c, canned, throttle = throttle)
     server.start().unsafeRunSync()
     try body(s"${if c.tlsEnabled then "https" else "http"}://127.0.0.1:${c.port}")
     finally server.stop()
@@ -268,6 +271,57 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
       resp.headers().firstValue("strict-transport-security").orElse("") should include("max-age=")
     }
   }
+
+  // ---- the client key of the failed-auth throttle, on the wire --------------------------------
+
+  private def clientOf(resp: HttpResponse[String]): String =
+    io.circe.parser.parse(resp.body()).toOption.get.hcursor.get[String]("client").toOption.get
+
+  "the client key" should "be the TCP peer, ignoring X-Forwarded-For from an untrusted peer" in
+    withServer(cfg(freePort())) { base =>
+      clientOf(get(s"$base$RowsPath", "X-Forwarded-For" -> "203.0.113.5")) shouldBe "127.0.0.1"
+      clientOf(get(s"$base$RowsPath")) shouldBe "127.0.0.1"
+    }
+
+  it should "be the right-most untrusted X-Forwarded-For hop behind a trusted proxy" in
+    withServer(cfg(freePort()).copy(trustedProxies = "127.0.0.1/32")) { base =>
+      clientOf(get(s"$base$RowsPath", "X-Forwarded-For" -> "203.0.113.5")) shouldBe "203.0.113.5"
+      clientOf(
+        get(s"$base$RowsPath", "X-Forwarded-For" -> "203.0.113.5, 198.51.100.1")
+      ) shouldBe "198.51.100.1"
+      clientOf(get(s"$base$RowsPath", "X-Forwarded-For" -> "garbage")) shouldBe "127.0.0.1"
+    }
+
+  private def blockedThrottle(keys: String*): AuthThrottle =
+    val t = new AuthThrottle(2, 60, 300, 1000)
+    keys.foreach(k => (1 to 3).foreach(_ => t.recordFailure(k)))
+    t
+
+  "a blocked client" should "get 429 on every request, whatever the path or method" in {
+    val port = freePort()
+    withServer(cfg(port), Some(blockedThrottle("127.0.0.1"))) { base =>
+      List(s"$base$RowsPath", s"$base/api/v1/nope").foreach { url =>
+        val resp = get(url, "Authorization" -> "Bearer qod_pat_x")
+        resp.statusCode() shouldBe 429
+        resp.body() should include("too_many_auth_failures")
+        resp.headers().firstValue("retry-after").orElse("") shouldBe "300"
+        assertEdgeHeaders(h => resp.headers().firstValue(h).toScala)
+      }
+      val post = raw(port, s"POST $RowsPath HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+      statusOf(post) shouldBe 429
+    }
+  }
+
+  it should "not block the other clients of the same trusted proxy" in
+    withServer(
+      cfg(freePort()).copy(trustedProxies = "127.0.0.1/32"),
+      Some(blockedThrottle("203.0.113.5"))
+    ) { base =>
+      get(s"$base$RowsPath", "X-Forwarded-For" -> "203.0.113.5").statusCode() shouldBe 429
+      get(s"$base$RowsPath", "X-Forwarded-For" -> "203.0.113.6").statusCode() shouldBe 200
+      // The proxy's own key is not the blocked client's either.
+      get(s"$base$RowsPath").statusCode() shouldBe 200
+    }
 
   extension [A](o: java.util.Optional[A])
     private def toScala: Option[A] = if o.isPresent then Some(o.get) else None

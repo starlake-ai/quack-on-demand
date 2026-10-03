@@ -65,6 +65,18 @@ object RestEdgeEndpoints:
   private[rest] val AcceptAttribute: org.typelevel.vault.Key[String] =
     org.typelevel.vault.Key.newKey[cats.effect.SyncIO, String].unsafeRunSync()
 
+  /** Where [[RestEdgeServer]] parks the client key it resolved from the TCP peer and, behind a
+    * trusted proxy, `X-Forwarded-For`. Read from the request, never from a header the client could
+    * set.
+    */
+  private[rest] val ClientAttribute: org.typelevel.vault.Key[String] =
+    org.typelevel.vault.Key.newKey[cats.effect.SyncIO, String].unsafeRunSync()
+
+  private def client(req: ServerRequest): String = req.underlying match
+    case r: org.http4s.Request[?] =>
+      r.attributes.lookup(ClientAttribute).getOrElse(ClientAddress.Unknown)
+    case _ => ClientAddress.Unknown
+
   private def accept(req: ServerRequest): Option[String] =
     val parked = req.underlying match
       case r: org.http4s.Request[?] => r.attributes.lookup(AcceptAttribute)
@@ -77,7 +89,8 @@ object RestEdgeEndpoints:
       authorization = values(req, "Authorization"),
       accept = accept(req),
       rawQuery = rawQuery(req),
-      requestId = values(req, RequestIdHeader).headOption.getOrElse("")
+      requestId = values(req, RequestIdHeader).headOption.getOrElse(""),
+      client = client(req)
     )
   }
 

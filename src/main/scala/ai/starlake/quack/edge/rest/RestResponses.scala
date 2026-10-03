@@ -9,13 +9,15 @@ import scala.jdk.CollectionConverters.*
 
 /** What the handlers read from one HTTP request: every `Authorization` value (two of them is a 401,
   * so they are not collapsed), `Accept`, the RAW query string (see [[RestQuery.parse]] on why the
-  * edge decodes it itself) and the request id the server minted for it.
+  * edge decodes it itself), the request id the server minted for it and the client key the server
+  * resolved for the failed-auth throttle ([[ClientAddress]]).
   */
 final case class RestRequest(
     authorization: List[String],
     accept: Option[String],
     rawQuery: String,
-    requestId: String
+    requestId: String,
+    client: String = ClientAddress.Unknown
 )
 
 /** A 200: its headers (content type included) and its body, buffered (bounded by the row cap and
@@ -86,6 +88,8 @@ object RestResponses:
     // Every 503 is retryable: a resume in progress, or a pool with no node to serve right now.
     val extra = e match
       case RestError.Unauthorized => List(Header("WWW-Authenticate", "Bearer"))
+      // A blocked client learns when its block ends.
+      case RestError.TooManyAuthFailures(s)             => List(Header("Retry-After", s.toString))
       case _ if status == StatusCode.ServiceUnavailable =>
         List(Header("Retry-After", RetryAfterSec.toString))
       case _ => Nil

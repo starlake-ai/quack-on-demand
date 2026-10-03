@@ -107,8 +107,9 @@ service:
     annotations: {}
   # Read-only REST data edge (`GET /api/v1/...`, PAT bearer), created only when
   # rest.enabled. Not `service.rest`: that key is the admin REST/UI listener
-  # above. Internet exposure requires a reverse proxy or WAF in front of it
-  # that rate-limits per client and per Authorization value.
+  # above. The edge throttles failed authentication per client (see
+  # rest.authThrottle); a WAF in front of it is still recommended for
+  # volumetric and DDoS limits on internet exposure.
   restData:
     type: ClusterIP
     port: 31339
@@ -322,6 +323,20 @@ rest:
   enabled: false
   tls:
     enabled: true
+  # CIDRs of the proxies / load balancers in front of the edge whose
+  # X-Forwarded-For is believed (read from the right) when telling clients
+  # apart; empty = every client is its TCP peer. Behind an Ingress or cloud LB,
+  # list its addresses: otherwise every client shares the LB's failed-auth
+  # budget, and one client's bad tokens block everyone.
+  trustedProxies: ""
+  # Failed-authentication throttle, per client address and per replica: more
+  # than failuresPerWindow failures within windowSec block the client for
+  # blockSec (429 before any token lookup).
+  authThrottle:
+    failuresPerWindow: 20
+    windowSec: 60
+    blockSec: 300
+    maxEntries: 100000
 
 flightsql:
   tls:

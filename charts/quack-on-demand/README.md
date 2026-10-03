@@ -107,8 +107,10 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
-| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. Internet exposure requires a reverse proxy or WAF that rate-limits per client and per `Authorization` value. |
+| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. It throttles failed authentication per client; a WAF is still recommended for volumetric and DDoS limits on internet exposure. |
 | `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair. |
+| `rest.trustedProxies` | `""` | `QOD_REST_TRUSTED_PROXIES`: CIDRs of the proxies / load balancers whose `X-Forwarded-For` identifies the client. Set it behind an Ingress or LB: otherwise every client shares one failed-auth budget, and one client's bad tokens block everyone. |
+| `rest.authThrottle.*` | `20` / `60` / `300` / `100000` | `failuresPerWindow` / `windowSec` / `blockSec` / `maxEntries` of the failed-authentication throttle (`QOD_REST_AUTH_*`), per replica. |
 | `service.restData.type` | `ClusterIP` | The REST data edge Service (`service.rest` is the admin REST/UI one). |
 | `ingress.enabled` | `false` | REST/UI only. |
 | `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |

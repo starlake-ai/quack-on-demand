@@ -93,7 +93,11 @@ final class AuditRecorder(
         * resolved some other way (bypassing `rest`) passes it explicitly, and `None` is the correct
         * value for session callers.
         */
-      patId: Option[String] = None
+      patId: Option[String] = None,
+      /** The audit origin: `rest` (the admin REST API) unless the caller is another HTTP door, such
+        * as the REST data edge (`rest-data`).
+        */
+      origin: String = "rest"
   ): Unit =
     if store.enabled then
       try
@@ -109,7 +113,7 @@ final class AuditRecorder(
               action,
               target.map(clean(_, MaxNameChars)),
               outcome,
-              "rest",
+              origin,
               detail.map((key, value) => key -> clean(value, MaxDetailChars)),
               patId
             )
