@@ -346,9 +346,10 @@ final class FlightSqlRouter(
         */
       adminDispatch: Boolean = true,
       /** Audit origin recorded on denial and write events and on the SessionOpened module event:
-        * `"flightsql"` for the raw wire, `"quack"` for the native Quack front door. Independent of
-        * `edge` below: metering and audit must not move when a caller only wants to tag the OPA
-        * input differently.
+        * `"flightsql"` for the raw wire, `"quack"` for the native Quack front door, `"rest-data"`
+        * for the REST data edge (through the routed executor). Independent of `edge` below:
+        * metering and audit must not move when a caller only wants to tag the OPA input
+        * differently.
         */
       source: String = "flightsql",
       /** Read by nothing: every statement is the node's to decide, and the node's OPA input carries
@@ -595,7 +596,8 @@ final class FlightSqlRouter(
     * renderer, so callers that want it go through [[execute]].
     *
     * `source` is the audit origin recorded on denial and write events and on the SessionOpened
-    * module event (`"flightsql"` or `"quack"`). `edge` is read by nothing (see `execute`).
+    * module event (`"flightsql"`, `"quack"` or `"rest-data"`). `edge` is read by nothing (see
+    * `execute`).
     *
     * `clientDataScans` is set by the native Quack front door alone, the one caller that relays
     * SEND_DATA on the statement's node connection; it lets a DuckDB 2.0 client's

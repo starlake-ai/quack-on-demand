@@ -2744,6 +2744,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         se.pool shouldBe poolKey.pool
       case other => fail(s"expected StatementExecuted, got $other")
 
+  it should "emit SessionOpened under the source the caller of execute names" in:
+    val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
+    val sink: ManagerEventSink = e => { received.add(e); () }
+    val (router, _, _)         = setup(events = sink)
+    router.execute("evt-src", "alice", poolKey, "SELECT 1", source = "rest-data").unsafeRunSync()
+    received.toArray.toList.collect { case ManagerEvent.SessionOpened(_, u, via) =>
+      (u, via)
+    } shouldBe List(("alice", "rest-data"))
+
   it should "emit StatementExecuted with ok=false when execution fails" in:
     val received               = new java.util.concurrent.CopyOnWriteArrayList[ManagerEvent]()
     val sink: ManagerEventSink = e => { received.add(e); () }

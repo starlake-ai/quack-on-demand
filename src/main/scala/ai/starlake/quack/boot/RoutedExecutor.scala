@@ -1,6 +1,6 @@
 package ai.starlake.quack.boot
 
-import ai.starlake.quack.edge.{QueryResult, RouterFailure}
+import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ExecCaller}
@@ -24,19 +24,47 @@ import cats.effect.IO
 object RoutedExecutor:
 
   /** The router leg: `(caller, poolKey, sql, effectiveSet, recordExecution)`. Main binds
-    * `FlightSqlRouter.execute(..., adminDispatch = false)`; tests record what reaches it.
+    * [[viaRouter]]; tests record what reaches it.
     */
   type Run =
     (ExecCaller, PoolKey, String, Option[EffectiveSet], Boolean) => IO[
       Either[RouterFailure, QueryResult]
     ]
 
+  /** The production router leg: [[FlightSqlRouter.execute]] with what the [[ExecCaller]] carries
+    * (patId, `source`, `edge`, `preferredNode`, `commitMessage`) forwarded, and `adminDispatch =
+    * false` (the SQL admin dialect's authorization does not know about PAT attenuation, so a
+    * claimed admin statement must stay on the pre-dialect routed path). Kept here rather than as a
+    * closure in `Main` so the forwarding is covered by a spec against a real router.
+    */
+  def viaRouter(router: FlightSqlRouter): Run =
+    (caller, poolKey, sql, eff, recordExecution) =>
+      router.execute(
+        caller.connectionId,
+        caller.identity,
+        poolKey,
+        sql,
+        effectiveSet = eff,
+        preferredNode = caller.preferredNode,
+        recordExecution = recordExecution,
+        patId = caller.patId,
+        adminDispatch = false,
+        // Audit origin and SessionOpened.via: "flightsql" unless the caller names its own (the
+        // REST data edge passes "rest-data"). MCP and the REST preview family share the default and
+        // are not distinguishable from each other; metering and audit must not move just because
+        // OPA needs a tag, so the handshake's client.edge is the caller's separate `edge`.
+        source = caller.source,
+        edge = caller.edge,
+        // A handler's own commit message for its write (a restore, an undrop), else the verb's.
+        commitMessage = caller.commitMessage
+      )
+
   // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
   // handshake's EffectiveSet resolution: a system caller (ExecCaller.system, the manager's own
   // work) gets a synthetic superuser EffectiveSet (NOT None, for which no session handle can be
   // minted: NodePrincipal.Unbound) and is never attenuated -- a system caller is definitionally
   // TokenRestriction.Unrestricted; every session and PAT resolves through
-  // sup.authorizeHandshakeDetailed (same gate + 60s cache as the handshake, edge "mcp"), a
+  // sup.authorizeHandshakeDetailed (same gate + 60s cache as the handshake, the caller's edge), a
   // Denied short-circuiting to AccessDenied and an Unavailable (the tenant's OPA unreachable)
   // to RouterFailure.Unavailable before fsRouter.execute. A superuser's set is its own row's
   // (system = false), so nodes run its statements as that user, never as NodePrincipal.System.
@@ -161,7 +189,7 @@ object RoutedExecutor:
               eff.map(e =>
                 ai.starlake.quack.ondemand.rbac.Attenuation.attenuatedBy(e, caller.restriction)
               )
-          // Main binds `route` to FlightSqlRouter.execute with adminDispatch = false: this closure
+          // Main binds `route` to viaRouter (adminDispatch = false): this closure
           // is the single choke point every PreviewExecutor caller shares, and PAT attenuation
           // narrows `narrowed` but the SQL admin dialect's own authorization does not know about
           // that ceiling, so a claimed admin statement must stay on the pre-dialect routed path.

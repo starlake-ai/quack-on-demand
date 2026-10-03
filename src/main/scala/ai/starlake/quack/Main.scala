@@ -1798,25 +1798,7 @@ object Main extends IOApp with LazyLogging:
         ai.starlake.quack.boot.RoutedExecutor(
           sup,
           classifier,
-          (caller, poolKey, sql, eff, rec) =>
-            fsRouter.execute(
-              caller.connectionId,
-              caller.identity,
-              poolKey,
-              sql,
-              effectiveSet = eff,
-              recordExecution = rec,
-              patId = caller.patId,
-              adminDispatch = false,
-              // Audit origin and SessionOpened.via stay "flightsql" (the pre-OPA default): MCP
-              // and the REST preview family share this closure and are not distinguishable from
-              // each other, but metering and audit must not move just because OPA needs a tag.
-              // Only the OPA input's client.edge is set to "mcp" here.
-              edge = "mcp",
-              // A handler's own commit message for its write (a restore, an undrop), else the
-              // verb's.
-              commitMessage = caller.commitMessage
-            )
+          ai.starlake.quack.boot.RoutedExecutor.viaRouter(fsRouter)
         )(recordExecution)
 
       val previewExecutor: ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor =
