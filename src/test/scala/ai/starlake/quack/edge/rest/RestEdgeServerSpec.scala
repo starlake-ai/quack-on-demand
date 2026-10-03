@@ -390,5 +390,76 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  // ---- CORS -------------------------------------------------------------------------------------
+
+  private val App = "https://app.example.com"
+
+  private def preflight(port: Int, origin: String, method: String = "GET"): String =
+    raw(
+      port,
+      s"OPTIONS $RowsPath HTTP/1.1\r\nHost: x\r\nOrigin: $origin\r\n" +
+        s"Access-Control-Request-Method: $method\r\n" +
+        "Access-Control-Request-Headers: authorization\r\nConnection: close\r\n\r\n"
+    )
+
+  "CORS" should "be off by default: no CORS header, and OPTIONS stays a 405" in {
+    val port = freePort()
+    withServer(cfg(port)) { base =>
+      val resp = get(s"$base$RowsPath", "Origin" -> App)
+      resp.statusCode() shouldBe 200
+      resp.headers().firstValue("access-control-allow-origin").isPresent shouldBe false
+      resp.headers().firstValue("vary").orElse("") shouldBe "Authorization"
+      statusOf(preflight(port, App)) shouldBe 405
+    }
+  }
+
+  it should "answer an allowed origin's preflight for GET with Authorization and Accept" in {
+    val port = freePort()
+    withServer(cfg(port).copy(corsAllowedOrigins = App)) { _ =>
+      val resp = preflight(port, App)
+      statusOf(resp) shouldBe 204
+      headerOf(resp, "Access-Control-Allow-Origin") shouldBe Some(App)
+      headerOf(resp, "Access-Control-Allow-Methods") shouldBe Some("GET")
+      headerOf(resp, "Access-Control-Allow-Headers") shouldBe Some("Authorization, Accept")
+      headerOf(resp, "Access-Control-Allow-Credentials") shouldBe None
+      headerOf(resp, "Vary").getOrElse("") should include("Origin")
+      assertEdgeHeaders(headerOf(resp, _))
+    }
+  }
+
+  it should "grant nothing to another origin, or to another method" in {
+    val port = freePort()
+    withServer(cfg(port).copy(corsAllowedOrigins = App)) { _ =>
+      val other = preflight(port, "https://evil.example")
+      statusOf(other) shouldBe 204
+      headerOf(other, "Access-Control-Allow-Origin") shouldBe None
+      val post = preflight(port, App, method = "POST")
+      headerOf(post, "Access-Control-Allow-Origin") shouldBe None
+    }
+  }
+
+  it should "mark every response, errors included, and expose the edge's headers to the origin" in
+    withServer(cfg(freePort()).copy(corsAllowedOrigins = App)) { base =>
+      val ok = get(s"$base$RowsPath", "Origin" -> App)
+      ok.headers().firstValue("access-control-allow-origin").orElse("") shouldBe App
+      ok.headers().firstValue("access-control-expose-headers").orElse("") shouldBe
+        "X-QoD-Snapshot, X-QoD-Truncated, X-QoD-Limit, Content-Range, X-Request-Id, Retry-After"
+      ok.headers().firstValue("access-control-allow-credentials").isPresent shouldBe false
+      ok.headers().firstValue("vary").orElse("") shouldBe "Authorization, Origin"
+      val err = get(s"$base/api/v1/tenant/acme/database/acme_lake/schemas", "Origin" -> App)
+      err.statusCode() shouldBe 404
+      err.headers().firstValue("access-control-allow-origin").orElse("") shouldBe App
+      val other = get(s"$base$RowsPath", "Origin" -> "https://evil.example")
+      other.headers().firstValue("access-control-allow-origin").isPresent shouldBe false
+      other.headers().firstValue("vary").orElse("") shouldBe "Authorization, Origin"
+    }
+
+  it should "answer * to any origin when configured with a star" in
+    withServer(cfg(freePort()).copy(corsAllowedOrigins = "*")) { base =>
+      val resp = get(s"$base$RowsPath", "Origin" -> "https://anywhere.example")
+      resp.headers().firstValue("access-control-allow-origin").orElse("") shouldBe "*"
+      resp.headers().firstValue("access-control-allow-credentials").isPresent shouldBe false
+    }
+
   extension [A](o: java.util.Optional[A])
     private def toScala: Option[A] = if o.isPresent then Some(o.get) else None

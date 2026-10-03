@@ -1826,12 +1826,25 @@ final case class RestEdgeConfig(
         "Parquet bodies the REST data edge streams at once (each runs an in-process DuckDB " +
           "limited to 64 MB), at most one per principal (tenant, user); past either 429."
     )
-    maxConcurrentParquet: Int = 2
+    maxConcurrentParquet: Int = 2,
+    @field @ConfigField(
+      envVar = "QOD_REST_CORS_ALLOWED_ORIGINS",
+      description =
+        "Comma-separated origins (scheme://host[:port]) browsers may call the REST data edge " +
+          "from, or `*` for any; empty = CORS off. Credentials are never allowed."
+    )
+    corsAllowedOrigins: String = ""
 ):
   // `def`, not a val: ConfigRegistry pairs declared fields with constructor parameters by position.
   /** The parsed `trustedProxies`; empty (trust none) when it does not parse, which boot refuses. */
   def trustedProxyCidrs: List[Cidr] =
     FleetConfig.parseCidrs("QOD_REST_TRUSTED_PROXIES", trustedProxies).getOrElse(Nil)
+
+  /** The parsed `corsAllowedOrigins`; off when it does not parse, which boot refuses. */
+  def cors: ai.starlake.quack.edge.rest.RestCors =
+    ai.starlake.quack.edge.rest.RestCors
+      .parse(corsAllowedOrigins)
+      .getOrElse(ai.starlake.quack.edge.rest.RestCors.Off)
 
 object RestEdgeConfig:
 
@@ -1886,6 +1899,7 @@ object RestEdgeConfig:
         atLeast(cfg.maxConcurrentTotal, 1, "QOD_REST_MAX_CONCURRENT_TOTAL"),
         atLeast(cfg.maxStreamSec, 1, "QOD_REST_MAX_STREAM_SEC"),
         atLeast(cfg.maxConcurrentParquet, 1, "QOD_REST_MAX_CONCURRENT_PARQUET"),
+        ai.starlake.quack.edge.rest.RestCors.parse(cfg.corsAllowedOrigins).left.toOption,
         otherPorts.collectFirst {
           case (door, p) if p == cfg.port =>
             s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"

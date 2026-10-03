@@ -47,6 +47,8 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
     defaults.maxConcurrentTotal shouldBe 16
     defaults.maxStreamSec shouldBe 600
     defaults.maxConcurrentParquet shouldBe 2
+    defaults.corsAllowedOrigins shouldBe ""
+    defaults.cors.enabled shouldBe false
   }
 
   it should "parse trustedProxies as IPv4 and IPv6 CIDRs" in {
@@ -116,6 +118,19 @@ class RestEdgeConfigSpec extends AnyFlatSpec with Matchers:
           .getOrElse("") should include("QOD_REST_TRUSTED_PROXIES")
       }
     }
+
+  it should "refuse a malformed CORS origin, naming its env var" in {
+    RestEdgeConfig
+      .validate(defaults.copy(enabled = true, corsAllowedOrigins = "example.com"), others, hold)
+      .left
+      .toOption
+      .getOrElse("") should include("QOD_REST_CORS_ALLOWED_ORIGINS")
+    RestEdgeConfig.validate(
+      defaults.copy(enabled = true, corsAllowedOrigins = "https://app.example.com"),
+      others,
+      hold
+    ) shouldBe Right(())
+  }
 
   it should "refuse a port another door already binds" in {
     val msg = RestEdgeConfig

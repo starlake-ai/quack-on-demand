@@ -47,7 +47,9 @@ import scala.util.Try
   *   - the security headers and the default caching headers on every response;
   *   - the client key of the failed-auth throttle, resolved from the TCP peer and, only behind
   *     `trustedProxies`, `X-Forwarded-For`, then handed to the handlers as a request attribute; and
-  *     the 429 a blocked client gets on every request, ahead of all of the above.
+  *     the 429 a blocked client gets on every request, ahead of all of the above;
+  *   - CORS ([[RestCors]]), when origins are configured: the `OPTIONS` preflight, answered here
+  *     without reaching a route, and the CORS headers on every response, errors included.
   */
 final class RestEdgeServer(
     cfg: RestEdgeConfig,
@@ -60,6 +62,7 @@ final class RestEdgeServer(
   import RestEdgeServer.*
 
   private val authThrottle: AuthThrottle = throttle.getOrElse(AuthThrottle(cfg, _ => ()))
+  private val cors: RestCors             = cfg.cors
   private val trustedProxies             = cfg.trustedProxyCidrs
 
   private val tapirRoutes: HttpRoutes[IO] = Http4sServerInterpreter[IO]().toRoutes(endpoints)
@@ -148,7 +151,9 @@ final class RestEdgeServer(
       .withAttribute(RestEdgeEndpoints.ClientAttribute, client)
       .withAttribute(RestEdgeEndpoints.TrailersAttribute, trailers)
     val req    = accept.fold(base)(a => base.withAttribute(RestEdgeEndpoints.AcceptAttribute, a))
-    val routed = blocked(client).orElse(gate(req)) match
+    val origin = req0.headers.get(ci"Origin").map(_.head.value)
+    val pre    = preflight(req, origin)
+    val routed = blocked(client).orElse(pre).orElse(gate(req)) match
       case Some(refused) => IO.pure(refused)
       case None          => (tapirRoutes <+> notFound).orNotFound.run(req)
     routed
@@ -156,8 +161,53 @@ final class RestEdgeServer(
         logger.warn(s"rest [$rid] unhandled failure: ${t.getClass.getName}")
         error(Status.InternalServerError, "upstream_error", s"upstream error (request id $rid)")
       }
-      .map(resp => withTrailers(decorate(resp, rid), trailers))
+      .map(resp => withTrailers(withCors(decorate(resp, rid), origin, pre.isDefined), trailers))
   }
+
+  /** The answer to a CORS preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`),
+    * only while CORS is on: 204, granting `GET` with `Authorization` and `Accept` to an allowed
+    * origin that asks for `GET`, and nothing to anyone else (the browser then refuses the call).
+    */
+  private def preflight(req: Request[IO], origin: Option[String]): Option[Response[IO]] =
+    val requested = req.headers.get(ci"Access-Control-Request-Method").map(_.head.value)
+    Option.when(
+      cors.enabled && req.method == Method.OPTIONS && origin.isDefined && requested.isDefined
+    ) {
+      val grant = origin.flatMap(cors.allowOrigin).filter(_ => requested.contains("GET"))
+      grant.fold(Response[IO](Status.NoContent))(allowed =>
+        Response[IO](Status.NoContent).putHeaders(
+          Header.Raw(ci"Access-Control-Allow-Origin", allowed),
+          Header.Raw(ci"Access-Control-Allow-Methods", RestCors.AllowMethods),
+          Header.Raw(ci"Access-Control-Allow-Headers", RestCors.AllowHeaders),
+          Header.Raw(ci"Access-Control-Max-Age", RestCors.MaxAgeSec.toString)
+        )
+      )
+    }
+
+  /** CORS on a response, while it is on: `Vary: Origin` always (merged into the `Vary` the response
+    * already has), and the allowed origin plus the exposed headers when the request's `Origin` is
+    * allowed. A preflight answer carries its own grant (or none), never this one.
+    */
+  private def withCors(
+      resp: Response[IO],
+      origin: Option[String],
+      isPreflight: Boolean
+  ): Response[IO] =
+    if !cors.enabled then resp
+    else
+      val vary   = resp.headers.get(ci"Vary").map(_.toList.map(_.value).mkString(", "))
+      val merged = vary.fold("Origin")(v => if v.contains("Origin") then v else s"$v, Origin")
+      val base   = resp.putHeaders(Header.Raw(ci"Vary", merged))
+      if isPreflight then base
+      else
+        origin
+          .flatMap(cors.allowOrigin)
+          .fold(base)(allowed =>
+            base.putHeaders(
+              Header.Raw(ci"Access-Control-Allow-Origin", allowed),
+              Header.Raw(ci"Access-Control-Expose-Headers", RestCors.ExposeHeaders)
+            )
+          )
 
   private def withTrailers(resp: Response[IO], slot: RestTrailers): Response[IO] =
     slot.get.fold(resp)(fields =>

@@ -356,6 +356,9 @@ rest:
   # an in-process DuckDB limited to 64 MB (off-heap). Past either the answer is
   # 429 too_many_requests.
   maxConcurrentParquet: 2
+  # Browser origins (scheme://host[:port], comma-separated) allowed to call the
+  # edge cross-origin, or "*"; empty = CORS off. Credentials are never allowed.
+  corsAllowedOrigins: ""
 
 flightsql:
   tls:
