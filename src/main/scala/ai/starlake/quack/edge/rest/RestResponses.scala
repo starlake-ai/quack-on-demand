@@ -42,7 +42,24 @@ enum RestBody:
     * An error raised after the first byte aborts the connection, so a client never mistakes a cut
     * stream for a complete one. `trailers` is read once the stream has completed.
     */
-  case Streamed(bytes: fs2.Stream[IO, Byte], trailers: IO[List[Header]])
+  case Streamed(
+      bytes: fs2.Stream[IO, Byte],
+      trailers: IO[List[Header]],
+      unstarted: RestUnstarted = new RestUnstarted
+  )
+
+/** What runs when a streamed body is released without ever having been started (the client went
+  * away before the head was written): the producer fires it, whoever meters the answer registers
+  * what it should do. Runs at most once.
+  */
+final class RestUnstarted:
+  private val hook = new java.util.concurrent.atomic.AtomicReference[IO[Unit]](IO.unit)
+
+  /** Registers what a never-started body does when it is released. */
+  def onRelease(action: IO[Unit]): Unit = hook.set(action)
+
+  /** Runs the registered action; the producer calls it once, when it releases the body. */
+  def fire: IO[Unit] = IO.defer(hook.getAndSet(IO.unit))
 
 /** A 200: its headers (content type included) and its body. */
 final case class RestOk(headers: List[Header], content: RestBody):

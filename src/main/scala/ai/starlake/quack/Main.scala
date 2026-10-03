@@ -1890,6 +1890,8 @@ object Main extends IOApp with LazyLogging:
                 new ai.starlake.quack.ondemand.telemetry.AuditRateLimiter(intervalMillis = 1000)
               )
           )
+          val restMetrics =
+            new ai.starlake.quack.observability.metrics.RestEdgeInstruments(metricsReg.composite)
           val handlers = new ai.starlake.quack.edge.rest.RestEdgeHandlers(
             restCfgResolved,
             sup,
@@ -1906,12 +1908,14 @@ object Main extends IOApp with LazyLogging:
               tenantId = t => sup.getTenant(t).map(_.id),
               providerFor = tenantOidcRegistry.forTenant,
               findUser = (t, u) => sup.findUserForLogin(t, u)
-            ).resolve
+            ).resolve,
+            metrics = restMetrics
           )
           new ai.starlake.quack.edge.rest.RestEdgeServer(
             restCfgResolved,
             ai.starlake.quack.edge.rest.RestEdgeServer.serverEndpoints(handlers),
-            throttle = Some(throttle)
+            throttle = Some(throttle),
+            metrics = restMetrics
           )
         }
       // A REST edge bind failure aborts boot exactly like the Quack door's.

@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.rest
 
 import ai.starlake.quack.RestEdgeConfig
 import ai.starlake.quack.edge.CertGen
+import ai.starlake.quack.observability.metrics.RestEdgeInstruments
 import ai.starlake.quack.ondemand.api.ErrorResponse
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -95,10 +96,14 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
     }
   )
 
-  private def withServer[A](c: RestEdgeConfig, throttle: Option[AuthThrottle] = None)(
+  private def withServer[A](
+      c: RestEdgeConfig,
+      throttle: Option[AuthThrottle] = None,
+      metrics: RestEdgeInstruments = RestEdgeInstruments.noop
+  )(
       body: String => A
   ): A =
-    val server = new RestEdgeServer(c, canned, throttle = throttle)
+    val server = new RestEdgeServer(c, canned, throttle = throttle, metrics = metrics)
     server.start().unsafeRunSync()
     try body(s"${if c.tlsEnabled then "https" else "http"}://127.0.0.1:${c.port}")
     finally server.stop()
@@ -460,6 +465,55 @@ class RestEdgeServerSpec extends AnyFlatSpec with Matchers:
       resp.headers().firstValue("access-control-allow-origin").orElse("") shouldBe "*"
       resp.headers().firstValue("access-control-allow-credentials").isPresent shouldBe false
     }
+
+  // ---- meters of the answers the server gives itself ----------------------------------------
+
+  "the server's own answers" should "be counted without a route, a blocked client's as a rejection" in {
+    val reg  = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val port = freePort()
+    withServer(cfg(port), metrics = new RestEdgeInstruments(reg)) { base =>
+      get(s"$base/api/v1/nope").statusCode() shouldBe 404
+      statusOf(
+        raw(port, s"POST $RowsPath HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+      ) shouldBe
+        405
+    }
+    def c(status: String) = reg
+      .counter("qod_rest_requests_total", "route", "none", "format", "none", "status", status)
+      .count()
+    (c("404"), c("405")) shouldBe (1.0, 1.0)
+    val blocked = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    withServer(
+      cfg(freePort()),
+      Some(blockedThrottle("127.0.0.1")),
+      new RestEdgeInstruments(blocked)
+    ) { base =>
+      get(s"$base$RowsPath").statusCode() shouldBe 429
+    }
+    blocked.counter("qod_rest_rejections_total", "reason", "auth_failures").count() shouldBe 1.0
+  }
+
+  "a blocked client's CORS preflight" should "be metered as a preflight and a rejection, never a data route" in {
+    val reg = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    withServer(
+      cfg(freePort()).copy(corsAllowedOrigins = "https://app.example"),
+      Some(blockedThrottle("127.0.0.1")),
+      new RestEdgeInstruments(reg)
+    ) { base =>
+      val req = HttpRequest
+        .newBuilder(URI.create(s"$base$RowsPath"))
+        .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+        .header("Origin", "https://app.example")
+        .header("Access-Control-Request-Method", "GET")
+        .build()
+      client.send(req, HttpResponse.BodyHandlers.ofString()).statusCode() shouldBe 429
+    }
+    reg
+      .counter("qod_rest_requests_total", "route", "preflight", "format", "none", "status", "429")
+      .count() shouldBe 1.0
+    reg.counter("qod_rest_rejections_total", "reason", "auth_failures").count() shouldBe 1.0
+    reg.find("qod_rest_requests_total").counters().size shouldBe 1
+  }
 
   extension [A](o: java.util.Optional[A])
     private def toScala: Option[A] = if o.isPresent then Some(o.get) else None

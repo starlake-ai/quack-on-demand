@@ -14,6 +14,7 @@ import ai.starlake.quack.ondemand.api.{
 }
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
+import ai.starlake.quack.observability.metrics.RestEdgeInstruments
 import cats.data.EitherT
 import cats.effect.{IO, Outcome, Poll, Resource}
 import com.typesafe.scalalogging.LazyLogging
@@ -109,6 +110,9 @@ object RestEdgeHandlers:
     * anything else rather than ignore it.
     */
   enum Route(val template: String, val params: Option[Set[String]]):
+    /** The route's name in metric labels: one per template, never a concrete path. */
+    def metric: String = toString.toLowerCase(java.util.Locale.ROOT)
+
     case Schemas
         extends Route(
           "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas",
@@ -180,7 +184,9 @@ final class RestEdgeHandlers(
       */
     resolveOidc: (String, String) => Option[RestPrincipal] = RestAuth.NoOidc,
     /** Whether `/rows` offers Parquet; the host probe in production, a seam in specs. */
-    parquetAvailable: => Boolean = RestParquetWriter.available
+    parquetAvailable: => Boolean = RestParquetWriter.available,
+    /** The edge's Prometheus meters. */
+    metrics: RestEdgeInstruments = RestEdgeInstruments.noop
 ) extends LazyLogging:
 
   private lazy val rowFormats: Set[RestFormat] =
@@ -353,7 +359,7 @@ final class RestEdgeHandlers(
           sn.map(id => Header("X-QoD-Snapshot", id.toString))
         out match
           case Left(enc) => RestOk(head ++ paging(enc.rows.toLong, enc.more, enc.cut), enc.bytes)
-          case Right((bytes, w)) =>
+          case Right((bytes, w, unstarted)) =>
             // The row count is only known once the last batch is out, so the paging headers are
             // trailers, announced here. Many clients and proxies drop trailers: the effective row
             // limit goes up front instead, and a page holding that many rows may continue.
@@ -362,7 +368,7 @@ final class RestEdgeHandlers(
                 Header("X-QoD-Limit", limit.toString),
                 Header("Trailer", "Content-Range, X-QoD-Truncated")
               ),
-              RestBody.Streamed(bytes, IO(paging(w.rows, w.more, w.cut)))
+              RestBody.Streamed(bytes, IO(paging(w.rows, w.more, w.cut)), unstarted)
             )
     }
 
@@ -727,7 +733,7 @@ final class RestEdgeHandlers(
       req: RestRequest,
       wait: FiniteDuration,
       user: (String, String)
-  ): IO[Either[RestError, (fs2.Stream[IO, Byte], RowEncoder)]] =
+  ): IO[Either[RestError, (fs2.Stream[IO, Byte], RowEncoder, RestUnstarted)]] =
     val rid    = req.requestId
     val closed = IO.blocking(qr.close()).attempt.void
     IO.uncancelable { poll =>
@@ -748,14 +754,14 @@ final class RestEdgeHandlers(
                   IO(share.release()) *> closed.as(Left(openFailure(rid, t)))
                 case Right(enc) =>
                   // Cancelled while the first batch was read: nobody will stream it.
-                  val (bytes, unstarted) = streamOf(enc, qr, share, rid, deadline)
+                  val (bytes, watch, unstarted) = streamOf(enc, qr, share, rid, deadline)
                   poll(IO.unit).onCancel(unstarted) *>
                     IO.monotonic
                       .flatMap { now =>
                         val left = (deadline - now).max(Duration.Zero)
                         (IO.sleep(wait.max(UnstartedFloor).min(left)) *> unstarted).start
                       }
-                      .as(Right((bytes, enc)))
+                      .as(Right((bytes, enc, watch)))
               }
       }
     }
@@ -772,8 +778,9 @@ final class RestEdgeHandlers(
       logger.warn(s"rest [$rid] reading the first batch failed: ${t.getClass.getName}")
       RestError.UpstreamError
 
-  /** The body over an opened encoder, and the release of a body never started (see [[streamRows]]).
-    * Exactly one of the stream and that release owns `enc`, `qr` and `share`.
+  /** The body over an opened encoder, the hook its metering registers, and the release of a body
+    * never started (see [[streamRows]]). Exactly one of the stream and that release owns `enc`,
+    * `qr` and `share`.
     */
   private def streamOf(
       enc: RowEncoder,
@@ -781,7 +788,7 @@ final class RestEdgeHandlers(
       share: UserLimiter.Hold,
       rid: String,
       deadline: FiniteDuration
-  ): (fs2.Stream[IO, Byte], IO[Unit]) =
+  ): (fs2.Stream[IO, Byte], RestUnstarted, IO[Unit]) =
     // 0: handed out, 1: streaming, 2: released.
     val state   = new java.util.concurrent.atomic.AtomicInteger(0)
     val release = enc.close
@@ -793,7 +800,8 @@ final class RestEdgeHandlers(
       }
     // Released other than by a whole body: whatever may still block is forced first.
     val forced    = enc.abort.attempt *> release
-    val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced, IO.unit)
+    val watch     = new RestUnstarted
+    val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced *> watch.fire, IO.unit)
     val expired   = IO.monotonic
       .flatMap(now => IO.sleep((deadline - now).max(Duration.Zero)))
       .as(Left(new java.util.concurrent.TimeoutException("maxStreamSec")))
@@ -812,7 +820,7 @@ final class RestEdgeHandlers(
       .handleErrorWith(t =>
         fs2.Stream.exec(IO(streamFailed(rid, t, enc.cut))) ++ fs2.Stream.raiseError[IO](t)
       )
-    (bytes, unstarted)
+    (bytes, watch, unstarted)
 
   /** Logs why a streamed body failed after its first byte: the byte cap is the client's paging
     * signal (INFO), anything else an abort (WARN). Only the class, never the text.
@@ -878,17 +886,63 @@ final class RestEdgeHandlers(
     * personal data.
     */
   private def respond(route: Route, req: RestRequest)(step: Step[RestOk]): Out =
-    step.value.attempt.map { outcome =>
-      val result = outcome match
-        case Right(Right(ok)) => Right(ok)
-        case Right(Left(e))   => Left(failure(e, req.requestId))
-        case Left(t)          =>
-          logger.warn(s"rest [${req.requestId}] ${route.template} failed: ${t.getClass.getName}")
-          Left(failure(RestError.UpstreamError, req.requestId))
-      val status = result.fold(_._1.code, _ => 200)
-      logger.info(
-        s"rest [${req.requestId}] GET ${route.template} params=[${paramNames(req.rawQuery)}] " +
-          s"-> $status"
-      )
-      result
+    IO.monotonic.flatMap { started =>
+      step.value.attempt.flatMap { outcome =>
+        val result = outcome match
+          case Right(Right(ok)) => Right(ok)
+          case Right(Left(e))   =>
+            rejectionOf(e).foreach(metrics.rejection)
+            Left(failure(e, req.requestId))
+          case Left(t) =>
+            logger.warn(s"rest [${req.requestId}] ${route.template} failed: ${t.getClass.getName}")
+            Left(failure(RestError.UpstreamError, req.requestId))
+        val status = result.fold(_._1.code, _ => 200)
+        logger.info(
+          s"rest [${req.requestId}] GET ${route.template} params=[${paramNames(req.rawQuery)}] " +
+            s"-> $status"
+        )
+        measured(route, started, status, result)
+      }
     }
+
+  /** Records the answer in the edge's meters: at once for a buffered body or an error, and when the
+    * body ends for a streamed one, whose time includes the stream. A streamed body that fails, that
+    * its client abandons mid-way, or that is released without ever starting counts as an abort.
+    */
+  private def measured(
+      route: Route,
+      started: FiniteDuration,
+      status: Int,
+      result: Either[Failure, RestOk]
+  ): IO[Either[Failure, RestOk]] =
+    val format = result.toOption.fold(RestEdgeInstruments.NoFormat)(ok => formatName(ok.headers))
+    def record = IO.monotonic.map(now =>
+      metrics.request(route.metric, format, status, (now - started).toNanos)
+    )
+    result match
+      case Right(ok @ RestOk(_, RestBody.Streamed(bytes, trailers, unstarted))) =>
+        // One answer, metered once: a body released unstarted fails if Ember starts it after all.
+        val metered            = new AtomicBoolean(false)
+        def once(io: IO[Unit]) = IO(metered.compareAndSet(false, true)).ifM(io, IO.unit)
+        val aborted            = once(IO(metrics.streamAborted(route.metric, format)) *> record)
+        // Cut by an error, or by the client going away mid-body: both are aborts.
+        val counted = bytes.onFinalizeCase {
+          case Resource.ExitCase.Succeeded => once(record)
+          case _                           => aborted
+        }
+        // A body never started is released by the stream's owner, and metered then.
+        unstarted.onRelease(aborted)
+        IO.pure(Right(ok.copy(content = RestBody.Streamed(counted, trailers, unstarted))))
+      case other => record.as(other)
+
+  /** The negotiated format of a 200, from its content type. */
+  private def formatName(headers: List[Header]): String =
+    headers
+      .find(_.name.equalsIgnoreCase("Content-Type"))
+      .flatMap(h => RestFormat.values.find(_.contentType == h.value))
+      .fold(RestEdgeInstruments.NoFormat)(_.toString.toLowerCase(java.util.Locale.ROOT))
+
+  private def rejectionOf(e: RestError): Option[String] = e match
+    case RestError.TooManyAuthFailures(_) => Some("auth_failures")
+    case RestError.TooManyRequests        => Some("concurrency")
+    case _                                => None

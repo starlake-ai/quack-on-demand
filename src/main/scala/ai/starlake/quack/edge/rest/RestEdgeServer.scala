@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.rest
 import ai.starlake.quack.RestEdgeConfig
 import ai.starlake.quack.edge.CertGen
 import ai.starlake.quack.edge.quack.PemKeyStore
+import ai.starlake.quack.observability.metrics.RestEdgeInstruments
 import ai.starlake.quack.ondemand.api.ErrorResponse
 import ai.starlake.quack.ondemand.api.Dtos.given
 import cats.data.{Kleisli, OptionT}
@@ -56,7 +57,9 @@ final class RestEdgeServer(
     endpoints: List[ServerEndpoint[RestEdgeEndpoints.Caps, IO]],
     newRequestId: () => String = () => UUID.randomUUID().toString,
     /** The failed-auth throttle, the SAME instance the handlers record failures in. */
-    throttle: Option[AuthThrottle] = None
+    throttle: Option[AuthThrottle] = None,
+    /** The edge's Prometheus meters, shared with the handlers. */
+    metrics: RestEdgeInstruments = RestEdgeInstruments.noop
 ) extends LazyLogging:
 
   import RestEdgeServer.*
@@ -98,7 +101,20 @@ final class RestEdgeServer(
       .withContentType(`Content-Type`(MediaType.application.json))
 
   private val notFound: HttpRoutes[IO] =
-    Kleisli(_ => OptionT.pure[IO](error(Status.NotFound, "not_found", "not found")))
+    Kleisli(_ =>
+      OptionT.liftF(
+        IO(recordServerAnswer(error(Status.NotFound, "not_found", "not found"), preflight = false))
+      )
+    )
+
+  /** Meters an answer the server gave without a route (the routes meter their own; these take no
+    * measurable time): the blocked client's 429 also as a rejection.
+    */
+  private def recordServerAnswer(resp: Response[IO], preflight: Boolean): Response[IO] =
+    val route = if preflight then "preflight" else RestEdgeInstruments.NoRoute
+    if resp.status == Status.TooManyRequests then metrics.rejection("auth_failures")
+    metrics.request(route, RestEdgeInstruments.NoFormat, resp.status.code, 0L)
+    resp
 
   /** Before any route: a response when the request is refused, else None. */
   private def gate(req: Request[IO]): Option[Response[IO]] =
@@ -150,12 +166,13 @@ final class RestEdgeServer(
       .putHeaders(Header.Raw(ci"X-Request-Id", rid))
       .withAttribute(RestEdgeEndpoints.ClientAttribute, client)
       .withAttribute(RestEdgeEndpoints.TrailersAttribute, trailers)
-    val req    = accept.fold(base)(a => base.withAttribute(RestEdgeEndpoints.AcceptAttribute, a))
-    val origin = req0.headers.get(ci"Origin").map(_.head.value)
-    val pre    = preflight(req, origin)
-    val routed = blocked(client).orElse(pre).orElse(gate(req)) match
-      case Some(refused) => IO.pure(refused)
-      case None          => (tapirRoutes <+> notFound).orNotFound.run(req)
+    val req     = accept.fold(base)(a => base.withAttribute(RestEdgeEndpoints.AcceptAttribute, a))
+    val origin  = req0.headers.get(ci"Origin").map(_.head.value)
+    val pre     = preflight(req, origin)
+    val refused = blocked(client).orElse(pre).orElse(gate(req))
+    val routed  = refused match
+      case Some(answer) => IO(recordServerAnswer(answer, pre.isDefined))
+      case None         => (tapirRoutes <+> notFound).orNotFound.run(req)
     routed
       .handleError { t =>
         logger.warn(s"rest [$rid] unhandled failure: ${t.getClass.getName}")
@@ -336,7 +353,7 @@ object RestEdgeServer:
             ok.headers :+ sttp.model.Header("Content-Length", bytes.length.toString),
             fs2.Stream.chunk(fs2.Chunk.byteBuffer(bytes.buffer))
           )
-        case RestBody.Streamed(bytes, trailers) =>
+        case RestBody.Streamed(bytes, trailers, _) =>
           req.trailers.set(trailers)
           (ok.headers, bytes)
     }

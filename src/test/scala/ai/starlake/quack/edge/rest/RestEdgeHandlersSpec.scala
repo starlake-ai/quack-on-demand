@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import ai.starlake.quack.observability.metrics.RestEdgeInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ErrorResponse, ExecCaller}
 import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
@@ -273,7 +274,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       throttle: Option[AuthThrottle] = None,
       limiter: Option[UserLimiter] = None,
       oidc: Map[(String, String), RestPrincipal] = Map.empty,
-      parquet: Boolean = true
+      parquet: Boolean = true,
+      metrics: RestEdgeInstruments = RestEdgeInstruments.noop
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
@@ -308,7 +310,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         throttle = throttle,
         limiter = Some(lim),
         resolveOidc = (t, jwt) => oidc.get((t, jwt)),
-        parquetAvailable = parquet
+        parquetAvailable = parquet,
+        metrics = metrics
       ),
       calls,
       lim,
@@ -1976,4 +1979,103 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     fx.closes.get shouldBe 2
     lim.inFlightTotal shouldBe 0
     parquetDirs() shouldBe before
+  }
+
+  // ---- Prometheus meters -----------------------------------------------------------------------
+
+  private def count(reg: io.micrometer.core.instrument.simple.SimpleMeterRegistry, tags: String*) =
+    Option(reg.find("qod_rest_requests_total").tags(tags*).counter()).fold(0.0)(_.count())
+
+  "the meters" should "count answers by route template, format and status, never by path" in {
+    val reg = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val fx  = fixture(metrics = new RestEdgeInstruments(reg))
+    okOf(rows(fx, "customer"))
+    okOf(rows(fx, "customer", "format=csv"))
+    errOf(rows(fx, "ghost"))
+    errOf(rowsAs(fx, "qod_pat_garbage", "c1"))
+    okOf(fx.handlers.schemas("acme", "acme_lake", req()).unsafeRunSync())
+    count(reg, "route", "rows", "format", "json", "status", "200") shouldBe 1.0
+    count(reg, "route", "rows", "format", "csv", "status", "200") shouldBe 1.0
+    count(reg, "route", "rows", "format", "none", "status", "404") shouldBe 1.0
+    count(reg, "route", "rows", "format", "none", "status", "401") shouldBe 1.0
+    count(reg, "route", "schemas", "format", "json", "status", "200") shouldBe 1.0
+    reg.get("qod_rest_request_seconds").tags("route", "rows").timers().size should be > 0
+    // Only template names and fixed vocabularies ever become label values.
+    reg.getMeters.toArray.toList
+      .map(_.asInstanceOf[io.micrometer.core.instrument.Meter].getId)
+      .flatMap(id =>
+        id.getTags.toArray.toList.map(_.asInstanceOf[io.micrometer.core.instrument.Tag])
+      )
+      .filter(_.getKey == "route")
+      .map(_.getValue)
+      .toSet should contain only ("rows", "schemas")
+  }
+
+  it should "count the abuse controls' rejections" in {
+    val reg  = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val gate = new CountDownLatch(1)
+    val arr  = new AtomicInteger()
+    val fx   = fixture(
+      metrics = new RestEdgeInstruments(reg),
+      respond = Some(gated(gate, arr)),
+      limiter = Some(new UserLimiter(perUser = 1, total = 64))
+    )
+    val first = IO(rows(fx, "customer")).start.unsafeRunSync()
+    awaitCount(arr, 1)
+    errOf(rows(fx, "customer"))._3.error shouldBe "too_many_requests"
+    gate.countDown()
+    okOf(first.joinWithNever.unsafeRunSync())
+    (1 to 21).foreach(_ => rowsAs(fx, "qod_pat_garbage", "c7"))
+    reg.counter("qod_rest_rejections_total", "reason", "concurrency").count() shouldBe 1.0
+    reg.counter("qod_rest_rejections_total", "reason", "auth_failures").count() shouldBe 1.0
+  }
+
+  it should "time a streamed answer when its body ends, and count an aborted one" in {
+    val reg = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val fx  = fixture(metrics = new RestEdgeInstruments(reg))
+    val s   = streamedOf(okOf(rows(fx, "customer", "format=arrow")))
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 0.0
+    drain(s)
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 1.0
+    val broken = fixture(metrics = new RestEdgeInstruments(reg), respond = Some(failing(1)))
+    val b      = streamedOf(okOf(rows(broken, "customer", "format=arrow&limit=2500")))
+    b.bytes.compile.drain.attempt.unsafeRunSync().isLeft shouldBe true
+    reg.counter("qod_rest_stream_aborts_total", "route", "rows", "format", "arrow").count() shouldBe
+      1.0
+  }
+
+  it should "count a body its client abandons mid-way as an abort, once" in {
+    val reg = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val fx  = fixture(metrics = new RestEdgeInstruments(reg), dataRows = 3000)
+    val s   = streamedOf(okOf(rows(fx, "customer", "format=arrow&limit=3000")))
+    // The client goes away mid-body: the server cancels the stream, which did not fail.
+    val reading =
+      s.bytes.chunks.evalMap(_ => IO.sleep(1.second)).compile.drain.start.unsafeRunSync()
+    Thread.sleep(300)
+    reading.cancel.unsafeRunSync()
+    reg.counter("qod_rest_stream_aborts_total", "route", "rows", "format", "arrow").count() shouldBe
+      1.0
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 1.0
+    fx.closes.get shouldBe 2
+  }
+
+  it should "meter a body that is never started once it is released, and only then" in {
+    val reg = new io.micrometer.core.instrument.simple.SimpleMeterRegistry
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxStreamSec = 1),
+      metrics = new RestEdgeInstruments(reg),
+      limiter = Some(lim)
+    )
+    val s = streamedOf(okOf(rows(fx, "customer", "format=arrow")))
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 0.0
+    awaitDrained(lim)
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 1.0
+    reg.counter("qod_rest_stream_aborts_total", "route", "rows", "format", "arrow").count() shouldBe
+      1.0
+    // Started after its release, the body fails at once; that is the same answer, not a second.
+    s.bytes.compile.drain.attempt.unsafeRunSync().isLeft shouldBe true
+    count(reg, "route", "rows", "format", "arrow", "status", "200") shouldBe 1.0
+    reg.counter("qod_rest_stream_aborts_total", "route", "rows", "format", "arrow").count() shouldBe
+      1.0
   }
