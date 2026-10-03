@@ -7,6 +7,7 @@ import ai.starlake.quack.model.{
   Role,
   RoleDistribution,
   RunningNode,
+  SessionCatalog,
   Tenant,
   TenantDbKind
 }
@@ -1006,6 +1007,126 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Some(_) =>
         sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
         defaultsRouter(sup).defaultsOf(key) shouldBe ((Some("delta_lake"), Some("myschema")))
+
+  // The parser defaults the router resolves names against are the ones SessionCatalog resolves for
+  // the pool, for every kind and metastore shape. The REST edge qualifies its generated names from
+  // the same resolver; if the router derived the catalog on its own, the policy rewriters could
+  // qualify against one catalog while the node read another.
+  it should "resolve the parser defaults through SessionCatalog for every kind and shape" in:
+    val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
+      def createDatabase(name: String): Either[String, Unit] = Right(())
+      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+    val backend = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          25500 + n.size,
+          "tok",
+          Some(6L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
+    val sup = new PoolSupervisor(
+      backend,
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      dbAdmin = admin
+    )
+    sup.createTenant(Tenant("zeta")).unsafeRunSync()
+    // DuckLake pre-init against pgPort 0 fails fast and is swallowed by design (see the schema
+    // skew test below), so no live Postgres is needed for the ducklake shapes.
+    val pg = Map("pgHost" -> "127.0.0.1", "pgPort" -> "0", "pgUser" -> "u", "pgPassword" -> "p")
+    final case class Shape(
+        suffix: String,
+        kind: TenantDbKind,
+        metastore: Map[String, String],
+        dataPath: String,
+        defaultDatabase: Option[String],
+        expectedDb: Option[String],
+        expectedSchema: Option[String]
+    )
+    val shapes = List(
+      Shape("mem", TenantDbKind.InMemory, Map.empty, "", None, Some("memory"), Some("main")),
+      Shape(
+        "memov",
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        Some("fedpg"),
+        Some("fedpg"),
+        Some("main")
+      ),
+      Shape(
+        "file",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "zeta_file", "schemaName" -> "main"),
+        "/tmp/qod-session-catalog.duckdb",
+        None,
+        Some("zeta_file"),
+        Some("main")
+      ),
+      Shape(
+        "filealias",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "zeta_filealias", "schemaName" -> "main", "catalogAlias" -> "zeta_parent"),
+        "/tmp/qod-session-catalog-alias.duckdb",
+        None,
+        Some("zeta_parent"),
+        Some("main")
+      ),
+      Shape(
+        "lake",
+        TenantDbKind.DuckLake,
+        pg + ("schemaName" -> "curated"),
+        "/tmp/qod-session-catalog-lake",
+        None,
+        Some("zeta_lake"),
+        Some("curated")
+      ),
+      Shape(
+        "lakealias",
+        TenantDbKind.DuckLake,
+        pg ++ Map("schemaName" -> "main", "catalogAlias" -> "zeta_lake"),
+        "/tmp/qod-session-catalog-lake-alias",
+        None,
+        Some("zeta_lake"),
+        Some("main")
+      )
+    )
+    val router = defaultsRouter(sup)
+    shapes.foreach { s =>
+      withClue(s"${s.suffix}: ") {
+        sup
+          .createTenantDb(
+            tenantName = "zeta",
+            suffix = s.suffix,
+            kind = s.kind,
+            metastore = s.metastore,
+            dataPath = s.dataPath,
+            defaultDatabase = s.defaultDatabase
+          )
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+        val key = PoolKey("zeta", s"zeta_${s.suffix}", s"p${s.suffix}")
+        sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+        val st = sup.get(key).get
+        router.defaultsOf(key) shouldBe ((
+          SessionCatalog.database(st.kindWire, st.metastore, st.defaultDatabase),
+          SessionCatalog.schema(st.kindWire, st.metastore, st.defaultSchema)
+        ))
+        router.defaultsOf(key) shouldBe ((s.expectedDb, s.expectedSchema))
+      }
+    }
 
   // Issue #112: the gateway's parser default (`defaultsOf`, the tenant-db's own defaultSchema
   // override) and the schema of the USE prelude wrapWithDefaultSchema sends must agree, or the
