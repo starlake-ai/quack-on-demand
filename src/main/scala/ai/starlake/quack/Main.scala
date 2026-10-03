@@ -1899,7 +1899,8 @@ object Main extends IOApp with LazyLogging:
             catalogReader,
             (tenant, tenantDb, tag) =>
               store.findSnapshotTag(tenant, tenantDb, tag).map(_.snapshotId),
-            throttle = Some(throttle)
+            throttle = Some(throttle),
+            limiter = Some(ai.starlake.quack.edge.rest.UserLimiter(restCfgResolved))
           )
           new ai.starlake.quack.edge.rest.RestEdgeServer(
             restCfgResolved,

@@ -43,6 +43,8 @@ data:
   QOD_REST_AUTH_WINDOW_SEC:              {{ .Values.rest.authThrottle.windowSec | quote }}
   QOD_REST_AUTH_BLOCK_SEC:               {{ .Values.rest.authThrottle.blockSec | quote }}
   QOD_REST_AUTH_THROTTLE_MAX_ENTRIES:    {{ .Values.rest.authThrottle.maxEntries | quote }}
+  QOD_REST_MAX_CONCURRENT_PER_USER:      {{ .Values.rest.maxConcurrentPerUser | quote }}
+  QOD_REST_MAX_CONCURRENT_TOTAL:         {{ .Values.rest.maxConcurrentTotal | quote }}
 
   # ---- Metrics sink ---------------------------------------------------------
   QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}

@@ -88,8 +88,9 @@ object RestResponses:
     // Every 503 is retryable: a resume in progress, or a pool with no node to serve right now.
     val extra = e match
       case RestError.Unauthorized => List(Header("WWW-Authenticate", "Bearer"))
-      // A blocked client learns when its block ends.
+      // A blocked client learns when its block ends; a full cap frees up quickly.
       case RestError.TooManyAuthFailures(s)             => List(Header("Retry-After", s.toString))
+      case RestError.TooManyRequests                    => List(Header("Retry-After", "1"))
       case _ if status == StatusCode.ServiceUnavailable =>
         List(Header("Retry-After", RetryAfterSec.toString))
       case _ => Nil

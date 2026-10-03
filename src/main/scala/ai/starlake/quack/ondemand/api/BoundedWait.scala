@@ -30,18 +30,24 @@ object BoundedWait:
     * `onDelivered` sees a `Right` delivered in time before it is returned, with no cancellation
     * point in between: a caller that registers it there can close it when it is cancelled at the
     * boundary of the `poll` it waits in, where the returned value itself would be lost.
+    *
+    * `beforeStart` runs uncancelably right before `run`'s fiber starts: whatever it acquires is
+    * then owned by that fiber's outcome, with no window in which a cancelled caller could leave it
+    * held (the REST edge retains its per-user slot here and releases it when the node call ends).
     */
   def closingLate[E, A](
       run: IO[Either[E, A]],
       limit: FiniteDuration,
       onTimeout: => E,
       close: A => Unit,
-      onDelivered: A => IO[Unit] = (_: A) => IO.unit
+      onDelivered: A => IO[Unit] = (_: A) => IO.unit,
+      beforeStart: IO[Unit] = IO.unit
   ): IO[Either[E, A]] =
     IO.uncancelable { poll =>
       for
         state   <- Ref[IO].of[Handoff](Handoff.Waiting)
         outcome <- Deferred[IO, Either[Throwable, Either[E, A]]]
+        _       <- beforeStart
         _       <- run.attempt.flatMap { r =>
           state.modify {
             case Handoff.Waiting => (Handoff.Delivered, outcome.complete(r).void)

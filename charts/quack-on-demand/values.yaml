@@ -107,9 +107,9 @@ service:
     annotations: {}
   # Read-only REST data edge (`GET /api/v1/...`, PAT bearer), created only when
   # rest.enabled. Not `service.rest`: that key is the admin REST/UI listener
-  # above. The edge throttles failed authentication per client (see
-  # rest.authThrottle); a WAF in front of it is still recommended for
-  # volumetric and DDoS limits on internet exposure.
+  # above. The edge throttles failed authentication per client and caps
+  # in-flight requests per user (see rest.*); a WAF in front of it is still
+  # recommended for volumetric and DDoS limits on internet exposure.
   restData:
     type: ClusterIP
     port: 31339
@@ -337,6 +337,15 @@ rest:
     windowSec: 60
     blockSec: 300
     maxEntries: 100000
+  # In-flight requests per user (not per token) and for the whole edge, per
+  # replica; past either the answer is 429 too_many_requests. A JSON or CSV page
+  # is buffered in the manager heap, in a buffer that grows by doubling (up to
+  # 3 x QOD_REST_MAX_RESPONSE_BYTES while it grows): size
+  # resources.limits.memory (and the JVM heap) for up to 3 x maxConcurrentTotal
+  # x QOD_REST_MAX_RESPONSE_BYTES (3 x 16 x 64 MiB = 3 GiB by default) on top
+  # of the manager's own needs.
+  maxConcurrentPerUser: 4
+  maxConcurrentTotal: 16
 
 flightsql:
   tls:

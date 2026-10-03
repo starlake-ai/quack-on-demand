@@ -154,6 +154,7 @@ class AuthThrottleSpec extends AnyFlatSpec with Matchers:
       RestError.PoolUnavailable,
       RestError.StatementTimeout,
       RestError.UpstreamError,
+      RestError.TooManyRequests,
       RestError.TooManyAuthFailures(1)
     ).foreach(e => withClue(e.code)(AuthThrottle.counts(e) shouldBe false))
   }

@@ -30,6 +30,9 @@ import io.circe.Json
 import io.circe.parser.parse
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.apache.arrow.vector.VectorUnloader
+import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.arrow.vector.types.pojo.Schema
 import org.slf4j.LoggerFactory
 import pureconfig.ConfigSource
 import sttp.model.{Header, StatusCode}
@@ -49,8 +52,8 @@ import scala.jdk.CollectionConverters.*
   * executors (recording, and the unrecording one for the probe) share the stub; each call notes
   * which one it came through.
   *
-  * The failed-auth throttle is covered here too, over the same seam: the resolver counts its
-  * lookups.
+  * The HTTP-layer abuse controls are covered here too, over the same seam: the failed-auth throttle
+  * (the resolver counts its lookups) and the per-user in-flight cap (latched stubs).
   */
 class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
 
@@ -59,6 +62,9 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   private val Token      = "qod_pat_alice"
   private val SuperToken = "qod_pat_root"
   private val OtherToken = "qod_pat_bob"
+  // A second PAT of alice's (same owner as Token), and a PAT of another acme user.
+  private val Token2     = "qod_pat_alice2"
+  private val CarolToken = "qod_pat_carol"
 
   private def principal(
       tenant: Option[String],
@@ -233,9 +239,13 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
   final class Fixture(
       val handlers: RestEdgeHandlers,
       val calls: ListBuffer[Call],
+      val limiter: UserLimiter,
       val lookups: AtomicInteger
   ):
     val closes = new AtomicInteger()
+
+    /** DuckLake catalog lookups (snapshot and view resolution) made so far. */
+    val catalogs = new AtomicInteger()
 
   private val baseCfg = RestEdgeConfig(
     enabled = true,
@@ -260,16 +270,25 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       dataRows: Int = 3,
       respond: Option[AtomicInteger => Responder] = None,
       stmtTimeout: Option[FiniteDuration] = None,
-      throttle: Option[AuthThrottle] = None
+      throttle: Option[AuthThrottle] = None,
+      limiter: Option[UserLimiter] = None
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
       Token      -> principal(Some("acme"), restriction, "pat-1", Some("u-alice")),
+      Token2     -> principal(Some("acme"), restriction, "pat-2", Some("u-alice")),
+      CarolToken -> principal(
+        Some("acme"),
+        TokenRestriction.Unrestricted,
+        "pat-3",
+        Some("u-carol")
+      ),
       SuperToken -> principal(None, TokenRestriction.Unrestricted, "pat-root"),
       OtherToken -> principal(Some("globex"), TokenRestriction.Unrestricted, "pat-bob")
     )
-    val lookups                                                             = new AtomicInteger()
-    var fx: Fixture                                                         = null
+    val lookups     = new AtomicInteger()
+    val lim         = limiter.getOrElse(UserLimiter(cfg))
+    var fx: Fixture = null
     def executor(recorded: Boolean): CatalogPreviewHandlers.PreviewExecutor =
       (caller, key, sql) =>
         IO(calls.synchronized(calls += Call(caller, key, sql, recorded))) *>
@@ -281,12 +300,14 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         t => { lookups.incrementAndGet(); pats.get(t) },
         executor(recorded = true),
         executor(recorded = false),
-        (_, _) => reader,
+        (_, _) => { fx.catalogs.incrementAndGet(); reader },
         tags,
         stmtTimeout = stmtTimeout,
-        throttle = throttle
+        throttle = throttle,
+        limiter = Some(lim)
       ),
       calls,
+      lim,
       lookups
     )
     fx
@@ -1096,3 +1117,179 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     statuses.distinct shouldBe Vector(StatusCode.Unauthorized)
     okOf(rowsAs(fx, Token, "c4"))
   }
+
+  // ---- the per-user in-flight cap --------------------------------------------------------------
+
+  /** A responder whose every call waits on `gate`; `arrived` counts the calls that reached it. */
+  private def gated(gate: CountDownLatch, arrived: AtomicInteger): AtomicInteger => Responder =
+    closes =>
+      sql =>
+        IO(arrived.incrementAndGet()) *> IO.blocking(gate.await(10, TimeUnit.SECONDS)) *>
+          defaultResponder(closes, 1)(sql)
+
+  private def awaitCount(n: AtomicInteger, target: Int): Unit =
+    val deadline = System.nanoTime() + 5.seconds.toNanos
+    while n.get < target && System.nanoTime() < deadline do Thread.sleep(5)
+    n.get shouldBe target
+
+  private def awaitDrained(lim: UserLimiter): Unit =
+    val deadline = System.nanoTime() + 5.seconds.toNanos
+    while lim.inFlightTotal > 0 && System.nanoTime() < deadline do Thread.sleep(5)
+    Thread.sleep(100)
+    lim.inFlightTotal shouldBe 0
+
+  /** Freed exactly once: the owner's cap of one slot is still exactly one slot. */
+  private def assertOneSlotLeft(lim: UserLimiter): Unit =
+    lim.tryAcquire(("acme", "u-alice")) should not be empty
+    lim.tryAcquire(("acme", "u-alice")) shouldBe None
+
+  "the per-user cap" should "admit maxConcurrentPerUser parallel requests and answer the next 429" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val fx      = fixture(respond = Some(gated(gate, arrived)))
+    val fibers  = (1 to 4).map(_ => IO(rows(fx, "customer")).start.unsafeRunSync())
+    awaitCount(arrived, 4)
+    val fifth = errOf(rows(fx, "customer"))
+    (fifth._1, fifth._3.error) shouldBe (StatusCode.TooManyRequests, "too_many_requests")
+    header(fifth._2, "Retry-After") shouldBe Some("1")
+    arrived.get shouldBe 4 // the refused request never reached the executor
+    gate.countDown()
+    fibers.map(_.joinWithNever.unsafeRunSync()).foreach(okOf)
+    fx.limiter.inFlightTotal shouldBe 0
+  }
+
+  it should "share one budget across every PAT of the same owner, not across owners" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val fx      = fixture(
+      respond = Some(gated(gate, arrived)),
+      limiter = Some(new UserLimiter(perUser = 1, total = 64))
+    )
+    val first = IO(rowsAs(fx, Token, "c1")).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    errOf(rowsAs(fx, Token2, "c1"))._3.error shouldBe "too_many_requests"
+    val carol = IO(rowsAs(fx, CarolToken, "c1")).start.unsafeRunSync()
+    awaitCount(arrived, 2)
+    gate.countDown()
+    okOf(first.joinWithNever.unsafeRunSync())
+    okOf(carol.joinWithNever.unsafeRunSync())
+  }
+
+  it should "apply the edge-wide cap across owners" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val fx      = fixture(
+      respond = Some(gated(gate, arrived)),
+      limiter = Some(new UserLimiter(perUser = 4, total = 1))
+    )
+    val first = IO(rowsAs(fx, Token, "c1")).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    errOf(rowsAs(fx, CarolToken, "c2"))._3.error shouldBe "too_many_requests"
+    gate.countDown()
+    okOf(first.joinWithNever.unsafeRunSync())
+  }
+
+  it should "refuse a request over the cap before any catalog lookup" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val fx      = fixture(
+      respond = Some(gated(gate, arrived)),
+      limiter = Some(new UserLimiter(perUser = 1, total = 64))
+    )
+    val first = IO(rows(fx, "customer")).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    val before = fx.catalogs.get
+    errOf(rows(fx, "customer"))._3.error shouldBe "too_many_requests"
+    val detail = fx.handlers.table("acme", "acme_lake", "main", "customer", req()).unsafeRunSync()
+    errOf(detail)._3.error shouldBe "too_many_requests"
+    fx.catalogs.get shouldBe before
+    gate.countDown()
+    okOf(first.joinWithNever.unsafeRunSync())
+  }
+
+  it should "hold the slot past a 504 until the node call completes, then free it exactly once" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val lim     = new UserLimiter(perUser = 1, total = 64)
+    val fx      = fixture(
+      respond = Some(gated(gate, arrived)),
+      stmtTimeout = Some(200.millis),
+      limiter = Some(lim)
+    )
+    errOf(rows(fx, "customer"))._1 shouldBe StatusCode.GatewayTimeout
+    lim.inFlight(("acme", "u-alice")) shouldBe 1
+    errOf(rows(fx, "customer"))._3.error shouldBe "too_many_requests"
+    gate.countDown()
+    awaitDrained(lim)
+    fx.closes.get shouldBe 1 // the late probe result was closed, and only once
+    assertOneSlotLeft(lim)
+  }
+
+  it should "free the slot exactly once when the client disconnects while the node call runs" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val lim     = new UserLimiter(perUser = 1, total = 64)
+    val fx      = fixture(respond = Some(gated(gate, arrived)), limiter = Some(lim))
+    val fiber   =
+      fx.handlers.rows("acme", "acme_lake", "main", "customer", req()).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    fiber.cancel.unsafeRunSync()
+    lim.inFlightTotal shouldBe 1 // the node is still working
+    gate.countDown()
+    awaitDrained(lim)
+    fx.closes.get shouldBe 1
+    assertOneSlotLeft(lim)
+  }
+
+  it should "free the slot exactly once when the client disconnects mid-read" in {
+    val reading                            = new CountDownLatch(1)
+    val gate                               = new CountDownLatch(1)
+    val lim                                = new UserLimiter(perUser = 1, total = 64)
+    val stream: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+        else
+          IO {
+            val inner  = TestArrow.readerFor("SELECT range::INTEGER AS c_id FROM range(3)")
+            val reader = new GatedReader(inner, reading, gate)
+            Right(
+              QueryResult(
+                reader,
+                () => { closes.incrementAndGet(); reader.close() },
+                "n-data",
+                1L
+              )
+            )
+          }
+    val fx    = fixture(respond = Some(stream), limiter = Some(lim))
+    val fiber =
+      fx.handlers.rows("acme", "acme_lake", "main", "customer", req()).start.unsafeRunSync()
+    reading.await(5, TimeUnit.SECONDS) shouldBe true
+    // The disconnect: cancelling waits for the blocking read, then the finalizer runs.
+    val cancel = fiber.cancel.start.unsafeRunSync()
+    Thread.sleep(50)
+    lim.inFlightTotal shouldBe 1
+    gate.countDown()
+    cancel.joinWithNever.unsafeRunSync()
+    awaitDrained(lim)
+    fx.closes.get shouldBe 2 // probe and data, each exactly once
+    assertOneSlotLeft(lim)
+  }
+
+  /** An Arrow reader that signals `reading` and then waits on `gate` before each batch of `inner`:
+    * a client disconnecting while the edge reads the result.
+    */
+  private final class GatedReader(inner: ArrowReader, reading: CountDownLatch, gate: CountDownLatch)
+      extends ArrowReader(TestArrow.sharedAllocator):
+    override def loadNextBatch(): Boolean =
+      reading.countDown()
+      gate.await(10, TimeUnit.SECONDS)
+      val more = inner.loadNextBatch()
+      if more then
+        val batch = new VectorUnloader(inner.getVectorSchemaRoot).getRecordBatch
+        try loadRecordBatch(batch)
+        finally batch.close()
+      more
+    override def bytesRead(): Long                 = inner.bytesRead()
+    override protected def closeReadSource(): Unit = inner.close()
+    override protected def readSchema(): Schema    = inner.getVectorSchemaRoot.getSchema

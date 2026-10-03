@@ -1793,7 +1793,22 @@ final case class RestEdgeConfig(
       description =
         "Client addresses the failed-auth throttle tracks (counters and, separately, blocks)."
     )
-    authThrottleMaxEntries: Int = 100000
+    authThrottleMaxEntries: Int = 100000,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_CONCURRENT_PER_USER",
+      description =
+        "In-flight requests per principal (tenant, user), whatever the number of their tokens; past it 429."
+    )
+    maxConcurrentPerUser: Int = 4,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_CONCURRENT_TOTAL",
+      description =
+        "In-flight requests across the whole REST data edge; past it 429. Each may buffer a " +
+          "JSON or CSV page of up to QOD_REST_MAX_RESPONSE_BYTES in the heap, in a buffer that " +
+          "grows by doubling and so can briefly take up to three times that: size the heap for " +
+          "up to 3 x this x that, on top of the manager's own needs."
+    )
+    maxConcurrentTotal: Int = 16
 ):
   // `def`, not a val: ConfigRegistry pairs declared fields with constructor parameters by position.
   /** The parsed `trustedProxies`; empty (trust none) when it does not parse, which boot refuses. */
@@ -1849,6 +1864,8 @@ object RestEdgeConfig:
         atLeast(cfg.authWindowSec, 1, "QOD_REST_AUTH_WINDOW_SEC"),
         atLeast(cfg.authBlockSec, 1, "QOD_REST_AUTH_BLOCK_SEC"),
         atLeast(cfg.authThrottleMaxEntries, 1, "QOD_REST_AUTH_THROTTLE_MAX_ENTRIES"),
+        atLeast(cfg.maxConcurrentPerUser, 1, "QOD_REST_MAX_CONCURRENT_PER_USER"),
+        atLeast(cfg.maxConcurrentTotal, 1, "QOD_REST_MAX_CONCURRENT_TOTAL"),
         otherPorts.collectFirst {
           case (door, p) if p == cfg.port =>
             s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"

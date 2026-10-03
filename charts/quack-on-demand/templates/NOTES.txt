@@ -62,10 +62,14 @@ Quack on Demand has been installed.
     curl {{- if .Values.rest.tls.enabled }} -k{{- end }} -H "Authorization: Bearer <qod_pat_...>" \
       "{{ if .Values.rest.tls.enabled }}https{{ else }}http{{ end }}://localhost:{{ .Values.service.restData.port }}/api/v1/tenant/<tenant>/database/<db>/schemas/<schema>/tables/<table>/rows?limit=10"
 
-  The edge throttles failed authentication per client. Behind a load balancer
-  or Ingress, set rest.trustedProxies: without it every client shares the
-  LB's budget, and one client's bad tokens block everyone. Before exposing it
-  to the internet, a WAF is still recommended for volumetric and DDoS limits.
+  The edge throttles failed authentication per client and caps in-flight
+  requests per user. Behind a load balancer or Ingress, set
+  rest.trustedProxies: without it every client shares the LB's budget, and one
+  client's bad tokens block everyone. A JSON or CSV page is buffered in the
+  manager heap, in a buffer that grows by doubling: budget up to 3 x
+  rest.maxConcurrentTotal x the response byte cap (3 GiB by default) on top of
+  the manager's own needs. Before exposing it to the
+  internet, a WAF is still recommended for volumetric and DDoS limits.
 {{- end }}
 
 # Watch the Quack node pods the manager spawns

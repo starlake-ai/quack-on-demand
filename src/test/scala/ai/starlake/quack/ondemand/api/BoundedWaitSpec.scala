@@ -149,3 +149,28 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     awaitCloses(late, 1)
     late.closes.get() shouldBe 1
     seen.get shouldBe None
+
+  it should "run beforeStart exactly once, before the statement, even for a cancelled caller" in:
+    val seed = System.nanoTime()
+    info(s"seed=$seed")
+    val rnd = new scala.util.Random(seed)
+    (1 to 200).foreach { _ =>
+      val acquired  = new AtomicInteger(0)
+      val seenByRun = new AtomicInteger(-1)
+      val done      = new CountDownLatch(1)
+      val run       = IO { seenByRun.set(acquired.get()); done.countDown() }.as(Right(new Res(0)))
+      val waiting   = BoundedWait.closingLate(
+        run,
+        10.seconds,
+        "timeout",
+        closeRes,
+        beforeStart = IO(acquired.incrementAndGet()).void
+      )
+      // Cancelled at a random point: before entering (nothing acquired, nothing run) or after
+      // (acquired once, and the statement then runs having seen it).
+      waiting.timeoutTo(rnd.nextInt(3).millis, IO.pure(Left("outer"))).unsafeRunSync()
+      if acquired.get() == 1 then
+        done.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        withClue(s"seed=$seed: ")(seenByRun.get() shouldBe 1)
+      else acquired.get() shouldBe 0
+    }
