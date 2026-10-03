@@ -43,6 +43,14 @@ EXCLUSIONS = {
     # http4s routes, never in the OpenAPI contract; listed so a registration cannot slip in)
     "/api/internal/authz/credentials",
     "/api/internal/authz/decide",
+    # Read-only REST data edge (quack-rest): served on its own port, not the
+    # manager's, to machine-to-machine clients (low-code tools, services) with a
+    # PAT bearer. Humans read data through `qod sql` or MCP, so no CLI surface
+    # is warranted.
+    "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas",
+    "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables",
+    "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}",
+    "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"
