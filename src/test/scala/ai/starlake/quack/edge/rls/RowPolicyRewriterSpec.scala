@@ -485,3 +485,98 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   it should "pass when the explained statement reads no policy table" in {
     go("EXPLAIN ANALYZE SELECT count(*) FROM orders", frOnly) shouldBe Passthrough
   }
+
+  // ---- time travel --------------------------------------------------------------------------
+  //
+  // jsqlparser cannot parse DuckLake's `AT (VERSION => n)`, and takes `AT (TIMESTAMP => ...)` only
+  // before an alias while DuckDB takes it only after one. The clause is stripped with the ACL
+  // parser's scanner and put back on the same table reference: inside the filtered view, on the
+  // base table, never on the derived table.
+
+  private def raw(o: Outcome): String = o match
+    case Rewritten(sql) => sql
+    case other          => fail(s"expected Rewritten, got $other")
+
+  private val regionEu = policy("c_region = 'eu'")
+
+  "a time-travel read" should "keep AT (VERSION => n) on the base table inside the wrapper" in {
+    raw(
+      go("SELECT * FROM tpch1.customer AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
+    ) shouldBe
+      "SELECT * FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE (c_region = 'eu')) " +
+      "AS customer"
+  }
+
+  it should "move the caller's alias to the wrapper and keep the clause on the base table" in {
+    raw(
+      go("SELECT c.c_id FROM tpch1.customer c AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
+    ) shouldBe
+      "SELECT c.c_id FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE " +
+      "(c_region = 'eu')) c"
+  }
+
+  it should "keep each table's own clause when several tables carry one" in {
+    val policies = List(regionEu, policy("o_year = 2024", table = "orders", id = "rp-2"))
+    val sql      = raw(
+      go(
+        "SELECT * FROM customer AS c AT (VERSION => 7) JOIN orders o AT (VERSION => 9) " +
+          "ON c.c_id = o.c_id",
+        eff(tenantUser, policies)
+      )
+    )
+    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) AS c")
+    sql should include("FROM orders AT (VERSION => 9) WHERE (o_year = 2024)) o")
+  }
+
+  it should "leave the clause after the alias on a table no policy covers" in {
+    val sql = raw(
+      go(
+        "SELECT * FROM customer c AT (VERSION => 7), orders o AT (VERSION => 9)",
+        eff(tenantUser, List(regionEu))
+      )
+    )
+    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) c")
+    sql should include("orders o AT (VERSION => 9)")
+  }
+
+  it should "keep the caller's spelling of the clause, case and spacing included" in {
+    raw(go("SELECT * FROM customer x at(version=>7)", eff(tenantUser, List(regionEu)))) should
+      include("FROM customer at(version=>7) WHERE (c_region = 'eu')) x")
+  }
+
+  it should "keep an AT (TIMESTAMP => expr) clause the same way" in {
+    val clause = "AT (TIMESTAMP => TIMESTAMP '2026-01-01 10:00:00')"
+    raw(go(s"SELECT * FROM customer c $clause", eff(tenantUser, List(regionEu)))) should
+      include(s"FROM customer $clause WHERE (c_region = 'eu')) c")
+  }
+
+  it should "keep the clause on a table inside a subquery and a CTE" in {
+    val sql = raw(
+      go(
+        "WITH k AS (SELECT c_id FROM customer AT (VERSION => 3)) SELECT * FROM k " +
+          "WHERE c_id IN (SELECT c_id FROM customer z AT (VERSION => 4))",
+        eff(tenantUser, List(regionEu))
+      )
+    )
+    sql should include("FROM customer AT (VERSION => 3) WHERE (c_region = 'eu')) AS customer")
+    sql should include("FROM customer AT (VERSION => 4) WHERE (c_region = 'eu')) z")
+  }
+
+  it should "pass through, clause intact in the caller's text, when no policy covers the table" in {
+    go("SELECT * FROM orders AT (VERSION => 9)", eff(tenantUser, List(regionEu))) shouldBe
+      Passthrough
+  }
+
+  it should "fail closed when the clause follows a derived table instead of a table" in {
+    go(
+      "SELECT * FROM (SELECT * FROM customer) d AT (VERSION => 7)",
+      eff(tenantUser, List(regionEu))
+    ) shouldBe PassthroughParseFailed
+  }
+
+  it should "fail closed when the caller's text carries the carrier's reserved marker" in {
+    go(
+      "SELECT '__qod_time_travel_0__' FROM customer AT (VERSION => 7)",
+      eff(tenantUser, List(regionEu))
+    ) shouldBe PassthroughParseFailed
+  }
