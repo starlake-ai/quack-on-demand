@@ -17,7 +17,7 @@ class GenOpenApiSpec extends AnyFlatSpec with Matchers:
   private val operations =
     api.paths.pathItems.toList.flatMap { case (path, item) => item.get.map(path -> _) }
 
-  "the REST data edge operations" should "require the PAT bearer scheme" in {
+  "the REST data edge operations" should "accept the PAT bearer or the tenant-OIDC bearer" in {
     val rest = operations.filter(_._2.tags.contains(RestEdgeEndpoints.Tag))
     rest.map(_._1).sorted shouldBe List(
       "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas",
@@ -26,13 +26,19 @@ class GenOpenApiSpec extends AnyFlatSpec with Matchers:
       "/api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows"
     )
     rest.foreach { case (_, op) =>
-      op.security shouldBe List(ListMap(RestEdgeEndpoints.SecuritySchemeName -> Vector.empty))
+      op.security shouldBe List(
+        ListMap(RestEdgeEndpoints.SecuritySchemeName     -> Vector.empty),
+        ListMap(RestEdgeEndpoints.OidcSecuritySchemeName -> Vector.empty)
+      )
     }
-    val scheme = api.components
-      .flatMap(_.securitySchemes.get(RestEdgeEndpoints.SecuritySchemeName))
+    def scheme(name: String) = api.components
+      .flatMap(_.securitySchemes.get(name))
       .flatMap(_.toOption)
-      .getOrElse(fail("no security scheme"))
-    (scheme.`type`, scheme.scheme) shouldBe ("http", Some("bearer"))
+      .getOrElse(fail(s"no security scheme $name"))
+    val pat  = scheme(RestEdgeEndpoints.SecuritySchemeName)
+    val oidc = scheme(RestEdgeEndpoints.OidcSecuritySchemeName)
+    (pat.`type`, pat.scheme, pat.bearerFormat) shouldBe ("http", Some("bearer"), Some("PAT"))
+    (oidc.`type`, oidc.scheme, oidc.bearerFormat) shouldBe ("http", Some("bearer"), Some("JWT"))
   }
 
   "every other operation" should "keep the security it had" in

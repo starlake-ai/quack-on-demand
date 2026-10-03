@@ -271,7 +271,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       respond: Option[AtomicInteger => Responder] = None,
       stmtTimeout: Option[FiniteDuration] = None,
       throttle: Option[AuthThrottle] = None,
-      limiter: Option[UserLimiter] = None
+      limiter: Option[UserLimiter] = None,
+      oidc: Map[(String, String), RestPrincipal] = Map.empty
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
@@ -304,7 +305,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         tags,
         stmtTimeout = stmtTimeout,
         throttle = throttle,
-        limiter = Some(lim)
+        limiter = Some(lim),
+        resolveOidc = (t, jwt) => oidc.get((t, jwt))
       ),
       calls,
       lim,
@@ -1293,3 +1295,78 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     override def bytesRead(): Long                 = inner.bytesRead()
     override protected def closeReadSource(): Unit = inner.close()
     override protected def readSchema(): Schema    = inner.getVectorSchemaRoot.getSchema
+
+  // ---- OIDC bearer -----------------------------------------------------------------------------
+
+  private val Jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJkYXZlIn0.c2ln"
+
+  private val dave = RestPrincipal(
+    RbacUser("u-dave", Some("acme"), "dave", "user"),
+    TokenRestriction.Unrestricted,
+    patId = None,
+    jwtRoles = Set("analyst"),
+    jwtGroups = Set("finance", "analyst"),
+    jwtClaims = Map("sub" -> "dave", "exp" -> "1")
+  )
+
+  "an OIDC bearer" should "run through the executor as its user, with the token's roles, groups and claims" in {
+    val fx  = fixture(oidc = Map(("acme", Jwt) -> dave))
+    val out = fx.handlers
+      .rows("acme", "acme_lake", "main", "customer", req(auth = List(s"Bearer $Jwt")))
+      .unsafeRunSync()
+    okOf(out)
+    fx.lookups.get shouldBe 0 // the PAT store is never asked for a JWT
+    fx.calls.map(_.caller).distinct.foreach { c =>
+      c.identity shouldBe "dave"
+      c.connectionId shouldBe "rest-oidc-u-dave"
+      c.patId shouldBe None
+      (c.source, c.edge) shouldBe ("rest-data", "rest-data")
+      c.jwtRoles shouldBe Set("analyst")
+      c.jwtGroups shouldBe Set("finance", "analyst")
+      c.jwtClaims shouldBe Map("sub" -> "dave", "exp" -> "1")
+      c.superuserAdmissible shouldBe false
+      c.system shouldBe false
+    }
+    // Its probe runs unrecorded and its data statement recorded, as for a PAT.
+    fx.calls.map(c => (c.sql.endsWith("LIMIT 0"), c.recorded)) shouldBe
+      List((true, false), (false, true))
+  }
+
+  it should "answer 401 when the path tenant's resolver does not verify it" in {
+    // Verified for acme only: the same token on globex's path is not.
+    val fx = fixture(oidc = Map(("acme", Jwt) -> dave))
+    val e  = errOf(
+      fx.handlers
+        .rows("globex", "globex_lake", "main", "customer", req(auth = List(s"Bearer $Jwt")))
+        .unsafeRunSync()
+    )
+    (e._1, e._3.error) shouldBe (StatusCode.Unauthorized, "unauthorized")
+    fx.calls shouldBe empty
+  }
+
+  it should "count its failures against the client like any other credential" in {
+    val fx = fixture()
+    (1 to 20).foreach(_ => errOf(rowsAs(fx, Jwt, "c9"))._1 shouldBe StatusCode.Unauthorized)
+    errOf(rowsAs(fx, Jwt, "c9"))._3.error shouldBe "too_many_auth_failures"
+  }
+
+  it should "take its in-flight slot as its own user" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val lim     = new UserLimiter(perUser = 1, total = 64)
+    val fx      = fixture(
+      respond = Some(gated(gate, arrived)),
+      limiter = Some(lim),
+      oidc = Map(("acme", Jwt) -> dave)
+    )
+    val first = IO(rowsAs(fx, Jwt, "c1")).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    lim.inFlight(("acme", "u-dave")) shouldBe 1
+    errOf(rowsAs(fx, Jwt, "c1"))._3.error shouldBe "too_many_requests"
+    // Another user's PAT is not dave's budget.
+    val alice = IO(rowsAs(fx, Token, "c1")).start.unsafeRunSync()
+    awaitCount(arrived, 2)
+    gate.countDown()
+    okOf(first.joinWithNever.unsafeRunSync())
+    okOf(alice.joinWithNever.unsafeRunSync())
+  }

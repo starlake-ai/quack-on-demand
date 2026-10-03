@@ -13,16 +13,15 @@ import java.util.{Date, UUID}
 
 /** Mints test RSA keys and signed JWTs for the security e2e test suite.
   *
-  * The key pair is generated once per JVM via a lazy val, so all JWTs minted
-  * during a test run share the same public key. This is intentional: the
-  * MockOidcServer caches a single JWKS document per boot, and OidcBearerAuthenticator
-  * caches the JWKS for the suite lifetime. Re-generating per-test would cause
-  * signature verification failures against a stale JWKS.
+  * The key pair is generated once per JVM via a lazy val, so all JWTs minted during a test run
+  * share the same public key. This is intentional: the MockOidcServer caches a single JWKS document
+  * per boot, and OidcBearerAuthenticator caches the JWKS for the suite lifetime. Re-generating
+  * per-test would cause signature verification failures against a stale JWKS.
   */
 object JwtTestSigner:
 
-  /** A test RSA-2048 key pair, generated once per JVM. Stable across the test
-    * suite lifetime so cached JWKS responses stay valid for the suite.
+  /** A test RSA-2048 key pair, generated once per JVM. Stable across the test suite lifetime so
+    * cached JWKS responses stay valid for the suite.
     */
   lazy val keyPair: RSAKey =
     new RSAKeyGenerator(2048)
@@ -31,18 +30,23 @@ object JwtTestSigner:
 
   /** Mint a signed RS256 JWT.
     *
-    * @param payload  extra claims to include in the token (in addition to the
-    *                 standard iat / nbf / exp / iss / aud added here).
-    * @param issuer   the `iss` claim.
-    * @param audience optional `aud` claim (single string).
-    * @param expIn    token lifetime from now (default 5 minutes).
-    * @return compact serialized JWT string.
+    * @param payload
+    *   extra claims to include in the token (in addition to the standard iat / nbf / exp / iss /
+    *   aud added here).
+    * @param issuer
+    *   the `iss` claim.
+    * @param audience
+    *   optional `aud` claim (single string).
+    * @param expIn
+    *   token lifetime from now (default 5 minutes).
+    * @return
+    *   compact serialized JWT string.
     */
   def mint(
-      payload:  Map[String, Any],
-      issuer:   String,
-      audience: Option[String]  = None,
-      expIn:    Duration        = Duration.ofMinutes(5)
+      payload: Map[String, Any],
+      issuer: String,
+      audience: Option[String] = None,
+      expIn: Duration = Duration.ofMinutes(5)
   ): String =
     val now = Instant.now()
     val exp = now.plus(expIn)
@@ -72,11 +76,26 @@ object JwtTestSigner:
     jwt.sign(new RSASSASigner(keyPair.toRSAPrivateKey))
     jwt.serialize()
 
-  /** Build a JWKS JSON object containing the test public key, in the shape
-    * that OidcBearerAuthenticator's JWKS resolver (Nimbus RemoteJWKSet) expects.
+  /** Sign exactly `claims` with the test key (RS256), adding nothing: no default `exp`, `iat` or
+    * `nbf`. For the cases [[mint]] cannot express, such as a token without an expiry.
+    */
+  def mintRaw(claims: JWTClaimsSet): String =
+    val header = new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(keyPair.getKeyID).build()
+    val jwt    = new SignedJWT(header, claims)
+    jwt.sign(new RSASSASigner(keyPair.toRSAPrivateKey))
+    jwt.serialize()
+
+  /** An unsigned (`alg=none`) compact JWT carrying exactly `claims`: `header.payload.` with an
+    * empty signature segment.
+    */
+  def unsigned(claims: JWTClaimsSet): String =
+    new com.nimbusds.jwt.PlainJWT(claims).serialize()
+
+  /** Build a JWKS JSON object containing the test public key, in the shape that
+    * OidcBearerAuthenticator's JWKS resolver (Nimbus RemoteJWKSet) expects.
     *
-    * The returned Json encodes the RSA public key parameters (n, e) plus the
-    * kid so the processor can select the right key when verifying a token.
+    * The returned Json encodes the RSA public key parameters (n, e) plus the kid so the processor
+    * can select the right key when verifying a token.
     */
   def jwksJson(): Json =
     // toPublicJWK strips the private key material; toJSONString gives the

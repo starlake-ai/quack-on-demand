@@ -60,9 +60,10 @@ object RestEdgeHandlers:
           None
         )
 
-/** The REST edge's request lifecycle after the HTTP shell: authenticate the PAT, resolve the target
-  * with MCP `run_sql`'s rules, pick the snapshot with the preview endpoint's rules, probe the
-  * schema, parse and render ONE SELECT, execute it and encode the result.
+/** The REST edge's request lifecycle after the HTTP shell: authenticate the bearer (a PAT, or a JWT
+  * of the tenant's own OIDC provider), resolve the target with MCP `run_sql`'s rules, pick the
+  * snapshot with the preview endpoint's rules, probe the schema, parse and render ONE SELECT,
+  * execute it and encode the result.
   *
   * The edge is a thin translator. It holds no policy: grants, column and row policies, the pools
   * axis inside the executor, `branchOnly` and the token's timeout all run in the injected
@@ -80,7 +81,7 @@ object RestEdgeHandlers:
   *
   * Two HTTP-layer resource controls wrap that pipeline without touching it: the failed-auth
   * throttle around step 2 ([[AuthThrottle]], keyed by the client address) and one in-flight slot
-  * per request of the token's owner around steps 5 to 7 ([[UserLimiter]]).
+  * per request of its principal around steps 5 to 7 ([[UserLimiter]]).
   *
   * Views: DuckLake's behaviour on `AT (VERSION => n)` over a view is not established, so a name
   * that is or was a view is read at the current state with no snapshot pin, no `X-QoD-Snapshot` and
@@ -103,7 +104,11 @@ final class RestEdgeHandlers(
     /** The failed-auth throttle, shared with [[RestEdgeServer]] in production. */
     throttle: Option[AuthThrottle] = None,
     /** The per-user in-flight cap. */
-    limiter: Option[UserLimiter] = None
+    limiter: Option[UserLimiter] = None,
+    /** Bearer JWTs of the path tenant's own OIDC provider ([[RestOidc.resolve]]); PATs only when
+      * left out.
+      */
+    resolveOidc: (String, String) => Option[RestPrincipal] = RestAuth.NoOidc
 ) extends LazyLogging:
 
   // Built from `cfg` when not given: a default parameter cannot refer to another one here.
@@ -267,15 +272,17 @@ final class RestEdgeHandlers(
 
   // ---- step 2: authentication ----------------------------------------------------------------
 
-  /** A blocked client is answered 429 FIRST, before the header is parsed or the PAT store is asked:
-    * that lookup is the load the throttle exists to shed. Every authentication failure then counts
-    * against the client.
+  /** A blocked client is answered 429 FIRST, before the header is parsed, the PAT store is asked or
+    * a JWT is verified: that work is the load the throttle exists to shed. Every authentication
+    * failure then counts against the client.
     */
-  private def authenticate(tenant: String, req: RestRequest): Step[PatPrincipal] =
+  private def authenticate(tenant: String, req: RestRequest): Step[RestPrincipal] =
     val blocked = authThrottle.blockedFor(req.client).map(RestError.TooManyAuthFailures(_))
     for
       _ <- lift(blocked.toLeft(()))
-      p <- EitherT(IO.blocking(RestAuth.authenticate(req.authorization, resolvePat)))
+      p <- EitherT(
+        IO.blocking(RestAuth.authenticate(req.authorization, resolvePat, tenant, resolveOidc))
+      )
         .leftMap(authFailure(req.client))
       _ <- lift(RestAuth.admit(p, tenant).left.map(authFailure(req.client)))
     yield p
@@ -289,13 +296,14 @@ final class RestEdgeHandlers(
       RestError.TooManyAuthFailures(cfg.authBlockSec)
     else e
 
-  /** Runs `body` under one in-flight slot of the token's OWNER, `(tenant, userId)` rather than the
-    * PAT, so minting more tokens buys no extra slots; 429 when a cap is reached. The request's own
-    * share of the slot is released when `body` ends, however it ends: the slot is taken and its
-    * release registered with no cancellation point in between. Each node call inside it holds a
-    * share of its own ([[execute]]) until the node work has actually finished.
+  /** Runs `body` under one in-flight slot of the request's principal, `(tenant, userId)` (for a PAT
+    * its OWNER, never the token itself), so minting more tokens buys no extra slots; 429 when a cap
+    * is reached. The request's own share of the slot is released when `body` ends, however it ends:
+    * the slot is taken and its release registered with no cancellation point in between. Each node
+    * call inside it holds a share of its own ([[execute]]) until the node work has actually
+    * finished.
     */
-  private def withSlot[A](p: PatPrincipal)(body: UserLimiter.Hold => Step[A]): Step[A] =
+  private def withSlot[A](p: RestPrincipal)(body: UserLimiter.Hold => Step[A]): Step[A] =
     EitherT(
       IO.uncancelable { poll =>
         IO(userLimiter.tryAcquire((p.user.tenant.getOrElse(""), p.user.id))).flatMap {
@@ -351,7 +359,7 @@ final class RestEdgeHandlers(
     * so an out-of-scope pool is a 403 `acl_denied` rather than the probe's catch-all 404.
     */
   private def resolveTarget(
-      p: PatPrincipal,
+      p: RestPrincipal,
       tenant: String,
       tenantDb: String,
       pool: Option[String]

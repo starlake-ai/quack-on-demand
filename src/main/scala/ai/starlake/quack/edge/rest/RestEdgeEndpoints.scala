@@ -34,11 +34,14 @@ object RestEdgeEndpoints:
   /** The OpenAPI security scheme name of the PAT bearer. */
   val SecuritySchemeName = "restEdgePat"
 
+  /** The OpenAPI security scheme name of the tenant-OIDC bearer, the alternative to a PAT. */
+  val OidcSecuritySchemeName = "restEdgeOidc"
+
   private val PortNote =
     "Served by the REST data edge on its own port (quack-rest, default 31339), never on the " +
-      "manager port. Auth: `Authorization: Bearer <PAT>` only; the token's tools axis must allow " +
-      "`rest`. Parameters: `pool` (default: a read-capable pool of the database), `format` " +
-      "(`json` or `csv`; else `Accept`, else JSON)."
+      "manager port. Auth: `Authorization: Bearer <PAT>` (the token's tools axis must allow " +
+      "`rest`) or `Bearer <JWT>` of the tenant's own OIDC provider. Parameters: `pool` (default: " +
+      "a read-capable pool of the database), `format` (`json` or `csv`; else `Accept`, else JSON)."
 
   private val TimeTravelNote =
     " DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601); " +

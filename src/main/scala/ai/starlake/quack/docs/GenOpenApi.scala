@@ -21,27 +21,41 @@ object GenOpenApi:
       .toOpenAPI(DocEndpoints.all, "Quack on Demand REST API", version)
     withRestEdgeBearer(openapi).toYaml
 
-  /** Declares the REST data edge's PAT bearer on its operations (the `rest-edge` tag). The edge
-    * reads `Authorization` raw rather than through a Tapir auth input (see `RestEdgeEndpoints`), so
-    * the interpreter cannot infer the scheme; it is added here, to the document only.
+  /** Declares the REST data edge's two bearers on its operations (the `rest-edge` tag), as
+    * alternatives: a PAT, or a JWT of the path tenant's own OIDC provider. The edge reads
+    * `Authorization` raw rather than through a Tapir auth input (see `RestEdgeEndpoints`), so the
+    * interpreter cannot infer the schemes; they are added here, to the document only.
     */
   private[docs] def withRestEdgeBearer(api: OpenAPI): OpenAPI =
-    val scheme = SecurityScheme(
+    def bearer(format: String, description: String) = SecurityScheme(
       `type` = "http",
-      description = Some(
-        "A personal access token (qod_pat_...). The only credential the REST data edge accepts."
-      ),
+      description = Some(description),
       name = None,
       in = None,
       scheme = Some("bearer"),
-      bearerFormat = Some("PAT"),
+      bearerFormat = Some(format),
       flows = None,
       openIdConnectUrl = None
     )
-    val requirement = ListMap(RestEdgeEndpoints.SecuritySchemeName -> Vector.empty[String])
-    val items       = api.paths.pathItems.map { case (path, item) =>
+    val pat = bearer(
+      "PAT",
+      "A personal access token (qod_pat_...) of a user of the path tenant; a token restricted on " +
+        "its tools axis must list `rest`."
+    )
+    val oidc = bearer(
+      "JWT",
+      "An ID token of the path tenant's own OIDC provider (or an access token whose audience is " +
+        "the tenant's client id), verified by that provider only; it must carry `exp` and name a " +
+        "user provisioned and enabled in the tenant."
+    )
+    // Two requirements in one list: either scheme alone satisfies the operation.
+    val requirements = List(
+      ListMap(RestEdgeEndpoints.SecuritySchemeName     -> Vector.empty[String]),
+      ListMap(RestEdgeEndpoints.OidcSecuritySchemeName -> Vector.empty[String])
+    )
+    val items = api.paths.pathItems.map { case (path, item) =>
       path -> item.copy(get = item.get.map { op =>
-        if op.tags.contains(RestEdgeEndpoints.Tag) then op.security(List(requirement)) else op
+        if op.tags.contains(RestEdgeEndpoints.Tag) then op.security(requirements) else op
       })
     }
     api
@@ -49,7 +63,8 @@ object GenOpenApi:
       .components(
         api.components
           .getOrElse(Components.Empty)
-          .addSecurityScheme(RestEdgeEndpoints.SecuritySchemeName, scheme)
+          .addSecurityScheme(RestEdgeEndpoints.SecuritySchemeName, pat)
+          .addSecurityScheme(RestEdgeEndpoints.OidcSecuritySchemeName, oidc)
       )
 
   def main(args: Array[String]): Unit =

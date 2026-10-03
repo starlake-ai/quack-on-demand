@@ -5,15 +5,15 @@ import ai.starlake.quack.ondemand.state.RbacUser
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** PAT bearer intake, tenant binding and the tools axis of the REST data edge, without the handler
-  * around them.
+/** Bearer intake, tenant binding and the tools axis of the REST data edge, without the handler
+  * around them. The OIDC resolver itself is [[RestOidcSpec]]'s.
   */
 class RestAuthSpec extends AnyFlatSpec with Matchers:
 
   private val Token      = "qod_pat_alice"
   private val SuperToken = "qod_pat_root"
 
-  private def principal(
+  private def pat(
       tenant: Option[String],
       restriction: TokenRestriction = TokenRestriction.Unrestricted
   ) =
@@ -29,15 +29,20 @@ class RestAuthSpec extends AnyFlatSpec with Matchers:
 
   private val resolve: String => Option[PatPrincipal] = t =>
     lookups += t
-    if t == Token then Some(principal(Some("acme")))
-    else if t == SuperToken then Some(principal(None))
-    else if t.startsWith("qod_pat_long") then Some(principal(Some("acme")))
+    if t == Token then Some(pat(Some("acme")))
+    else if t == SuperToken then Some(pat(None))
+    else if t.startsWith("qod_pat_long") then Some(pat(Some("acme")))
     else None
+
+  private def principal(
+      tenant: Option[String],
+      restriction: TokenRestriction = TokenRestriction.Unrestricted
+  ) = RestPrincipal.of(pat(tenant, restriction))
 
   private def auth(headers: String*) = RestAuth.authenticate(headers.toList, resolve)
 
   "authenticate" should "admit a live PAT bearer, whatever the scheme's case" in {
-    auth(s"Bearer $Token").map(_.patId) shouldBe Right("pat-1")
+    auth(s"Bearer $Token").map(_.patId) shouldBe Right(Some("pat-1"))
     auth(s"bearer $Token").isRight shouldBe true
     auth(s"BEARER $Token").isRight shouldBe true
   }
@@ -108,4 +113,53 @@ class RestAuthSpec extends AnyFlatSpec with Matchers:
     c.system shouldBe false
     c.restriction shouldBe r
     c.preferredNode shouldBe None
+    (c.jwtRoles, c.jwtGroups, c.jwtClaims) shouldBe (Set.empty, Set.empty, Map.empty)
+    c.superuserAdmissible shouldBe false
+  }
+
+  it should "carry a JWT principal's roles, groups and claims, keyed per user, tagged rest-data" in {
+    val p = RestPrincipal(
+      RbacUser("u-dave", Some("acme"), "dave", "user"),
+      TokenRestriction.Unrestricted,
+      patId = None,
+      jwtRoles = Set("analyst"),
+      jwtGroups = Set("finance", "analyst"),
+      jwtClaims = Map("sub" -> "dave", "exp" -> "x")
+    )
+    val c = RestAuth.callerFor(p)
+    c.connectionId shouldBe "rest-oidc-u-dave"
+    c.identity shouldBe "dave"
+    c.patId shouldBe None
+    (c.source, c.edge) shouldBe ("rest-data", "rest-data")
+    c.jwtRoles shouldBe Set("analyst")
+    c.jwtGroups shouldBe Set("finance", "analyst")
+    c.jwtClaims shouldBe Map("sub" -> "dave", "exp" -> "x")
+    c.superuserAdmissible shouldBe false
+    c.system shouldBe false
+  }
+
+  "authenticate" should "refuse a JWT principal that is not tenant-scoped" in {
+    val root =
+      RestPrincipal(RbacUser("u-root", None, "root", "admin"), TokenRestriction.Unrestricted, None)
+    RestAuth.authenticate(List("Bearer a.b.c"), resolve, "acme", (_, _) => Some(root)) shouldBe
+      Left(RestError.Unauthorized)
+  }
+
+  it should "never hand a PAT to the JWT resolver, nor a JWT to the PAT store" in {
+    val jwts = scala.collection.mutable.ListBuffer.empty[(String, String)]
+    lookups.clear()
+    RestAuth.authenticate(
+      List(s"Bearer $Token"),
+      resolve,
+      "acme",
+      (t, j) => { jwts += ((t, j)); None }
+    )
+    RestAuth.authenticate(
+      List("Bearer a.b.c"),
+      resolve,
+      "acme",
+      (t, j) => { jwts += ((t, j)); None }
+    )
+    lookups.toList shouldBe List(Token)
+    jwts.toList shouldBe List(("acme", "a.b.c"))
   }

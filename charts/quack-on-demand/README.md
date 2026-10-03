@@ -82,7 +82,7 @@ Every release is published to GHCR as `oci://ghcr.io/starlake-ai/charts/quack-on
 | Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. Any pod that reaches it can hold its connection slots, which stops authorization for every tenant, so set `networkPolicy.enabled=true` (off by default), or in a NetworkPolicy of your own open the port to node pods alone. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `Service` (Quack) | ClusterIP on `:9494` for the native Quack protocol front door, which a DuckDB client `ATTACH`es to (when `quack.enabled`, the default). |
-| `Service` (REST data) | `<release>-rest`, ClusterIP on `:31339` for the read-only REST data edge (`GET /api/v1/...`, PAT bearer). Only when `rest.enabled`. |
+| `Service` (REST data) | `<release>-rest`, ClusterIP on `:31339` for the read-only REST data edge (`GET /api/v1/...`, PAT or tenant-OIDC bearer). Only when `rest.enabled`. |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
@@ -107,7 +107,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
-| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. It throttles failed authentication per client and caps in-flight requests per user; a WAF is still recommended for volumetric and DDoS limits on internet exposure. |
+| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PAT or tenant-OIDC bearer. It throttles failed authentication per client and caps in-flight requests per user; a WAF is still recommended for volumetric and DDoS limits on internet exposure. |
 | `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair. |
 | `rest.trustedProxies` | `""` | `QOD_REST_TRUSTED_PROXIES`: CIDRs of the proxies / load balancers whose `X-Forwarded-For` identifies the client. Set it behind an Ingress or LB: otherwise every client shares one failed-auth budget, and one client's bad tokens block everyone. |
 | `rest.authThrottle.*` | `20` / `60` / `300` / `100000` | `failuresPerWindow` / `windowSec` / `blockSec` / `maxEntries` of the failed-authentication throttle (`QOD_REST_AUTH_*`), per replica. |

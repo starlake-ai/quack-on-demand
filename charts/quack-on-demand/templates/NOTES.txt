@@ -52,7 +52,7 @@ Quack on Demand has been installed.
 
 {{- if .Values.rest.enabled }}
 
-# Port-forward the read-only REST data edge (PAT bearer only)
+# Port-forward the read-only REST data edge (PAT or tenant-OIDC bearer)
 
   kubectl --namespace {{ .Release.Namespace }} port-forward \
     svc/{{ include "qod.fullname" . }}-rest {{ .Values.service.restData.port }}:{{ .Values.service.restData.port }}

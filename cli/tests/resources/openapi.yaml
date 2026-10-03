@@ -4211,9 +4211,10 @@ paths:
       - rest-edge
       description: 'List the schemas of a database the caller can read: `[{"name"}]`.
         Served by the REST data edge on its own port (quack-rest, default 31339),
-        never on the manager port. Auth: `Authorization: Bearer <PAT>` only; the token''s
-        tools axis must allow `rest`. Parameters: `pool` (default: a read-capable
-        pool of the database), `format` (`json` or `csv`; else `Accept`, else JSON).'
+        never on the manager port. Auth: `Authorization: Bearer <PAT>` (the token''s
+        tools axis must allow `rest`) or `Bearer <JWT>` of the tenant''s own OIDC
+        provider. Parameters: `pool` (default: a read-capable pool of the database),
+        `format` (`json` or `csv`; else `Accept`, else JSON).'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemas
       parameters:
       - name: tenant
@@ -4249,6 +4250,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - restEdgePat: []
+      - restEdgeOidc: []
   /api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables:
     get:
       tags:
@@ -4256,9 +4258,10 @@ paths:
       description: 'List the tables and views of a schema the caller can read: `[{"name",
         "type": "table"|"view"}]`; a schema with nothing visible is a 404. Served
         by the REST data edge on its own port (quack-rest, default 31339), never on
-        the manager port. Auth: `Authorization: Bearer <PAT>` only; the token''s tools
-        axis must allow `rest`. Parameters: `pool` (default: a read-capable pool of
-        the database), `format` (`json` or `csv`; else `Accept`, else JSON).'
+        the manager port. Auth: `Authorization: Bearer <PAT>` (the token''s tools
+        axis must allow `rest`) or `Bearer <JWT>` of the tenant''s own OIDC provider.
+        Parameters: `pool` (default: a read-capable pool of the database), `format`
+        (`json` or `csv`; else `Accept`, else JSON).'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTables
       parameters:
       - name: tenant
@@ -4299,6 +4302,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - restEdgePat: []
+      - restEdgeOidc: []
   /api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}:
     get:
       tags:
@@ -4306,12 +4310,13 @@ paths:
       description: 'Describe one table or view as the caller sees it after policy:
         `{"name", "type", "columns": [{"name", "type"}]}`. Served by the REST data
         edge on its own port (quack-rest, default 31339), never on the manager port.
-        Auth: `Authorization: Bearer <PAT>` only; the token''s tools axis must allow
-        `rest`. Parameters: `pool` (default: a read-capable pool of the database),
-        `format` (`json` or `csv`; else `Accept`, else JSON). DuckLake tables only:
-        at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601); the pinned
-        snapshot comes back in `X-QoD-Snapshot`. A view is read at the current state,
-        with no `X-QoD-Snapshot`, and `asOf*` on it is a 400 `invalid_selector`.'
+        Auth: `Authorization: Bearer <PAT>` (the token''s tools axis must allow `rest`)
+        or `Bearer <JWT>` of the tenant''s own OIDC provider. Parameters: `pool` (default:
+        a read-capable pool of the database), `format` (`json` or `csv`; else `Accept`,
+        else JSON). DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`,
+        `asOfTs` (ISO-8601); the pinned snapshot comes back in `X-QoD-Snapshot`. A
+        view is read at the current state, with no `X-QoD-Snapshot`, and `asOf*` on
+        it is a 400 `invalid_selector`.'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTablesTable
       parameters:
       - name: tenant
@@ -4357,6 +4362,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - restEdgePat: []
+      - restEdgeOidc: []
   /api/v1/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/rows:
     get:
       tags:
@@ -4369,13 +4375,13 @@ paths:
         filter-shaped value is a 400 `reserved_column`. Headers: `Content-Range`,
         `X-QoD-Truncated` when a server or token row cap or the response byte cap
         cut the page. Served by the REST data edge on its own port (quack-rest, default
-        31339), never on the manager port. Auth: `Authorization: Bearer <PAT>` only;
-        the token''s tools axis must allow `rest`. Parameters: `pool` (default: a
-        read-capable pool of the database), `format` (`json` or `csv`; else `Accept`,
-        else JSON). DuckLake tables only: at most one of `asOf` (snapshot id), `asOfTag`,
-        `asOfTs` (ISO-8601); the pinned snapshot comes back in `X-QoD-Snapshot`. A
-        view is read at the current state, with no `X-QoD-Snapshot`, and `asOf*` on
-        it is a 400 `invalid_selector`.'
+        31339), never on the manager port. Auth: `Authorization: Bearer <PAT>` (the
+        token''s tools axis must allow `rest`) or `Bearer <JWT>` of the tenant''s
+        own OIDC provider. Parameters: `pool` (default: a read-capable pool of the
+        database), `format` (`json` or `csv`; else `Accept`, else JSON). DuckLake
+        tables only: at most one of `asOf` (snapshot id), `asOfTag`, `asOfTs` (ISO-8601);
+        the pinned snapshot comes back in `X-QoD-Snapshot`. A view is read at the
+        current state, with no `X-QoD-Snapshot`, and `asOf*` on it is a 400 `invalid_selector`.'
       operationId: getApiV1TenantTenantDatabaseTenantdbSchemasSchemaTablesTableRows
       parameters:
       - name: tenant
@@ -4421,6 +4427,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - restEdgePat: []
+      - restEdgeOidc: []
   /health:
     get:
       operationId: getHealth
@@ -11967,7 +11974,14 @@ components:
   securitySchemes:
     restEdgePat:
       type: http
-      description: A personal access token (qod_pat_...). The only credential the
-        REST data edge accepts.
+      description: A personal access token (qod_pat_...) of a user of the path tenant;
+        a token restricted on its tools axis must list `rest`.
       scheme: bearer
       bearerFormat: PAT
+    restEdgeOidc:
+      type: http
+      description: An ID token of the path tenant's own OIDC provider (or an access
+        token whose audience is the tenant's client id), verified by that provider
+        only; it must carry `exp` and name a user provisioned and enabled in the tenant.
+      scheme: bearer
+      bearerFormat: JWT

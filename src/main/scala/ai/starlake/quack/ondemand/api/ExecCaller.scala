@@ -50,6 +50,13 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * metering or audit. `preferredNode` is the router's SOFT pin: the REST edge sends its data
   * statement to the node that answered its schema probe, and a vanished node falls back to the
   * usual pick. All three default to what every call site had before they existed.
+  *
+  * `jwtRoles`, `jwtGroups` and `jwtClaims` are what a VERIFIED bearer JWT said about the caller,
+  * handed to the handshake ([[authzRequest]]) exactly as the FlightSQL edge hands its own: the roles
+  * and groups widen the user's EffectiveSet by name inside the user's tenant, and the claims ride on
+  * it to the OPA input. A credential validated by a tenant-scoped authority cannot speak for a
+  * tenant-less superuser row of the same name, so such a caller sets `superuserAdmissible = false`.
+  * Empty for every caller without a JWT.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -61,7 +68,10 @@ final case class ExecCaller(
     commitMessage: Option[String] = None,
     source: String = "flightsql",
     edge: String = "mcp",
-    preferredNode: Option[String] = None
+    preferredNode: Option[String] = None,
+    jwtRoles: Set[String] = Set.empty,
+    jwtGroups: Set[String] = Set.empty,
+    jwtClaims: Map[String, String] = Map.empty
 ):
   /** The row cap actually applied: the server cap, the token's cap and the request's, smallest
     * wins. A token can lower the cap and can never raise it.
@@ -82,6 +92,9 @@ final case class ExecCaller(
       poolKey.tenant,
       poolKey.pool,
       identity,
+      jwtRoles = jwtRoles,
+      jwtGroups = jwtGroups,
+      jwtClaims = jwtClaims,
       superuserAdmissible = superuserAdmissible,
       edge = edge,
       restriction = restriction

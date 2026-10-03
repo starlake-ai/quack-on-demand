@@ -105,9 +105,9 @@ service:
     port: 9494
     nodePort: ""
     annotations: {}
-  # Read-only REST data edge (`GET /api/v1/...`, PAT bearer), created only when
-  # rest.enabled. Not `service.rest`: that key is the admin REST/UI listener
-  # above. The edge throttles failed authentication per client and caps
+  # Read-only REST data edge (`GET /api/v1/...`, PAT or tenant-OIDC bearer),
+  # created only when rest.enabled. Not `service.rest`: that key is the admin
+  # REST/UI listener above. The edge throttles failed authentication per client and caps
   # in-flight requests per user (see rest.*); a WAF in front of it is still
   # recommended for volumetric and DDoS limits on internet exposure.
   restData:
@@ -316,9 +316,10 @@ quack:
     enabled: false
 
 # Read-only REST data edge (tables and views as GET resources, JSON or CSV,
-# personal access tokens only). Off by default. TLS on by default, reusing the
-# Flight edge's PEM pair like the Quack door. A PAT may use it unless its
-# `tools` axis is set without `rest`.
+# a personal access token or an ID token of the tenant's own OIDC provider, or
+# an access token whose audience is the tenant's client id, as bearer). Off by
+# default. TLS on by default, reusing the Flight edge's PEM pair like the Quack
+# door. A PAT may use it unless its `tools` axis is set without `rest`.
 rest:
   enabled: false
   tls:

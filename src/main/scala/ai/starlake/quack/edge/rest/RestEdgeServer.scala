@@ -233,7 +233,7 @@ final class RestEdgeServer(
         if !cfg.tlsEnabled && !isLoopback(cfg.host) then
           logger.warn(
             s"REST data edge on ${cfg.host}:${cfg.port} runs WITHOUT TLS on a non-loopback " +
-              "address: PAT bearers cross the network in clear text (QOD_REST_TLS_ENABLED=true)"
+              "address: bearer tokens cross the network in clear text (QOD_REST_TLS_ENABLED=true)"
           )
         logger.info(
           s"REST data edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}); " +

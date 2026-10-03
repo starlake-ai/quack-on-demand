@@ -1873,11 +1873,11 @@ object Main extends IOApp with LazyLogging:
           IO(logger.info(s"module ${m.name}: starting")) *> m.start(moduleCtxFor(m))
         )
 
-      // REST data edge (quack-rest): PAT bearer only, every request one SELECT through the SAME
-      // routed executor MCP run_sql uses. The data statement runs with recordExecution = true, so
-      // statement history and metering see it like any other door; the schema probe runs
-      // unrecorded, like FlightSQL's prepare-time probe. Its own listener; started after the
-      // Quack door.
+      // REST data edge (quack-rest): PAT or tenant-OIDC bearer, every request one SELECT through
+      // the SAME routed executor MCP run_sql uses. The data statement runs with
+      // recordExecution = true, so statement history and metering see it like any other door; the
+      // schema probe runs unrecorded, like FlightSQL's prepare-time probe. Its own listener;
+      // started after the Quack door.
       val restEdge: Option[ai.starlake.quack.edge.rest.RestEdgeServer] =
         Option.when(restCfgResolved.enabled) {
           // ONE throttle shared by the server's pre-route gate and the handlers that record
@@ -1900,7 +1900,13 @@ object Main extends IOApp with LazyLogging:
             (tenant, tenantDb, tag) =>
               store.findSnapshotTag(tenant, tenantDb, tag).map(_.snapshotId),
             throttle = Some(throttle),
-            limiter = Some(ai.starlake.quack.edge.rest.UserLimiter(restCfgResolved))
+            limiter = Some(ai.starlake.quack.edge.rest.UserLimiter(restCfgResolved)),
+            // Bearer JWTs: the path tenant's OWN provider only, never the manager-wide chain.
+            resolveOidc = new ai.starlake.quack.edge.rest.RestOidc(
+              tenantId = t => sup.getTenant(t).map(_.id),
+              providerFor = tenantOidcRegistry.forTenant,
+              findUser = (t, u) => sup.findUserForLogin(t, u)
+            ).resolve
           )
           new ai.starlake.quack.edge.rest.RestEdgeServer(
             restCfgResolved,

@@ -40,6 +40,13 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
     c.preferredNode shouldBe None
   }
 
+  it should "carry no JWT roles, groups or claims and admit a superuser row by default" in {
+    // Only a caller holding a verified bearer JWT sets these; every other call site is unchanged.
+    val c = ExecCaller.unrestricted("conn-1", "alice")
+    (c.jwtRoles, c.jwtGroups, c.jwtClaims) shouldBe (Set.empty, Set.empty, Map.empty)
+    c.superuserAdmissible shouldBe true
+  }
+
   "effectiveMaxRows" should "take the smallest of the server cap, the token cap and the request" in {
     val capped = ExecCaller
       .unrestricted("c", "u", superuserAdmissible = false)

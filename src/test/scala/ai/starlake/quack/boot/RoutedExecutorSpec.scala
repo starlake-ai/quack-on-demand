@@ -124,3 +124,48 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
     f.routed.map((c, eff) => (c.system, eff.map(e => (e.user.id, e.user.tenant)))) shouldBe
       List((false, Some(("u-root", None))))
   }
+
+  // ---- a verified bearer JWT's roles, groups and claims ----------------------------------------
+
+  /** A tenant user with no grant of their own; pool access comes from a group named by the JWT. */
+  private def withGroupGrant(f: Fixture): Unit =
+    f.store.upsertUserIdentity(RbacUser(id = "u-dave", tenant = Some("acme"), "dave", "user"))
+    val group = f.sup.createGroup("acme", "analysts").unsafeRunSync().toOption.get
+    f.sup.grantPoolPermission("acme", None, None, Some(group.id)).unsafeRunSync()
+    f.sup.createRole("acme", "reader").unsafeRunSync()
+
+  it should "widen the handshake by the caller's JWT groups and roles, and carry its claims" in {
+    val f = new Fixture
+    withGroupGrant(f)
+    val plain = ExecCaller.unrestricted("rest-oidc-u-dave", "dave")
+    f.exec(plain).left.toOption.map(_.getClass.getSimpleName) shouldBe Some("AccessDenied")
+    f.routed shouldBe Nil
+    val jwt = plain.copy(
+      jwtRoles = Set("reader"),
+      jwtGroups = Set("analysts"),
+      jwtClaims = Map("sub" -> "dave"),
+      superuserAdmissible = false
+    )
+    f.exec(jwt)
+    val eff = f.routed.map(_._2).headOption.flatten.getOrElse(fail("not routed"))
+    eff.user.id shouldBe "u-dave"
+    eff.groups.map(_.name) shouldBe List("analysts")
+    eff.roles.map(_.name) shouldBe List("reader")
+    eff.claims shouldBe Map("sub" -> "dave")
+  }
+
+  it should "refuse a tenant-less superuser row when the credential cannot speak for one" in {
+    val f = new Fixture
+    f.store.upsertUserIdentity(RbacUser(id = "u-root", tenant = None, "root", "admin"))
+    val caller = ExecCaller.unrestricted("rest-oidc-u-root", "root")
+    // Admissible (the default every older caller keeps): the superuser row is matched.
+    f.exec(caller)
+    f.routed.map(_._2.map(_.user.id)) shouldBe List(Some("u-root"))
+    f.exec(caller.copy(superuserAdmissible = false))
+      .left
+      .toOption
+      .map(
+        _.getClass.getSimpleName
+      ) shouldBe Some("AccessDenied")
+    f.routed.size shouldBe 1
+  }
