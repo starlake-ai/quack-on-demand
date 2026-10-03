@@ -379,6 +379,11 @@ qod auth pat revoke --id pat-...
 `--max-rows`). A flag left off the command line is unrestricted on that axis, not empty -
 same rule as the REST body above.
 
+The `tools` axis also governs the read-only REST data edge through the reserved name
+`rest` (no MCP tool can take that name): a token with no `--tool` flag may use the edge,
+a token minted with `--tool` must include `--tool rest` to use it. See "Reading over HTTP
+(REST data edge)" below.
+
 The MCP server lives at `POST /mcp` on the manager port (`QOD_MCP_ENABLED`, default
 true). Auth is `Authorization: Bearer <PAT>`, and nothing else: session JWTs are
 refused there. Point Claude Code at it with:
@@ -2533,6 +2538,109 @@ library):
   `QOD_FLEET_AUTO_APPROVE` admits it; a narrowed list must include that address (`qod fleet servers`
   shows `sourceAddr`).
 
+## Reading over HTTP (REST data edge)
+
+A read-only HTTP listener for tools that speak nothing else (n8n, Zapier, a spreadsheet
+import, a cache): tables and views as `GET` resources, JSON or CSV. Off by default; turn
+it on with `QOD_REST_ENABLED=true` in the manager's environment (Helm: `rest.enabled=true`,
+which also creates the `<release>-rest` Service). Port `31339` (`QOD_REST_PORT`), TLS on by
+default with the FlightSQL edge's certificate (`QOD_REST_TLS_ENABLED=false` for plain HTTP
+on a trusted network only). The boot banner prints a `REST (data)` line when it is up.
+
+**Credentials: personal access tokens only.** Never the static `X-API-Key`, a session
+cookie, HTTP Basic or `?access_token=`. A superuser's token is refused (401): mint it from a
+tenant user. The URL's tenant must be the token owner's tenant (otherwise 403 `forbidden`).
+The token's `tools` axis must be unrestricted or include `rest`; its `databases`, `pools`
+and `maxRows` / `stmtTimeoutMs` axes apply as everywhere else.
+
+```bash
+# 1. As the tenant user who will read (or an admin minting for a service user's session):
+qod auth pat create --name n8n-orders --tool rest --database acme_tpch --max-rows 5000
+# {"id":"pat-...","token":"qod_pat_..."}   <- printed once
+TOKEN=qod_pat_...
+BASE=https://localhost:31339/api/v1/tenant/acme/database/acme_tpch
+
+# 2. The four endpoints (-k: the default certificate is self-signed)
+curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas"
+curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables"
+curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders"
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "$BASE/schemas/tpch1/tables/orders/rows?select=o_orderkey,o_totalprice&o_orderstatus=eq.F&order=o_orderkey&limit=100"
+
+# CSV instead of JSON
+curl -k -H "Authorization: Bearer $TOKEN" "$BASE/schemas/tpch1/tables/orders/rows?limit=10&format=csv"
+```
+
+`/rows` parameters:
+
+- `select=a,b` (default: every column the caller may see), `order=a.desc.nullslast,b`,
+  `limit` (default `QOD_REST_DEFAULT_LIMIT`, 1000), `offset` (needs `order`), `pool=<name>`,
+  `format=json|csv` (or the `Accept` header).
+- Filters: `<column>=<op>.<value>` with `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`,
+  `ilike` (`*` is the wildcard, at most 4), `in.(a,b,"c,d")`, `is.null|true|false`, each
+  negatable with `not.` (`status=not.in.(X,Y)`). Repeating a filter ANDs it.
+- DuckLake tables only: `asOf=<snapshot id>`, `asOfTag=<tag>` or `asOfTs=<ISO-8601>`.
+  Every page of a table carries `X-QoD-Snapshot`; send it back as `asOf` on the next page
+  so writes landing in between do not shift the rows. A non-DuckLake database answers 400
+  `invalid_kind`. A view (or a name that ever was one) has no time travel: it is read at
+  the current state with no `X-QoD-Snapshot`, `asOf*` on it answers 400 `invalid_selector`,
+  and paging over a view is not stable under concurrent writes.
+- Headers: `Content-Range: <first>-<last>/*`, and `X-QoD-Truncated: true` when a server or
+  token cap (not your own `limit`) cut the page. Rows are capped at
+  `min(limit, QOD_REST_MAX_ROWS, the token's maxRows)`, and a page is cut at a row
+  boundary once its body would pass `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB), also flagged
+  `X-QoD-Truncated`.
+
+Things to know:
+
+- **Same policy as every door.** Grants, pool permissions, row filters and column masks
+  apply; masked columns look like ordinary columns. Statements carry origin `rest-data`
+  and the token's id in audit and history (OPA sees `client.edge = "rest-data"`). An
+  object the caller cannot read answers the same 404 as one that does not exist, and a
+  schema with nothing readable is a 404 too. Listings are always narrowed to the caller's
+  grants.
+- **A column under a deny policy hides its whole table.** The edge learns a table's
+  columns with `SELECT * ... LIMIT 0`, which the column policy refuses when any column is
+  denied, so `/tables/{t}` and `/rows` answer 404 for that table while `/tables` still lists
+  it. Workaround: grant a view that leaves the denied column out (a mask, unlike a deny,
+  keeps the table readable).
+- **The schema probe is not recorded.** Each request's `SELECT * ... LIMIT 0` runs without a
+  history or audit row, like the FlightSQL prepare probe, so a request refused at the probe
+  (404) leaves no `data-denial` audit row; the manager's access log still has it. The data
+  statement and the listings are recorded as usual.
+- **Reserved names.** `select`, `order`, `limit`, `offset`, `asOf`, `asOfTag`, `asOfTs`,
+  `pool`, `format` and `branch` are parameters, never filters: any of them, in any case
+  (`Limit`, `ASOF`), with a filter-shaped value (`[not.]<op>.<value>`, e.g. `limit=eq.5`)
+  answers 400 `reserved_column` on every table, whether or not it has such a column. With
+  an ordinary value the exact name keeps its meaning (`limit=5`). Workaround for a column
+  so named: a view that renames it, granted instead of the table.
+- **Caching.** Responses are `Cache-Control: private` with `Vary: Authorization, Accept`; only a
+  DuckLake read pinned by `asOf`/`asOfTag` is cacheable (5 minutes).
+- **CSV is not formula-escaped.** A value starting with `=`, `+`, `-` or `@` reaches a
+  spreadsheet as written: the data stays exact, and a consumer that opens CSV in a
+  spreadsheet must guard itself.
+- **Snapshot ids are visible.** `X-QoD-Snapshot`, and the errors of an `asOf` /
+  `asOfTag` / `asOfTs` that does not resolve, tell any token that can read one table of a
+  DuckLake database when that database was last written to, tables it cannot read
+  included.
+- **Cold pools.** A hibernated pool wakes on the first request; if it is not ready within
+  the resume hold (`PROXY_RESUME_HOLD_TIMEOUT_SEC`, 60 s) the answer is 503
+  `pool_resuming` with `Retry-After: 5`. `QOD_REST_STMT_TIMEOUT_SEC` (90 s) must be larger
+  than the hold, or the manager refuses to boot; a request to a cold pool that the edge's
+  own wait cuts short still answers 503 `pool_resuming`. On a warm pool a statement past
+  that wait answers 504. Every 503 carries `Retry-After`.
+- **Internet exposure requires a reverse proxy or WAF in front of the port that
+  rate-limits per client and per `Authorization` value.** The edge has no per-client
+  throttle or per-user concurrency cap of its own yet (they come in a later change): every
+  bad token costs a control-plane lookup, and a valid token can run heavy reads
+  concurrently, bounded only by the row, byte and time caps.
+- Errors are `{"error": "<code>", "message": "..."}`: 401 `unauthorized` (one body for every
+  credential failure), 403 `forbidden` / `acl_denied`, 404 `not_found`, 400
+  `invalid_filter` / `unknown_column` / `order_required` / `invalid_parameter`, 406
+  `unsupported_format`, 502 `upstream_error`, 503 `pool_resuming` / `pool_unavailable`,
+  504 `statement_timeout`. The message of a 502 carries a request id: the manager log has a
+  WARN line under that id with the failure class, and the node's own text at DEBUG only.
+
 ## Hardening (node enforcement, pod security, network policy, reader eviction)
 
 Self-serve / hosted deployments need a tighter isolation posture than the OSS
@@ -2761,6 +2869,8 @@ The audit reads the answering replica's configuration and the shared control pla
 | Symptom | Cause | Fix |
 |---|---|---|
 | `/api/*` returns 401 (the CLI adds "run qod login, or set QOD_TOKEN to a personal access token") | No valid credential on the call: none sent, an expired or revoked session or PAT, or a former static API key | `qod login`, or set `QOD_TOKEN` to a personal access token (`X-API-Key: <token>` on raw REST calls) |
+| REST data edge (`:31339`) returns 401 on every call | Not a live PAT of a tenant user: static key, session, superuser-owned or revoked token | Mint a PAT as the tenant user (`qod auth pat create --tool rest ...`) and send `Authorization: Bearer qod_pat_...` |
+| REST data edge returns 403 `forbidden` | Path tenant is not the token's tenant, or the token's `tools` axis lacks `rest` | Fix the URL's tenant, or mint a token with `--tool rest` (or no `--tool` at all) |
 | Manager boots with `WARNING: QOD_API_KEY (quack-on-demand.apiKey) was removed and is ignored`, and clients sending the key get 401 | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
 | `qod start` / `qod serve` (with or without `--demo`) print `warning: QOD_API_KEY is set` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file; it is ignored and never passed to the manager | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
 | Manager refuses to boot: `the FlightSQL edge and the Quack front door have no authenticator: ...` | `QOD_AUTH_DB_ENABLED=false` and no other `quack-flightsql.auth` provider: the FlightSQL edge and the Quack front door would refuse every client. System-scope OIDC (`QOD_MGMT_OIDC_*`) does not count: it signs in to the admin UI and REST only | `QOD_AUTH_DB_ENABLED=true`, or a Keycloak or Azure password backend (`QOD_AUTH_KEYCLOAK_ENABLED=true` / `QOD_AUTH_AZURE_ENABLED=true` with their settings), or a bearer provider (`JWT_SECRET_KEY` or `JWT_PUBLIC_KEY_PATH`, `QOD_AUTH_GOOGLE_ENABLED=true`, `QOD_AUTH_AWS_ENABLED=true`) |
