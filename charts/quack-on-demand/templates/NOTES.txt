@@ -50,6 +50,22 @@ Quack on Demand has been installed.
     ATTACH 'quack:localhost:{{ .Values.service.quack.port }}' AS qod (TYPE quack, TOKEN 'tenant=<tenant>&pool=<pool>&user=<user>&password=<password>');
 {{- end }}
 
+{{- if .Values.rest.enabled }}
+
+# Port-forward the read-only REST data edge (PAT bearer only)
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward \
+    svc/{{ include "qod.fullname" . }}-rest {{ .Values.service.restData.port }}:{{ .Values.service.restData.port }}
+
+  Mint a PAT (qod auth pat create), then (replace <tenant>/<db>/<schema>/<table>):
+
+    curl {{- if .Values.rest.tls.enabled }} -k{{- end }} -H "Authorization: Bearer <qod_pat_...>" \
+      "{{ if .Values.rest.tls.enabled }}https{{ else }}http{{ end }}://localhost:{{ .Values.service.restData.port }}/api/v1/tenant/<tenant>/database/<db>/schemas/<schema>/tables/<table>/rows?limit=10"
+
+  Before exposing it to the internet, put a reverse proxy or WAF in front that
+  rate-limits per client and per Authorization value.
+{{- end }}
+
 # Watch the Quack node pods the manager spawns
 
   kubectl --namespace {{ .Release.Namespace }} get pods -l managed-by=quack-on-demand -w
