@@ -147,11 +147,12 @@ RUN install -d -o quack -g quack /app/certs /app/state /app/ducklake
 USER quack
 
 # Manager REST + UI (20900), the node verdict listener (20901), FlightSQL edge
-# (31338) and the native Quack protocol front door (9494, what a DuckDB client
-# ATTACHes to).
+# (31338), the native Quack protocol front door (9494, what a DuckDB client
+# ATTACHes to) and the read-only REST data edge (31339, off unless
+# QOD_REST_ENABLED=true).
 # Local-mode Quack nodes lease ports from QOD_MIN_PORT..QOD_MAX_PORT;
 # expose the default range so a host port-forward can reach them too.
-EXPOSE 20900 20901 31338 9494 21900-22500
+EXPOSE 20900 20901 31338 9494 31339 21900-22500
 
 # Sensible container defaults. Override at run time via -e.
 ENV QOD_ON_DEMAND_HOST=0.0.0.0 \

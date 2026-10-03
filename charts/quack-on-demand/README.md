@@ -82,6 +82,7 @@ Every release is published to GHCR as `oci://ghcr.io/starlake-ai/charts/quack-on
 | Container port `internal` | `:20901`, no Service: node pods call the manager pod directly for verdicts. Any pod that reaches it can hold its connection slots, which stops authorization for every tenant, so set `networkPolicy.enabled=true` (off by default), or in a NetworkPolicy of your own open the port to node pods alone. |
 | `Service` (FlightSQL) | ClusterIP on `:31338` for the Arrow Flight gRPC edge. |
 | `Service` (Quack) | ClusterIP on `:9494` for the native Quack protocol front door, which a DuckDB client `ATTACH`es to (when `quack.enabled`, the default). |
+| `Service` (REST data) | `<release>-rest`, ClusterIP on `:31339` for the read-only REST data edge (`GET /api/v1/...`, PAT bearer). Only when `rest.enabled`. |
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
@@ -106,6 +107,9 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
+| `rest.enabled` | `false` | Read-only REST data edge on `:31339` (`QOD_REST_ENABLED`), with its Service and NetworkPolicy port. PATs only. Internet exposure requires a reverse proxy or WAF that rate-limits per client and per `Authorization` value. |
+| `rest.tls.enabled` | `true` | `QOD_REST_TLS_ENABLED`; reuses the Flight edge's PEM pair. |
+| `service.restData.type` | `ClusterIP` | The REST data edge Service (`service.rest` is the admin REST/UI one). |
 | `ingress.enabled` | `false` | REST/UI only. |
 | `serviceMonitor.enabled` | `false` | Set true when you run Prometheus Operator. |
 | `metrics.sink` | `prometheus` | One of `prometheus` \| `aws` \| `azure` \| `gcp` \| `none`. |

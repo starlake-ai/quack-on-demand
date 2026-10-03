@@ -70,3 +70,30 @@ spec:
       nodePort: {{ .Values.service.quack.nodePort }}
       {{- end }}
 {{- end }}
+{{- if .Values.rest.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qod.fullname" . }}-rest
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "qod.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rest-data
+  {{- with .Values.service.restData.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.restData.type }}
+  selector:
+    {{- include "qod.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rest-data
+      port: {{ .Values.service.restData.port }}
+      targetPort: rest-data
+      protocol: TCP
+      {{- if and (eq .Values.service.restData.type "NodePort") .Values.service.restData.nodePort }}
+      nodePort: {{ .Values.service.restData.nodePort }}
+      {{- end }}
+{{- end }}

@@ -82,6 +82,9 @@ spec:
             - name: quack
               containerPort: 9494
               protocol: TCP
+            - name: rest-data
+              containerPort: 31339
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "qod.fullname" . }}

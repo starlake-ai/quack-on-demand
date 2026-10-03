@@ -23,6 +23,10 @@ spec:
           port: {{ .Values.service.flightsql.port }}
         - protocol: TCP
           port: {{ .Values.service.quack.port }}
+        {{- if .Values.rest.enabled }}
+        - protocol: TCP
+          port: {{ .Values.service.restData.port }}
+        {{- end }}
       {{- with .Values.networkPolicy.ingressFrom }}
       from:
         {{- toYaml . | nindent 8 }}

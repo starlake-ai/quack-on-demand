@@ -216,6 +216,7 @@ services:
       - "${MANAGER_PORT:-20900}:20900"   # REST + UI
       - "${EDGE_PORT:-31338}:31338"      # FlightSQL edge
       - "${QUACK_PORT:-9494}:9494"       # native Quack protocol front door (DuckDB ATTACH)
+      - "${REST_DATA_PORT:-31339}:31339" # read-only REST data edge (off unless QOD_REST_ENABLED=true)
       - "${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}:${QUACK_MIN_PORT:-21900}-${QUACK_MAX_PORT:-22500}"
 
     # Make the host reachable as `host.docker.internal` so a corporate
