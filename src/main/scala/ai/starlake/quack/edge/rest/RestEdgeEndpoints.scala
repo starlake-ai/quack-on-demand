@@ -43,7 +43,7 @@ object RestEdgeEndpoints:
     "Served by the REST data edge on its own port (quack-rest, default 31339), never on the " +
       "manager port. Auth: `Authorization: Bearer <PAT>` (the token's tools axis must allow " +
       "`rest`) or `Bearer <JWT>` of the tenant's own OIDC provider. Parameters: `pool` (default: " +
-      "a read-capable pool of the database), `format` (`json` or `csv`, and `arrow` on /rows; " +
+      "a read-capable pool of the database), `format` (`json` or `csv`, and `arrow` or `parquet` on /rows; " +
       "else `Accept`, else JSON)."
 
   private val TimeTravelNote =
@@ -119,7 +119,8 @@ object RestEdgeEndpoints:
     .out(
       streamBinaryBody(Fs2Streams[IO])(CodecFormat.OctetStream()).description(
         "application/json (an array of objects) or text/csv, and on /rows also " +
-          "application/vnd.apache.arrow.stream (streamed), per `format` then `Accept`; the " +
+          "application/vnd.apache.arrow.stream or application/vnd.apache.parquet (streamed), " +
+          "per `format` then `Accept`; the " +
           "Content-Type header says which"
       )
     )
@@ -182,12 +183,12 @@ object RestEdgeEndpoints:
           "`offset` (needs `order`). A reserved name (select, order, limit, offset, asOf, asOfTag, " +
           "asOfTs, pool, format, branch), in any case, with a filter-shaped value is a 400 " +
           "`reserved_column`. Headers: `Content-Range`, `X-QoD-Truncated` when a server or token " +
-          "row cap or the response byte cap cut the page. With `format=arrow` the rows are " +
-          "streamed: `X-QoD-Limit`, the effective row limit " +
+          "row cap or the response byte cap cut the page. With `format=arrow` or `parquet` the " +
+          "rows are streamed: `X-QoD-Limit`, the effective row limit " +
           "min(limit, or QOD_REST_DEFAULT_LIMIT when absent; quack-rest.maxRows; token maxRows), " +
-          "comes up front, and a page holding " +
-          "that many rows may continue; `Content-Range` and `X-QoD-Truncated` follow as HTTP " +
-          "trailers, which many clients and proxies drop. A stream that reaches the response " +
+          "comes up front, and a page " +
+          "holding that many rows may continue; `Content-Range` and `X-QoD-Truncated` follow as " +
+          "HTTP trailers, which many clients and proxies drop. A stream that reaches the response " +
           "byte cap with rows left is aborted, never ended cleanly: lower `limit` to page under " +
           "it. " +
           s"$PortNote$TimeTravelNote"

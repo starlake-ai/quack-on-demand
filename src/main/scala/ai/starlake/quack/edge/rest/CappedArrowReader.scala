@@ -60,8 +60,21 @@ final class CappedArrowReader private (
     */
   def cut: Boolean = budget
 
+  private var pending = false
+
+  /** Loads the first batch NOW, so a source that fails on it fails here, and hands that same batch
+    * out on the next [[loadNextBatch]] (for a consumer, such as a native scan, that pulls on its
+    * own schedule). True when there was a batch.
+    */
+  def prefetch(): Boolean =
+    pending = loadNextBatch()
+    pending
+
   override def loadNextBatch(): Boolean =
-    if closed then false
+    if pending then
+      pending = false
+      true
+    else if closed then false
     else if served >= maxRows then
       // At the cap: one look at what is left, then the stream is over.
       if !extra then extra = hasAnotherRow

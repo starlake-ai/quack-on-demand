@@ -663,6 +663,33 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       alloc.close()
   }
 
+  it should "stream a Parquet file of the page with the effective row limit up front" in {
+    assume(
+      ai.starlake.quack.edge.rest.RestParquetWriter.available,
+      "no POSIX named pipes on this host"
+    )
+    val (status, headers, body) = getBytes(
+      env.base,
+      rowsOf("orders"),
+      alice,
+      "select=o_id,o_total&order=o_id&limit=4&format=parquet"
+    )
+    withClue(new String(body, java.nio.charset.StandardCharsets.UTF_8))(status shouldBe 200)
+    headers.get("content-type") shouldBe Some("application/vnd.apache.parquet")
+    headers.get("x-qod-limit") shouldBe Some("4")
+    val f = Files.createTempFile("rest-e2e", ".parquet")
+    try
+      Files.write(f, body)
+      val c = java.sql.DriverManager.getConnection("jdbc:duckdb:")
+      try
+        val rs  = c.createStatement().executeQuery(s"SELECT o_id, o_total FROM read_parquet('$f')")
+        val got = ListBuffer.empty[(Int, BigDecimal)]
+        while rs.next() do got += ((rs.getInt(1), BigDecimal(rs.getBigDecimal(2))))
+        got.toList shouldBe List(10, 20, 30, 40).map(id => (id, BigDecimal(id) * 1.5))
+      finally c.close()
+    finally Files.deleteIfExists(f)
+  }
+
   it should "answer an ungranted table exactly like a missing one" in {
     val denied  = get(env.base, rowsOf("secret"), alice)
     val missing = get(env.base, rowsOf("no_such_table"), alice)

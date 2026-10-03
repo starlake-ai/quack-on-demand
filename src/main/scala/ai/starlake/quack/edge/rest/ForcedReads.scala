@@ -5,9 +5,9 @@ import cats.effect.{Fiber, IO, Poll}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.concurrent.duration.*
 
-/** The blocking reads of one streamed body (the node result's batches), made forcible: a deadline
-  * or a client cancel ends the WAIT for a read at once, and makes the read itself return instead of
-  * waiting for the node.
+/** The blocking reads of one streamed body (the node result's batches, a Parquet pipe), made
+  * forcible: a deadline or a client cancel ends the WAIT for a read at once, and makes the read
+  * itself return instead of waiting for the node.
   *
   * Cancelling an `IO.blocking` read waits for it to return, which a stalled node may never let it
   * do. Here each read runs on its own interruptible fiber and the caller waits on that fiber's join

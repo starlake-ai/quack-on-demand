@@ -272,7 +272,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       stmtTimeout: Option[FiniteDuration] = None,
       throttle: Option[AuthThrottle] = None,
       limiter: Option[UserLimiter] = None,
-      oidc: Map[(String, String), RestPrincipal] = Map.empty
+      oidc: Map[(String, String), RestPrincipal] = Map.empty,
+      parquet: Boolean = true
   ): Fixture =
     val calls                           = ListBuffer.empty[Call]
     val pats: Map[String, PatPrincipal] = Map(
@@ -306,7 +307,8 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
         stmtTimeout = stmtTimeout,
         throttle = throttle,
         limiter = Some(lim),
-        resolveOidc = (t, jwt) => oidc.get((t, jwt))
+        resolveOidc = (t, jwt) => oidc.get((t, jwt)),
+        parquetAvailable = parquet
       ),
       calls,
       lim,
@@ -1625,6 +1627,176 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     override protected def closeReadSource(): Unit = inner.close()
     override protected def readSchema(): Schema    = inner.getVectorSchemaRoot.getSchema
 
+  // ---- Parquet, streamed -----------------------------------------------------------------------
+
+  "format=parquet" should "stream a Parquet file of the rows, the paging headers as trailers" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxRows = 20, defaultLimit = 20),
+      dataRows = 50,
+      limiter = Some(lim)
+    )
+    val ok = okOf(rows(fx, "customer", "format=parquet"))
+    header(ok.headers, "Content-Type") shouldBe Some("application/vnd.apache.parquet")
+    header(ok.headers, "Trailer") shouldBe Some("Content-Range, X-QoD-Truncated")
+    header(ok.headers, "X-QoD-Limit") shouldBe Some("20")
+    val s     = streamedOf(ok)
+    val bytes = drain(s)
+    new String(bytes.take(4), "US-ASCII") shouldBe "PAR1"
+    new String(bytes.takeRight(4), "US-ASCII") shouldBe "PAR1"
+    s.trailers.unsafeRunSync().map(h => h.name -> h.value) shouldBe
+      List("Content-Range" -> "0-19/*", "X-QoD-Truncated" -> "true")
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "answer 400 when the byte cap is reached before the first byte" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    // 3000 rows arrive in batches of 1024; a 1 KiB cap is crossed by the first one, and DuckDB
+    // writes nothing before its first row group.
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxResponseBytes = 1024),
+      dataRows = 3000,
+      limiter = Some(lim)
+    )
+    val e = errOf(rows(fx, "customer", "format=parquet&limit=3000&order=c_id"))
+    (e._1, e._3.error) shouldBe (StatusCode.BadRequest, "invalid_parameter")
+    e._3.message should include("limit")
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "abort at the byte cap with rows left, never sending a whole file" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    // About 20 bytes a row: a 600 KiB cap falls past the first 16384-row group.
+    val lim = new UserLimiter(perUser = 4, total = 64)
+    val fx  = fixture(
+      cfg = baseCfg.copy(maxResponseBytes = 600L * 1024, maxRows = 100000),
+      dataRows = 50000,
+      limiter = Some(lim)
+    )
+    val s    = streamedOf(okOf(rows(fx, "customer", "format=parquet&limit=50000&order=c_id")))
+    val sent = ListBuffer.empty[Byte]
+    val out  = s.bytes.chunks.evalMap(c => IO(sent ++= c.toList)).compile.drain.attempt
+    out.unsafeRunSync().isLeft shouldBe true
+    // No footer: what went out is not a Parquet file.
+    new String(sent.takeRight(4).toArray, "US-ASCII") should not be "PAR1"
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+  }
+
+  it should "answer 429 past maxConcurrentParquet, and free the slot with the body" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val fx    = fixture(cfg = baseCfg.copy(maxConcurrentParquet = 1))
+    val first = streamedOf(okOf(rows(fx, "customer", "format=parquet")))
+    val e     = errOf(parquetAs(fx, CarolToken))
+    (e._1, e._3.error, header(e._2, "Retry-After")) shouldBe
+      (StatusCode.TooManyRequests, "too_many_requests", Some("1"))
+    // Refused once its data result is in hand, then closed: both of its results are closed, the
+    // first body's data result is still open.
+    fx.closes.get shouldBe 3
+    // Other formats are not bounded by it.
+    drain(streamedOf(okOf(rows(fx, "customer", "format=arrow"))))
+    drain(first)
+    drain(streamedOf(okOf(rows(fx, "customer", "format=parquet"))))
+  }
+
+  it should "read a view at the current state, unpinned and uncached, and refuse asOf on it" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val fx = fixture()
+    val ok = okOf(rows(fx, "v_customer", "format=parquet"))
+    drain(streamedOf(ok))
+    fx.calls.map(_.sql).foreach(_ should not include "AT (")
+    header(ok.headers, "X-QoD-Snapshot") shouldBe None
+    header(ok.headers, "Cache-Control") shouldBe Some("private, no-cache")
+    val e = errOf(rows(fixture(), "v_customer", "format=parquet&asOfTag=v1"))
+    (e._1, e._3.error) shouldBe (StatusCode.BadRequest, "invalid_selector")
+  }
+
+  it should "answer a resuming pool with the same 503 and Retry-After as JSON" in {
+    val resuming: AtomicInteger => Responder =
+      _ => _ => IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
+    val e = errOf(rows(fixture(respond = Some(resuming)), "customer", "format=parquet"))
+    (e._1, e._3.error, header(e._2, "Retry-After")) shouldBe
+      (StatusCode.ServiceUnavailable, "pool_resuming", Some("5"))
+  }
+
+  it should "release the result, the writer and the slot when cancelled while it reads the first batch" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val before    = parquetDirs()
+    val (lim, fx) = cancelledDuringFirstBatch("parquet")
+    awaitDrained(lim)
+    fx.closes.get shouldBe 2
+    parquetDirs() shouldBe before
+    assertOneSlotLeft(lim)
+  }
+
+  /** The writers' private pipe directories present right now. */
+  private def parquetDirs(): Set[String] =
+    val tmp = java.nio.file.Paths.get(System.getProperty("java.io.tmpdir"))
+    val all = java.nio.file.Files.list(tmp)
+    try
+      all.iterator.asScala
+        .map(_.getFileName.toString)
+        .filter(_.startsWith("qod-rest-parquet-"))
+        .toSet
+    finally all.close()
+
+  it should "be a 406 on a host that cannot stream it" in {
+    val fx = fixture(parquet = false)
+    errOf(rows(fx, "customer", "format=parquet"))._3.error shouldBe "unsupported_format"
+    val viaAccept = fx.handlers
+      .rows(
+        "acme",
+        "acme_lake",
+        "main",
+        "customer",
+        req(accept = Some("application/vnd.apache.parquet"))
+      )
+      .unsafeRunSync()
+    errOf(viaAccept)._1 shouldBe StatusCode.NotAcceptable
+    fx.calls shouldBe empty
+  }
+
+  private def parquetAs(fx: Fixture, token: String) =
+    fx.handlers
+      .rows("acme", "acme_lake", "main", "customer", req("format=parquet", List(s"Bearer $token")))
+      .unsafeRunSync()
+
+  it should "admit one Parquet body per user, whatever their tokens, beside other users' bodies" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val fx    = fixture(cfg = baseCfg.copy(maxConcurrentParquet = 2))
+    val first = streamedOf(okOf(parquetAs(fx, Token)))
+    val e     = errOf(parquetAs(fx, Token2))
+    (e._1, e._3.error, header(e._2, "Retry-After")) shouldBe
+      (StatusCode.TooManyRequests, "too_many_requests", Some("1"))
+    drain(streamedOf(okOf(parquetAs(fx, CarolToken))))
+    drain(first)
+    drain(streamedOf(okOf(parquetAs(fx, Token2))))
+  }
+
+  it should "hold no Parquet slot while the probe (or the resume behind it) is running" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    val gate                                  = new CountDownLatch(1)
+    val arrived                               = new AtomicInteger()
+    val firstProbe                            = new AtomicBoolean(true)
+    val probeHeld: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") && firstProbe.getAndSet(false) then
+          IO(arrived.incrementAndGet()) *> IO.blocking(gate.await(10, TimeUnit.SECONDS)) *>
+            defaultResponder(closes, 3)(sql)
+        else defaultResponder(closes, 3)(sql)
+    val fx    = fixture(cfg = baseCfg.copy(maxConcurrentParquet = 1), respond = Some(probeHeld))
+    val alice = IO(parquetAs(fx, Token)).start.unsafeRunSync()
+    awaitCount(arrived, 1)
+    // The edge's only Parquet slot is free while alice's probe waits.
+    drain(streamedOf(okOf(parquetAs(fx, CarolToken))))
+    gate.countDown()
+    drain(streamedOf(okOf(alice.joinWithNever.unsafeRunSync())))
+  }
+
   // ---- a stalled node --------------------------------------------------------------------------
 
   /** What ends a stalled node read early: closing the result (a blocking socket read, deaf to
@@ -1723,11 +1895,12 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     }
 
   it should "free a request cancelled while its encoder opens, within about a second" in {
-    // Arrow waits for its first batch.
-    val formats = List("arrow" -> 0)
+    // Arrow waits for its first batch; Parquet for its first bytes, which need a whole row group.
+    val formats = List("arrow" -> 0) ++ Option.when(RestParquetWriter.available)("parquet" -> 1)
     for (format, stallFrom) <- formats; unblock <- Unblock.values do
-      val lim = new UserLimiter(perUser = 4, total = 64)
-      val fx  = fixture(
+      val before = parquetDirs()
+      val lim    = new UserLimiter(perUser = 4, total = 64)
+      val fx     = fixture(
         respond = Some(stalledRows(stallFrom, stallMs = 8000, unblock)),
         limiter = Some(lim)
       )
@@ -1743,4 +1916,64 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       ms should be < 2000L
       awaitClosed(fx, 2)
       awaitDrained(lim)
+      parquetDirs() shouldBe before
+  }
+
+  it should "not hold a Parquet request past maxStreamSec" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    Unblock.values.foreach { unblock =>
+      val before = parquetDirs()
+      val lim    = new UserLimiter(perUser = 4, total = 64)
+      val fx     = fixture(
+        cfg = baseCfg.copy(maxStreamSec = 1),
+        respond = Some(stalledRows(stallFrom = 1, stallMs = 8000, unblock)),
+        limiter = Some(lim)
+      )
+      val t0 = System.nanoTime()
+      // DuckDB writes nothing before its first row group, which needs the stalled batches: the
+      // deadline falls while the writer opens.
+      val e  = errOf(rows(fx, "customer", "format=parquet&limit=3000"))
+      val ms = millisSince(t0)
+      info(s"$unblock: answered after $ms ms")
+      (e._1, e._3.error) shouldBe (StatusCode.GatewayTimeout, "statement_timeout")
+      ms should be < 2500L
+      awaitClosed(fx, 2)
+      awaitDrained(lim)
+      parquetDirs() shouldBe before
+    }
+  }
+
+  it should "not hold a started Parquet stream past maxStreamSec" in {
+    assume(RestParquetWriter.available, "no POSIX named pipes on this host")
+    // Two rows of 4 MB per row group, so the first bytes go out before the node stalls.
+    val wide = (closes: AtomicInteger) =>
+      (sql: String) =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+        else
+          IO {
+            val inner = TestArrow.readerFor(
+              "SELECT range::INTEGER AS c_id, repeat('x', 4000000) AS c_email FROM range(4)"
+            )
+            val reader = new StalledReader(inner, 1, 8000, Unblock.OnClose)
+            Right(
+              QueryResult(reader, () => { closes.incrementAndGet(); reader.close() }, "n-data", 1L)
+            )
+          }
+    val before = parquetDirs()
+    val lim    = new UserLimiter(perUser = 4, total = 64)
+    val fx     = fixture(
+      cfg = baseCfg.copy(maxStreamSec = 2, maxResponseBytes = 1L << 30),
+      respond = Some(wide),
+      limiter = Some(lim)
+    )
+    val t0  = System.nanoTime()
+    val s   = streamedOf(okOf(rows(fx, "customer", "format=parquet&limit=4")))
+    val out = s.bytes.compile.drain.attempt.unsafeRunSync()
+    val ms  = millisSince(t0)
+    info(s"the stream ended after $ms ms")
+    out.left.toOption.get shouldBe a[java.util.concurrent.TimeoutException]
+    ms should be < 3500L
+    fx.closes.get shouldBe 2
+    lim.inFlightTotal shouldBe 0
+    parquetDirs() shouldBe before
   }

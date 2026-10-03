@@ -30,7 +30,7 @@ class RestFormatSpec extends AnyFlatSpec with Matchers:
     RestFormat.negotiate(Some("arrow"), None).left.map(_.status.code) shouldBe Left(406)
   }
 
-  it should "serve arrow on /rows, by name or by Accept" in {
+  it should "serve arrow and parquet on /rows, by name or by Accept" in {
     def rows(format: Option[String], accept: Option[String]) =
       RestFormat.negotiate(format, accept, RestFormat.Rows).left.map(_.code)
     rows(Some("arrow"), None) shouldBe Right(RestFormat.Arrow)
@@ -38,9 +38,15 @@ class RestFormatSpec extends AnyFlatSpec with Matchers:
     rows(None, Some("application/vnd.apache.arrow.stream")) shouldBe Right(RestFormat.Arrow)
     rows(None, Some("application/json;q=0.5, application/vnd.apache.arrow.stream")) shouldBe
       Right(RestFormat.Arrow)
-    rows(Some("parquet"), None) shouldBe Left("unsupported_format")
+    rows(Some("parquet"), None) shouldBe Right(RestFormat.Parquet)
+    rows(None, Some("application/vnd.apache.parquet")) shouldBe Right(RestFormat.Parquet)
+    RestFormat
+      .negotiate(Some("parquet"), None, RestFormat.Rows - RestFormat.Parquet)
+      .left
+      .map(_.code) shouldBe Left("unsupported_format")
     rows(None, None) shouldBe Right(RestFormat.Json)
     RestFormat.Arrow.streamed shouldBe true
+    RestFormat.Parquet.streamed shouldBe true
     List(RestFormat.Json, RestFormat.Csv).foreach(_.streamed shouldBe false)
   }
 
@@ -66,4 +72,5 @@ class RestFormatSpec extends AnyFlatSpec with Matchers:
     RestFormat.Json.contentType shouldBe "application/json"
     RestFormat.Csv.contentType shouldBe "text/csv; charset=utf-8"
     RestFormat.Arrow.contentType shouldBe "application/vnd.apache.arrow.stream"
+    RestFormat.Parquet.contentType shouldBe "application/vnd.apache.parquet"
   }

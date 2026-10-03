@@ -46,6 +46,7 @@ data:
   QOD_REST_MAX_CONCURRENT_PER_USER:      {{ .Values.rest.maxConcurrentPerUser | quote }}
   QOD_REST_MAX_CONCURRENT_TOTAL:         {{ .Values.rest.maxConcurrentTotal | quote }}
   QOD_REST_MAX_STREAM_SEC:               {{ .Values.rest.maxStreamSec | quote }}
+  QOD_REST_MAX_CONCURRENT_PARQUET:       {{ .Values.rest.maxConcurrentParquet | quote }}
 
   # ---- Metrics sink ---------------------------------------------------------
   QOD_METRICS_SINK:        {{ .Values.metrics.sink | quote }}

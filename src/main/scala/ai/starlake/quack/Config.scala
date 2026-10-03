@@ -1819,7 +1819,14 @@ final case class RestEdgeConfig(
           "embedded node client (QOD_NATIVE_CLIENT=false) ignores both and holds that until the " +
           "node answers."
     )
-    maxStreamSec: Int = 600
+    maxStreamSec: Int = 600,
+    @field @ConfigField(
+      envVar = "QOD_REST_MAX_CONCURRENT_PARQUET",
+      description =
+        "Parquet bodies the REST data edge streams at once (each runs an in-process DuckDB " +
+          "limited to 64 MB), at most one per principal (tenant, user); past either 429."
+    )
+    maxConcurrentParquet: Int = 2
 ):
   // `def`, not a val: ConfigRegistry pairs declared fields with constructor parameters by position.
   /** The parsed `trustedProxies`; empty (trust none) when it does not parse, which boot refuses. */
@@ -1878,6 +1885,7 @@ object RestEdgeConfig:
         atLeast(cfg.maxConcurrentPerUser, 1, "QOD_REST_MAX_CONCURRENT_PER_USER"),
         atLeast(cfg.maxConcurrentTotal, 1, "QOD_REST_MAX_CONCURRENT_TOTAL"),
         atLeast(cfg.maxStreamSec, 1, "QOD_REST_MAX_STREAM_SEC"),
+        atLeast(cfg.maxConcurrentParquet, 1, "QOD_REST_MAX_CONCURRENT_PARQUET"),
         otherPorts.collectFirst {
           case (door, p) if p == cfg.port =>
             s"QOD_REST_PORT ${cfg.port} is already bound by the $door listener"

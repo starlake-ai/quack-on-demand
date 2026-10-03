@@ -15,7 +15,7 @@ import ai.starlake.quack.ondemand.api.{
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import cats.data.EitherT
-import cats.effect.{IO, Outcome, Resource}
+import cats.effect.{IO, Outcome, Poll, Resource}
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import org.apache.arrow.vector.ipc.ArrowReader
@@ -38,6 +38,71 @@ object RestEdgeHandlers:
     * token's statement timeout: writing the head can take a moment.
     */
   private val UnstartedFloor: FiniteDuration = 30.seconds
+
+  /** A streamed format's encoder over one result: its bytes from the first one on, what it counted,
+    * how to force it to stop, and the release of what it holds (never the result itself, which its
+    * owner closes after).
+    */
+  private trait RowEncoder:
+    def bytes: fs2.Stream[IO, Byte]
+    def rows: Long
+    def more: Boolean
+    def cut: Boolean
+
+    /** Makes whatever the encoder is blocked on return (a deadline, a cancel), without waiting. */
+    def abort: IO[Unit]
+
+    /** Releases what the encoder holds, once its reads have returned. */
+    def close: IO[Unit]
+
+  private object RowEncoder:
+    /** Opens the encoder of `qr` in `format`, its first bytes in hand. Every wait on the node goes
+      * through `poll` as a forcible read ([[ForcedReads]]), whose abort closes `qr` (its usual
+      * close, the one an admin kill uses): a cancel, or a `poll` that bounds the wait, ends the
+      * open promptly, with the encoder released.
+      */
+    def open(
+        format: RestFormat,
+        qr: QueryResult,
+        limit: Int,
+        maxBytes: Long,
+        poll: Poll[IO]
+    ): IO[RowEncoder] =
+      val kill = IO.blocking(qr.close())
+      format match
+        case RestFormat.Parquet =>
+          RestParquetWriter.opening(qr.rows, limit, maxBytes, kill, poll).map { w =>
+            new RowEncoder:
+              def bytes = fs2.Stream.chunk(fs2.Chunk.array(w.first)) ++ w.rest
+              def rows  = w.rows
+              def more  = w.more
+              def cut   = w.cut
+              def abort = w.abort
+              def close = w.close()
+          }
+        case _ =>
+          IO(new RestArrowWriter(qr.rows, limit, maxBytes)).flatMap { w =>
+            val reads    = new ForcedReads(kill)
+            val released = reads.settled *> IO.blocking(w.close())
+            reads(poll)(w.start())
+              .guaranteeCase {
+                case Outcome.Succeeded(_) => IO.unit
+                case _                    => released
+              }
+              .map { first =>
+                new RowEncoder:
+                  def bytes = fs2.Stream.chunk(fs2.Chunk.array(first)) ++
+                    fs2.Stream
+                      .repeatEval(IO.uncancelable(p => reads(p)(w.next())))
+                      .unNoneTerminate
+                      .flatMap(b => fs2.Stream.chunk(fs2.Chunk.array(b)))
+                  def rows  = w.rows
+                  def more  = w.more
+                  def cut   = w.cut
+                  def abort = reads.abort
+                  def close = released
+              }
+          }
 
   /** The four routes: their template (for access logs, never the concrete path) and the parameters
     * each admits. `None` admits the whole `/rows` vocabulary; the listings and the detail refuse
@@ -113,12 +178,20 @@ final class RestEdgeHandlers(
     /** Bearer JWTs of the path tenant's own OIDC provider ([[RestOidc.resolve]]); PATs only when
       * left out.
       */
-    resolveOidc: (String, String) => Option[RestPrincipal] = RestAuth.NoOidc
+    resolveOidc: (String, String) => Option[RestPrincipal] = RestAuth.NoOidc,
+    /** Whether `/rows` offers Parquet; the host probe in production, a seam in specs. */
+    parquetAvailable: => Boolean = RestParquetWriter.available
 ) extends LazyLogging:
+
+  private lazy val rowFormats: Set[RestFormat] =
+    if parquetAvailable then RestFormat.Rows else RestFormat.Rows - RestFormat.Parquet
 
   // Built from `cfg` when not given: a default parameter cannot refer to another one here.
   private val authThrottle: AuthThrottle = throttle.getOrElse(AuthThrottle(cfg, _ => ()))
   private val userLimiter: UserLimiter   = limiter.getOrElse(UserLimiter(cfg))
+
+  /** The Parquet slots: one per principal, `maxConcurrentParquet` for the whole edge. */
+  private val parquetLimiter = new UserLimiter(perUser = 1, total = cfg.maxConcurrentParquet)
 
   import RestEdgeHandlers.*
   import RestResponses.*
@@ -222,7 +295,8 @@ final class RestEdgeHandlers(
               .noSpaces
           case RestFormat.Csv => csv(List("name", "type"), cols)
           // The table detail negotiates JSON or CSV only (RestFormat.Documents).
-          case RestFormat.Arrow => throw new IllegalStateException("arrow is not a document format")
+          case RestFormat.Arrow | RestFormat.Parquet =>
+            throw new IllegalStateException("a streamed format is not a document format")
         RestOk(
           baseHeaders(fmt, pinned(t, q, snap)) ++
             snap.map(id => Header("X-QoD-Snapshot", id.toString)),
@@ -238,7 +312,7 @@ final class RestEdgeHandlers(
         sch <- lift(schemaSegment(schema))
         tbl <- lift(objectSegment(name))
         q   <- lift(parseQuery(Route.Rows, req.rawQuery))
-        f   <- lift(RestFormat.negotiate(q.format, req.accept, RestFormat.Rows))
+        f   <- lift(RestFormat.negotiate(q.format, req.accept, rowFormats))
         t   <- resolveTarget(p, tenant, tenantDb, q.pool)
         // min(limit ?: defaultLimit, maxRows, token maxRows); the statement fetches one more.
         limit = t.caller.effectiveMaxRows(cfg.maxRows, q.limit.getOrElse(cfg.defaultLimit))
@@ -258,7 +332,8 @@ final class RestEdgeHandlers(
             onFailure = dataFailure(req.requestId, filtered = rq.filters.nonEmpty)
             out <- execute(pinned, sql, onFailure, req, slot) { qr =>
               if f.streamed then
-                streamArrow(qr, limit, req, timeoutFor(t.caller)).map(_.map(Right(_)))
+                streamRows(f, qr, limit, req, timeoutFor(t.caller), userKey(p))
+                  .map(_.map(Right(_)))
               else
                 reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))(qr)
                   .map(_.map(Left(_)))
@@ -327,12 +402,15 @@ final class RestEdgeHandlers(
   private def withSlot[A](p: RestPrincipal)(body: UserLimiter.Hold => Step[A]): Step[A] =
     EitherT(
       IO.uncancelable { poll =>
-        IO(userLimiter.tryAcquire((p.user.tenant.getOrElse(""), p.user.id))).flatMap {
+        IO(userLimiter.tryAcquire(userKey(p))).flatMap {
           case None       => IO.pure(Left(RestError.TooManyRequests))
           case Some(slot) => poll(body(slot).value).guarantee(IO(slot.release()))
         }
       }
     )
+
+  /** The principal's key in the limiters: `(tenant, userId)`. */
+  private def userKey(p: RestPrincipal): (String, String) = (p.user.tenant.getOrElse(""), p.user.id)
 
   // ---- path segments and parameters ----------------------------------------------------------
 
@@ -612,18 +690,25 @@ final class RestEdgeHandlers(
     val base = stmtTimeout.getOrElse(cfg.stmtTimeoutSec.seconds)
     caller.restriction.stmtTimeoutMs.filter(_ > 0).map(_.toLong.millis).fold(base)(_ min base)
 
-  /** The data statement's result as a streamed Arrow IPC body ([[RestArrowWriter]]) and the writer,
-    * which counts what it sent for the trailers. The `use` of [[execute]]: it owns `qr` from the
-    * first instruction on.
+  /** The data statement's result as a streamed body in `format` (Arrow IPC through
+    * [[RestArrowWriter]], Parquet through [[RestParquetWriter]]), and the encoder, which counts
+    * what it sent for the trailers. The `use` of [[execute]]: it owns `qr` from the first
+    * instruction on.
     *
-    * The deadline, `maxStreamSec`, runs from here. The schema and the first batch are pulled HERE,
-    * before the answer is committed, so a node that fails on its first batch still gets an ordinary
-    * error response, and a first batch still missing at the deadline the ordinary 504. Every node
-    * read is forcible ([[ForcedReads]]): a request cancelled during it, or the deadline, ends it at
-    * once, closing `qr` (its usual close, the one an admin kill uses) and interrupting the read so
-    * that it returns, and the writer and the result are released. From then on the stream owns
-    * them: its finalizer closes the writer and then the result, once, which also releases the node
-    * call's share of the in-flight slot.
+    * A Parquet body first takes one of the principal's Parquet slots (one per principal,
+    * `maxConcurrentParquet` for the edge; 429 when none is free, `qr` closed), held only from here
+    * until the body is released: never across the probe, the catalog lookups or a resume. Each one
+    * runs an in-process DuckDB with its own memory limit, so their number is bounded apart from the
+    * in-flight cap.
+    *
+    * The deadline, `maxStreamSec`, runs from here. The first batch (and for Parquet the first
+    * bytes) is pulled HERE, before the answer is committed, so a node that fails early still gets
+    * an ordinary error response, and a first batch still missing at the deadline the ordinary 504.
+    * That wait is forcible ([[ForcedReads]]): a request cancelled during it, or the deadline, ends
+    * it at once, closing `qr` (its usual close) so the blocked read returns, and the encoder, the
+    * result and the slots are released. From then on the stream owns them: its finalizer closes the
+    * encoder and then the result, once, which also releases the node call's share of the in-flight
+    * slot and the Parquet slot.
     *
     * The stream fails, and Ember then aborts the connection instead of ending the chunked body
     * cleanly, when a batch after the first byte fails, when the response byte cap is reached with
@@ -635,47 +720,51 @@ final class RestEdgeHandlers(
     * at most until the deadline) unless the stream has started by then; the two can never both own
     * it.
     */
-  private def streamArrow(
+  private def streamRows(
+      format: RestFormat,
       qr: QueryResult,
       limit: Int,
       req: RestRequest,
-      wait: FiniteDuration
-  ): IO[Either[RestError, (fs2.Stream[IO, Byte], RestArrowWriter)]] =
+      wait: FiniteDuration,
+      user: (String, String)
+  ): IO[Either[RestError, (fs2.Stream[IO, Byte], RowEncoder)]] =
     val rid    = req.requestId
     val closed = IO.blocking(qr.close()).attempt.void
-    val reads  = new ForcedReads(IO.blocking(qr.close()))
     IO.uncancelable { poll =>
+      val slot =
+        if format == RestFormat.Parquet then parquetLimiter.tryAcquire(user)
+        else Some(UserLimiter.Hold.Released)
       IO.monotonic.flatMap { handed =>
         val deadline = handed + cfg.maxStreamSec.seconds
-        IO(new RestArrowWriter(qr.rows, limit, cfg.maxResponseBytes))
-          .flatMap { w =>
-            reads(ForcedReads.within(poll, deadline))(w.start())
-              .guaranteeCase {
-                case Outcome.Succeeded(_) => IO.unit
-                case _                    => reads.settled *> IO.blocking(w.close())
+        slot match
+          case None        => closed.as(Left(RestError.TooManyRequests))
+          case Some(share) =>
+            RowEncoder
+              .open(format, qr, limit, cfg.maxResponseBytes, ForcedReads.within(poll, deadline))
+              .onCancel(IO(share.release()) *> closed)
+              .attempt
+              .flatMap {
+                case Left(t) =>
+                  IO(share.release()) *> closed.as(Left(openFailure(rid, t)))
+                case Right(enc) =>
+                  // Cancelled while the first batch was read: nobody will stream it.
+                  val (bytes, unstarted) = streamOf(enc, qr, share, rid, deadline)
+                  poll(IO.unit).onCancel(unstarted) *>
+                    IO.monotonic
+                      .flatMap { now =>
+                        val left = (deadline - now).max(Duration.Zero)
+                        (IO.sleep(wait.max(UnstartedFloor).min(left)) *> unstarted).start
+                      }
+                      .as(Right((bytes, enc)))
               }
-              .map(first => (w, first))
-          }
-          .onCancel(closed)
-          .attempt
-          .flatMap {
-            case Left(t)           => closed.as(Left(openFailure(rid, t)))
-            case Right((w, first)) =>
-              // Cancelled while the first batch was read: nobody will stream it.
-              val (bytes, unstarted) = streamOf(w, first, reads, qr, rid, deadline)
-              poll(IO.unit).onCancel(unstarted) *>
-                IO.monotonic
-                  .flatMap { now =>
-                    val left = (deadline - now).max(Duration.Zero)
-                    (IO.sleep(wait.max(UnstartedFloor).min(left)) *> unstarted).start
-                  }
-                  .as(Right((bytes, w)))
-          }
       }
     }
 
-  /** The answer to a writer that failed on the first batch. */
+  /** The answer to an encoder that failed to open. */
   private def openFailure(rid: String, t: Throwable): RestError = t match
+    // The page outgrew the byte cap before its first byte: an ordinary answer still fits.
+    case _: CappedArrowReader.ByteCapReached =>
+      RestError.invalidParameter("limit", "the page exceeds the response byte cap")
     case _: java.util.concurrent.TimeoutException =>
       logger.warn(s"rest [$rid] no first batch within maxStreamSec")
       RestError.StatementTimeout
@@ -683,37 +772,31 @@ final class RestEdgeHandlers(
       logger.warn(s"rest [$rid] reading the first batch failed: ${t.getClass.getName}")
       RestError.UpstreamError
 
-  /** The body over a started writer, and the release of a body never started (see [[streamArrow]]).
-    * Exactly one of the two owns `w` and `qr`.
+  /** The body over an opened encoder, and the release of a body never started (see [[streamRows]]).
+    * Exactly one of the stream and that release owns `enc`, `qr` and `share`.
     */
   private def streamOf(
-      w: RestArrowWriter,
-      first: Array[Byte],
-      reads: ForcedReads,
+      enc: RowEncoder,
       qr: QueryResult,
+      share: UserLimiter.Hold,
       rid: String,
       deadline: FiniteDuration
   ): (fs2.Stream[IO, Byte], IO[Unit]) =
     // 0: handed out, 1: streaming, 2: released.
     val state   = new java.util.concurrent.atomic.AtomicInteger(0)
-    val release = (reads.settled *> IO.blocking {
-      try w.close()
-      finally qr.close()
-    }).handleError { t =>
-      logger.warn(s"rest [$rid] closing a streamed result failed: ${t.getClass.getName}")
-      logger.debug(s"rest [$rid] closing a streamed result failed: ${t.getMessage}")
-    }
+    val release = enc.close
+      .guarantee(IO.blocking(qr.close()))
+      .guarantee(IO(share.release()))
+      .handleError { t =>
+        logger.warn(s"rest [$rid] closing a streamed result failed: ${t.getClass.getName}")
+        logger.debug(s"rest [$rid] closing a streamed result failed: ${t.getMessage}")
+      }
     // Released other than by a whole body: whatever may still block is forced first.
-    val forced    = reads.abort.attempt *> release
+    val forced    = enc.abort.attempt *> release
     val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced, IO.unit)
     val expired   = IO.monotonic
       .flatMap(now => IO.sleep((deadline - now).max(Duration.Zero)))
       .as(Left(new java.util.concurrent.TimeoutException("maxStreamSec")))
-    val batches = fs2.Stream.chunk(fs2.Chunk.array(first)) ++
-      fs2.Stream
-        .repeatEval(IO.uncancelable(p => reads(p)(w.next())))
-        .unNoneTerminate
-        .flatMap(b => fs2.Stream.chunk(fs2.Chunk.array(b)))
     // The transition to streaming is the acquire of a bracket, so its release is registered with
     // it: no cancellation can fall between the two.
     val bytes = fs2.Stream
@@ -723,11 +806,11 @@ final class RestEdgeHandlers(
         case (false, _)                          => IO.unit
       }
       .flatMap { owned =>
-        if owned then batches.interruptWhen(expired)
+        if owned then enc.bytes.interruptWhen(expired)
         else fs2.Stream.raiseError[IO](new IllegalStateException("result already released"))
       }
       .handleErrorWith(t =>
-        fs2.Stream.exec(IO(streamFailed(rid, t, w.cut))) ++ fs2.Stream.raiseError[IO](t)
+        fs2.Stream.exec(IO(streamFailed(rid, t, enc.cut))) ++ fs2.Stream.raiseError[IO](t)
       )
     (bytes, unstarted)
 
