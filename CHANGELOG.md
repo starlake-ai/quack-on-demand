@@ -1,59 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Added
-
-- **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
-  (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
-  `QOD_REST_ENABLED=true` opens a listener of its own on `:31339` (`QOD_REST_PORT`, TLS on by default
-  and reusing the FlightSQL edge's PEM pair, `QOD_REST_TLS_ENABLED`) with four `GET` endpoints under
-  `/api/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
-  `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, answering JSON (an array of
-  objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
-  column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
-  negatable with `not.`), `order`, `limit`/`offset` and, on DuckLake tables,
-  `asOf`/`asOfTag`/`asOfTs`; every DuckLake table page carries `X-QoD-Snapshot`, and sending it
-  back as `asOf` keeps paging stable under concurrent writes. Views are read at the current state,
-  without `X-QoD-Snapshot`, and answer `asOf*` with `400 invalid_selector`. Each request becomes
-  one `SELECT` through the same routed executor as MCP `run_sql`, so grants, row and column
-  policies, pool permissions, audit and statement history (origin and OPA `client.edge`
-  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is not
-  recorded, so a request refused at the probe leaves no audit row. An object the caller may not
-  read answers the same `404` as a missing one, and so does a table holding a column under a deny
-  policy, which the probe cannot read (the table listing still names it). A reserved parameter
-  name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
-  `400 reserved_column`. Credentials are personal access tokens only (never the static API
-  key, a cookie or a password; a superuser token is refused): a token with no `tools` restriction
-  may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
-  name `rest`. Rows are capped by `min(limit or QOD_REST_DEFAULT_LIMIT, QOD_REST_MAX_ROWS, the
-  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB, cut at a row boundary),
-  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
-  `min(QOD_REST_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
-  that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
-  a request to a cold pool that the edge's own wait cuts short. Boot refuses a
-  `QOD_REST_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
-  `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
-  `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
-  Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
-  listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
-  whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
-  under a column or row policy reads a table at a snapshot only when the table, under that name,
-  has always been the same table with the same column names: those policies match today's names,
-  so a table or column renamed, dropped or recreated since is refused, in every statement kind and
-  on every door.
-  Responses are `Cache-Control: private` with `Vary:
-  Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
-  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a
-  `<release>-rest` Service (`service.restData`) and its NetworkPolicy port; the image exposes
-  `31339`. There is no per-client rate limit, authentication throttle or per-user concurrency cap
-  yet: an internet-facing edge must sit behind a reverse proxy or WAF that rate-limits per client
-  and per `Authorization` value.
-  The edge keeps at most `QOD_REST_DATA_MAX_CONNECTIONS` (512) connections open, and no more than
-  fit a tenth of the heap at `QOD_REST_DATA_MAX_HEADER_BYTES` (16 KiB per request line and per
-  header block), as boot says when that is fewer; `QOD_REST_MAX_CONNECTIONS` and
-  `QOD_REST_MAX_HEADER_BYTES` stay the manager REST port's.
-
 ## 0.12.2
 
 ### Fixed
@@ -1413,6 +1359,112 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `NodeKeys`, `QuackHttpAdapter`, the backends, `MetricsBindings`, `FederatedSourceHandlers`, ...).
 
 ### Added
+
+- **A read-only REST data edge serves tables and views as HTTP resources.** HTTP-only tools
+  (n8n, Zapier, a spreadsheet import, a cache) can now read governed data without a driver or SQL.
+  `QOD_REST_ENABLED=true` opens a fifth listener on `:31339` (`QOD_REST_PORT`, TLS on by default
+  and reusing the FlightSQL edge's PEM pair, `QOD_REST_TLS_ENABLED`) with four `GET` endpoints under
+  `/api/v1/tenant/{tenant}/database/{db}`: `/schemas`, `/schemas/{s}/tables`,
+  `/schemas/{s}/tables/{t}` and `/schemas/{s}/tables/{t}/rows`, answering JSON (an array of
+  objects, exact decimals) or CSV (RFC 4180) by `format=` or `Accept`. `/rows` takes `select`,
+  column filters (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `in`, `is`, each
+  negatable with `not.`), `order`, `limit`/`offset` and, on DuckLake tables,
+  `asOf`/`asOfTag`/`asOfTs`; every DuckLake table page carries `X-QoD-Snapshot`, and sending it
+  back as `asOf` keeps paging stable under concurrent writes. Views are read at the current state,
+  without `X-QoD-Snapshot`, and answer `asOf*` with `400 invalid_selector`. Each request becomes
+  one `SELECT` through the same routed executor as MCP `run_sql`, so grants, row and column
+  policies, pool permissions, audit and statement history (origin and OPA `client.edge`
+  `rest-data`) and metering apply unchanged; the schema probe (`SELECT * ... LIMIT 0`) is not
+  recorded, so a request refused at the probe leaves no audit row. An object the caller may not
+  read answers the same `404` as a missing one, and so does a table holding a column under a deny
+  policy, which the probe cannot read (the table listing still names it). A reserved parameter
+  name in any case with a filter-shaped value (`limit=eq.5`, `Format=not.eq.x`) answers
+  `400 reserved_column`. Credentials are personal access tokens, or the tenant's own OIDC tokens
+  (next entry), never the static API key, a cookie or a password; a superuser token is
+  refused. A token with no `tools` restriction
+  may use the edge, and one restricted with `qod auth pat create --tool ...` must list the reserved
+  name `rest`. Rows are capped by `min(limit or QOD_REST_DEFAULT_LIMIT, QOD_REST_MAX_ROWS, the
+  token's maxRows)` and bodies by `QOD_REST_MAX_RESPONSE_BYTES` (64 MiB, cut at a row boundary),
+  with `X-QoD-Truncated` when a server or token cap cut the page; each statement is bounded by
+  `min(QOD_REST_STMT_TIMEOUT_SEC (90 s), the token's stmtTimeoutMs)` (504), and a hibernated pool
+  that does not resume within `PROXY_RESUME_HOLD_TIMEOUT_SEC` answers `503 pool_resuming`, as does
+  a request to a cold pool that the edge's own wait cuts short. Boot refuses a
+  `QOD_REST_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
+  `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
+  `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
+  Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
+  listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
+  whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
+  under a column or row policy reads a table at a snapshot only when the table, under that name,
+  has always been the same table with the same column names: those policies match today's names,
+  so a table or column renamed, dropped or recreated since is refused, in every statement kind and
+  on every door.
+  Responses are `Cache-Control: private` with `Vary:
+  Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
+  endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a
+  `<release>-rest` Service (`service.restData`) and its NetworkPolicy port; the image exposes
+  `31339`.
+- **The REST data edge accepts the tenant's own OIDC tokens.** Besides a PAT, a bearer JWT (an ID
+  token, or an access token whose audience is the tenant's client id) is admitted when the PATH
+  tenant's per-tenant OIDC provider verifies it (issuer, audience,
+  signature and JWKS exactly as for that tenant's FlightSQL logins). The manager-wide providers are
+  never consulted, a tenant without a provider of its own answers 401, the token must carry `exp`,
+  and the user it names must be provisioned and enabled in that tenant (never a superuser row).
+  Its roles, groups and claims reach the handshake and the OPA input as on the FlightSQL edge, and
+  its statements are attributed to `rest-data` like a PAT's. The OpenAPI document declares both
+  bearers (`restEdgePat`, `restEdgeOidc`) as alternatives on the `rest-edge` operations.
+- **`/rows` streams Arrow IPC and Parquet.** `format=arrow` (or `Accept:
+  application/vnd.apache.arrow.stream`) re-frames the node's batches and `format=parquet` (or
+  `Accept: application/vnd.apache.parquet`) writes Parquet through the manager's embedded DuckDB
+  into a named pipe, both with memory bounded by a batch or a row group whatever the page size; the
+  row cap is enforced by slicing. On these two, `X-QoD-Limit`, the effective row limit
+  `min(limit, or QOD_REST_DEFAULT_LIMIT when absent; quack-rest.maxRows; token maxRows)`, is sent up front, and a page holding that many rows may continue; `Content-Range` and `X-QoD-Truncated`
+  follow as HTTP trailers (announced by `Trailer`), which browsers and many clients and proxies
+  drop, so nothing should rely on them. An error after the first byte aborts the connection rather
+  than ending the body cleanly, and so does `QOD_REST_MAX_RESPONSE_BYTES`, checked between batches
+  (for Parquet on the Arrow data fed to the writer): a stream that reaches it with rows left is
+  aborted after at most one batch of overrun, never ended as if complete, so a client lowers
+  `limit` to page under it (a Parquet page that outgrows it before its first byte answers
+  `400 invalid_parameter`). An answer still running `QOD_REST_MAX_STREAM_SEC` (600) after its
+  result arrived is aborted (a `504` before the first batch), the node read in progress forced to
+  return (result closed, thread interrupted) and everything released. At most `QOD_REST_MAX_CONCURRENT_PARQUET` (2) Parquet bodies stream at once, one
+  per user, each through an in-process DuckDB limited to 64 MB, past which the answer is
+  `429 too_many_requests`; the slot is held only while the body is written, never across the
+  probe or a resume.
+  Views keep their rules in every format: no `AT` clause, no
+  `X-QoD-Snapshot`, no caching, `asOf*` a 400. Parquet needs named pipes and is not offered on
+  Windows (406). Buffered JSON and CSV answers now carry `Content-Length`. The OpenAPI document
+  lists each route's media types on its 200 answer. Helm: `rest.maxStreamSec`,
+  `rest.maxConcurrentParquet`.
+- **CORS on the REST data edge.** `QOD_REST_CORS_ALLOWED_ORIGINS` (empty = off) lists exact
+  origins or `*` (a scheme's default port is dropped, as browsers send it); allowed origins get a
+  preflight for `GET` with `Authorization` and `Accept`, the
+  edge's headers exposed and `Vary: Origin`. Credentials are never allowed. A malformed origin
+  refuses boot. A preflight from a client the failed-auth throttle has blocked gets its 429
+  without `Access-Control-Allow-Origin`. Helm: `rest.corsAllowedOrigins`.
+- **Prometheus meters for the REST data edge:** `qod_rest_requests_total{route,format,status}`,
+  `qod_rest_request_seconds{route,format}`, `qod_rest_rejections_total{reason}` and
+  `qod_rest_stream_aborts_total{route,format}` (a streamed body cut, abandoned by its client, or
+  never started), labelled by route template only.
+- **Abuse controls on the REST data edge.** A client address that fails authentication more than
+  `QOD_REST_AUTH_FAILURES_PER_WINDOW` (20) times within `QOD_REST_AUTH_WINDOW_SEC` (60) is blocked
+  for `QOD_REST_AUTH_BLOCK_SEC` (300): every request then gets `429 too_many_auth_failures` with
+  `Retry-After`, before any token lookup, and each block is audited as
+  `auth.rest.throttled` with origin `rest-data` (the manager log has a WARN line per block, the
+  client address at DEBUG only). The address is the TCP peer, or behind a proxy listed in
+  `QOD_REST_TRUSTED_PROXIES` the right-most untrusted `X-Forwarded-For` hop (a port on it ignored,
+  an `unknown` hop never taken as the client, IPv6 keyed per /64). Behind a load balancer that list
+  must name it: otherwise every client shares one budget and one client's bad tokens block everyone.
+  Each user, whatever the number of their tokens, runs at most `QOD_REST_MAX_CONCURRENT_PER_USER`
+  (4) requests at once, `QOD_REST_MAX_CONCURRENT_TOTAL` (16) for the whole edge, past which the
+  answer is `429 too_many_requests`, refused before any catalog lookup; a slot stays taken until the
+  node work really ends, even after a 504 or while a streamed body is read, and is freed however the
+  request ends, a cancelled one included. A JSON or CSV page is buffered in the heap, in a buffer
+  that grows by doubling: size the heap for up to 3 x `QOD_REST_MAX_CONCURRENT_TOTAL` x
+  `QOD_REST_MAX_RESPONSE_BYTES` (3 GiB by default). Both are per manager replica (under HA the effective
+  budget is N times the configured one); a WAF or rate-limiting proxy is still recommended for
+  volumetric and DDoS limits on an internet-facing edge. Helm: `rest.trustedProxies`,
+  `rest.authThrottle.*`, `rest.maxConcurrentPerUser` and `rest.maxConcurrentTotal`.
 
 - Decision metrics: `qod_authz_decisions_total{tenant, kind=plan|screen,
   outcome=allow|refuse|unavailable, mode=qod|opa}` and `qod_authz_decide_duration_ms{kind}`
