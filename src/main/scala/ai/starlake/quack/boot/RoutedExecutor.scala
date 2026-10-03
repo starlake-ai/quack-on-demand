@@ -3,7 +3,7 @@ package ai.starlake.quack.boot
 import ai.starlake.quack.edge.{FlightSqlRouter, QueryResult, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
-import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ExecCaller}
+import ai.starlake.quack.ondemand.api.{BoundedWait, CatalogPreviewHandlers, ExecCaller}
 import ai.starlake.quack.ondemand.rbac.{EffectiveSet, HandshakeDenial}
 import ai.starlake.quack.route.StatementClassifier
 import cats.effect.IO
@@ -203,19 +203,21 @@ object RoutedExecutor:
           // inside QuackHttpClient) is deliberately deferred to a later
           // sub-project; do not describe this branch as killing or aborting
           // the statement.
+          // BoundedWait rather than timeoutTo: timeoutTo cannot interrupt the IO.blocking node
+          // call, so it sat on the call past the limit and then dropped the result without
+          // closing it (its Arrow reader and its kill-registry entry stayed open). A result that
+          // arrives late is now closed exactly once.
           caller.restriction.stmtTimeoutMs match
             case Some(ms) if ms > 0 =>
-              run.timeoutTo(
+              BoundedWait.closingLate(
+                run,
                 scala.concurrent.duration.FiniteDuration(
                   ms.toLong,
                   java.util.concurrent.TimeUnit.MILLISECONDS
                 ),
-                IO.pure(
-                  Left(
-                    ai.starlake.quack.edge.RouterFailure
-                      .Unavailable(s"statement exceeded this token's ${ms}ms limit")
-                  )
-                )
+                ai.starlake.quack.edge.RouterFailure
+                  .Unavailable(s"statement exceeded this token's ${ms}ms limit"),
+                _.close()
               )
             case _ => run
       }

@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
-import ai.starlake.quack.edge.{FlightSqlRouter, SessionRegistry}
+import ai.starlake.quack.edge.{FlightSqlRouter, RouterFailure, SessionRegistry}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
 }
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.ExecCaller
+import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry.EventJournal
@@ -24,10 +25,13 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.time.Instant
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.*
 
 /** The routed executor's production router leg ([[RoutedExecutor.viaRouter]]) against a real
-  * router: what the caller value carries (source, preferred node) must reach the router.
+  * router: what the caller value carries (source, preferred node) must reach the router, and a
+  * token timeout must not drop the result it stops waiting for without closing it.
   */
 class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
 
@@ -98,6 +102,11 @@ class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
   private val denying = new StatementValidator:
     def validate(ctx: ValidationContext): ValidationResult = Denied("no grant", Set.empty)
 
+  private def timedSystem(id: String, ms: Int): ExecCaller =
+    ExecCaller
+      .system(id)
+      .copy(restriction = TokenRestriction.Unrestricted.copy(stmtTimeoutMs = Some(ms)))
+
   "RoutedExecutor.viaRouter" should "route to the caller's preferred node" in:
     val fx     = setup(nodeCount = 3)
     val target = fx.nodes(2).nodeId
@@ -119,3 +128,33 @@ class RoutedExecutorRouterLegSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     fx.journal.drainNow()
     fx.store.events.map(_.origin) shouldBe List("flightsql")
+
+  "the routed executor" should "answer within the token's limit and close a late result" in:
+    // The node call blocks like the real one (IO.blocking, not interruptible by cancellation) and
+    // answers after 1.5s whatever happens, so a wait that is not bounded shows up as elapsed time
+    // rather than as a hung suite.
+    val release = new CountDownLatch(1)
+    val fx      = setup(respond =
+      () => IO.blocking { release.await(1500, TimeUnit.MILLISECONDS); TestArrow.okResponse() }
+    )
+    val t0  = System.nanoTime()
+    val out = fx.executor(timedSystem("c-4", 50), poolKey, "SELECT 1").unsafeRunSync()
+    (System.nanoTime() - t0).nanos should be < 1.second
+    out match
+      case Left(RouterFailure.Unavailable(m)) => m should include("50ms")
+      case other                              => fail(s"expected Unavailable, got $other")
+    // The statement is still running on the node and still registered.
+    fx.router.registry.list() should have size 1
+    release.countDown()
+    // Closing the late result deregisters it; a plain timeoutTo dropped it unclosed.
+    val deadline = System.nanoTime() + 5.seconds.toNanos
+    while fx.router.registry.list().nonEmpty && System.nanoTime() < deadline do Thread.sleep(10)
+    fx.router.registry.list() shouldBe empty
+
+  it should "hand a result delivered within the limit to the caller, still open" in:
+    val fx  = setup()
+    val out = fx.executor(timedSystem("c-5", 5000), poolKey, "SELECT 1").unsafeRunSync()
+    out shouldBe a[Right[?, ?]]
+    fx.router.registry.list() should have size 1
+    out.foreach(_.close())
+    fx.router.registry.list() shouldBe empty
