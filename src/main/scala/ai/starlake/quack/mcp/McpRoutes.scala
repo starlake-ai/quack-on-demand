@@ -2,7 +2,7 @@ package ai.starlake.quack.mcp
 
 import ai.starlake.quack.{McpConfig, RestLimitsConfig}
 import ai.starlake.quack.edge.BoundedBody
-import ai.starlake.quack.ondemand.auth.PatPrincipal
+import ai.starlake.quack.ondemand.auth.{PatPrincipal, TokenRestriction}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.{Json, JsonObject}
@@ -59,6 +59,15 @@ final class McpRoutes(
 ) extends LazyLogging:
 
   import McpJsonRpc._
+
+  // Thrown at boot (Main builds this once): a tool named after a reserved tools-axis entry, such
+  // as the REST data edge's `rest`, would let one PAT allowlist entry admit two different surfaces.
+  tools.map(_.name).filter(TokenRestriction.ReservedToolNames.contains) match
+    case Nil      => ()
+    case reserved =>
+      throw new IllegalArgumentException(
+        s"MCP tool name(s) ${reserved.mkString(", ")} are reserved on the PAT tools axis"
+      )
 
   private val byName: Map[String, McpToolDef] = tools.map(t => t.name -> t).toMap
 
