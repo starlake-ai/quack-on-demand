@@ -27,8 +27,30 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
       .filter(m => classOf[sttp.tapir.Endpoint[?, ?, ?, ?, ?]].isAssignableFrom(m.getReturnType))
       .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
 
+  /** Modules whose `{tenant}` routes are NOT behind `apiKeyGuard`, excluded on purpose: this spec
+    * must not claim a guard applies where it does not.
+    *
+    *   - `RestEdgeEndpoints`: served only by the REST data edge's own listener, never by
+    *     ManagerServer. Its tenant binding is the PAT's: `RestAuth.admit` refuses a path tenant
+    *     other than the token owner's with 403 (pinned by RestAuthSpec and RestEdgeHandlersSpec),
+    *     so `extractTenant` has nothing to guard there.
+    */
+  private val notBehindApiKeyGuard: List[AnyRef] =
+    List(ai.starlake.quack.edge.rest.RestEdgeEndpoints)
+
   private val allEndpoints: List[(String, AnyEndpoint)] =
-    EndpointModules.all.flatMap(endpointsOf)
+    EndpointModules.all.filterNot(m => notBehindApiKeyGuard.exists(_ eq m)).flatMap(endpointsOf)
+
+  "the exclusions" should "cover only REST data edge routes" in {
+    // Guards the exclusion list itself: every endpoint it removes must be a rest-edge route, so
+    // a manager route can never slip out of the guardrail by landing in an excluded module.
+    val excluded = notBehindApiKeyGuard.flatMap(endpointsOf)
+    excluded should not be empty
+    excluded.foreach { case (name, ep) =>
+      withClue(name)(ep.info.tags shouldBe Vector("rest-edge"))
+      ep.showPathTemplate() should startWith("/api/v1/tenant/{tenant}/")
+    }
+  }
 
   private val CaptureRe = "\\{([^}]+)\\}".r
 

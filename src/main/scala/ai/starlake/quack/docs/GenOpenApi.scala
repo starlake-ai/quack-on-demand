@@ -1,7 +1,12 @@
 package ai.starlake.quack.docs
 
+import ai.starlake.quack.edge.rest.RestEdgeEndpoints
+import sttp.apispec.SecurityScheme
+import sttp.apispec.openapi.{Components, OpenAPI}
 import sttp.apispec.openapi.circe.yaml.*
 import sttp.tapir.docs.openapi.OpenAPIDocsInterpreter
+
+import scala.collection.immutable.ListMap
 
 import java.nio.file.{Files, Paths}
 
@@ -14,7 +19,38 @@ object GenOpenApi:
   def render(version: String): String =
     val openapi = OpenAPIDocsInterpreter()
       .toOpenAPI(DocEndpoints.all, "Quack on Demand REST API", version)
-    openapi.toYaml
+    withRestEdgeBearer(openapi).toYaml
+
+  /** Declares the REST data edge's PAT bearer on its operations (the `rest-edge` tag). The edge
+    * reads `Authorization` raw rather than through a Tapir auth input (see `RestEdgeEndpoints`), so
+    * the interpreter cannot infer the scheme; it is added here, to the document only.
+    */
+  private[docs] def withRestEdgeBearer(api: OpenAPI): OpenAPI =
+    val scheme = SecurityScheme(
+      `type` = "http",
+      description = Some(
+        "A personal access token (qod_pat_...). The only credential the REST data edge accepts."
+      ),
+      name = None,
+      in = None,
+      scheme = Some("bearer"),
+      bearerFormat = Some("PAT"),
+      flows = None,
+      openIdConnectUrl = None
+    )
+    val requirement = ListMap(RestEdgeEndpoints.SecuritySchemeName -> Vector.empty[String])
+    val items       = api.paths.pathItems.map { case (path, item) =>
+      path -> item.copy(get = item.get.map { op =>
+        if op.tags.contains(RestEdgeEndpoints.Tag) then op.security(List(requirement)) else op
+      })
+    }
+    api
+      .paths(api.paths.copy(pathItems = items))
+      .components(
+        api.components
+          .getOrElse(Components.Empty)
+          .addSecurityScheme(RestEdgeEndpoints.SecuritySchemeName, scheme)
+      )
 
   def main(args: Array[String]): Unit =
     val out = args.headOption.getOrElse(
