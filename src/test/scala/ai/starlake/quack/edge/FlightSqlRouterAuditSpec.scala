@@ -153,6 +153,19 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     store.events.head.patId shouldBe None
   }
 
+  it should "stamp the audit origin with the source the caller of execute names" in {
+    val denying = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult = Denied("no grant", Set.empty)
+    val (router, journal, store) = setupWithJournal(validator = denying)
+    router
+      .execute("aud-src", "alice", poolKey, "SELECT * FROM cat.sch.tbl", source = "rest-data")
+      .unsafeRunSync()
+    journal.drainNow()
+    store.events should have size 1
+    store.events.head.action shouldBe "sql.denied"
+    store.events.head.origin shouldBe "rest-data"
+  }
+
   it should "emit data-write/sql.ddl/ok for a CREATE TABLE" in {
     val (router, journal, store) = setupWithJournal()
     router
