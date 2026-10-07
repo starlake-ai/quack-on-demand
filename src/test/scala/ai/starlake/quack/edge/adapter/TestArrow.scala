@@ -2,12 +2,13 @@ package ai.starlake.quack.edge.adapter
 
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import org.apache.arrow.memory.RootAllocator
-import org.apache.arrow.vector.{BigIntVector, BitVector, IntVector, VarCharVector}
+import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.dictionary.Dictionary
 import org.apache.arrow.vector.ipc.ArrowReader
-import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.arrow.vector.types.pojo.Schema
+import org.duckdb.{DuckDBConnection, DuckDBResultSet}
 
-import java.sql.{Connection, DriverManager, ResultSet, Types}
-import scala.jdk.CollectionConverters.*
+import java.sql.{Connection, DriverManager, ResultSet}
 
 /** Builds throw-away ArrowReader instances backed by an in-process DuckDB so tests can stub out
   * [[QuackHttpClient.query]] without standing up a real Quack node.
@@ -20,6 +21,19 @@ object TestArrow:
 
   Class.forName("org.duckdb.DuckDBDriver")
 
+  // ONE in-memory database for every reader. A database owns a pool of worker threads; opening
+  // one per reader (readers here are rarely closed, `okResponse` closes nothing) leaked them until
+  // the test JVM hit the OS per-process thread limit and the suite stalled. A duplicate
+  // connection costs no thread.
+  private lazy val shared: DuckDBConnection =
+    val c = DriverManager
+      .getConnection("jdbc:duckdb:", InProcessDuckDb.properties)
+      .asInstanceOf[DuckDBConnection]
+    val s = c.createStatement()
+    try s.execute("SET threads = 1")
+    finally s.close()
+    c
+
   /** Reader yielding a single row `SELECT 1 AS x`. */
   def oneRowReader(): ArrowReader =
     readerFor("SELECT 1 AS x")
@@ -30,65 +44,46 @@ object TestArrow:
   def emptyReader(): ArrowReader =
     readerFor("SELECT 1 AS x WHERE FALSE")
 
-  /** Reader for arbitrary SQL evaluated against the in-process DuckDB. The rows are read through
-    * plain JDBC and re-encoded with Arrow Java vectors (DuckDB 2.0's JDBC no longer supports
-    * `arrowExportStream`). Batches hold at most 1024 rows, as the old export did.
+  /** Reader for arbitrary SQL evaluated against the in-process DuckDB, through DuckDB's own Arrow
+    * export: every type arrives exactly as a node presents it (unsigned and HUGEINT widths,
+    * temporal units, ENUM dictionaries, nested and union layouts). Batches hold at most 1024 rows.
     */
   def readerFor(sql: String): ArrowReader =
-    val conn = DriverManager.getConnection("jdbc:duckdb:", InProcessDuckDb.properties)
+    val conn = shared.duplicate()
     try fromResultSet(conn, conn.createStatement().executeQuery(sql))
     catch
       case e: Throwable =>
         conn.close()
         throw e
 
-  /** Wrap an open JDBC result as an ArrowReader; closing the reader closes `conn`. */
+  /** Wrap an open JDBC result as an ArrowReader through DuckDB's Arrow export; closing the reader
+    * closes `conn`.
+    */
   def fromResultSet(conn: Connection, rs: ResultSet): ArrowReader =
-    val md         = rs.getMetaData
-    val arrowTypes = (1 to md.getColumnCount).map { i =>
-      md.getColumnType(i) match
-        case Types.INTEGER | Types.SMALLINT | Types.TINYINT => new ArrowType.Int(32, true)
-        case Types.BIGINT                                   => new ArrowType.Int(64, true)
-        case Types.BOOLEAN | Types.BIT                      => ArrowType.Bool.INSTANCE
-        case _                                              => ArrowType.Utf8.INSTANCE
-    }
-    val fields = (1 to md.getColumnCount).map { i =>
-      new Field(md.getColumnLabel(i), FieldType.nullable(arrowTypes(i - 1)), null)
-    }
-    val schema = new Schema(fields.asJava)
-    new ArrowReader(sharedAllocator):
-      private var exhausted = false
+    val exported = rs
+      .asInstanceOf[DuckDBResultSet]
+      .arrowExportStream(sharedAllocator, 1024L)
+      .asInstanceOf[ArrowReader]
+    new ClosingReader(exported, conn)
 
-      override def loadNextBatch(): Boolean =
-        if exhausted then false
-        else
-          val root = getVectorSchemaRoot
-          root.allocateNew()
-          var n = 0
-          while n < 1024 && rs.next() do
-            for c <- 1 to arrowTypes.length do
-              val v   = root.getVector(c - 1)
-              val raw = rs.getObject(c)
-              if raw == null then () // stays null
-              else
-                v match
-                  case x: IntVector     => x.setSafe(n, raw.asInstanceOf[Number].intValue)
-                  case x: BigIntVector  => x.setSafe(n, raw.asInstanceOf[Number].longValue)
-                  case x: BitVector     => x.setSafe(n, if raw.asInstanceOf[Boolean] then 1 else 0)
-                  case x: VarCharVector => x.setSafe(n, raw.toString.getBytes("UTF-8"))
-                  case _                => ()
-            n += 1
-          root.setRowCount(n)
-          if n < 1024 then exhausted = true
-          n > 0 || !exhausted
-
-      override def bytesRead(): Long = 0L
-
-      override def closeReadSource(): Unit =
-        try rs.close()
-        finally conn.close()
-
-      override def readSchema(): Schema = schema
+  /** `inner`, closing `conn` after it. Every read delegates, so the root, the batches and the
+    * dictionaries are the export's own.
+    */
+  private final class ClosingReader(inner: ArrowReader, conn: Connection)
+      extends ArrowReader(sharedAllocator):
+    override def getVectorSchemaRoot: VectorSchemaRoot = inner.getVectorSchemaRoot
+    override def getDictionaryVectors: java.util.Map[java.lang.Long, Dictionary] =
+      inner.getDictionaryVectors
+    override def lookup(id: Long): Dictionary                    = inner.lookup(id)
+    override def getDictionaryIds: java.util.Set[java.lang.Long] = inner.getDictionaryIds
+    override def loadNextBatch(): Boolean                        = inner.loadNextBatch()
+    override def bytesRead(): Long                               = inner.bytesRead()
+    override def close(): Unit                                   = close(true)
+    override def close(closeReadSource: Boolean): Unit           =
+      try inner.close(closeReadSource)
+      finally conn.close()
+    override protected def closeReadSource(): Unit = ()
+    override protected def readSchema(): Schema    = inner.getVectorSchemaRoot.getSchema
 
   /** A success response with a small reader and a no-op close. */
   def okResponse(latencyMs: Long = 5L): QuackResponse =
