@@ -283,7 +283,9 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       ),
       journal = journal,
       resumeHoldTimeout = hold,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+      // As Main wires it: the hold waits for a woken node to listen, not only to be launched.
+      nodeAccepting = FlightSqlRouter.tcpAccepting()
     )
     // The production default hold (`resumeHoldTimeoutSec`, 60 s).
     val router = routerWith(60.seconds)
@@ -723,7 +725,9 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     // The probe of an ungranted table is refused unrecorded (it is plumbing, like FlightSQL's
     // prepare-time probe): the client gets the plain 404 and no data-denial row is written.
     get(e.base, rowsOf("secret"), alice).status shouldBe 404
-    okResp(get(e.base, rowsOf("orders"), alice, "select=o_id&o_id=eq.10"))
+    // A filter value no other test sends: earlier tests read `orders` with other credentials
+    // (a capped PAT), so only this request's statement may be judged here.
+    okResp(get(e.base, rowsOf("orders"), alice, "select=o_id&o_id=eq.70"))
     e.journal.drainNow()
     e.telemetry.events.filter(ev =>
       ev.action == "sql.denied" && ev.detail.get("sql").exists(_.contains("\"secret\""))
@@ -736,7 +740,8 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       .searchStatements(StatementQuery(tenants = Some(Set(Acme)), limit = 500))
       .map(_.event)
       .filter(s =>
-        s.status == "ok" && s.sql.contains(s"FROM \"$LakeDb\".\"$LakeSchema\".\"orders\"")
+        s.status == "ok" && s.sql.contains(s"FROM \"$LakeDb\".\"$LakeSchema\".\"orders\"") &&
+          s.sql.contains("'70'")
       )
     history should not be empty
     history.map(_.patId).distinct shouldBe List(Some(e.tokens.alice.id))
@@ -753,8 +758,8 @@ class RestEdgeEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val e = env
     e.sup.get(e.coldKey).map(_.suspended) shouldBe Some(true)
     // LocalQuackBackend.start returns once the process is launched, and a fresh node counts as
-    // routable before `quack_serve` listens, so the router's hold can end before the node answers.
-    // A 503 pool_unavailable here has that cause, which lies in the router's hold, not the edge.
+    // routable before `quack_serve` listens: the router's hold also waits for the node to accept
+    // connections (nodeAccepting), else the probe met a closed port and answered 404.
     val r = okResp(
       get(e.base, rowsOf("orders"), alice, s"select=o_id&order=o_id&limit=2&pool=${e.coldKey.pool}")
     )
