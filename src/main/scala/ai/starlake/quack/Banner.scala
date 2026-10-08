@@ -66,6 +66,14 @@ object Banner:
         * banner is the one place an operator reliably sees whether grants are enforced.
         */
       aclEnabled: Boolean,
+      /** The global node-lockdown default (`quack-flightsql.nodeLockdown.enabled`, env
+        * `QOD_NODE_LOCKDOWN`). Required for the same reason as `aclEnabled`: without lockdown a
+        * tenant can ATTACH, INSTALL, read local files and the node environment, which holds the
+        * catalog password, object-store keys and federation secrets.
+        */
+      nodeLockdown: Boolean,
+      /** Pools whose effective lockdown is off (per-pool override, else the global default). */
+      unlockedPools: Int = 0,
       /** Authorization engine of a tenant that sets none (`quack-flightsql.opa.defaultMode`, env
         * `QOD_ACL_MODE`): `qod` or `opa`.
         */
@@ -74,8 +82,8 @@ object Banner:
         * SQL ACL disabled, so the banner must never imply "nothing enforced" while one exists.
         */
       opaTenants: Int = 0,
-      /** The `qod` CLI config file (`QOD_CONFIG_FILE`, set by `qod start`) the
-        * manager was launched with; None when launched outside the CLI.
+      /** The `qod` CLI config file (`QOD_CONFIG_FILE`, set by `qod start`) the manager was launched
+        * with; None when launched outside the CLI.
         */
       cliConfigFile: Option[String] = None
   ): String =
@@ -87,6 +95,14 @@ object Banner:
         "   SQL ACL       : DISABLED for qod tenants (every statement admitted; set QOD_ACL_ENABLED=true to enforce); opa tenants enforced by OPA"
       else
         "   SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true to enforce)"
+    val exposure     = "can ATTACH/INSTALL/LOAD, read local files and node credentials"
+    val lockdownLine =
+      if !nodeLockdown then
+        s"   NODE LOCKDOWN : DISABLED ($unlockedPools pool(s) unlocked): their tenants $exposure; set QOD_NODE_LOCKDOWN=true to enforce"
+      else if unlockedPools > 0 then
+        s"   NODE LOCKDOWN : ENABLED, but $unlockedPools pool(s) opted out: their tenants $exposure"
+      else
+        "   NODE LOCKDOWN : ENABLED (tenants cannot ATTACH/INSTALL/LOAD, read local files or node credentials)"
     val modeLine =
       s"   ACL MODE      : $aclMode (default for tenants that set none; $opaTenants tenant(s) in opa mode)"
     val rh        = display(restHost)
@@ -105,6 +121,7 @@ object Banner:
        |   FlightSQL     : $scheme://$fh:$flightPort$quackLine
        |$aclLine
        |$modeLine
+       |$lockdownLine
        |
        | Client connection strings: $ClientsDocUrl
        |$Line""".stripMargin

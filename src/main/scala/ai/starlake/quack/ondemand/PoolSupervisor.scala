@@ -2278,6 +2278,9 @@ final class PoolSupervisor(
   def effectiveLockdown(key: PoolKey): Boolean =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
 
+  /** Pools whose effective lockdown is off, for the boot banner. */
+  def unlockedPoolCount: Int = poolRows.values.count(!_.lockdown.getOrElse(lockdownEnabled))
+
   /** The owner-declared scale-out band, resolved from the persisted row (the band stays out of
     * PoolState on purpose, like lockdown). None = pool unknown OR fixed size.
     */
