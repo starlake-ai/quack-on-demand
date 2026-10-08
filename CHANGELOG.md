@@ -16,6 +16,12 @@
   told you to run `qod login`. The credential-checking endpoints (`login`, `change-password`,
   `forgot-password`, `reset-password`) now show the server's message.
 
+- **The boot banner shows the node lockdown state.** A new `NODE LOCKDOWN` line sits under
+  `SQL ACL`. Lockdown is off by default, and without it a tenant can ATTACH, INSTALL, read local
+  files and the node environment (catalog password, object-store keys, federation secrets), which
+  nothing on screen said. The line counts unlocked pools, so a per-pool `lockdown: off` under a
+  global `QOD_NODE_LOCKDOWN=true` shows up too.
+
 ## 0.9.11
 
 - **Security: a custom admin password now holds on demo stacks.** The bundled demo manifests

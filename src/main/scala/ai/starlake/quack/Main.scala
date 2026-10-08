@@ -840,9 +840,12 @@ object Main extends IOApp with LazyLogging:
       nodeDisableSsl = mgrCfg.nodeDisableSsl
     )
     val adapter = new QuackHttpAdapter(client, tracker)
-    logger.info(
-      s"node lockdown: ${if lockdownCfg.enabled then "enabled" else "disabled"}"
-    )
+    if lockdownCfg.enabled then logger.info("node lockdown: enabled")
+    else
+      logger.warn(
+        "node lockdown: disabled; tenants of unlocked pools can read node credentials " +
+          "(set QOD_NODE_LOCKDOWN=true to enforce)"
+      )
 
     // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
     // so the pool's default schema exists before wrapWithDefaultSchema ever
@@ -1862,6 +1865,8 @@ object Main extends IOApp with LazyLogging:
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
                     ),
                     aclEnabled = aclCfg.enabled,
+                    nodeLockdown = lockdownCfg.enabled,
+                    unlockedPools = sup.unlockedPoolCount,
                     aclMode = opaCfg.defaultMode,
                     opaTenants = sup.listTenants().count(_.acl.isOpa(opaCfg.defaultMode)),
                     cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty)

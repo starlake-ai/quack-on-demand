@@ -47,7 +47,16 @@ class BannerSpec extends AnyFlatSpec with Matchers:
 
   "startup" should "render the endpoints with TLS on, 0.0.0.0 mapped, and link the client docs" in {
     val b =
-      Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true, aclEnabled = true)
+      Banner.startup(
+        meta,
+        "0.0.0.0",
+        20900,
+        "0.0.0.0",
+        31338,
+        tlsEnabled = true,
+        aclEnabled = true,
+        nodeLockdown = true
+      )
     b should include("http://localhost:20900/ui")
     b should include("SQL ACL       : ENABLED")
     b should include("grpc+tls://localhost:31338")
@@ -59,7 +68,16 @@ class BannerSpec extends AnyFlatSpec with Matchers:
 
   it should "render plain grpc when TLS is off" in {
     val b =
-      Banner.startup(meta, "myhost", 20900, "myhost", 31338, tlsEnabled = false, aclEnabled = false)
+      Banner.startup(
+        meta,
+        "myhost",
+        20900,
+        "myhost",
+        31338,
+        tlsEnabled = false,
+        aclEnabled = false,
+        nodeLockdown = true
+      )
     b should include("grpc://myhost:31338")
     b should include("SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true")
     b should include(
@@ -76,6 +94,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       31338,
       tlsEnabled = false,
       aclEnabled = false,
+      nodeLockdown = true,
       aclMode = "qod",
       opaTenants = 2
     )
@@ -96,6 +115,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       31338,
       tlsEnabled = false,
       aclEnabled = false,
+      nodeLockdown = true,
       aclMode = "opa",
       opaTenants = 0
     )
@@ -114,6 +134,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       31338,
       tlsEnabled = false,
       aclEnabled = true,
+      nodeLockdown = true,
       aclMode = "qod",
       opaTenants = 1
     )
@@ -130,12 +151,73 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       31338,
       tlsEnabled = false,
       aclEnabled = true,
+      nodeLockdown = true,
       cliConfigFile = Some("/home/u/.config/qod/config.toml")
     )
     withCli should include(
       "qod config    : /home/u/.config/qod/config.toml\n   control plane : "
     )
     val bare =
-      Banner.startup(meta, "myhost", 20900, "myhost", 31338, tlsEnabled = false, aclEnabled = true)
+      Banner.startup(
+        meta,
+        "myhost",
+        20900,
+        "myhost",
+        31338,
+        tlsEnabled = false,
+        aclEnabled = true,
+        nodeLockdown = true
+      )
     (bare should not).include("qod config")
+  }
+
+  "startup node lockdown line" should "say ENABLED when lockdown is on everywhere" in {
+    val b = Banner.startup(
+      meta,
+      "myhost",
+      20900,
+      "myhost",
+      31338,
+      tlsEnabled = false,
+      aclEnabled = true,
+      nodeLockdown = true
+    )
+    b should include(
+      "NODE LOCKDOWN : ENABLED (tenants cannot ATTACH/INSTALL/LOAD, read local files or node credentials)"
+    )
+    (b should not).include("QOD_NODE_LOCKDOWN")
+  }
+
+  it should "warn that tenants can read node credentials when lockdown is off by default" in {
+    val b = Banner.startup(
+      meta,
+      "myhost",
+      20900,
+      "myhost",
+      31338,
+      tlsEnabled = false,
+      aclEnabled = true,
+      nodeLockdown = false,
+      unlockedPools = 3
+    )
+    b should include("NODE LOCKDOWN : DISABLED (3 pool(s) unlocked)")
+    b should include("read local files and node credentials")
+    b should include("set QOD_NODE_LOCKDOWN=true to enforce")
+  }
+
+  it should "name the pools that opted out when lockdown is on by default" in {
+    val b = Banner.startup(
+      meta,
+      "myhost",
+      20900,
+      "myhost",
+      31338,
+      tlsEnabled = false,
+      aclEnabled = true,
+      nodeLockdown = true,
+      unlockedPools = 2
+    )
+    b should include("NODE LOCKDOWN : ENABLED, but 2 pool(s) opted out")
+    b should include("read local files and node credentials")
+    (b should not).include("cannot ATTACH")
   }
