@@ -449,19 +449,34 @@ final case class TelemetryConfig(
       description =
         "Days to keep daily rollup buckets (the usage-accounting ledger) before the periodic purge removes them. 400 covers a full billing year."
     )
-    usageRetentionDays: Int = 400
+    usageRetentionDays: Int = 400,
+    @field
+    @ConfigField(
+      envVar = "QOD_AUDIT_SINK",
+      description =
+        "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted). Requires store=postgres. Lines dropped under stdout backpressure count in qod_journal_dropped_total{table=stdout}."
+    )
+    auditSink: String = "none"
 )
 
 object TelemetryConfig:
-  def validate(store: String, stmtHistoryRetentionDays: Int): Either[String, Unit] =
+  def validate(
+      store: String,
+      stmtHistoryRetentionDays: Int,
+      auditSink: String = "none"
+  ): Either[String, Unit] =
     store match
       case "postgres" | "none" =>
-        if stmtHistoryRetentionDays == 0 || stmtHistoryRetentionDays >= 2 then Right(())
-        else
+        if stmtHistoryRetentionDays != 0 && stmtHistoryRetentionDays < 2 then
           Left(
             "telemetry.stmtHistoryRetentionDays must be 0 (keep forever) or >= 2: the daily" +
               " rollup recompute rebuilds whole-day buckets from raw rows"
           )
+        else if auditSink != "none" && auditSink != "stdout" then
+          Left(s"unknown telemetry.auditSink: '$auditSink' (supported: none, stdout)")
+        else if auditSink != "none" && store == "none" then
+          Left("telemetry.auditSink requires telemetry.store=postgres: store=none records nothing")
+        else Right(())
       case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
 
 final case class ManagerConfig(

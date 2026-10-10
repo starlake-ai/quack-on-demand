@@ -512,3 +512,39 @@ class AdminSqlParserSpec extends AnyFlatSpec with Matchers:
       Right(AdminCommand.AlterGroupAddUser("finance", "alice"))
     AdminSqlParser.parse("ALTER GROUP finance DROP USER alice") shouldBe
       Right(AdminCommand.AlterGroupDropUser("finance", "alice"))
+
+  "redactLiterals" should "mask every quoted form and keep the statement shape" in:
+    import AdminSqlParser.redactLiterals
+    redactLiterals("CREATE SECRET s (TYPE s3, KEY_ID 'AKIA1', SECRET 'xyz')") shouldBe
+      "CREATE SECRET s (TYPE s3, KEY_ID '?', SECRET '?')"
+    redactLiterals("ATTACH 'dbname=x password=hunter2' AS pg (TYPE postgres)") shouldBe
+      "ATTACH '?' AS pg (TYPE postgres)"
+    redactLiterals("SELECT 'O''Brien', E'it\\'s', $$a$$, $tag$b$tag$") shouldBe
+      "SELECT '?', '?', '?', '?'"
+    redactLiterals("""SELECT type'x', a$b$c FROM t WHERE id = $1""") shouldBe
+      """SELECT type'?', a$b$c FROM t WHERE id = $1"""
+
+  // Review of #156: DuckDB accepts a double-quoted value for secret options and SET.
+  it should "mask double-quoted values, which DuckDB accepts for secrets" in:
+    AdminSqlParser.redactLiterals(
+      """CREATE SECRET s (TYPE s3, KEY_ID "AKIA1", SECRET "xyz")"""
+    ) shouldBe """CREATE SECRET s (TYPE s3, KEY_ID "?", SECRET "?")"""
+    AdminSqlParser.redactLiterals("""SET s3_secret_access_key = "xyz"""") shouldBe
+      """SET s3_secret_access_key = "?""""
+
+  it should "drop literals hidden in comments and mask only an unterminated tail" in:
+    AdminSqlParser.redactLiterals("SELECT 1 -- 'pw1'\n/* 'pw2' */") should (not include "pw1" and
+      not include "pw2")
+    AdminSqlParser.redactLiterals("SELECT a FROM t WHERE x = 'cut-off secr") shouldBe
+      "SELECT a FROM t WHERE x = '?'"
+    AdminSqlParser.redactLiterals("SELECT 1 /* open 'pw3'") shouldBe "SELECT 1  "
+    AdminSqlParser.redactLiterals("SELECT $q$abc") shouldBe "SELECT '?'"
+
+  "quotedValues" should "return every quoted content, delimiters stripped" in:
+    AdminSqlParser.quotedValues(
+      """CREATE SECRET s2 (TYPE s3, SECRET 'abc' 'hunter2', KEY_ID "k1", X E'e1', Y $q$d1$q$)"""
+    ) shouldBe Set("abc", "hunter2", "k1", "e1", "d1")
+    AdminSqlParser.quotedValues("SELECT 'cut-off secr") shouldBe Set("cut-off secr")
+
+  it should "undo quote doubling so the value matches what an error echoes" in:
+    AdminSqlParser.quotedValues("""SELECT 'it''s', "a""b"""") shouldBe Set("it's", "a\"b")

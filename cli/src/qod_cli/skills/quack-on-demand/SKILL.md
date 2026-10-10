@@ -1543,9 +1543,10 @@ Tenant admins see only their own tenant's rows. Superusers and static-key caller
 
 | Env var | Default | Effect |
 |---|---|---|
-| `QOD_TELEMETRY_JOURNAL_CAPACITY` | `8192` | Bounded in-process telemetry journal queue depth. Overflow drops events and increments `qod_journal_dropped_total`. Increase to buffer higher statement throughput under Postgres write latency spikes |
+| `QOD_TELEMETRY_JOURNAL_CAPACITY` | `8192` | Bounded in-process telemetry journal queue depth, also the stdout sink's queue depth. Overflow drops events and increments `qod_journal_dropped_total` (label `table`: `audit` / `stmt_history` = not written to Postgres, `stdout` = not written to stdout). Increase to buffer higher statement throughput under Postgres write latency spikes |
 | `QOD_AUDIT_RETENTION_DAYS` | `90` | Delete rows older than N days (hourly purge); set to `0` to keep forever |
 | `QOD_TELEMETRY_STORE` | `postgres` | `none` disables all recording, hides the Audit UI page, and keeps the drop counter at zero |
+| `QOD_AUDIT_SINK` | `none` | `stdout` also writes every audit and statement event to stdout as one JSON line (`qodEvent=audit` or `statement`) for a log shipper. The line is redacted: SQL literals become `'?'`, engine error text is scrubbed, and on a failed auth event the typed login name and tenant become a keyed hash. Needs `QOD_TELEMETRY_STORE=postgres`. Lines dropped under stdout backpressure count in `qod_journal_dropped_total{table="stdout"}` |
 
 ## Statement history and trends
 

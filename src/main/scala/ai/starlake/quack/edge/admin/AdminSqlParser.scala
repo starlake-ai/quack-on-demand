@@ -154,6 +154,84 @@ object AdminSqlParser:
       else None
     else None
 
+  /** `sql` with every quoted span masked, for sinks that leave the control plane: string literals
+    * become `'?'`, double-quoted spans `"?"` and comments a space. Secrets ride in both quote forms
+    * (`CREATE SECRET ... SECRET '...'` and `SECRET "..."`, `ATTACH '...password=...'`), and a
+    * commented-out literal is still a literal. A span left open at the end (SQL cut by a length
+    * cap) is masked to the end, keeping the statement readable up to it.
+    */
+  def redactLiterals(sql: String): String =
+    pieces(sql).map {
+      case Piece.Text(s)          => s
+      case Piece.Quoted(_, false) => "'?'"
+      case Piece.Quoted(_, true)  => "\"?\""
+      case Piece.Comment          => " "
+    }.mkString
+
+  /** The contents of every quoted span of `sql` (string literals in any form and double-quoted
+    * spans, delimiters stripped). Feeds `AttachErrorRedactor.scrub` as the known values to chase
+    * through an engine error about this statement, which echoes them in its own quoting.
+    */
+  def quotedValues(sql: String): Set[String] =
+    pieces(sql).collect { case Piece.Quoted(v, _) if v.nonEmpty => v }.toSet
+
+  private enum Piece:
+    case Text(s: String)
+    case Quoted(value: String, doubleQuoted: Boolean)
+    case Comment
+
+  /** One pass of [[scanRegion]] over `sql`. Whole words are copied as one run, `$` allowed after
+    * the first character as in [[tokenizeUpTo]] and DuckDB, so `type'x'` is not misread as `E'...'`
+    * and `a$b$c` not as a `$b$` dollar quote. An unterminated construct becomes a tail piece.
+    */
+  private def pieces(sql: String): Vector[Piece] =
+    val n   = sql.length
+    val out = Vector.newBuilder[Piece]
+    var i   = 0
+    while i < n do
+      val c       = sql(i)
+      val eString = (c == 'E' || c == 'e') && i + 1 < n && sql(i + 1) == '\''
+      if (c.isLetterOrDigit || c == '_') && !eString then
+        val start = i
+        while i < n && (sql(i).isLetterOrDigit || sql(i) == '_' || sql(i) == '$') do i += 1
+        out += Piece.Text(sql.substring(start, i))
+      else
+        val (open, close) = delimiters(sql, i)
+        scanRegion(sql, i) match
+          case Some(Right((end, ScanKind.Comment))) => out += Piece.Comment; i = end
+          case Some(Right((end, kind)))             =>
+            out += Piece.Quoted(
+              unescape(c, sql.substring(i + open, end - close)),
+              kind == ScanKind.Ident
+            )
+            i = end
+          case Some(Left(_)) if c == '/' => out += Piece.Comment; i = n
+          case Some(Left(_))             =>
+            out += Piece.Quoted(unescape(c, sql.substring((i + open).min(n))), c == '"')
+            i = n
+          case None => out += Piece.Text(c.toString); i += 1
+    out.result()
+
+  /** A quoted span's content as the engine reads it: `''` / `""` doubling undone, so the value an
+    * error echoes (`it's`) is the one handed to the scrubber. `E'...'` escapes are left to the
+    * scrubber's own normalization.
+    */
+  private def unescape(open: Char, raw: String): String =
+    open match
+      case '\'' => raw.replace("''", "'")
+      case '"'  => raw.replace("\"\"", "\"")
+      case _    => raw
+
+  /** Opening and closing delimiter lengths of the [[scanRegion]] construct starting at `sql(i)`. */
+  private def delimiters(sql: String, i: Int): (Int, Int) =
+    sql(i) match
+      case 'E' | 'e' => (2, 1)
+      case '/'       => (2, 2)
+      case '$'       =>
+        val tag = sql.indexOf('$', i + 1) - i + 1
+        if tag > 0 then (tag, tag) else (1, 1)
+      case _ => (1, 1)
+
   // Shared tokenizer core. `maxTokens` bounds how many tokens are collected before returning -
   // used by claims() to avoid a full-statement scan (per-token allocation and toUpperCase,
   // including on multi-megabyte string literals) on every statement of the hot path. Scanning
