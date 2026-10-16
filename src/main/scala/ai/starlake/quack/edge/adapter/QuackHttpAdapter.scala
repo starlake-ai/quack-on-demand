@@ -42,10 +42,15 @@ final class QuackHttpAdapter(
     // Quack's URI scheme; QuackProtocol maps it to http://host:port/quack.
     val endpoint  = s"quack:${node.host}:${node.port}"
     val authorize = authorizer(node, principal, onMint)
-    val call      = stampPrelude match
-      case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
-      case None    => client.query(endpoint, node.token, sql, session, authorize)
-    withLoad(node, recordLoad)(call)(NodeOutcome.fromQuackResponse)
+    val call      = IO.defer {
+      stampPrelude match
+        case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
+        case None    => client.query(endpoint, node.token, sql, session, authorize)
+    }
+    withLoad(node, recordLoad)(
+      call,
+      QuackResponse.Failed(QuackError.Transient(s"node ${node.nodeId} is draining"))
+    )(NodeOutcome.fromQuackResponse)
 
   /** The prelude producer for statements of `principal` on `node`: a fresh session handle each
     * call, so a PREPARE sent long after another (a COMMIT) still carries a valid one. `onMint` is
@@ -69,21 +74,30 @@ final class QuackHttpAdapter(
   def tracked[A](node: RunningNode, recordLoad: Boolean)(
       call: IO[NodeOutcome[A]]
   ): IO[NodeOutcome[A]] =
-    withLoad(node, recordLoad)(call)(identity)
+    withLoad(node, recordLoad)(
+      call,
+      NodeOutcome.Transient(s"node ${node.nodeId} is draining", 0L)
+    )(identity)
 
-  /** The in-flight bracket around one node call. `onStart` and the release are the acquire and
+  /** The in-flight bracket around one node call. `tryStart` and the release are the acquire and
     * release of a `bracketCase`, so a cancelled or raised call still gives its slot back: it is
     * released without a latency sample, since there is no outcome to book.
     */
   private def withLoad[A](node: RunningNode, recordLoad: Boolean)(
-      call: IO[A]
+      call: IO[A],
+      onDraining: A
   )(outcome: A => NodeOutcome[?]): IO[A] =
     if !recordLoad then call
     else
-      IO.delay(tracker.onStart(node.nodeId)).bracketCase(_ => call) {
-        case (_, Outcome.Succeeded(fa)) => fa.flatMap(a => IO.delay(bookkeep(node, outcome(a))))
-        case (_, _)                     => IO.delay(tracker.onAbort(node.nodeId))
-      }
+      IO.delay(tracker.tryStart(node.nodeId))
+        .bracketCase { admitted =>
+          if admitted then call else IO.pure(onDraining)
+        } {
+          case (false, _)                    => IO.unit
+          case (true, Outcome.Succeeded(fa)) =>
+            fa.flatMap(a => IO.delay(bookkeep(node, outcome(a))))
+          case (true, _) => IO.delay(tracker.onAbort(node.nodeId))
+        }
 
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
     tracker.onFinish(node.nodeId, out.latency)

@@ -53,6 +53,7 @@ import cats.syntax.all._
 import com.typesafe.scalalogging.LazyLogging
 
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.DurationInt
 import scala.util.Try
 
 /** Patch for [[PoolSupervisor.updateTenantDb]]. Absent fields unchanged; present fields replace.
@@ -3103,7 +3104,7 @@ final class PoolSupervisor(
               )
             else
               toRemove.foldLeft(IO.unit) { (acc, n) =>
-                acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
+                acc *> drainAndStop(key, n)
               }
           val deleteRemoved =
             // Drop both the store row and the tracker entry now the node is stopped. setDraining
@@ -3277,7 +3278,7 @@ final class PoolSupervisor(
             )
           else
             state.nodes.foldLeft(IO.unit) { (acc, n) =>
-              acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *> drainAndStop(key, n)
+              acc *> drainAndStop(key, n)
             }
         stopAll *>
           state.nodes.foldLeft(IO.unit)((acc, n) =>
@@ -3303,7 +3304,17 @@ final class PoolSupervisor(
           }
 
   private def drainAndStop(key: PoolKey, n: RunningNode, reason: String = "drain"): IO[Unit] =
-    stopNodeBestEffort(key, n.nodeId, reason)
+    def awaitIdle: IO[Unit] = IO.defer {
+      if tracker.snapshot(n.nodeId).inFlight == 0 then IO.unit
+      else IO.sleep(25.millis) *> awaitIdle
+    }
+    // Install cancellation cleanup before exposing the draining flag. Once idle, finish the stop
+    // without a cancellation gap that could make a stopped node routable again.
+    IO.uncancelable { poll =>
+      IO.delay(tracker.setDraining(n.nodeId, true)) *>
+        poll(awaitIdle).onCancel(IO.delay(tracker.setDraining(n.nodeId, false))) *>
+        stopNodeBestEffort(key, n.nodeId, reason)
+    }
 
   /** Drain-stop then forget each node (mark draining, [[drainAndStop]] with reason "suspend", then
     * delete the store row + tracker entry). Shared by [[suspendPool]] and reconcile's
@@ -3311,8 +3322,7 @@ final class PoolSupervisor(
     */
   private def drainAndForgetNodes(key: PoolKey, nodes: List[RunningNode]): IO[Unit] =
     val drainIO = nodes.foldLeft(IO.unit) { (acc, n) =>
-      acc *> IO.delay(tracker.setDraining(n.nodeId, true)) *>
-        drainAndStop(key, n, reason = "suspend")
+      acc *> drainAndStop(key, n, reason = "suspend")
     }
     val forgetIO = nodes.foldLeft(IO.unit) { (acc, n) =>
       acc *> IO.blocking(store.deleteNode(n.nodeId)) *> IO.delay(tracker.remove(n.nodeId))

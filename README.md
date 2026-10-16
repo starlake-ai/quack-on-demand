@@ -232,6 +232,12 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Self-healing on restart | The registry is reconciled against the runtime backend; dead nodes are respawned before the edge accepts traffic. Full matrix in [Resilience](https://docs.starlake.ai/qod/operating/resilience) | Nothing in DuckDB restarts a crashed engine for you |
 | Resume-on-query | A suspended pool wakes on the first statement with a bounded hold | Scale-to-zero without client-side retry logic |
 
+Non-force scale-down, stop, delete and suspension wait for the current manager's tracked node
+requests to finish. New tracked calls to a draining node are rejected before dispatch. The wait
+has no automatic timeout and can be cancelled; `force=true` skips it on scale, stop and delete.
+This is a local request drain, not coordination across manager replicas, open transactions or
+consumption of results after the adapter has returned a stream.
+
 ### Multi-tenancy and isolation
 
 | Feature | Description | Added value |

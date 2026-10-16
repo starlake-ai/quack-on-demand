@@ -33,6 +33,22 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def onStart(nodeId: String): Unit =
     update(nodeId)(l => l.copy(inFlight = l.inFlight + 1))
 
+  /** Check admission and reserve the slot atomically with respect to setDraining. A route can have
+    * been selected before the supervisor marked the node as draining.
+    */
+  def tryStart(nodeId: String): Boolean =
+    var admitted = false
+    state.compute(
+      nodeId,
+      (_, cur) =>
+        val load = if cur == null then NodeLoad.empty else cur.load
+        if load.draining then cur
+        else
+          admitted = true
+          Entry(load.copy(inFlight = load.inFlight + 1), writes.incrementAndGet())
+    )
+    admitted
+
   /** A request that ended without an outcome (cancelled or raised): release its in-flight slot
     * without a latency sample and without counting it as served.
     */
