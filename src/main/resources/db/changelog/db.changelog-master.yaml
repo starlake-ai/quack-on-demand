@@ -97,3 +97,5 @@ databaseChangeLog:
       file: db/changelog/0045-user-kind-builtin-rbac.yaml
   - include:
       file: db/changelog/0046-fleet-heartbeat-node-action.yaml
+  - include:
+      file: db/changelog/0047-node-authz-key-secret.yaml

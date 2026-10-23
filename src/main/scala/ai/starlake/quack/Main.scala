@@ -91,6 +91,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[ManagerAuthConfig]         = ProductHint[ManagerAuthConfig](camelMapping)
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
+  given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
@@ -124,6 +125,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[ManagerAuthConfig]        = deriveReader[ManagerAuthConfig]
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
+  given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
@@ -394,6 +396,17 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
+    // every node key derives from it, so it must outlive this process and agree across replicas.
+    val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
+      ai.starlake.quack.edge.authz.NodeKeySecret
+        .resolve(mgrCfg.nodeAuthz.keySecret, store.jdbcDataSource) match
+        case Left(msg)     => sys.error(msg)
+        case Right(secret) =>
+          new ai.starlake.quack.edge.authz.NodeKeys(
+            secret,
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port)
+          )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin)
     val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
