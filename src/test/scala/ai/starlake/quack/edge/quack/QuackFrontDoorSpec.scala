@@ -3,6 +3,7 @@ package ai.starlake.quack.edge.quack
 import ai.starlake.quack.edge.*
 import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.auth.AuthenticationService
+import ai.starlake.quack.edge.authz.HandleInspector
 import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.edge.sql.{
   Allowed,
@@ -40,28 +41,62 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
   private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
   private val Token            = "tenant=acme&pool=sales&user=alice&password=pw"
 
+  /** The metastore keys a DuckLake tenant-db needs; the initializer is stubbed, so none is used. */
+  private val LakeMetastore = Map(
+    "pgHost"     -> "localhost",
+    "pgPort"     -> "5432",
+    "pgUser"     -> "qod",
+    "pgPassword" -> "pw",
+    "schemaName" -> "main"
+  )
+
   private def connResp(id: String)       = QuackTestFixtures.serializeSampleConnectionResponse(id)
   private def prepareResp(more: Boolean) =
     QuackTestFixtures.serializeSamplePrepareResponse(java.math.BigInteger.valueOf(5L), more, true)
   private def fetchResp(chunk: Boolean) = QuackTestFixtures.serializeSampleFetchResponse(chunk)
   private val success                   = encodeSuccess()
 
+  /** How a session handle prelude starts, and the author-stamping statement the router sends as a
+    * write's first PREPARE (`FlightSqlRouter.stampPrelude`).
+    */
+  private val HandlePrefix = "CALL system.main.qod_session('"
+  private val StampPrefix  = "BEGIN; CALL ducklake_set_commit_message("
+
+  /** Stands for a session handle in [[ScriptedTransport.shape]]: the handle itself never appears in
+    * an assertion, so never in a failure message.
+    */
+  private val HandleMarker = "<session handle>"
+
+  /** A PREPARE a scripted node received: its SQL and the node (URI) it reached. */
+  private final case class Prepared(sql: String, uri: URI):
+    def isHandle: Boolean = sql.startsWith(HandlePrefix)
+
   /** Plays a node: records every request as a decoded frame and answers by message type. A session
-    * handle prelude (`CALL system.main.qod_session(...)`) is answered apart and recorded in
-    * `preludes` only, so the sequence of `posted` frames is what it was before handles existed.
+    * handle prelude (`CALL system.main.qod_session(...)`) is answered apart and kept out of
+    * `posted`, so the sequence of `posted` frames is what it was before handles existed; every
+    * PREPARE, the handles included, is listed in arrival order in `prepared`. `preludeError`
+    * refuses the next `preludeRefusals` handles (all of them by default) and the node accepts them
+    * again after that; `stampError` fails the author-stamping PREPARE only.
     */
   private final class ScriptedTransport extends QuackTransport:
     @volatile var prepareNeedsMore: Boolean    = false
     @volatile var prepareError: Option[String] = None
     @volatile var preludeError: Option[String] = None
+    @volatile var preludeRefusals: Int         = Int.MaxValue
+    @volatile var stampError: Option[String]   = None
     @volatile var fetchChunksBeforeEnd: Int    = 1
     val posted: ArrayBuffer[Frame]             = ArrayBuffer.empty
-    val preludes: ArrayBuffer[String]          = ArrayBuffer.empty
+    val prepared: ArrayBuffer[Prepared]        = ArrayBuffer.empty
     val prepareUris: ArrayBuffer[URI]          = ArrayBuffer.empty
     @volatile var unreachablePorts: Set[Int]   = Set.empty
     private val connections                    = new AtomicInteger(0)
     private var fetchesServed                  = 0
     def types: List[Int]                       = posted.toList.map(_.header.msgType)
+    def preludes: List[String]                 = prepared.toList.filter(_.isHandle).map(_.sql)
+
+    /** Every PREPARE in arrival order, a session handle shown as [[HandleMarker]]. */
+    def shape: List[String] =
+      prepared.toList.map(p => if p.isHandle then HandleMarker else p.sql)
 
     /** Traffic after a successful handshake, which itself costs one probe connection (a
       * CONNECTION_REQUEST and a DISCONNECT) that takes node connection id NODE1.
@@ -71,17 +106,20 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
       if unreachablePorts.contains(uri.getPort) then
         throw new java.io.IOException(s"connection refused: ${uri.getPort}")
-      val f       = frame(body).toOption.get
-      val prelude =
+      val f    = frame(body).toOption.get
+      val sent =
         if f.header.msgType != Type.PrepareRequest then None
-        else
-          decodePrepareRequest(f).toOption
-            .map(_.sql)
-            .filter(_.startsWith("CALL system.main.qod_session('"))
-      prelude match
-        case Some(sql) =>
-          posted.synchronized(preludes += sql)
-          preludeError.map(encodeError).getOrElse(prepareResp(false))
+        else decodePrepareRequest(f).toOption.map(r => Prepared(r.sql, uri))
+      posted.synchronized(sent.foreach(prepared += _))
+      sent.filter(_.isHandle) match
+        case Some(_) =>
+          val refusal = posted.synchronized {
+            preludeError.filter(_ => preludeRefusals > 0).map { m =>
+              preludeRefusals -= 1
+              encodeError(m)
+            }
+          }
+          refusal.getOrElse(prepareResp(false))
         case None =>
           posted.synchronized(posted += f)
           f.header.msgType match
@@ -89,7 +127,10 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
             case Type.PrepareRequest    =>
               posted.synchronized(prepareUris += uri)
               fetchesServed = 0
-              prepareError.map(encodeError).getOrElse(prepareResp(prepareNeedsMore))
+              val failure =
+                if sent.exists(_.sql.startsWith(StampPrefix)) then stampError.orElse(prepareError)
+                else prepareError
+              failure.map(encodeError).getOrElse(prepareResp(prepareNeedsMore))
             case Type.FetchRequest =>
               fetchesServed += 1
               if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
@@ -115,7 +156,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       superuser: Boolean = false,
       withAdmin: Boolean = false,
       ttlSec: Long = 3600,
-      maxConcurrent: Int = 0
+      maxConcurrent: Int = 0,
+      stamping: Boolean = false
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -139,10 +181,20 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       def discoverExisting()             = IO.pure(n.values.toList)
       def cleanup()                      = IO(n.clear())
     val tracker = new NodeLoadTracker
-    val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
+    // The author stamp applies to DuckLake pools only. Creating a DuckLake tenant-db runs a catalog
+    // initializer, which must never reach a Postgres from a unit spec.
+    val sup = new PoolSupervisor(
+      backend,
+      tracker,
+      new InMemoryControlPlaneStore(),
+      duckLakeInitializer = (_, _) => ()
+    )
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
+    val (kind, metastore, dataPath) =
+      if stamping then (TenantDbKind.DuckLake, LakeMetastore, "/data/acme_default")
+      else (TenantDbKind.InMemory, Map.empty[String, String], "")
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .createTenantDb(poolKey.tenant, poolKey.tenantDb, kind, metastore, dataPath)
       .unsafeRunSync()
     sup
       .createPool(poolKey, RoleDistribution(0, 0, 2), maxConcurrentPerNode = maxConcurrent)
@@ -160,6 +212,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       new QuackHttpAdapter(client, tracker),
       validator = validator,
       journal = journal,
+      stampWrites = stamping,
       events = sink,
       adminExecutor =
         if withAdmin then Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(sup))
@@ -351,14 +404,21 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     rendered should include("'ok'")
     rendered should include("status")
 
+  private def nonceOf(handleSql: String): String =
+    HandleInspector.payload(handleSql).hcursor.get[String]("nonce").toOption.get
+
   "a relayed statement" should "follow a session handle for the session's principal on its node" in:
     val fx     = setup()
     val connId = connect(fx)
     messageType(prepare(fx, connId, "SELECT 1")) shouldBe Type.PrepareResponse
-    fx.transport.preludes should have size 1
-    val payload = ai.starlake.quack.edge.authz.HandleInspector.payload(fx.transport.preludes.head)
+    fx.transport.preludes.size shouldBe 1
+    val handle  = fx.transport.prepared.head
+    val payload = HandleInspector.payload(handle.sql)
     payload.hcursor.downField("principal").get[String]("id") shouldBe Right("u-1")
-    fx.nodes.map(_.nodeId) should contain(payload.hcursor.get[String]("node").toOption.get)
+    // Minted for the node the statement went to, not for just any node of the pool, and sent over
+    // that node's connection.
+    payload.hcursor.get[String]("node") shouldBe Right(lastPrepareNode(fx))
+    handle.uri shouldBe fx.transport.prepareUris.last
 
   it should "answer an error, relaying nothing, when every node refuses the handle" in:
     val fx     = setup()
@@ -368,6 +428,130 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     messageType(resp) shouldBe Type.ErrorResponse
     errorText(resp) should include("session handle")
     fx.transport.sinceHandshake.exists(_.header.msgType == Type.PrepareRequest) shouldBe false
+
+  "a transaction's link" should "follow a fresh session handle with BEGIN, a statement and COMMIT" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    prepare(fx, connId, "SELECT 1") shouldBe prepareResp(false)
+    prepare(fx, connId, "COMMIT") shouldBe prepareResp(false)
+    val t = fx.transport
+    t.shape shouldBe List(
+      HandleMarker,
+      "BEGIN",
+      HandleMarker,
+      "USE memory.main; SELECT 1",
+      HandleMarker,
+      "COMMIT"
+    )
+    // One node connection carried all three, and each PREPARE had a handle of its own.
+    t.typesSinceHandshake.count(_ == Type.ConnectionRequest) shouldBe 1
+    t.prepared.toList.map(_.uri).distinct.size shouldBe 1
+    val handles = t.prepared.toList.filter(_.isHandle).map(h => HandleInspector.payload(h.sql))
+    handles.map(_.hcursor.get[String]("nonce")).distinct.size shouldBe 3
+    handles.map(_.hcursor.get[String]("node")).distinct.size shouldBe 1
+    handles.map(_.hcursor.downField("principal").get[String]("id")).distinct shouldBe
+      List(Right("u-1"))
+
+  "a refused handle inside a transaction" should "relay nothing and fail the statement as transient" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    val before = fx.transport.prepared.size
+    fx.transport.preludeError = Some("qod-node: session handle refused: handle expired")
+    val msg = errorText(prepare(fx, connId, "SELECT 1"))
+    msg should include("transient failure inside transaction")
+    msg should include("session handle")
+    // The refused handle was the only PREPARE the node saw: the statement itself was not relayed.
+    fx.transport.prepared.toList.drop(before).map(_.isHandle) shouldBe List(true)
+
+  "an admin statement's rendering" should "follow a session handle of the system principal" in:
+    val fx     = setup(superuser = true, withAdmin = true)
+    val connId = connect(fx)
+    prepare(fx, connId, "CREATE ROLE analysts") shouldBe prepareResp(false)
+    val log = fx.transport.prepared.toList
+    log.map(_.isHandle) shouldBe List(true, false)
+    log(1).sql should startWith("SELECT * FROM (VALUES")
+    // The result is the manager's own, rendered by a node: never run as the session's user (the
+    // superuser u-1 here), or Phase C's verdicts would be asked about the manager's own SQL.
+    val principal = HandleInspector.payload(log.head.sql).hcursor.downField("principal")
+    principal.get[Boolean]("system") shouldBe Right(true)
+    principal.get[String]("id") shouldBe Right("system")
+
+  // ---- author stamping: the DuckLake pools' writes (BEGIN, stamp, statement, COMMIT) ----
+
+  private val StampedWrite = "INSERT INTO t VALUES (1)"
+
+  "a stamped write" should "send its stamp, the write and the COMMIT each after a session handle" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    prepare(fx, connId, StampedWrite) shouldBe prepareResp(false)
+    val log = fx.transport.prepared.toList
+    log.map(_.isHandle) shouldBe List(true, false, true, false, true, false)
+    log(1).sql should startWith(StampPrefix)
+    log(1).sql should include("tenant:acme/user:alice")
+    log(3).sql should include(StampedWrite)
+    log(5).sql shouldBe "COMMIT"
+    // One node connection, three handles of their own.
+    log.map(_.uri).distinct.size shouldBe 1
+    log.filter(_.isHandle).map(h => nonceOf(h.sql)).distinct.size shouldBe 3
+
+  it should "never go out unstamped when its stamp's handle is refused" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    // Only the first handle, the stamp's on the first node, is refused: the retry on the other
+    // node gets its handles.
+    fx.transport.preludeError = Some("qod-node: session handle refused: handle expired")
+    fx.transport.preludeRefusals = 1
+    prepare(fx, connId, StampedWrite) shouldBe prepareResp(false)
+    // The write that reached a node is the stamped one. A refused handle is not the stamp SQL
+    // failing: falling back to a fresh link would have sent the write alone, with no COMMIT.
+    val statements = fx.transport.prepared.toList.filterNot(_.isHandle).map(_.sql)
+    statements.size shouldBe 3
+    statements.head should startWith(StampPrefix)
+    statements(1) should include(StampedWrite)
+    statements(2) shouldBe "COMMIT"
+    // The first node's link was released without a statement; the second node served the write.
+    fx.transport.typesSinceHandshake shouldBe List(
+      Type.ConnectionRequest,
+      Type.Disconnect,
+      Type.ConnectionRequest,
+      Type.PrepareRequest,
+      Type.PrepareRequest,
+      Type.PrepareRequest,
+      Type.Disconnect
+    )
+
+  it should "answer an error and send no statement when every node refuses its handles" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    fx.transport.preludeError = Some("qod-node: session handle refused: handle expired")
+    val resp = prepare(fx, connId, StampedWrite)
+    errorText(resp) should include("session handle")
+    fx.transport.prepared.toList.exists(!_.isHandle) shouldBe false
+    // One link per node the router tried, none reopened to send the write unstamped.
+    fx.transport.typesSinceHandshake.count(_ == Type.ConnectionRequest) shouldBe 2
+    fx.transport.typesSinceHandshake.count(_ == Type.Disconnect) shouldBe 2
+
+  it should "still go out unstamped when the stamp itself fails" in:
+    val fx     = setup(stamping = true)
+    val connId = connect(fx)
+    fx.transport.stampError = Some("Catalog Error: function ducklake_set_commit_message failed")
+    prepare(fx, connId, StampedWrite) shouldBe prepareResp(false)
+    // The stamp SQL failed on a good handle: the write proceeds on a fresh link, with its own
+    // handle, and without the stamp's COMMIT.
+    val log = fx.transport.prepared.toList
+    log.map(_.isHandle) shouldBe List(true, false, true, false)
+    log(1).sql should startWith(StampPrefix)
+    log(3).sql should include(StampedWrite)
+    fx.transport.typesSinceHandshake shouldBe List(
+      Type.ConnectionRequest,
+      Type.PrepareRequest,
+      Type.Disconnect,
+      Type.ConnectionRequest,
+      Type.PrepareRequest,
+      Type.Disconnect
+    )
 
   "SEND_DATA_REQUEST" should "answer like a node when no statement is streaming" in:
     val fx     = setup()
@@ -568,6 +752,17 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     )
     prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
     prepare(fx, connId, "INSERT INTO t VALUES (1)") shouldBe prepareResp(false)
+
+  it should "send a session handle before the reopened BEGIN and before itself" in:
+    val fx     = setup()
+    val connId = killedInTx(fx)
+    val before = fx.transport.prepared.size
+    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+    val recovery = fx.transport.prepared.toList.drop(before)
+    recovery.map(_.isHandle) shouldBe List(true, false, true, false)
+    recovery(1).sql shouldBe "BEGIN"
+    recovery(3).sql should include("ROLLBACK")
+    recovery.filter(_.isHandle).map(h => nonceOf(h.sql)).distinct.size shouldBe 2
 
   "a kill inside a transaction" should "clear the router's transaction state with the fence" in:
     val fx     = setup()

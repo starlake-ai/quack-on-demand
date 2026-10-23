@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.quack
 
 import ai.starlake.quack.edge.adapter.{QuackTestFixtures, QuackTransport, QuackWireError}
+import ai.starlake.quack.edge.authz.{NodeKeys, NodePrincipal}
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -9,6 +10,7 @@ import org.scalatest.matchers.should.Matchers
 
 import java.net.URI
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
 
 class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
@@ -40,7 +42,15 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
   )
   private val hello =
     ConnectionRequest("client-secret", "v2.0.0", "osx_arm64", 3L, 3L, "qod-test", 0L)
-  private val authorize: () => String = () => "CALL system.main.qod_session('test.handle')"
+  private val handleSql               = "CALL system.main.qod_session('test.handle')"
+  private val authorize: () => String = () => handleSql
+
+  /** The SQL of every PREPARE posted so far, in order: the handles and the statements. */
+  private def preparedSql(t: FakeTransport): List[String] =
+    t.posted.toList
+      .map(p => frame(p._2).toOption.get)
+      .filter(_.header.msgType == Type.PrepareRequest)
+      .flatMap(f => decodePrepareRequest(f).toOption.map(_.sql))
 
   private def connResp(id: String)       = QuackTestFixtures.serializeSampleConnectionResponse(id)
   private def errorResp(msg: String)     = QuackTestFixtures.serializeSampleErrorResponse(msg)
@@ -99,20 +109,70 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val out  =
       link.prepare(PrepareRequest("SELECT 1", Some(Hugeint(0L, 9L)), None), 4L).unsafeRunSync()
     out.isRight shouldBe true
-    decodePrepareRequest(frame(t.posted(1)._2).toOption.get).toOption.get.sql shouldBe
+    val handle = frame(t.posted(1)._2).toOption.get
+    decodePrepareRequest(handle).toOption.get.sql shouldBe
       "CALL system.main.qod_session('test.handle')"
-    val relayed = decodePrepareRequest(frame(t.posted(2)._2).toOption.get).toOption.get
-    relayed.sql shouldBe "SELECT 1"
-    relayed.queryUuid shouldBe Some(Hugeint(0L, 9L))
+    val relayed = frame(t.posted(2)._2).toOption.get
+    // Both PREPAREs go out on the node's connection, not the client's.
+    handle.header.connectionId shouldBe "NODE1"
+    relayed.header.connectionId shouldBe "NODE1"
+    val request = decodePrepareRequest(relayed).toOption.get
+    request.sql shouldBe "SELECT 1"
+    request.queryUuid shouldBe Some(Hugeint(0L, 9L))
 
-  it should "send nothing and fail Transient when the node refuses the handle" in:
+  it should "send nothing and fail HandleFailed when the node refuses the handle" in:
     val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
-      case Left(LinkFailure.Transient(m)) =>
+      case Left(LinkFailure.HandleFailed(m)) =>
         m should include("refused the statement's session handle")
-      case other => fail(s"expected Transient, got $other")
+        m should include("session handle refused: expired")
+      case other => fail(s"expected HandleFailed, got $other")
+    // The connection request and the refused handle; the statement itself never went out.
+    preparedSql(t) shouldBe List(handleSql)
     t.posted should have size 2
+
+  it should "send nothing and fail HandleFailed when the handle never reaches the node" in:
+    val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
+    val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
+    link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
+      case Left(LinkFailure.HandleFailed(m)) =>
+        m should include("did not reach the node")
+        m should include("HTTP 503")
+        // A 503 is not a refusal, and the message must not claim one.
+        m should not include "refused"
+      case other => fail(s"expected HandleFailed, got $other")
+    preparedSql(t) shouldBe List(handleSql)
+    t.posted should have size 2
+
+  it should "send nothing and fail Permanent when there is no principal to mint a handle for" in:
+    val t       = new FakeTransport(connResp("NODE1"))
+    val unbound = () => NodeKeys.ephemeral().prelude(node, NodePrincipal.Unbound)
+    val link    = QuackNodeLink.open(t, node, hello, 1L, unbound).unsafeRunSync().toOption.get._1
+    link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
+      case Left(LinkFailure.Permanent(m)) => m should include("no principal is bound")
+      case other                          => fail(s"expected Permanent, got $other")
+    // Only the connection request: minting failed before anything was sent.
+    t.posted should have size 1
+
+  it should "send a fresh session handle before each PREPARE of a link" in:
+    val minted = new AtomicInteger(0)
+    val fresh  = () => s"CALL system.main.qod_session('h${minted.incrementAndGet()}')"
+    val t      = new FakeTransport((connResp("NODE1") +: List.fill(6)(prepareResp(false)))*)
+    val link   = QuackNodeLink.open(t, node, hello, 1L, fresh).unsafeRunSync().toOption.get._1
+    link.runDiscard("BEGIN", 1L).unsafeRunSync() shouldBe Right(())
+    link.prepare(PrepareRequest("SELECT 1", None, None), 2L).unsafeRunSync().isRight shouldBe true
+    link.runDiscard("COMMIT", 3L).unsafeRunSync() shouldBe Right(())
+    // BEGIN, the statement in between and COMMIT each follow a handle of their own.
+    preparedSql(t) shouldBe List(
+      "CALL system.main.qod_session('h1')",
+      "BEGIN",
+      "CALL system.main.qod_session('h2')",
+      "SELECT 1",
+      "CALL system.main.qod_session('h3')",
+      "COMMIT"
+    )
+    minted.get shouldBe 3
 
   "runDiscard" should "prepare, drain every fetch and stop at the terminal response" in:
     val t = new FakeTransport(
@@ -172,6 +232,30 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t    = new FakeTransport(connResp("NODE1"), prepareResp(false), errorResp("conflict"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.runDiscard("COMMIT", 1L).unsafeRunSync() shouldBe Left(LinkFailure.Permanent("conflict"))
+
+  it should "send nothing and fail HandleFailed when the node refuses the handle" in:
+    val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
+    val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
+    link.runDiscard("COMMIT", 9L).unsafeRunSync() match
+      case Left(LinkFailure.HandleFailed(m)) =>
+        m should include("refused the statement's session handle")
+        m should include("session handle refused: expired")
+      case other => fail(s"expected HandleFailed, got $other")
+    // Only the refused handle was prepared; the COMMIT never went out.
+    preparedSql(t) shouldBe List(handleSql)
+    t.posted should have size 2
+
+  it should "send nothing and fail HandleFailed when the handle never reaches the node" in:
+    val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
+    val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
+    link.runDiscard("COMMIT", 9L).unsafeRunSync() match
+      case Left(LinkFailure.HandleFailed(m)) =>
+        m should include("did not reach the node")
+        m should include("HTTP 503")
+        m should not include "refused"
+      case other => fail(s"expected HandleFailed, got $other")
+    preparedSql(t) shouldBe List(handleSql)
+    t.posted should have size 2
 
   "close" should "post a DISCONNECT and swallow failures" in:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("gone"))

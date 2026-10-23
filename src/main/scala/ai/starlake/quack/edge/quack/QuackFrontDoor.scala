@@ -291,6 +291,8 @@ final class QuackFrontDoor(
   private def toOutcome[A](f: LinkFailure, ms: Long): NodeOutcome[A] = f match
     case LinkFailure.Transient(m) => NodeOutcome.Transient(m, ms)
     case LinkFailure.Permanent(m) => NodeOutcome.Permanent(m, ms)
+    // The statement was not sent, so another node may take it, as on the Arrow path.
+    case LinkFailure.HandleFailed(m) => NodeOutcome.Transient(m, ms)
 
   private def dropLink(link: QuackNodeLink, reused: Boolean): IO[Unit] =
     if reused then IO.unit else link.close()
@@ -328,9 +330,11 @@ final class QuackFrontDoor(
           case _ => ()
     else () => link.close().unsafeRunSync()
 
-  /** Open (or reuse, inside a client transaction) a node link, run the stamping prelude with the
-    * Arrow path's fail-open rule, then hand the link to `body`. Load bookkeeping goes through the
-    * adapter exactly as for the Arrow transport.
+  /** Open (or reuse, inside a client transaction) a node link, run the stamping prelude, then hand
+    * the link to `body`. The rule is the Arrow path's (`QuackHttpClient.queryStamped`): a failure
+    * of the stamp SQL itself is fail-open, the write proceeds unstamped on a fresh link; a failed
+    * session handle never is, the write is not sent and the failure is Transient. Load bookkeeping
+    * goes through the adapter exactly as for the Arrow transport.
     */
   private def onLink[A](s: QuackSession, cq: Long)(
       body: (QuackNodeLink, Boolean, Boolean, () => IO[Long]) => IO[NodeOutcome[A]]
@@ -357,9 +361,13 @@ final class QuackFrontDoor(
                 case None    => IO.pure(Right(()))
                 case Some(p) => link.runDiscard(p, cq)
               preludeIO.flatMap {
-                case Right(())  => body(link, stampedPrelude.isDefined, reused, elapsed)
+                case Right(()) => body(link, stampedPrelude.isDefined, reused, elapsed)
+                // A failed handle is never fail-open: the write is not sent, whatever the cause.
+                case Left(fail: LinkFailure.HandleFailed) =>
+                  dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
                 case Left(fail) =>
-                  // Fail-open like the Arrow path: the write proceeds unstamped on a fresh link.
+                  // The stamp SQL itself failed: fail open like the Arrow path, the write proceeds
+                  // unstamped on a fresh link whose own PREPAREs each follow a handle.
                   logger.warn(
                     s"stamping prelude failed on ${node.nodeId}; write proceeds unstamped: ${fail.message}"
                   )

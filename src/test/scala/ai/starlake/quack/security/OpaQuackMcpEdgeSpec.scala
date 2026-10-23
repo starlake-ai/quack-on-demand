@@ -64,15 +64,28 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
   // Native Quack front door
   // ---------------------------------------------------------------------------------------------
 
-  /** Plays a node: connects, answers a one-row PREPARE_RESPONSE, acknowledges everything else. */
+  /** Plays a node: connects, answers a one-row PREPARE_RESPONSE, acknowledges everything else. A
+    * session handle prelude (`CALL system.main.qod_session(...)`) is answered apart: `preludes`
+    * counts those and `prepares` only the statements the front door relays, and `order` lists both
+    * in arrival order.
+    */
   private final class NodeTransport extends QuackTransport:
     @volatile var prepares: Int                            = 0
+    @volatile var preludes: Int                            = 0
+    @volatile var order: Vector[String]                    = Vector.empty
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
       val f = frame(body).toOption.get
       f.header.msgType match
         case Type.ConnectionRequest => QuackTestFixtures.serializeSampleConnectionResponse("NODE1")
         case Type.PrepareRequest    =>
-          prepares += 1
+          val prelude = decodePrepareRequest(f).toOption
+            .exists(_.sql.startsWith("CALL system.main.qod_session('"))
+          if prelude then
+            preludes += 1
+            order = order :+ "prelude"
+          else
+            prepares += 1
+            order = order :+ "statement"
           QuackTestFixtures.serializeSamplePrepareResponse(
             java.math.BigInteger.valueOf(5L),
             false,
@@ -125,6 +138,9 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       val resp = prepare(d, connect(d), "SELECT * FROM orders")
       messageType(resp) shouldBe Type.PrepareResponse
       t.prepares shouldBe 1
+      // Exactly one session handle, sent right before the relayed statement.
+      t.preludes shouldBe 1
+      t.order shouldBe Vector("prelude", "statement")
       wm.verify(
         1,
         connectCalls.withRequestBody(matchingJsonPath("$.input.client.edge", equalTo("quack")))
@@ -147,7 +163,9 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       val msg = decodeErrorMessage(resp).toOption.get
       msg should include("denied by policy")
       msg should include("orders is off limits")
+      // Not even a session handle: a denial happens before any node connection is opened.
       t.prepares shouldBe 0
+      t.preludes shouldBe 0
     }
 
   it should "refuse the session when OPA denies the connect" in:

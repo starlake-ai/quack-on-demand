@@ -15,11 +15,18 @@ import java.net.URI
 
 /** Why a node round trip failed, in the two classes the router already distinguishes: a transport
   * problem (5xx, refused, timeout) is retried once on another node, an `ERROR_RESPONSE` from the
-  * node is final and its message goes to the client.
+  * node is final and its message goes to the client. [[HandleFailed]] is a third class, for the
+  * front door: the router retries it like a transport problem, and the stamping fallback never
+  * mistakes it for the failure of the stamp SQL.
   */
 enum LinkFailure(val message: String):
   case Transient(msg: String) extends LinkFailure(msg)
   case Permanent(msg: String) extends LinkFailure(msg)
+
+  /** The session handle prelude before a PREPARE failed (the node refused it, or it got no answer),
+    * so the statement was not sent.
+    */
+  case HandleFailed(msg: String) extends LinkFailure(msg)
 
 /** One raw Quack connection from the manager to a node, opened for one client statement.
   *
@@ -41,8 +48,11 @@ final class QuackNodeLink(
     authorize: () => String
 ) extends LazyLogging:
 
-  /** POST already-framed bytes and return the node's response bytes. */
-  def relay(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
+  /** POST already-framed bytes and return the node's response bytes. Private on purpose: it is the
+    * one way to put a PREPARE on the link with no session handle in front of it, so the only ways
+    * out are [[forward]] (which refuses a PREPARE), [[prepare]] and [[runDiscard]].
+    */
+  private def relay(bytes: Array[Byte]): IO[Either[LinkFailure, Array[Byte]]] =
     transport.post(url, bytes).attempt.map {
       case Right(resp)                       => Right(resp)
       case Left(e: QuackWireError.Transient) => Left(LinkFailure.Transient(e.msg))
@@ -60,7 +70,8 @@ final class QuackNodeLink(
     else relay(QuackWire.rewriteHeader(frame, nodeConnectionId))
 
   /** Relay `req` as this connection's next PREPARE, after a fresh session handle; the node's
-    * response bytes as they are.
+    * response bytes as they are. A failed handle ([[LinkFailure.HandleFailed]]) means `req` was not
+    * sent.
     */
   def prepare(
       req: QuackWire.PrepareRequest,
@@ -73,8 +84,9 @@ final class QuackNodeLink(
     }
 
   /** Run `sql` on this connection after a fresh session handle, and discard its result: the
-    * author-stamping prelude, a reopened BEGIN, the COMMIT epilogue. A node `ERROR_RESPONSE` is
-    * `Permanent(message)`.
+    * author-stamping prelude, a reopened BEGIN, the COMMIT epilogue. A node `ERROR_RESPONSE` to
+    * `sql` is `Permanent(message)`; a failed handle is [[LinkFailure.HandleFailed]], and `sql` was
+    * not sent.
     */
   def runDiscard(sql: String, clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     authorized(clientQueryId).flatMap {
@@ -82,20 +94,27 @@ final class QuackNodeLink(
       case Right(()) => run(sql, clientQueryId)
     }
 
-  /** The session handle prelude, drained. A node refusal is Transient (another node may take the
-    * statement); no principal to vouch for (`authorize` throws) is Permanent.
+  /** The session handle prelude, drained. Any failure of the prelude itself is `HandleFailed`, and
+    * the statement is not sent: a node error on it (the node refused the handle) and a transport
+    * failure on it (the handle never reached the node), each worded for what happened so that a 503
+    * is not reported as a refusal. No principal to vouch for (`authorize` throws) is `Permanent`:
+    * nothing could be minted, and no other node would do better.
     */
   private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     IO(authorize()).attempt.flatMap {
       case Left(e) =>
         IO.pure(Left(LinkFailure.Permanent(Option(e.getMessage).getOrElse(e.toString))))
       case Right(prelude) =>
-        run(prelude, clientQueryId).map(
-          _.left.map(f =>
-            LinkFailure.Transient(s"the node refused the statement's session handle: ${f.message}")
-          )
-        )
+        run(prelude, clientQueryId).map(_.left.map(handleFailure))
     }
+
+  /** [[run]] answers a node error with `Permanent` and a transport failure with `Transient`. */
+  private def handleFailure(f: LinkFailure): LinkFailure.HandleFailed = f match
+    case LinkFailure.Permanent(m) =>
+      LinkFailure.HandleFailed(s"the node refused the statement's session handle: $m")
+    case LinkFailure.Transient(m) =>
+      LinkFailure.HandleFailed(s"the statement's session handle did not reach the node: $m")
+    case h: LinkFailure.HandleFailed => h // never produced by run; keeps the match exhaustive
 
   /** One PREPARE of `sql`, drained through its FETCH loop so the node releases the result. The
     * query gets its own random uuid, as a Quack v3 client names every query it prepares.
