@@ -39,9 +39,10 @@ open class QuackHttpClient(
     * on the same connection. Returns a streaming [[QuackResponse.Ok]] whose `close` callback the
     * caller must invoke.
     *
-    * A refused prelude means `sql` is never sent: the connection is dropped and the failure is
-    * Transient (another node may take the statement). `authorize` throwing (no principal to vouch
-    * for) is Permanent.
+    * A failed prelude means `sql` is never sent and the connection is dropped. A prelude the node
+    * refuses ([[QuackHttpClient.HandleRefused]]) is Transient (another node may take the
+    * statement); one that fails in transport keeps its own error and class. `authorize` throwing
+    * (no principal to vouch for) is Permanent.
     *
     * `session` is accepted for the callers' sake and unused: every call opens its own node
     * connection, so no server-side session is shared between calls.
@@ -122,7 +123,9 @@ open class QuackHttpClient(
     poll(IO.unit).onCancel(release)
 
   /** Run `authorize`'s prelude on `conn` (its own PREPARE), then a cancel point; nothing for the
-    * canary. A node error on the prelude becomes [[QuackHttpClient.HandleRefused]].
+    * canary. The node's error on the prelude (its ERROR_RESPONSE) becomes
+    * [[QuackHttpClient.HandleRefused]]; a transport failure keeps its own error, Transient for a
+    * 5xx, so a 503 is never reported as a refusal.
     */
   private def install(poll: Poll[IO], conn: Connection, authorize: Option[() => String])(using
       IORuntime
@@ -131,8 +134,8 @@ open class QuackHttpClient(
       case None       => IO.unit
       case Some(mint) =>
         IO(mint()).flatMap { prelude =>
-          conn.executeDiscard(prelude).adaptError { case e: QuackWireError =>
-            QuackHttpClient.HandleRefused(e.getMessage)
+          conn.executeDiscard(prelude).adaptError { case e: QuackWireError.Permanent =>
+            QuackHttpClient.HandleRefused(e.msg)
           }
         } *> checkpoint(poll, conn.close())
 
@@ -253,6 +256,21 @@ open class QuackHttpClient(
 
 object QuackHttpClient:
 
-  /** The node refused a statement's session handle; the statement itself was never sent. */
-  final class HandleRefused(nodeError: String)
-      extends RuntimeException(s"the node refused the statement's session handle: $nodeError")
+  /** The node refused a statement's session handle (its ERROR_RESPONSE to the prelude); the
+    * statement itself was never sent. `nodeText` is the node's answer.
+    */
+  final class HandleRefused(val nodeText: String)
+      extends RuntimeException(HandleRefused.Prefix + nodeText)
+
+  object HandleRefused:
+
+    /** How the message of a refused handle starts, in the [[QuackError.Transient]] it fails as. */
+    val Prefix: String = "the node refused the statement's session handle: "
+
+    /** The node's answer when `err` is a refused session handle, which [[QuackHttpClient.query]]
+      * fails as Transient (another node may take the statement): the health probe tells it apart
+      * from any other failure to name the cause.
+      */
+    def unapply(err: QuackError): Option[String] = err match
+      case QuackError.Transient(m) if m.startsWith(Prefix) => Some(m.substring(Prefix.length))
+      case _                                               => None

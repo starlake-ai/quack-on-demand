@@ -103,3 +103,10 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       NodeHandles.NoPrincipalMarker
     )
   }
+
+  "the refusals the health warning names a cause for" should "be qod-node's own words" in {
+    val verify = Files.readString(Paths.get("native/qod-node/src/handle.cpp"))
+    (NodeHandles.KeyMismatchRefusal :: NodeHandles.ClockRefusals).foreach(m =>
+      verify should include(m)
+    )
+  }

@@ -45,7 +45,9 @@ struct Handle {
 };
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
-//! rest allows for clock skew. A handle valid longer than this is refused as malformed.
+//! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it
+//! covers: a node clock ahead of the manager's by the 60 s lifetime or more refuses every handle as
+//! expired. A handle valid longer than this is refused as valid too long.
 constexpr int64_t kMaxHandleLifetimeMs = 5 * 60 * 1000;
 
 //! Verifies `text` for this node (`node_key`: its 32-byte key; `node_id`: its id) at `now_ms` and

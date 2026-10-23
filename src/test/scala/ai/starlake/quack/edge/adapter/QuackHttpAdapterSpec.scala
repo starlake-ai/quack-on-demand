@@ -25,7 +25,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
           1
         )
   ) extends QuackHttpClient(TestArrow.sharedAllocator):
-    val preludes = scala.collection.mutable.ListBuffer.empty[String]
+    val preludes                = scala.collection.mutable.ListBuffer.empty[String]
+    @volatile var canaries: Int = 0
     override def query(
         endpoint: String,
         token: String,
@@ -40,7 +41,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
           .apply()
       }
     override def queryWithoutHandle(endpoint: String, token: String, sql: String) =
-      IO(canary())
+      IO { canaries += 1; canary() }
 
   "QuackHttpAdapter" should "delegate to client, track load on success" in:
     val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L))))
@@ -80,17 +81,17 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     adapter.send(node("n3"), "BAD", NodePrincipal.System, None).unsafeRunSync()
     tracker.snapshot("n3").healthy shouldBe true
 
-  "probe" should "return true on Ok without touching tracker counters" in:
+  "probe" should "be Ok without touching tracker counters" in:
     val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L))))
     val tracker = new NodeLoadTracker
     val adapter = new QuackHttpAdapter(client, tracker)
-    adapter.probe(node("p1")).unsafeRunSync() shouldBe true
+    adapter.probe(node("p1")).unsafeRunSync() shouldBe ProbeVerdict.Ok
     val snap = tracker.snapshot("p1")
     snap.inFlight shouldBe 0
     snap.totalServed shouldBe 0L
     snap.ewmaMs shouldBe 0.0
 
-  it should "return false on transient failure without touching tracker counters" in:
+  it should "fail on a transient failure without touching tracker counters" in:
     val client = new FakeClient(
       Map(
         "quack:127.0.0.1:0" ->
@@ -99,10 +100,12 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     )
     val tracker = new NodeLoadTracker
     val adapter = new QuackHttpAdapter(client, tracker)
-    adapter.probe(node("p2")).unsafeRunSync() shouldBe false
+    // A transport failure, even of the probe's handle, is not the node refusing it.
+    adapter.probe(node("p2")).unsafeRunSync() shouldBe
+      ProbeVerdict.Failed(QuackError.Transient("connection refused").toString)
     tracker.snapshot("p2").totalServed shouldBe 0L
 
-  it should "return false on permanent failure without touching tracker counters" in:
+  it should "fail on a permanent failure without touching tracker counters" in:
     val client = new FakeClient(
       Map(
         "quack:127.0.0.1:0" ->
@@ -111,7 +114,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     )
     val tracker = new NodeLoadTracker
     val adapter = new QuackHttpAdapter(client, tracker)
-    adapter.probe(node("p3")).unsafeRunSync() shouldBe false
+    adapter.probe(node("p3")).unsafeRunSync() shouldBe
+      ProbeVerdict.Failed(QuackError.Permanent("400").toString)
     tracker.snapshot("p3").totalServed shouldBe 0L
 
   "send with stampPrelude" should "route to queryStamped when supplied and to query when not" in:
@@ -312,20 +316,89 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     payload.hcursor.get[String]("node") shouldBe Right("n-h")
     payload.hcursor.downField("principal").get[String]("id") shouldBe Right("u-1")
 
-  "probe" should "fail a node that runs a statement without a session handle" in:
+  "probe" should "find a node that runs a statement without a session handle unenforced" in:
     val client = new FakeClient(
       Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))),
       canary = () => TestArrow.okResponse(1L)
     )
     new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-open")).unsafeRunSync() shouldBe
-      false
+      ProbeVerdict.Unenforced
 
   it should "pass a node that refuses it, as the system principal" in:
     val client = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))))
     new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-ok")).unsafeRunSync() shouldBe
-      true
+      ProbeVerdict.Ok
+    client.canaries shouldBe 1
     ai.starlake.quack.edge.authz.HandleInspector
       .payload(client.preludes.head)
       .hcursor
       .downField("principal")
       .get[Boolean]("system") shouldBe Right(true)
+
+  it should "pass a node whose canary fails for another reason: the probe statement ran" in:
+    val client = new FakeClient(
+      Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))),
+      canary = () => QuackResponse.Failed(QuackError.Transient("HTTP 503 from Quack node"), 1)
+    )
+    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-503")).unsafeRunSync() shouldBe
+      ProbeVerdict.Ok
+    client.canaries shouldBe 1
+
+  it should "carry the node's answer when it refuses the probe's own session handle" in:
+    val answer = "qod-node: session handle refused: handle MAC does not verify"
+    val client = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" -> (() =>
+          QuackResponse
+            .Failed(QuackError.Transient(QuackHttpClient.HandleRefused(answer).getMessage), 1)
+        )
+      )
+    )
+    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-key")).unsafeRunSync() shouldBe
+      ProbeVerdict.HandleRefused(answer)
+    // The probe statement never ran, so there was nothing for the canary to tell.
+    client.canaries shouldBe 0
+
+  "HandleRefusalWarnings" should "name another node-key secret once, until the node passes again" in:
+    val warnings = new HandleRefusalWarnings
+    val refused  =
+      ProbeVerdict.HandleRefused("qod-node: session handle refused: handle MAC does not verify")
+    val first = warnings.warning("n-1", refused)
+    first.isDefined shouldBe true
+    first.get should include("node n-1 refuses the manager's session handles")
+    first.get should include("handle MAC does not verify")
+    first.get should include("QOD_NODE_KEY_SECRET")
+    first.get should include("restart the node")
+    // Once per refusal: not again on the next tick, nor after a tick that failed otherwise.
+    warnings.warning("n-1", refused) shouldBe None
+    warnings.warning("n-1", ProbeVerdict.Failed("down")) shouldBe None
+    warnings.warning("n-1", refused) shouldBe None
+    // Another node is named on its own.
+    warnings.warning("n-2", refused).isDefined shouldBe true
+    // A pass ends the refusal: the next one is named again.
+    warnings.warning("n-1", ProbeVerdict.Ok) shouldBe None
+    warnings.warning("n-1", refused) shouldBe first
+
+  it should "name the clocks for a handle the node finds expired or valid too long" in:
+    for answer <- List(
+        "qod-node: session handle refused: handle expired",
+        "qod-node: session handle refused: handle is valid too long"
+      )
+    do
+      val w = new HandleRefusalWarnings().warning("n-1", ProbeVerdict.HandleRefused(answer)).get
+      w should include(answer)
+      w should include("clocks disagree by about the handle lifetime (60 s) or more")
+      w should include("check clock sync")
+      w should not include "QOD_NODE_KEY_SECRET"
+
+  it should "pass any other refusal on as the node words it" in:
+    val answer = "qod-node: session handle refused: it was already used"
+    new HandleRefusalWarnings().warning("n-1", ProbeVerdict.HandleRefused(answer)) shouldBe Some(
+      s"node n-1 refuses the manager's session handles, so no statement runs on it and it stays " +
+        s"unhealthy ($answer)"
+    )
+
+  it should "say nothing for a node that is down or does not enforce" in:
+    val warnings = new HandleRefusalWarnings
+    warnings.warning("n-1", ProbeVerdict.Failed("connection refused")) shouldBe None
+    warnings.warning("n-1", ProbeVerdict.Unenforced) shouldBe None

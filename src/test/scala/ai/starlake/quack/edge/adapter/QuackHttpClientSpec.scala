@@ -73,12 +73,14 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
     }
 
   /** Answers by message type and records every request type in arrival order. `onPrepare` gets the
-    * 1-based index of the PREPARE so a test can make one of them fail or block. CONNECT, DISCONNECT
-    * and HEARTBEAT always succeed.
+    * 1-based index of the PREPARE so a test can make one of them fail or block; `onPrelude` does
+    * the same for the session handles, which are counted apart. CONNECT, DISCONNECT and HEARTBEAT
+    * always succeed.
     */
   private final class ScriptedTransport(
       onPrepare: Int => IO[Array[Byte]],
-      onConnect: IO[Array[Byte]] = IO(QuackTestFixtures.serializeSampleConnectionResponse(connId))
+      onConnect: IO[Array[Byte]] = IO(QuackTestFixtures.serializeSampleConnectionResponse(connId)),
+      onPrelude: Int => IO[Array[Byte]] = _ => IO(preludeOk)
   ) extends QuackTransport:
     val types: ConcurrentLinkedQueue[Int]                  = ConcurrentLinkedQueue[Int]()
     private val prepares                                   = AtomicInteger(0)
@@ -86,8 +88,7 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO.defer {
       val t = QuackNativeBridge.parseMessageType(body)
       if t == MessageType.PrepareRequest.wireOrdinal && isPrelude(body) then
-        preludes.incrementAndGet()
-        IO(preludeOk)
+        onPrelude(preludes.incrementAndGet())
       else
         types.add(t)
         if t == MessageType.PrepareRequest.wireOrdinal then onPrepare(prepares.incrementAndGet())
@@ -583,12 +584,37 @@ class QuackHttpClientSpec extends AnyFunSpec with Matchers:
       try
         val client = clientWith(allocator, _ => new QuackProtocol(transport, allocator))
         client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
-          case QuackResponse.Failed(QuackError.Transient(msg), _) =>
+          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
             msg should include("refused the statement's session handle")
             msg should include("does not verify")
+            // What the health probe reads back to name the cause: the node's answer, as it is.
+            val answer = QuackHttpClient.HandleRefused.unapply(err)
+            answer.map(QuackHttpClient.HandleRefused.Prefix + _) shouldBe Some(msg)
+            answer.get should endWith(
+              "qod-node: session handle refused: handle MAC does not verify"
+            )
           case other => fail(s"expected Failed(Transient), got $other")
         // CONNECT, then DISCONNECT: the statement's PREPARE was never sent.
         transport.postCount.get() shouldBe 2
+      finally allocator.close()
+    }
+
+    it("keeps a transport failure of the handle Transient, with its own error, not a refusal") {
+      val transport = ScriptedTransport(
+        _ => IO(prepareOk),
+        onPrelude = _ => IO.raiseError(QuackWireError.Transient("HTTP 503 from Quack node"))
+      )
+      val allocator = new RootAllocator()
+      try
+        val client = clientWith(allocator, alloc => new QuackProtocol(transport, alloc))
+        client.query(endpoint, token, "DELETE FROM t", None, authorize).unsafeRunSync() match
+          case QuackResponse.Failed(err @ QuackError.Transient(msg), _) =>
+            msg shouldBe "HTTP 503 from Quack node"
+            QuackHttpClient.HandleRefused.unapply(err) shouldBe None
+          case other => fail(s"expected Failed(Transient), got $other")
+        // The handle never reached the node, so the statement was not sent either.
+        transport.count(MessageType.PrepareRequest) shouldBe 0
+        transport.count(MessageType.DisconnectMessage) shouldBe 1
       finally allocator.close()
     }
 

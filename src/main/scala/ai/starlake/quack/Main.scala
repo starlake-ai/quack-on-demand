@@ -900,6 +900,11 @@ object Main extends IOApp with LazyLogging:
     // recorded, so the next tick retries the (idempotent) CREATE.
     val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
 
+    // A node that refuses the manager's session handles (a key from another node-key secret, a
+    // clock out of bounds) fails every statement Transient and stays unhealthy: its probe names the
+    // likely cause once, until the node passes again.
+    val handleRefusals = new HandleRefusalWarnings
+
     // Reads one node's attached catalogs. Decoding (batch draining, schema-only first batch,
     // close-on-every-path) lives in IcebergAttachVerifier.decodeCatalogNames, which is unit
     // tested; this is wiring only. Fail-soft: any surprise becomes a Left, never an exception.
@@ -988,8 +993,10 @@ object Main extends IOApp with LazyLogging:
         // now is a transition check (was healthy, now failing) without restructuring HealthProbe
         // to expose one itself.
         val wasHealthy = tracker.snapshot(n.nodeId).healthy
-        adapter.probe(n, probeSql).map { ok =>
+        adapter.probe(n, probeSql).map { verdict =>
+          val ok = verdict.healthy
           if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
+          handleRefusals.warning(n.nodeId, verdict).foreach(w => logger.warn(w))
           // An encrypted database that fails its probe is most likely a key mismatch, which looks
           // exactly like the orphaned-node-port failure. Name the likely cause once per
           // healthy-to-unhealthy transition (not on every tick of a still-unhealthy node) so the

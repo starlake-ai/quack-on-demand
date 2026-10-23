@@ -79,23 +79,27 @@ final class QuackHttpAdapter(
       case NodeOutcome.Transient(_, _) => tracker.setHealthy(node.nodeId, false)
       case NodeOutcome.Permanent(_, _) => ()
 
-  /** Liveness and enforcement probe, as the system principal: true iff `sql` runs AND the node
-    * refuses a statement with no session handle (the canary). A node that runs the canary does not
-    * enforce authorization: it is reported once (ERROR) and stays unhealthy, so it is never routed
-    * to. A canary that fails for another reason leaves the verdict to `sql`. Skips all tracker
+  /** Liveness and enforcement probe, as the system principal: [[ProbeVerdict.Ok]] iff `sql` runs
+    * AND the node refuses a statement with no session handle (the canary). A node that refuses the
+    * probe's own handle is [[ProbeVerdict.HandleRefused]], with its answer, so the health loop can
+    * name the cause. A node that runs the canary does not enforce authorization: it is reported
+    * once (ERROR) and is [[ProbeVerdict.Unenforced]], so it stays unhealthy and is never routed to.
+    * A canary that fails for another reason leaves the verdict to `sql`. Skips all tracker
     * bookkeeping, like the send it mirrors.
     */
-  def probe(node: RunningNode, sql: String = "SELECT 1"): IO[Boolean] =
+  def probe(node: RunningNode, sql: String = "SELECT 1"): IO[ProbeVerdict] =
     val endpoint = s"quack:${node.host}:${node.port}"
     client.query(endpoint, node.token, sql, None, authorizer(node, NodePrincipal.System)).flatMap {
       case QuackResponse.Ok(_, _, close) => IO(close()) *> canary(node)
-      case _                             => IO.pure(false)
+      case QuackResponse.Failed(QuackHttpClient.HandleRefused(nodeText), _) =>
+        IO.pure(ProbeVerdict.HandleRefused(nodeText))
+      case QuackResponse.Failed(err, _) => IO.pure(ProbeVerdict.Failed(err.toString))
     }
 
   /** Node ids whose canary ran: reported once until they enforce again. */
   private val unenforced = scala.collection.concurrent.TrieMap.empty[String, Unit]
 
-  private def canary(node: RunningNode): IO[Boolean] =
+  private def canary(node: RunningNode): IO[ProbeVerdict] =
     client
       .queryWithoutHandle(s"quack:${node.host}:${node.port}", node.token, "SELECT 1")
       .map {
@@ -106,14 +110,14 @@ final class QuackHttpAdapter(
               s"node ${node.nodeId} ran a statement that carried no session handle: it does not " +
                 "enforce authorization, so it is marked unhealthy and never routed to"
             )
-          false
+          ProbeVerdict.Unenforced
         case QuackResponse.Failed(QuackError.Permanent(m), _)
             if m.contains(NodeHandles.NoPrincipalMarker) =>
           unenforced.remove(node.nodeId)
-          true
+          ProbeVerdict.Ok
         case QuackResponse.Failed(err, _) =>
           logger.debug(s"canary on ${node.nodeId} inconclusive: $err")
-          true
+          ProbeVerdict.Ok
       }
 
   /** Scrape the node's DuckDB engine internals (buffer-manager memory, temp storage, spill files)

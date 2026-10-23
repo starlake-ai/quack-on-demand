@@ -34,6 +34,17 @@ object NodeHandles:
     */
   val NoPrincipalMarker: String = "has no verified principal"
 
+  /** Part of qod-node's refusal of a handle whose MAC fails under the node's key
+    * (native/qod-node/src/handle.cpp): the node's key derives from another node-key secret.
+    */
+  val KeyMismatchRefusal: String = "does not verify"
+
+  /** Parts of qod-node's refusals of a handle its clock places out of bounds (handle.cpp): expired
+    * (the node's clock ahead of the manager's by the lifetime or more) and valid too long (behind
+    * it by more than the node's slack).
+    */
+  val ClockRefusals: List[String] = List("handle expired", "valid too long")
+
   /** The key of node `nodeId`: HMAC-SHA256(secret, "qod-node-key/v1/" + nodeId), 32 bytes. */
   def nodeKey(secret: String, nodeId: String): Array[Byte] =
     hmac(
