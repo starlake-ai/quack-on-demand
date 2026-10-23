@@ -59,7 +59,8 @@ CI runs both on the six platforms: `.github/workflows/qod-node-spike.yml`.
   ones the official `duckdb.exe` is built from. A static host must register what those libraries
   link like extensions before opening a database (`duckdb_register_static_extension` with the
   `loadable_extensions` and `httplib` capabilities and the built-in extensions; see
-  `src/static_extensions.cpp`): without the capability, INSTALL and LOAD are refused. Verified on
-  macOS arm64 (official extensions install and load, round trip passes); CI checks Windows.
+  `src/static_extensions.cpp`): without the capability, INSTALL and LOAD are refused. With that,
+  Windows x64 and ARM64 pass the smoke and the quack round trip (release Windows CLI as client), and
+  so does a static macOS arm64 build.
 
 Still open: Iceberg and Postgres plans, and latency.
