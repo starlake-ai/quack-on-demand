@@ -147,7 +147,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          home="$RUNNER_TEMP/duckdb-home"
+          # POSIX path for bash and tar (GNU tar reads the "D:" of a Windows path as a remote host).
+          home="$(cygpath -u "$RUNNER_TEMP")/duckdb-home"
           mkdir -p "$home/include" "$home/lib" "$home/bin"
           tmp="$(mktemp -d)"
           mkdir -p "$tmp/cli"
@@ -159,7 +160,8 @@ jobs:
           cp "$tmp/cli/duckdb.exe" "$home/bin/duckdb.exe"
           git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
           cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
-          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          # Mixed form (D:/a/...) for CMake and later steps.
+          echo "DUCKDB_HOME=$(cygpath -m "$home")" >> "$GITHUB_ENV"
           ls -l "$home/lib" "$home/bin"
 
       - name: Build qod-node (Visual Studio 2022, static DuckDB)
