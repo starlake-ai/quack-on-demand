@@ -24,7 +24,7 @@ option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
-set(QOD_NODE_PROTOCOL 1)
+set(QOD_NODE_PROTOCOL 2)
 
 if(NOT DUCKDB_HOME)
   set(DUCKDB_HOME $ENV{DUCKDB_HOME})
@@ -185,8 +185,10 @@ if(QOD_NODE_TESTS)
   add_test(NAME authz COMMAND authz_test)
   qod_node_test(authz_engine_test)
   add_test(NAME authz_engine COMMAND authz_engine_test)
+  qod_node_test(handle_tool)
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
-    add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh $<TARGET_FILE:qod-node>)
+    add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh
+      $<TARGET_FILE:qod-node> $<TARGET_FILE:handle_tool>)
   endif()
 endif()

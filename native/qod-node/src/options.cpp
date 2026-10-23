@@ -47,6 +47,8 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 			options.secrets_ephemeral = true;
 		} else if (arg == "--secret-directory") {
 			options.secret_directory = Value(args, i);
+		} else if (arg == "--node-id") {
+			options.node_id = Value(args, i);
 		} else if (arg == "--init") {
 			options.init_files.push_back(Value(args, i));
 		} else if (arg == "--parent-pid") {
@@ -65,6 +67,9 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 		if (options.secret_directory.empty()) {
 			throw std::invalid_argument("--secret-directory is required");
 		}
+		if (options.node_id.empty()) {
+			throw std::invalid_argument("--node-id is required");
+		}
 	}
 	return options;
 }
@@ -72,7 +77,7 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 std::string Usage() {
 	return "usage:\n"
 	       "  qod-node --port <port> [--bind <address>] --secrets-dir <dir> [--secrets-ephemeral]\n"
-	       "           --secret-directory <path> [--init <file>|-]... [--parent-pid <pid>]\n"
+	       "           --secret-directory <path> --node-id <id> [--init <file>|-]... [--parent-pid <pid>]\n"
 	       "  qod-node --build-info\n"
 	       "  qod-node --list-settings [--init <file>|-]...\n";
 }

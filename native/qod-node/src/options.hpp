@@ -20,6 +20,8 @@ struct NodeOptions {
 	bool secrets_ephemeral = false;
 	//! DuckDB's secret_directory, set before anything else runs.
 	std::string secret_directory;
+	//! This node's id ($QOD_NODE_ID): every session handle the node accepts must name it.
+	std::string node_id;
 	//! Init SQL files ("-": stdin, how the spawn scripts hand it over), run statement by statement,
 	//! best effort.
 	std::vector<std::string> init_files;

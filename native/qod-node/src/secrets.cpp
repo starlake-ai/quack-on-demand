@@ -1,5 +1,6 @@
 #include "secrets.hpp"
 
+#include "crypto.hpp"
 #include "utf8_args.hpp"
 
 #include <filesystem>
@@ -26,6 +27,18 @@ std::string ReadSecret(const std::string &dir, const std::string &key) {
 		throw std::runtime_error("the secrets directory's " + key + " is empty");
 	}
 	return value;
+}
+
+std::string ReadNodeKey(const std::string &dir) {
+	auto hex = ReadSecret(dir, "QOD_NODE_AUTHZ_KEY");
+	bool lower_hex = hex.size() == 64;
+	for (auto c : hex) {
+		lower_hex = lower_hex && ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+	}
+	if (!lower_hex) {
+		throw std::runtime_error("the secrets directory's QOD_NODE_AUTHZ_KEY is not 64 lowercase hex digits");
+	}
+	return FromHex(hex);
 }
 
 void DisposeSecrets(const std::string &dir, bool ephemeral) {

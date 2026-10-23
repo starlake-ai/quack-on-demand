@@ -150,7 +150,7 @@ jobs:
           fi
           ln -s "$DUCKDB_HOME/lib" "$layout/lib"
           "$layout/bin/qod-node" --build-info
-          bash native/qod-node/tests/process_test.sh "$layout/bin/qod-node"
+          bash native/qod-node/tests/process_test.sh "$layout/bin/qod-node" native/qod-node/build/handle_tool
 
       - uses: actions/upload-artifact@v7
         with:
@@ -226,7 +226,8 @@ jobs:
           native/qod-node/tests/windows_spawn_smoke.ps1 `
             -NodeBin "$env:GITHUB_WORKSPACE\native\qod-node\build\Release\qod-node.exe" `
             -DuckdbCli "$env:DUCKDB_HOME/bin/duckdb.exe" `
-            -SpawnScript "$env:GITHUB_WORKSPACE\scripts\spawn-quack-node.ps1"
+            -SpawnScript "$env:GITHUB_WORKSPACE\scripts\spawn-quack-node.ps1" `
+            -HandleTool "$env:GITHUB_WORKSPACE\native\qod-node\build\Release\handle_tool.exe"
 
       - uses: actions/upload-artifact@v7
         with:

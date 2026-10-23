@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Process-level tests for qod-node (POSIX). Run by ctest, or directly:
 #
-#   process_test.sh <qod-node binary>
+#   process_test.sh <qod-node binary> [<handle_tool binary>]
 #
-# With DUCKDB_CLI set to a release duckdb CLI, it also queries the node over quack.
+# With DUCKDB_CLI set to a release duckdb CLI, it also talks to the node over quack: a statement
+# without a session handle is refused, and with handle_tool a valid prelude installs, a replayed or
+# foreign-node one does not.
 set -uo pipefail
 
-node_bin="${1:?usage: process_test.sh <qod-node binary>}"
+node_bin="${1:?usage: process_test.sh <qod-node binary> [<handle_tool binary>]}"
+handle_tool="${2:-}"
 work="$(mktemp -d)"
 failures=0
 pids=()
+# The node key every test node gets, and its id.
+node_key="4242424242424242424242424242424242424242424242424242424242424242"
+node_id="quack-test-node-1"
 
 cleanup() {
   for pid in "${pids[@]+"${pids[@]}"}"; do
@@ -61,12 +67,13 @@ new_secrets() {
   local dir="$work/secrets é ü.$RANDOM"
   mkdir -p "$dir"
   printf '%s' "$1" > "$dir/QOD_NODE_TOKEN"
+  printf '%s' "${2-$node_key}" > "$dir/QOD_NODE_AUTHZ_KEY"
   echo "$dir"
 }
 
 # --- build marker ---------------------------------------------------------------------------------
 marker="$("$node_bin" --build-info)"
-if [[ ! "$marker" =~ ^qod-node-build-info:protocol=[0-9]+\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
+if [[ ! "$marker" =~ ^qod-node-build-info:protocol=2\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
   fail "unexpected build marker: $marker"
 fi
 
@@ -79,25 +86,49 @@ grep -q -- '--port is required' "$work/usage.out" || fail "no arguments: missing
 "$node_bin" --port 70000 > /dev/null 2>&1
 [[ $? -eq 2 ]] || fail "--port 70000 must be refused"
 
-# --- missing token --------------------------------------------------------------------------------
+"$node_bin" --port "$(port)" --secrets-dir "$work/x" --secret-directory "$work/secret-dir" > "$work/no-id.out" 2>&1
+status=$?
+[[ $status -eq 2 ]] || fail "no --node-id: exit $status, expected 2"
+grep -q -- '--node-id is required' "$work/no-id.out" || fail "no --node-id: missing '--node-id is required'"
+
+# --- missing or malformed secrets -----------------------------------------------------------------
 mkdir -p "$work/empty-secrets"
 "$node_bin" --port "$(port)" --secrets-dir "$work/empty-secrets" --secret-directory "$work/secret-dir" \
-  > "$work/no-token.out" 2>&1
+  --node-id "$node_id" > "$work/no-token.out" 2>&1
 status=$?
 [[ $status -eq 1 ]] || fail "missing token: exit $status, expected 1"
 grep -q 'has no QOD_NODE_TOKEN' "$work/no-token.out" || fail "missing token: message not found"
 
-# An ephemeral secrets directory goes even when the token read fails.
+mkdir -p "$work/no-key"
+printf 'tok-no-key' > "$work/no-key/QOD_NODE_TOKEN"
+"$node_bin" --port "$(port)" --secrets-dir "$work/no-key" --secret-directory "$work/secret-dir" \
+  --node-id "$node_id" > "$work/no-key.out" 2>&1
+status=$?
+[[ $status -eq 1 ]] || fail "missing node key: exit $status, expected 1"
+grep -q 'has no QOD_NODE_AUTHZ_KEY' "$work/no-key.out" || fail "missing node key: message not found"
+
+"$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-key "4242ZZ")" --secret-directory "$work/secret-dir" \
+  --node-id "$node_id" > "$work/bad-key.out" 2>&1
+status=$?
+[[ $status -eq 1 ]] || fail "malformed node key: exit $status, expected 1"
+grep -q 'QOD_NODE_AUTHZ_KEY is not 64 lowercase hex digits' "$work/bad-key.out" ||
+  fail "malformed node key: message not found"
+if grep -q '4242ZZ' "$work/bad-key.out"; then
+  fail "malformed node key: the key reached the output"
+fi
+
+# An ephemeral secrets directory goes even when a read fails.
 mkdir -p "$work/empty-ephemeral"
 "$node_bin" --port "$(port)" --secrets-dir "$work/empty-ephemeral" --secrets-ephemeral \
-  --secret-directory "$work/secret-dir" > /dev/null 2>&1
+  --secret-directory "$work/secret-dir" --node-id "$node_id" > /dev/null 2>&1
 [[ ! -e "$work/empty-ephemeral" ]] || fail "missing token: the ephemeral secrets directory was kept"
 
 # --- a stop while starting ends the node at once --------------------------------------------------
 # An init FIFO no one writes blocks startup in open(), where only an immediate exit reaches it.
 mkfifo "$work/stuck-init"
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-stuck)" \
-  --secret-directory "$work/secret-dir" --init "$work/stuck-init" > "$work/stuck-term.out" 2>&1 &
+  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/stuck-init" \
+  > "$work/stuck-term.out" 2>&1 &
 stuck=$!
 pids+=("$stuck")
 sleep 1
@@ -114,8 +145,8 @@ sleep 300 &
 stuck_parent=$!
 pids+=("$stuck_parent")
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-orphan)" \
-  --secret-directory "$work/secret-dir" --init "$work/stuck-init" --parent-pid "$stuck_parent" \
-  > "$work/stuck-parent.out" 2>&1 &
+  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/stuck-init" \
+  --parent-pid "$stuck_parent" > "$work/stuck-parent.out" 2>&1 &
 orphan=$!
 pids+=("$orphan")
 sleep 1
@@ -128,7 +159,7 @@ else
   fail "parent end while starting: the node outlived its parent"
 fi
 
-# --- serve: best-effort init, token kept out of the output, parent watch ---------------------------
+# --- serve: best-effort init, secrets kept out of the output, identity checks, parent watch -------
 token="token-$RANDOM$RANDOM"
 secrets="$(new_secrets "$token")"
 cat > "$work/init.sql" <<'SQL'
@@ -142,7 +173,7 @@ sleep 300 &
 parent=$!
 pids+=("$parent")
 "$node_bin" --port "$serve_port" --bind 127.0.0.1 --secrets-dir "$secrets" --secrets-ephemeral \
-  --secret-directory "$work/secret-dir" --init "$work/init.sql" --parent-pid "$parent" \
+  --secret-directory "$work/secret-dir" --node-id "$node_id" --init "$work/init.sql" --parent-pid "$parent" \
   > "$work/serve.out" 2>&1 &
 node=$!
 pids+=("$node")
@@ -158,19 +189,31 @@ else
     fail "serve: a failing init statement's text reached the output"
   fi
   grep -q "serving on" "$work/serve.out" || fail "serve: no listen url reported"
-  if grep -q "$token" "$work/serve.out"; then
-    fail "serve: the token reached the output"
+  if grep -q -e "$token" -e "$node_key" "$work/serve.out"; then
+    fail "serve: a secret reached the output"
   fi
   [[ ! -e "$secrets" ]] || fail "serve: the ephemeral secrets directory was not removed"
 
   if [[ -n "${DUCKDB_CLI:-}" ]]; then
-    "$DUCKDB_CLI" -noheader -list > "$work/client.out" 2>&1 <<SQL
-INSTALL quack;
-LOAD quack;
-ATTACH 'quack:127.0.0.1:$serve_port' AS q (TYPE quack, TOKEN '$token');
-FROM quack_query_by_name('q', 'SELECT v FROM memory.main.answers');
-SQL
-    grep -qx '42' "$work/client.out" || { fail "quack: could not read the init table"; cat "$work/client.out"; }
+    # One quack_query is one client connection with one PREPARE.
+    quack_query() {
+      DUCKDB_AGENT_MODE=0 HOME="$work/client-home" "$DUCKDB_CLI" -noheader -list \
+        -c "INSTALL quack; LOAD quack; FROM quack_query('quack:127.0.0.1:$serve_port', '$1', token := '$token');" 2>&1
+    }
+    mkdir -p "$work/client-home"
+    quack_query "SELECT v FROM memory.main.answers" > "$work/no-handle.out"
+    grep -q 'no verified principal' "$work/no-handle.out" ||
+      { fail "quack: a statement without a session handle was not refused"; cat "$work/no-handle.out"; }
+    if [[ -n "$handle_tool" ]]; then
+      handle="$("$handle_tool" "$node_key" "$node_id" u-test 60000)"
+      quack_query "CALL system.main.qod_session(''$handle'')" > "$work/prelude.out"
+      grep -qx 'true' "$work/prelude.out" || { fail "quack: a valid prelude did not install"; cat "$work/prelude.out"; }
+      quack_query "CALL system.main.qod_session(''$handle'')" > "$work/replay.out"
+      grep -q 'already used' "$work/replay.out" || { fail "quack: a replayed handle was not refused"; cat "$work/replay.out"; }
+      foreign="$("$handle_tool" "$node_key" quack-other-node u-test 60000)"
+      quack_query "CALL system.main.qod_session(''$foreign'')" > "$work/foreign.out"
+      grep -q 'another node' "$work/foreign.out" || { fail "quack: a foreign-node handle was not refused"; cat "$work/foreign.out"; }
+    fi
   fi
 
   kill "$parent"
@@ -185,7 +228,7 @@ fi
 # --- serve: init SQL on stdin, SIGTERM stops the node ---------------------------------------------
 printf 'CREATE TABLE piped AS SELECT 7 AS v;\nSELECT * FROM piped;' |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-one)" \
-    --secret-directory "$work/secret-dir" --init - > "$work/term.out" 2>&1 &
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/term.out" 2>&1 &
 term_node=$!
 pids+=("$term_node")
 if wait_for '\[qod-node\] ready' "$work/term.out"; then
@@ -206,7 +249,7 @@ fi
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack
 # does not refuse a port another listener holds.)
 "$node_bin" --port "$(port)" --bind 192.0.2.1 --secrets-dir "$(new_secrets token-two)" \
-  --secret-directory "$work/secret-dir" > "$work/unbindable.out" 2>&1 &
+  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/unbindable.out" 2>&1 &
 unbindable=$!
 pids+=("$unbindable")
 if wait_exit "$unbindable"; then
