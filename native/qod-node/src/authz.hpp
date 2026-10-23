@@ -14,10 +14,14 @@ namespace qod {
 //! parse screen and again from post_bind. The manager's health probe expects it (the canary).
 constexpr const char *kNoPrincipal = "qod-node: this connection has no verified principal";
 
-//! The manager's prelude, CALL qod_session('<handle>'), sent as its own PREPARE before every
-//! statement on a node connection.
-constexpr const char *kPreludePrefix = "CALL qod_session('";
+//! The manager's prelude, CALL system.main.qod_session('<handle>'), sent as its own PREPARE before
+//! every statement on a node connection. Qualified, like the screen: a macro a session creates in
+//! the default search path or in its temp schema cannot shadow it.
+constexpr const char *kPreludePrefix = "CALL system.main.qod_session('";
 constexpr const char *kPreludeSuffix = "')";
+
+//! How every refusal of a session handle starts, from the parse screen and from qod_session.
+constexpr const char *kHandleRefused = "qod-node: session handle refused: ";
 
 //! Milliseconds since the epoch.
 using Clock = std::function<int64_t()>;
@@ -65,6 +69,11 @@ public:
 	//! its handle verifies, is unused and may install on the connection (RefreshRefusal), and records
 	//! the handle's principal for the connection; admits any other statement only on a connection
 	//! whose recorded principal is still current. Returns empty to admit, else the refusal.
+	//!
+	//! The book is advisory: it cannot learn that a connection closed, so a record lasts as long as
+	//! its handle, and once it expired another principal's prelude is admitted here. The session
+	//! decides (qod_session keeps a connection's principal for its life; post_bind refuses a
+	//! statement without a current one); the screen only stops what it can before bind.
 	std::string Screen(const std::string &connection_id, const std::string &sql);
 
 private:

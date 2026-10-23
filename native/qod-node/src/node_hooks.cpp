@@ -35,10 +35,10 @@ public:
 		}
 		auto refusal = RefreshRefusal(installed_ ? &current_ : nullptr, handle);
 		if (!refusal.empty()) {
-			throw PermissionException("qod-node: session handle refused: " + refusal);
+			throw PermissionException(kHandleRefused + refusal);
 		}
 		if (!authz.Consume(handle)) {
-			throw PermissionException("qod-node: session handle refused: it was already used");
+			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce};
 		installed_ = true;
@@ -95,7 +95,7 @@ unique_ptr<FunctionData> SessionBind(ClientContext &context, TableFunctionBindIn
 	try {
 		handle = authz.Verify(input.inputs[0].GetValue<string>());
 	} catch (std::invalid_argument &error) {
-		throw PermissionException(std::string("qod-node: session handle refused: ") + error.what());
+		throw PermissionException(kHandleRefused + std::string(error.what()));
 	}
 	context.registered_state->GetOrCreate<SessionState>(SessionState::kKey)->Install(authz, handle);
 	return_types.push_back(LogicalType::BOOLEAN);
@@ -143,16 +143,20 @@ void ScreenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 // ---- post_bind -----------------------------------------------------------------------------------
 
-//! quack's callbacks: changing either from a session would switch the node's checks off.
-void RefuseCallbackSetting(LogicalOperator &plan) {
+//! quack's callbacks: changing either from a session would switch the node's checks off. The whole
+//! tree, not just its root: EXPLAIN ANALYZE runs the SET or RESET it wraps.
+void RefuseCallbackSetting(LogicalOperator &op) {
 	const Identifier *name = nullptr;
-	if (plan.type == LogicalOperatorType::LOGICAL_SET) {
-		name = &plan.Cast<LogicalSet>().name;
-	} else if (plan.type == LogicalOperatorType::LOGICAL_RESET) {
-		name = &plan.Cast<LogicalReset>().name;
+	if (op.type == LogicalOperatorType::LOGICAL_SET) {
+		name = &op.Cast<LogicalSet>().name;
+	} else if (op.type == LogicalOperatorType::LOGICAL_RESET) {
+		name = &op.Cast<LogicalReset>().name;
 	}
 	if (name && (*name == "quack_authorization_function" || *name == "quack_authentication_function")) {
 		throw PermissionException("qod-node: " + name->GetIdentifierName() + " cannot be changed");
+	}
+	for (auto &child : op.children) {
+		RefuseCallbackSetting(*child);
 	}
 }
 

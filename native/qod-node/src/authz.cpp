@@ -13,7 +13,7 @@ bool IsHandleCharacter(char c) {
 	       c == '.';
 }
 
-const std::string kRefused = "qod-node: session handle refused: ";
+const std::string kRefused = kHandleRefused;
 
 } // namespace
 

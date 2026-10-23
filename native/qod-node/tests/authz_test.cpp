@@ -36,12 +36,13 @@ int64_t now_ms = 1761200000000;
 
 int main() {
 	// ---- the prelude: exactly the manager's spelling
-	Expect(qod::PreludeHandle("CALL qod_session('abc.0f')") == "abc.0f", "the prelude");
-	Expect(qod::PreludeHandle("call qod_session('abc.0f')").empty(), "another spelling is no prelude");
-	Expect(qod::PreludeHandle(" CALL qod_session('abc.0f')").empty(), "a leading blank");
-	Expect(qod::PreludeHandle("CALL qod_session('a'); SELECT 1").empty(), "a second statement");
-	Expect(qod::PreludeHandle("CALL qod_session('a''b')").empty(), "a quote inside the handle");
-	Expect(qod::PreludeHandle("CALL qod_session('')").empty(), "no handle");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('abc.0f')") == "abc.0f", "the prelude");
+	Expect(qod::PreludeHandle("CALL qod_session('abc.0f')").empty(), "unqualified, a macro could shadow it");
+	Expect(qod::PreludeHandle("call system.main.qod_session('abc.0f')").empty(), "another spelling is no prelude");
+	Expect(qod::PreludeHandle(" CALL system.main.qod_session('abc.0f')").empty(), "a leading blank");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('a'); SELECT 1").empty(), "a second statement");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('a''b')").empty(), "a quote inside the handle");
+	Expect(qod::PreludeHandle("CALL system.main.qod_session('')").empty(), "no handle");
 
 	// ---- refresh rules
 	qod::Handle next;
@@ -75,6 +76,10 @@ int main() {
 	ExpectMentions(authz.Screen("c-4", Prelude(first)), "already used", "a consumed handle elsewhere");
 	now_ms += 61000;
 	Expect(authz.Screen("c-1", "SELECT 1") == qod::kNoPrincipal, "an expired record");
+	// The book is advisory: once a record expired it admits another principal's prelude; the
+	// session refuses it (authz_engine_test).
+	Expect(authz.Screen("c-1", Prelude(Mint("u-9", now_ms + 60000))).empty(),
+	       "after expiry the book admits another principal");
 
 	if (failures == 0) {
 		std::cout << "authz_test: all passed" << std::endl;
