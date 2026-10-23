@@ -49,10 +49,7 @@ final class LocalQuackBackend(
   // A manager killed together with a node it was spawning can leave a secrets directory behind.
   NodeSecretFiles.sweepStale()
 
-  def start(spec: NodeSpec): IO[RunningNode] =
-    QuackBackend.screenBootSql(spec) *> startScreened(spec)
-
-  private def startScreened(spec: NodeSpec): IO[RunningNode] = IO.blocking {
+  def start(spec: NodeSpec): IO[RunningNode] = IO.blocking {
     // One process per node id. A start under an id this backend still holds (reconcile replacing
     // a node it judged dead) stops the held process first: overwriting the handle instead would
     // leave that process running untracked, holding its port past every stop path, and leak the

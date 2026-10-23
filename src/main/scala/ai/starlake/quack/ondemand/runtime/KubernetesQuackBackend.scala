@@ -415,9 +415,6 @@ final class KubernetesQuackBackend(
     svc
 
   def start(spec: NodeSpec): IO[RunningNode] =
-    QuackBackend.screenBootSql(spec) *> startScreened(spec)
-
-  private def startScreened(spec: NodeSpec): IO[RunningNode] =
     // Which resources THIS call created, so partial-start cleanup never tears down a
     // Terminating incumbent's resources after a 409'd create.
     val created = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()

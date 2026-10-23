@@ -6,9 +6,9 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 /** Pins the two engine behaviours `IcebergAttachVerifier` is built on, against a real duckdb CLI
-  * that carries on past a failed statement the way a node does. A node reads its init SQL through
-  * `-init` with `.bail off` (`scripts/spawn-quack-node.sh`); this spec feeds the CLI one statement
-  * per line on stdin, which carries on the same way.
+  * that carries on past a failed statement the way a node does. A node's qod-node runs the init SQL
+  * `scripts/spawn-quack-node.sh` assembles statement by statement, carrying on past a failing one;
+  * this spec feeds the CLI one statement per line on stdin, which carries on the same way.
   *
   *   1. A failed ATTACH does NOT abort the statements after it. This is why a node comes up healthy
   *      with a catalog silently missing, and therefore why the verifier has to exist at all. If a
@@ -23,10 +23,10 @@ import org.scalatest.matchers.should.Matchers
   * other way, behaviour (1) reads as false. See `IcebergFixture`'s scaladoc for both probes.
   *
   * Exit code is non-zero in both continuing cases, because a statement did fail. That code is
-  * exactly the signal a node discards: `spawn-quack-node.sh` leaves duckdb serving and never
-  * inspects it, so the process reports failure while the pool reports healthy. The assertions
-  * below pin it as non-zero for that reason, and a spec expecting 0 here would be asserting the
-  * opposite of what the node actually sees.
+  * exactly the signal a node discards: qod-node logs a failing init statement and serves anyway, so
+  * a statement reports failure while the pool reports healthy. The assertions below pin it as
+  * non-zero for that reason, and a spec expecting 0 here would be asserting the opposite of what
+  * the node actually sees.
   *
   * Case 1 needs only a duckdb CLI and an endpoint that refuses connections; case 2 also needs the
   * live fixture. Cancelled, not failed, when what it needs is absent.

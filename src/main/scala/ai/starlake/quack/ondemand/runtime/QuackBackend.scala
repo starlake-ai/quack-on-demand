@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.{InitSqlScreen, NodeSpec, PoolKey, RunningNode}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import cats.effect.IO
 
 trait QuackBackend:
@@ -59,16 +59,3 @@ trait QuackBackend:
     * and never prunes or respawns on it.
     */
   def liveNodeIds(key: PoolKey): IO[Option[Set[String]]] = IO.pure(None)
-
-object QuackBackend:
-
-  /** Fails when the boot SQL of `spec` holds a DuckDB CLI dot-command line
-    * ([[ai.starlake.quack.model.InitSqlScreen InitSqlScreen]]): the values as resolved for this
-    * spawn, `{{secret.NAME}}` values and rows stored before the write-time screens included. Every
-    * backend's `start` runs it before anything else, so no caller (a serving spawn, a maintenance
-    * or merge node, a module) can hand one to a node.
-    */
-  def screenBootSql(spec: NodeSpec): IO[Unit] =
-    InitSqlScreen.nodeSpecError(spec) match
-      case Some(msg) => IO.raiseError(new IllegalArgumentException(msg))
-      case None      => IO.unit

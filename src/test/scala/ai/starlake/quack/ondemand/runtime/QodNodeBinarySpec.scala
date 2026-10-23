@@ -141,11 +141,23 @@ class QodNodeBinarySpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     Files.exists(bin.getParent.getParent.resolve("lib")) shouldBe false
   }
 
+  /** The provisioned libduckdb's directory, read from DUCKDB_CACHE_DIR (build.sbt points forked
+    * tests at the main checkout's cache), not from [[QuackNativeSupport.libDuckDbDir]]: that reads
+    * a JVM-wide preload record other specs set to stub libraries.
+    */
+  private def provisionedLibDir: Option[Path] =
+    val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")
+    sys.env
+      .get("DUCKDB_CACHE_DIR")
+      .filter(_.trim.nonEmpty)
+      .map(d => Paths.get(d, abi, "lib"))
+      .filter(dir => Files.isRegularFile(dir.resolve(System.mapLibraryName("duckdb"))))
+
   "the vendored qod-node of this platform" should "install and start through its relative rpath" in {
     val platform = QuackNativeSupport.platform()
     val bytes    = platform.flatMap(QodNodeBinary.bundledBytes)
     assume(bytes.nonEmpty, s"no qod-node is vendored for ${platform.getOrElse("this platform")}")
-    val realLib = QuackNativeSupport.libDuckDbDir
+    val realLib = provisionedLibDir
     assume(realLib.nonEmpty, "no provisioned libduckdb (DUCKDB_CACHE_DIR)")
     // A cache of this test's own, its lib/ a link to the real one, so nothing is written there.
     val lib = tmp.resolve("cache/2.0.0/lib")

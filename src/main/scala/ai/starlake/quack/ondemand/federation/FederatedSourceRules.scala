@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.federation
 
-import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, InitSqlScreen}
+import ai.starlake.quack.model.{FederatedSource, FederatedSourceType}
 import ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind}
 
@@ -44,7 +44,7 @@ object FederatedSourceRules:
         val lower = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
         ReservedSecretPrefixes.filter(lower.contains).map { p =>
           s"setupSql mentions '$p', a secret-name prefix reserved for QoD's typed sources"
-        } ++ InitSqlScreen.error("setupSql", source.setupSql)
+        }
       case FederatedSourceType.IcebergRest =>
         config.toList.flatMap { json =>
           IcebergRestConfig.fromJson(json) match

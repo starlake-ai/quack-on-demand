@@ -1918,7 +1918,7 @@ Things to know:
 Manager: `QOD_RUNTIME_TYPE=fleet QOD_FLEET_JOIN_TOKEN=<random>` (plus HA if you run several managers).
 Every Linux or macOS server: `QOD_FLEET_JOIN_TOKEN=<random> uvx qod fleet join --manager https://mgr --advertise-host <data-ip>`
 (`https://mgr` is a TLS-terminating proxy in front of the REST port: the port itself has no TLS, so never point `https://` at `:20900`. `qod fleet join` refuses `http://` because the assignment carries credentials; `--manager http://mgr:20900 --insecure` is for tests on a trusted network only)
-under systemd or launchd (unit files below): `qod fleet join` is long-running, it heartbeats and runs the node the manager assigns until stopped. Pass the token through the environment, never
+under systemd or launchd (unit files below): `qod fleet join` is long-running, it heartbeats and runs the node the manager assigns until stopped. The node is qod-node, the node binary qod bundles for Linux and macOS (x86_64, aarch64), installed in the qod cache beside the DuckDB library qod downloads; `--qod-node-bin <path>` runs another build. Run the same qod version on the servers as the manager. Pass the token through the environment, never
 `--join-token`: a command-line argument is visible to every local user in `ps`. A joined server runs exactly one node; pools are scheduled
 onto free servers whose reported RAM covers the pool's `--memory`. `qod pool create --size 3` before three
 servers exist is fine: the pool shows `pending` (reason `none_free` or `none_fits`) until they join.
@@ -1990,7 +1990,7 @@ command line, `KeepAlive` true, `EnvironmentVariables` carrying the token. On a 
 start reaps the previous node through `node.pid` in the state dir.
 
 The node does NOT inherit the join process's whole environment (it holds the join token). It gets only
-`PATH HOME TMPDIR LANG LC_ALL TZ USER LOGNAME SHELL`, the proxy variables, `DUCKDB_BIN`, `QOD_APP_HOME`,
+`PATH HOME TMPDIR LANG LC_ALL TZ USER LOGNAME SHELL`, the proxy variables,
 `QOD_S3_*` / `QOD_AZURE_*`, and these metastore settings, so set them on the `qod fleet join` unit when needed:
 `PG_ADMIN_DB` (the database `CREATE DATABASE` runs from, when it is not `postgres`), `PGSSLMODE`,
 `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `PGCONNECT_TIMEOUT` (a metastore reached over TLS) and
@@ -2009,7 +2009,8 @@ The node does NOT inherit the join process's whole environment (it holds the joi
 ### Fleet servers as Docker containers
 
 Manager and servers can all be containers. One container per server (normally one per host), from
-`starlakeai/quack-on-demand-worker` (it runs `qod fleet join` and bundles DuckDB):
+`starlakeai/quack-on-demand-worker` (it runs `qod fleet join` and bundles the node binary and its DuckDB
+library):
 
     docker run -d --name qod-worker --restart unless-stopped --stop-timeout 70 \
       -p 21900:21900 \

@@ -6,7 +6,6 @@ import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
   FederatedSourceType,
-  InitSqlScreen,
   LockdownTriState,
   Names,
   NodePlacement,
@@ -158,11 +157,6 @@ object ManifestImporter extends LazyLogging:
         // manifest fields are rejected: accumulate a validation error rather
         // than throwing at apply time.
         LockdownTriState.parse(p.lockdown).left.foreach { msg =>
-          errs += s"tenant '${t.name}' pool '${p.name}': $msg"
-        }
-        // The pool's boot SQL, refused here because apply writes pool rows straight to the store
-        // (a tenant-db's initSql goes through TenantDb.validateSafety at apply).
-        InitSqlScreen.error("initSql", p.initSql).foreach { msg =>
           errs += s"tenant '${t.name}' pool '${p.name}': $msg"
         }
         // Reject a malformed demand scale-out band (one-sided, inverted,

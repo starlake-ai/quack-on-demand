@@ -227,9 +227,6 @@ object TenantDb {
       .orElse(pgPortError(td.metastore))
       .orElse(dataPathError(td.dataPath))
       .orElse(objectStoreError(td.objectStore))
-      // Not a metacharacter rule: initSql is SQL by design, but the CLI runs a dot-command line in
-      // it as an OS command (InitSqlScreen).
-      .orElse(InitSqlScreen.error("initSql", td.initSql))
 
   /** Required metastore keys per kind. Used by both [[validate]] (presence check at create time)
     * and [[ai.starlake.quack.ondemand.PoolSupervisor.updateTenantDb]] (drop guard at update time)

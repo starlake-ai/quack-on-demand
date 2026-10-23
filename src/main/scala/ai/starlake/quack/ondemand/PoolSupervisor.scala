@@ -4,7 +4,6 @@ import java.util.Locale
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
   BranchStatus,
-  InitSqlScreen,
   Names,
   NodePlacement,
   NodeSpec,
@@ -2189,10 +2188,6 @@ final class PoolSupervisor(
           )
           require(size > 0, s"role distribution must sum to at least 1: $dist")
           require(dist.isValidFor(size), s"role distribution does not sum to $size")
-          // Every create path (REST and MCP refuse it with a 400 first, the branch service, any
-          // module) lands here, so this is the choke point for the pool's own boot SQL.
-          val initSqlErr = InitSqlScreen.error("initSql", initSql)
-          require(initSqlErr.isEmpty, initSqlErr.getOrElse(""))
           // Cohorts are always persisted as authored so a local-defined pool can be exported and
           // replayed on K8s with placement intact. K8s reads `NodeSpec.placement`; local backends
           // ignore it (the UI warns before submit).
