@@ -5,6 +5,7 @@
 #include "handle.hpp"
 #include "json.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -52,9 +53,40 @@ std::string Sign(const std::string &payload, const std::string &key = kKey) {
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(key, payload));
 }
 
+// The golden handle NodeHandlesSpec (Scala) mints from fixed inputs: both sides agree on the format.
+void VerifyGolden(const std::string &path) {
+	std::ifstream in(path);
+	if (!in) {
+		std::cerr << "FAIL: cannot read " << path << std::endl;
+		failures++;
+		return;
+	}
+	std::string line, key_hex, text;
+	while (std::getline(in, line)) {
+		if (line.rfind("key=", 0) == 0) {
+			key_hex = line.substr(4);
+		} else if (line.rfind("handle=", 0) == 0) {
+			text = line.substr(7);
+		}
+	}
+	try {
+		auto handle = qod::VerifyHandle(text, qod::FromHex(key_hex), "quack-acme-db-bi-1", 1761200000000);
+		Expect(handle.principal.id == "u-1" && handle.principal.name == "alice" && handle.principal.tenant == "acme",
+		       "golden principal");
+		Expect(!handle.principal.superuser && !handle.principal.system, "golden flags");
+		Expect(handle.replica == "http://10.0.0.1:20900" && handle.pool == "acme/acme_db/bi", "golden replica, pool");
+		Expect(handle.policy_version == 42 && handle.nonce == "0123456789abcdef0123456789abcdef" &&
+		           handle.exp == 1761200060000,
+		       "golden version, nonce, exp");
+	} catch (std::invalid_argument &error) {
+		std::cerr << "FAIL: the golden handle does not verify: " << error.what() << std::endl;
+		failures++;
+	}
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
 	// ---- json
 	auto doc = qod::ParseJson(" {\"a\": [1, -2, true, null, \"x\\n\\u00e9\\ud83e\\udd86\"], \"b\": {\"c\": false}} ");
 	Expect(doc.Get("a", qod::JsonValue::Kind::ARRAY).array.size() == 5, "json array");
@@ -127,6 +159,10 @@ int main() {
 	promoted.superuser = true;
 	Expect(alice == qod::Principal({"u-1", "alice", "acme", false, false}), "same principal");
 	Expect(alice != promoted, "another flag is another principal");
+
+	if (argc > 1) {
+		VerifyGolden(argv[1]);
+	}
 
 	if (failures == 0) {
 		std::cout << "handle_test: all passed" << std::endl;

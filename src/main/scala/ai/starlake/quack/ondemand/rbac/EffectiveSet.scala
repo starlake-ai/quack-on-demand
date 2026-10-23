@@ -31,5 +31,8 @@ final case class EffectiveSet(
     // verbCeiling; None = no ceiling). The QoD arm needs no such field, since attenuation
     // already clipped `permissions`; the OPA arm never reads permissions, so it refuses any
     // access outside this set before asking OPA.
-    verbCeiling: Option[Set[ai.starlake.acl.parser.Verb]] = None
+    verbCeiling: Option[Set[ai.starlake.acl.parser.Verb]] = None,
+    // RoutedExecutor's system caller (ExecCaller.system): the manager acting for itself, never a
+    // user. Set only there; nodes run its statements as NodePrincipal.System.
+    system: Boolean = false
 )
