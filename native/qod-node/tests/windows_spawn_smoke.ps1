@@ -7,7 +7,7 @@
   -NodeBin as QOD_NODE_BIN, then checks that:
     - qod-node ran the init SQL the script handed it;
     - over quack, through the release DuckDB CLI (-DuckdbCli), a statement without a session handle
-      is refused and a valid prelude (minted by -HandleTool) installs;
+      is refused by the parse screen and a valid prelude (minted by -HandleTool) installs;
     - qod-node removed the secrets directory once it read its token and key;
     - qod-node exits by itself once its wrapper is killed (its parent watch).
   Exits non-zero, with the node's output, on the first failure.
@@ -85,13 +85,18 @@ while (-not ((Test-Path -LiteralPath $err) -and ((Get-Content -LiteralPath $err 
 }
 Write-Host 'node ready'
 
-if ((Get-Content -LiteralPath $err -Raw) -notmatch '\[qod-node\] init: \d+ of \d+ statement\(s\) ran') {
+if ((Get-Content -LiteralPath $err -Raw) -notmatch '\[qod-node\] init: [1-9]\d* of \d+ statement\(s\) ran') {
   Fail 'qod-node reported no init SQL run'
 }
 Write-Host 'init SQL ran'
 
-$answer = Invoke-Quack 'SELECT v FROM memory.main.fed'
-if ($answer -notmatch 'no verified principal') { Fail "a statement without a session handle was not refused: $answer" }
+# A table that does not exist: only the parse screen refuses before binding (quack words it
+# "Authorization callback failed"); the post_bind backstop refuses after it, and then a missing table
+# is a catalog error.
+$answer = Invoke-Quack 'SELECT v FROM memory.main.no_such_table'
+if ($answer -notmatch 'Authorization callback failed: .*no verified principal') {
+  Fail "a statement without a session handle was not refused by the parse screen: $answer"
+}
 Write-Host 'handle-less statement refused'
 
 $handle = (& $HandleTool $nodeKey $nodeId 'u-smoke' 60000 | Out-String).Trim()

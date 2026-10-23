@@ -33,7 +33,7 @@ object QodNodeBinary extends LazyLogging:
 
   /** The node protocol this manager speaks (`QOD_NODE_PROTOCOL` in native/qod-node/CMakeLists.txt).
     */
-  val Protocol: Int = 1
+  val Protocol: Int = 2
 
   val EnvVar: String = "QOD_NODE_BIN"
 

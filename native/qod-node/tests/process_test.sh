@@ -4,8 +4,9 @@
 #   process_test.sh <qod-node binary> [<handle_tool binary>]
 #
 # With DUCKDB_CLI set to a release duckdb CLI, it also talks to the node over quack: a statement
-# without a session handle is refused, and with handle_tool a valid prelude installs, a replayed or
-# foreign-node one does not.
+# without a session handle is refused by the parse screen, before binding, and with handle_tool a
+# valid prelude installs, a replayed or foreign-node one does not. A check it cannot run prints a
+# SKIP line saying which and why.
 set -uo pipefail
 
 node_bin="${1:?usage: process_test.sh <qod-node binary> [<handle_tool binary>]}"
@@ -28,6 +29,13 @@ trap cleanup EXIT
 fail() {
   echo "FAIL: $*"
   failures=$((failures + 1))
+}
+
+# Ends a background job of this shell and reaps it here, so bash's "Terminated" job notice (printed
+# whenever a later wait finds a job killed by a signal) does not litter the test's output.
+kill_quietly() {
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
 }
 
 # Waits up to 30 s for pattern in file. Returns non-zero on timeout.
@@ -107,15 +115,28 @@ status=$?
 [[ $status -eq 1 ]] || fail "missing node key: exit $status, expected 1"
 grep -q 'has no QOD_NODE_AUTHZ_KEY' "$work/no-key.out" || fail "missing node key: message not found"
 
-"$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-key "4242ZZ")" --secret-directory "$work/secret-dir" \
-  --node-id "$node_id" > "$work/bad-key.out" 2>&1
-status=$?
-[[ $status -eq 1 ]] || fail "malformed node key: exit $status, expected 1"
-grep -q 'QOD_NODE_AUTHZ_KEY is not 64 lowercase hex digits' "$work/bad-key.out" ||
-  fail "malformed node key: message not found"
-if grep -q '4242ZZ' "$work/bad-key.out"; then
-  fail "malformed node key: the key reached the output"
-fi
+# A node key that is not exactly 64 lowercase hex digits is refused naming the key, never its value
+# (nor any part of it: the first 8 characters are looked for).
+refuses_key() {
+  local label="$1" value="$2" message="$3" status
+  "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-key "$value")" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-key.out" 2>&1
+  status=$?
+  [[ $status -eq 1 ]] || fail "$label node key: exit $status, expected 1"
+  grep -q "$message" "$work/bad-key.out" || fail "$label node key: '$message' not found"
+  if [[ -n "$value" ]] && grep -q -F -- "${value:0:8}" "$work/bad-key.out"; then
+    fail "$label node key: the key reached the output"
+  fi
+}
+hex16="abcdef0123456789"
+lower_key="$hex16$hex16$hex16$hex16"
+not_hex="QOD_NODE_AUTHZ_KEY is not 64 lowercase hex digits"
+refuses_key "non-hex" "4242ZZ" "$not_hex"
+refuses_key "uppercase" "$(printf '%s' "$lower_key" | tr 'a-f' 'A-F')" "$not_hex"
+refuses_key "63-digit" "${lower_key%?}" "$not_hex"
+refuses_key "65-digit" "${lower_key}0" "$not_hex"
+# An empty file never reaches the format check: the secret reader refuses it first.
+refuses_key "empty" "" "QOD_NODE_AUTHZ_KEY is empty"
 
 # An ephemeral secrets directory goes even when a read fails.
 mkdir -p "$work/empty-ephemeral"
@@ -150,7 +171,7 @@ pids+=("$stuck_parent")
 orphan=$!
 pids+=("$orphan")
 sleep 1
-kill "$stuck_parent"
+kill_quietly "$stuck_parent"
 if wait_exit "$orphan"; then
   [[ "$exit_status" -eq 1 ]] || fail "parent end while starting: exit $exit_status, expected 1"
   grep -q 'stopping before ready: parent process' "$work/stuck-parent.out" ||
@@ -162,11 +183,17 @@ fi
 # --- serve: best-effort init, secrets kept out of the output, identity checks, parent watch -------
 token="token-$RANDOM$RANDOM"
 secrets="$(new_secrets "$token")"
+# The last three statements try to replace the parse screen with another authorization function
+# (INSTALL and LOAD first: the setting belongs to quack). The refusal check below only passes because
+# the node installs its own screen after the init SQL.
 cat > "$work/init.sql" <<'SQL'
 CREATE TABLE answers AS SELECT 42 AS v;
 SELEC broken;
 CREATE TABLE more AS SELECT 'a;b' AS w;
 SELECT 'qod-init-credential' FROM;
+INSTALL quack;
+LOAD quack;
+SET GLOBAL quack_authorization_function = 'system.main.no_such_function';
 SQL
 serve_port="$(port)"
 sleep 300 &
@@ -181,8 +208,9 @@ if ! wait_for '\[qod-node\] ready' "$work/serve.out"; then
   fail "serve: node never became ready"
   cat "$work/serve.out"
 else
-  grep -q '2 of 4 statement(s) ran' "$work/serve.out" || fail "serve: expected 2 of 4 init statements to run"
-  grep -q 'statement 4 of 4 failed: Parser Error: syntax error' "$work/serve.out" ||
+  # The two syntax errors fail; the rest, the override of the screen included, run.
+  grep -q '5 of 7 statement(s) ran' "$work/serve.out" || fail "serve: expected 5 of 7 init statements to run"
+  grep -q 'statement 4 of 7 failed: Parser Error: syntax error' "$work/serve.out" ||
     fail "serve: the failing statement's error was not reported"
   # DuckDB's error names the statement's text after `LINE 1:`; init SQL carries credentials.
   if grep -q -e 'qod-init-credential' -e 'LINE 1:' "$work/serve.out"; then
@@ -201,9 +229,12 @@ else
         -c "INSTALL quack; LOAD quack; FROM quack_query('quack:127.0.0.1:$serve_port', '$1', token := '$token');" 2>&1
     }
     mkdir -p "$work/client-home"
-    quack_query "SELECT v FROM memory.main.answers" > "$work/no-handle.out"
-    grep -q 'no verified principal' "$work/no-handle.out" ||
-      { fail "quack: a statement without a session handle was not refused"; cat "$work/no-handle.out"; }
+    # A table that does not exist: only the parse screen refuses before binding, and quack words that
+    # refusal "Authorization callback failed". Without the screen binding runs first (a catalog
+    # error), and for a table that exists the post_bind backstop refuses with no such prefix.
+    quack_query "SELECT v FROM memory.main.no_such_table" > "$work/no-handle.out"
+    grep -Eq 'Authorization callback failed: .*no verified principal' "$work/no-handle.out" ||
+      { fail "quack: a statement without a session handle was not refused by the parse screen"; cat "$work/no-handle.out"; }
     if [[ -n "$handle_tool" ]]; then
       handle="$("$handle_tool" "$node_key" "$node_id" u-test 60000)"
       quack_query "CALL system.main.qod_session(''$handle'')" > "$work/prelude.out"
@@ -213,10 +244,14 @@ else
       foreign="$("$handle_tool" "$node_key" quack-other-node u-test 60000)"
       quack_query "CALL system.main.qod_session(''$foreign'')" > "$work/foreign.out"
       grep -q 'another node' "$work/foreign.out" || { fail "quack: a foreign-node handle was not refused"; cat "$work/foreign.out"; }
+    else
+      echo "SKIP: quack session handle checks (valid, replayed, foreign-node): no handle_tool argument"
     fi
+  else
+    echo "SKIP: quack identity checks (refusal without a handle, session handles): DUCKDB_CLI is not set"
   fi
 
-  kill "$parent"
+  kill_quietly "$parent"
   if wait_exit "$node"; then
     [[ "$exit_status" -eq 0 ]] || fail "parent watch: exit $exit_status, expected 0"
     grep -q 'stopping: parent process' "$work/serve.out" || fail "parent watch: no 'stopping: parent process'"
