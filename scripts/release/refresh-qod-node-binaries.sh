@@ -24,15 +24,17 @@
 set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_DIR"
+# shellcheck source=SCRIPTDIR/qod-node-build-info.sh
+source "$REPO_DIR/scripts/release/qod-node-build-info.sh"
 
 FETCH_CI="${FETCH_CI:-1}"
-UNIX_PLATFORMS=(linux-x86_64 linux-aarch64 osx-x86_64 osx-aarch64)
 VENDORED=native/qod-node/binaries
 
-protocol="$(sed -nE 's/^set\(QOD_NODE_PROTOCOL ([0-9]+)\).*/\1/p' native/qod-node/CMakeLists.txt)"
+protocol="$(qod_node_pin_protocol)"
 [[ -n "$protocol" ]] || { echo "cannot read QOD_NODE_PROTOCOL from native/qod-node/CMakeLists.txt" >&2; exit 1; }
-pin="$(sed -nE 's/^ *val duckdb *= *"([0-9]+\.[0-9]+\.[0-9]+)[^"]*".*/\1/p' project/Versions.scala)"
-[[ -n "$pin" ]] || { echo "cannot read Versions.duckdb from project/Versions.scala" >&2; exit 1; }
+duckdb="$(qod_node_pin_duckdb)"
+[[ -n "$duckdb" ]] || { echo "cannot read Versions.duckdb from project/Versions.scala" >&2; exit 1; }
+pin="${duckdb#v}"
 
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then
@@ -40,28 +42,6 @@ sha256_of() {
   else
     sha256sum "$1" | awk '{print $1}'
   fi
-}
-
-# The marker compiled into a binary (kBuildInfo in native/qod-node/src/build_info.cpp), read from
-# the file without running it, so it works for every platform on any host.
-build_marker() {
-  LC_ALL=C grep -a -o 'qod-node-build-info:[ -~]*' "$1" 2>/dev/null | head -n1
-}
-
-# check_marker <file> - prints the binary's DuckDB source id when its marker matches the pin, else
-# says why on stderr and returns 1.
-check_marker() {
-  local marker
-  marker="$(build_marker "$1")"
-  if [[ ! "$marker" =~ ^qod-node-build-info:protocol=([0-9]+)\;duckdb=(v[0-9.]+)\;duckdb_source=([0-9a-f]+)$ ]]; then
-    echo "$1 has no qod-node build marker" >&2
-    return 1
-  fi
-  if [[ "${BASH_REMATCH[1]}" != "$protocol" || "${BASH_REMATCH[2]}" != "v$pin" ]]; then
-    echo "$1 is built for node protocol ${BASH_REMATCH[1]} and DuckDB ${BASH_REMATCH[2]}; the pin is protocol $protocol, DuckDB v$pin" >&2
-    return 1
-  fi
-  echo "${BASH_REMATCH[3]}"
 }
 
 # --- host platform: cmake build with the relative rpath ---
@@ -86,7 +66,7 @@ cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Rel
   -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$duckdb_home"
 cmake --build native/qod-node/build-release --config Release --target qod-node
 host_built=native/qod-node/build-release/qod-node
-source_id="$(check_marker "$host_built")" \
+source_id="$(qod_node_check_marker "$host_built")" \
   || { echo "the host build does not match the pin; nothing was changed." >&2; exit 1; }
 
 staged=("$host_platform:$host_built")
@@ -107,11 +87,11 @@ if [[ "$FETCH_CI" == "1" ]]; then
   tmp_artifacts=$(mktemp -d)
   trap 'rm -rf "$tmp_artifacts"' EXIT
   gh run download "$ci_run_id" --dir "$tmp_artifacts" --pattern 'qod-node-*'
-  for plat in "${UNIX_PLATFORMS[@]}"; do
+  for plat in "${QOD_NODE_UNIX_PLATFORMS[@]}"; do
     [[ "$plat" == "$host_platform" ]] && continue
     f="$tmp_artifacts/qod-node-$plat/qod-node"
     [[ -f "$f" ]] || { echo "CI run $ci_run_id has no qod-node-$plat artifact; nothing was changed." >&2; exit 1; }
-    id="$(check_marker "$f")" \
+    id="$(qod_node_check_marker "$f")" \
       || { echo "CI run $ci_run_id: the $plat artifact does not match the pin; nothing was changed." >&2; exit 1; }
     [[ "$id" == "$source_id" ]] \
       || { echo "CI run $ci_run_id: $plat is built against DuckDB source $id, the host against $source_id; nothing was changed." >&2; exit 1; }
@@ -127,6 +107,6 @@ for entry in "${staged[@]}"; do
   chmod 755 "$VENDORED/$plat/qod-node"
   sha256_of "$VENDORED/$plat/qod-node" > "$VENDORED/$plat/qod-node.sha256"
 done
-printf 'protocol=%s;duckdb=v%s;duckdb_source=%s\n' "$protocol" "$pin" "$source_id" > "$VENDORED/VERSION"
+printf 'protocol=%s;duckdb=%s;duckdb_source=%s\n' "$protocol" "$duckdb" "$source_id" > "$VENDORED/VERSION"
 echo "vendored: ${staged[*]%%:*}"
 echo "refreshed. Review with 'git status $VENDORED' and commit (git update-index --chmod=+x on a new binary: core.fileMode may be off)."

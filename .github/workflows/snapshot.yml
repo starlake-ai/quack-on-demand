@@ -79,6 +79,14 @@ jobs:
           source scripts/release/release-lib.sh
           verify_quackwire_binaries
 
+      # Same for qod-node, the process every local node runs: the jar bundles one per Linux and
+      # macOS platform, and a stale one would be refused at the manager's boot.
+      - name: Verify vendored qod-node binaries match the pin
+        run: |
+          set -euo pipefail
+          source scripts/release/release-lib.sh
+          verify_qod_node_binaries
+
       - name: Set up Temurin 21
         uses: actions/setup-java@v5
         with:

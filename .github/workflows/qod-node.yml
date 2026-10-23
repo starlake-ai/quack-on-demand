@@ -1,0 +1,269 @@
+name: qod-node
+
+# Builds and tests native/qod-node, the process every node runs, against the official DuckDB release
+# libraries (never a patched or source build) on the six platforms nodes run on, and uploads each
+# binary as an artifact (qod-node-<platform>):
+#
+#   - Linux and macOS link the shared libduckdb. A development build runs ctest (statement
+#     splitting, the serve statement, and the process tests with the release CLI as quack client);
+#     the vendored build (QOD_NODE_RELATIVE_RPATH: libduckdb only in ../lib) then runs the process
+#     tests again from a {bin,lib} layout like the one the manager installs, and is the artifact
+#     scripts/release/refresh-qod-node-binaries.sh vendors under native/qod-node/binaries/.
+#   - Windows links the release static libraries (the release duckdb.dll does not export the
+#     internal C++ symbols the planner hooks use), runs ctest, then a smoke of qod-node.exe through
+#     the real spawn-quack-node.ps1 (tests/windows_spawn_smoke.ps1). Its artifact is the release
+#     asset the launchers download: too large to bundle in the jar.
+#
+# The DuckDB version is read from project/Versions.scala, like the quackwire workflow. release.yml
+# and snapshot.yml call this workflow (workflow_call) for the Windows assets they publish.
+
+on:
+  push:
+    paths:
+      - 'native/qod-node/**'
+      - 'scripts/spawn-quack-node.ps1'
+      - 'project/Versions.scala'
+      - '.github/workflows/qod-node.yml'
+  pull_request:
+    paths:
+      - 'native/qod-node/**'
+      - 'scripts/spawn-quack-node.ps1'
+      - 'project/Versions.scala'
+      - '.github/workflows/qod-node.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'The ref to build (a release tag); empty for the caller''s.'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: qod-node-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  pin:
+    name: read the DuckDB pin
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      duckdb: ${{ steps.pin.outputs.duckdb }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - id: pin
+        run: |
+          set -euo pipefail
+          # `val duckdb = "X.Y.Z.W"` -> X.Y.Z, the release tag's version.
+          duckdb="$(sed -nE 's/^[[:space:]]*val duckdb[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+".*/\1/p' project/Versions.scala)"
+          [[ -n "$duckdb" ]] || { echo "::error::cannot read val duckdb from project/Versions.scala"; exit 1; }
+          echo "DuckDB pin: v$duckdb"
+          echo "duckdb=$duckdb" >> "$GITHUB_OUTPUT"
+
+  unix:
+    name: ${{ matrix.platform }}
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            duckdb_platform: linux-amd64
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+            duckdb_platform: linux-arm64
+          - runner: macos-15-intel
+            platform: osx-x86_64
+            duckdb_platform: osx-universal
+          - runner: macos-14
+            platform: osx-aarch64
+            duckdb_platform: osx-universal
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release library, full headers, CLI)
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/libs" "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/libs.tar.gz" "$base/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp"/libs/libduckdb.* "$home/lib/"
+          cp "$tmp/cli/duckdb" "$home/bin/duckdb"
+          # The archives carry only the C headers; the hooks need the internal ones of the same tag.
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - name: Build and test (development build)
+        run: |
+          set -euo pipefail
+          export DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb"
+          cmake -S native/qod-node -B native/qod-node/build -DCMAKE_BUILD_TYPE=Release \
+            -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build --config Release
+          ctest --test-dir native/qod-node/build --output-on-failure --timeout 300
+
+      - name: Build the vendored binary (relative rpath only)
+        run: |
+          set -euo pipefail
+          cmake -S native/qod-node -B native/qod-node/build-release -DCMAKE_BUILD_TYPE=Release \
+            -DQOD_NODE_RELATIVE_RPATH=ON -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build-release --config Release --target qod-node
+          source scripts/release/qod-node-build-info.sh
+          qod_node_check_marker native/qod-node/build-release/qod-node
+
+      - name: Test the vendored binary from a {bin,lib} layout
+        run: |
+          set -euo pipefail
+          export DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb"
+          layout="$RUNNER_TEMP/layout"
+          mkdir -p "$layout/bin"
+          cp native/qod-node/build-release/qod-node "$layout/bin/qod-node"
+          # Without lib/ it must not start: it carries no path of this machine.
+          if "$layout/bin/qod-node" --build-info > /dev/null 2>&1; then
+            echo "::error::the vendored binary started with no lib/ next to it"; exit 1
+          fi
+          ln -s "$DUCKDB_HOME/lib" "$layout/lib"
+          "$layout/bin/qod-node" --build-info
+          bash native/qod-node/tests/process_test.sh "$layout/bin/qod-node"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qod-node-${{ matrix.platform }}
+          path: native/qod-node/build-release/qod-node
+          if-no-files-found: error
+
+  windows:
+    name: ${{ matrix.platform }}
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x86_64
+            duckdb_platform: windows-amd64
+            cmake_arch: x64
+          - runner: windows-11-arm
+            platform: windows-aarch64
+            duckdb_platform: windows-arm64
+            cmake_arch: ARM64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release static libraries, full headers, CLI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # POSIX path for bash and tar (GNU tar reads the "D:" of a Windows path as a remote host).
+          home="$(cygpath -u "$RUNNER_TEMP")/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/static.tar.gz" "$base/duckdb-static-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/static.tar.gz" -C "$home/lib"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp/cli/duckdb.exe" "$home/bin/duckdb.exe"
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          # Mixed form (D:/a/...) for CMake and later steps.
+          echo "DUCKDB_HOME=$(cygpath -m "$home")" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      # The static build needs its DuckDB version and source id given: no libduckdb to probe.
+      - name: Build and test (Visual Studio 2022, static DuckDB)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli="$(cygpath -u "$DUCKDB_HOME")/bin/duckdb.exe"
+          read -r version source_id < <("$cli" -noheader -list -c "SELECT library_version, source_id FROM pragma_version()" | tr '|' ' ')
+          echo "DuckDB $version ($source_id)"
+          cmake -S native/qod-node -B native/qod-node/build -A ${{ matrix.cmake_arch }} \
+            -DQOD_NODE_DUCKDB_STATIC=ON -DQOD_NODE_TESTS=ON -DDUCKDB_HOME="$DUCKDB_HOME" \
+            -DQOD_NODE_DUCKDB_VERSION="$version" -DQOD_NODE_DUCKDB_SOURCE_ID="$source_id"
+          cmake --build native/qod-node/build --config Release
+          ctest --test-dir native/qod-node/build -C Release --output-on-failure --timeout 300
+          source scripts/release/qod-node-build-info.sh
+          qod_node_check_marker native/qod-node/build/Release/qod-node.exe
+
+      - name: Smoke through spawn-quack-node.ps1
+        shell: pwsh
+        run: |
+          native/qod-node/tests/windows_spawn_smoke.ps1 `
+            -NodeBin "$env:GITHUB_WORKSPACE\native\qod-node\build\Release\qod-node.exe" `
+            -DuckdbCli "$env:DUCKDB_HOME/bin/duckdb.exe" `
+            -SpawnScript "$env:GITHUB_WORKSPACE\scripts\spawn-quack-node.ps1"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qod-node-${{ matrix.platform }}
+          path: native/qod-node/build/Release/qod-node.exe
+          if-no-files-found: error
+
+  # The rolling `snapshot` pre-release (QOD_VERSION=latest-snapshot) carries the Windows qod-node.exe
+  # of main, under the release asset names. Only for a push to main: a release takes its own from
+  # its tag (release.yml calls this workflow).
+  snapshot-assets:
+    needs: windows
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: qod-node-windows-*
+          path: qod-node
+      - name: Upload to the snapshot pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          assets=()
+          for arch in x86_64 aarch64; do
+            exe="qod-node-windows-$arch.exe"
+            cp "qod-node/qod-node-windows-$arch/qod-node.exe" "$exe"
+            shasum -a 256 "$exe" > "$exe.sha256"
+            assets+=("$exe" "$exe.sha256")
+          done
+          if ! gh release view snapshot >/dev/null 2>&1; then
+            gh release create snapshot --prerelease --title "snapshot" \
+              --notes "Rolling snapshot of main. Assets are overwritten on every push to main; see the VERSION asset for the exact version, commit, and build time. Consumed by QOD_VERSION=latest-snapshot."
+          fi
+          gh release upload snapshot --clobber "${assets[@]}"

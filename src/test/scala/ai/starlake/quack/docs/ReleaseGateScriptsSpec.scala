@@ -10,11 +10,12 @@ import scala.compiletime.uninitialized
 import scala.jdk.CollectionConverters.*
 import scala.sys.process.*
 
-/** Drives the release gates on synthetic trees: the per-binary build-marker check
-  * (scripts/release/quackwire-build-info.sh) and `verify_quackwire_binaries` built on it, and the
-  * release-pin guard (scripts/release/check-release-pins.sh). The VERSION stamp vouches for the
-  * whole binary set, so a stale binary with a correct sidecar passed the old gate; these pin that
-  * it no longer does.
+/** Drives the release gates on synthetic trees: the per-binary build-marker checks
+  * (scripts/release/quackwire-build-info.sh, scripts/release/qod-node-build-info.sh) and
+  * `verify_quackwire_binaries` / `verify_qod_node_binaries` built on them, and the release-pin
+  * guard (scripts/release/check-release-pins.sh). The VERSION stamp vouches for the whole binary
+  * set, so a stale binary with a correct sidecar passed the old gate; these pin that it no longer
+  * does.
   */
 class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach:
 
@@ -97,7 +98,7 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private def releaseTree(stale: Set[String]): Path =
     val root = tempDir.resolve("tree")
     Files.createDirectories(root.resolve("scripts/release"))
-    Seq("release-lib.sh", "quackwire-build-info.sh").foreach { f =>
+    Seq("release-lib.sh", "quackwire-build-info.sh", "qod-node-build-info.sh").foreach { f =>
       Files.copy(Paths.get(s"scripts/release/$f"), root.resolve(s"scripts/release/$f"))
     }
     Files.writeString(root.resolve("build.sbt"), s"""val libquackwireVersion = "$Pin"\n""")
@@ -135,6 +136,84 @@ class ReleaseGateScriptsSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val (code, out) = verify(releaseTree(stale = Set("windows-x86_64")))
     code shouldBe 1
     out should include("windows-x86_64/quackwire.dll")
+  }
+
+  // ---- qod-node ----------------------------------------------------------------------------
+
+  private def nodeMarker(
+      protocol: String = "1",
+      duckdb: String = "v2.0.0",
+      source: String = "d54cbbe3df"
+  ) =
+    s"qod-node-build-info:protocol=$protocol;duckdb=$duckdb;duckdb_source=$source"
+
+  /** A checkout holding what `verify_qod_node_binaries` reads: the pin (CMakeLists protocol,
+    * Versions.duckdb), the four vendored binaries with their sidecars, and VERSION.
+    */
+  private def nodeTree(
+      markers: Map[String, Option[String]] = Map.empty,
+      version: String = "protocol=1;duckdb=v2.0.0;duckdb_source=d54cbbe3df"
+  ): Path =
+    val root = releaseTree(stale = Set.empty)
+    Files.createDirectories(root.resolve("native/qod-node"))
+    Files.writeString(root.resolve("native/qod-node/CMakeLists.txt"), "set(QOD_NODE_PROTOCOL 1)\n")
+    Files.createDirectories(root.resolve("project"))
+    Files.writeString(
+      root.resolve("project/Versions.scala"),
+      "object Versions {\n  val duckdb         = \"2.0.0.0\"\n}\n"
+    )
+    val bins = root.resolve("native/qod-node/binaries")
+    Seq("linux-x86_64", "linux-aarch64", "osx-x86_64", "osx-aarch64").foreach { plat =>
+      markers.getOrElse(plat, Some(nodeMarker())) match
+        case Some(m) =>
+          val bin = fakeBinary(bins.resolve(s"$plat/qod-node"), Some(m))
+          Files.writeString(bins.resolve(s"$plat/qod-node.sha256"), sha256(bin) + "\n")
+        case None => ()
+    }
+    Files.writeString(bins.resolve("VERSION"), version + "\n")
+    root
+
+  private def verifyNodes(root: Path): (Int, String) =
+    bash(root, "source scripts/release/release-lib.sh && verify_qod_node_binaries")
+
+  "verify_qod_node_binaries" should "pass a full set on the pin, one DuckDB source for all" in {
+    val (code, out) = verifyNodes(nodeTree())
+    withClue(out)(code shouldBe 0)
+    out should include("vendored qod-node binaries match protocol=1;duckdb=v2.0.0")
+  }
+
+  it should "refuse a missing platform" in {
+    val (code, out) = verifyNodes(nodeTree(markers = Map("osx-x86_64" -> None)))
+    code shouldBe 1
+    out should include("missing vendored qod-node binaries: osx-x86_64")
+  }
+
+  it should "refuse a binary of another node protocol" in {
+    val (code, out) =
+      verifyNodes(nodeTree(markers = Map("linux-x86_64" -> Some(nodeMarker(protocol = "2")))))
+    code shouldBe 1
+    out should include("node protocol 2")
+  }
+
+  it should "refuse a binary of another DuckDB release" in {
+    val (code, out) =
+      verifyNodes(nodeTree(markers = Map("linux-aarch64" -> Some(nodeMarker(duckdb = "v1.5.6")))))
+    code shouldBe 1
+    out should include("DuckDB v1.5.6")
+  }
+
+  it should "refuse a set built against different DuckDB sources" in {
+    val (code, out) =
+      verifyNodes(nodeTree(markers = Map("osx-aarch64" -> Some(nodeMarker(source = "0123abcd")))))
+    code shouldBe 1
+    out should include("different DuckDB sources")
+  }
+
+  it should "refuse a VERSION stamp that does not name the set" in {
+    val (code, out) =
+      verifyNodes(nodeTree(version = "protocol=1;duckdb=v2.0.0;duckdb_source=0123abcd"))
+    code shouldBe 1
+    out should include("VERSION does not read")
   }
 
   private val pinsScript = Paths.get("scripts/release/check-release-pins.sh").toAbsolutePath

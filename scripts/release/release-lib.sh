@@ -6,7 +6,7 @@
 #   release-docker.sh        - manual FALLBACK for a broken CI Docker channel
 #   release.yml (CI)         - sources this file for cli_version,
 #                               next_manager_snapshot, set_cli_* and
-#                               verify_quackwire_binaries
+#                               verify_quackwire_binaries, verify_qod_node_binaries
 #
 # Source this file; do not execute it. It anchors CWD at the repo root and
 # exposes the version-math helpers plus verify_quackwire_binaries (the
@@ -22,6 +22,9 @@ cd "$REPO_DIR"
 # quackwire_check_build_marker, used by verify_quackwire_binaries.
 # shellcheck source=SCRIPTDIR/quackwire-build-info.sh
 source "$REPO_DIR/scripts/release/quackwire-build-info.sh"
+# qod_node_check_marker and the platform list, used by verify_qod_node_binaries.
+# shellcheck source=SCRIPTDIR/qod-node-build-info.sh
+source "$REPO_DIR/scripts/release/qod-node-build-info.sh"
 
 REGISTRY_IMAGE="${REGISTRY_IMAGE:-starlakeai/quack-on-demand}"
 # Larger heap/stack for the signed publish + scaladoc steps.
@@ -136,6 +139,34 @@ verify_quackwire_binaries() {
     quackwire_check_build_marker "$f" "$version" || return 1
   done
   echo "phase 1 OK: vendored libquackwire binaries match $version"
+}
+
+# The vendored qod-node binaries (native/qod-node/binaries/, bundled by build.sbt): every Linux and
+# macOS platform present, its checksum right, its build marker on the pin, and one DuckDB source id
+# for the whole set, which the VERSION stamp names. Shared by release.sh's phase 1 and by
+# release.yml / snapshot.yml before any channel publishes.
+verify_qod_node_binaries() {
+  local root=native/qod-node/binaries plat f id ids=() missing=()
+  for plat in "${QOD_NODE_UNIX_PLATFORMS[@]}"; do
+    [[ -f "$root/$plat/qod-node" ]] || missing+=("$plat")
+  done
+  [[ ${#missing[@]} -eq 0 ]] \
+    || { echo "missing vendored qod-node binaries: ${missing[*]}. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+  for plat in "${QOD_NODE_UNIX_PLATFORMS[@]}"; do
+    f="$root/$plat/qod-node"
+    [[ -f "$f.sha256" ]] || { echo "missing checksum $f.sha256. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+    [[ "$(sha256_of "$f")" == "$(cat "$f.sha256")" ]] \
+      || { echo "checksum mismatch for $f. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+    id="$(qod_node_check_marker "$f")" || return 1
+    ids+=("$id")
+  done
+  [[ "$(printf '%s\n' "${ids[@]}" | sort -u | wc -l | tr -d ' ')" == "1" ]] \
+    || { echo "the vendored qod-node binaries are built against different DuckDB sources (${ids[*]}). Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+  local expected
+  expected="protocol=$(qod_node_pin_protocol);duckdb=$(qod_node_pin_duckdb);duckdb_source=${ids[0]}"
+  [[ "$(cat "$root/VERSION" 2>/dev/null || true)" == "$expected" ]] \
+    || { echo "$root/VERSION does not read $expected. Run scripts/release/refresh-qod-node-binaries.sh." >&2; return 1; }
+  echo "phase 1 OK: vendored qod-node binaries match $expected"
 }
 
 # 0.3.5 -> 0.3.6-SNAPSHOT (sbt-release's default patch bump).
