@@ -109,7 +109,11 @@ final class KubernetesQuackBackend(
     // token, the forwarded QOD_S3_* / QOD_AZURE_* credentials) reaches the spawn script as a file of
     // the read-only `qod-node-secrets` projected volume instead (secretsVolume below), whose
     // Secrets start() creates before the pod.
-    val merged = spec.metastore.filterNot { case (k, _) => NodeSecretFiles.isKey(k) }
+    // The node's id is the manager's alone (nodeIdEnv below): a metastore entry of that name would
+    // give the pod a second one.
+    val merged = spec.metastore.filterNot { case (k, _) =>
+      NodeSecretFiles.isKey(k) || k == NodeSecretFiles.NodeIdEnv
+    }
     merged.foreach { case (k, v) =>
       val e = new EnvVar()
       e.setName(k)

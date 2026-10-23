@@ -9,6 +9,7 @@ import sys
 import httpx
 import pytest
 
+from qod_cli import fleet_join
 from qod_cli.fleet_join import (
     BACKOFF_MIN_S,
     FleetMember,
@@ -308,6 +309,14 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}
     assert env["QOD_S3_ENDPOINT"] == "minio:9000"
     assert dir_mode == 0o700 and set(file_modes.values()) == {0o600}
+
+
+def test_cloud_credential_keys_are_pinned_by_name():
+    # _CLOUD_CRED_KEYS is a slice of _SECRET_KEYS (NodeSecretFiles.CloudCredKeys on the manager): a
+    # key added before the cloud credentials must not shift it unnoticed.
+    assert fleet_join._CLOUD_CRED_KEYS == (
+        "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING",
+        "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
 
 
 def test_secrets_dir_is_removed_once_the_node_is_up_and_on_stop(tmp_path):

@@ -12,6 +12,8 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
 
   private val isWindows = System.getProperty("os.name").toLowerCase.contains("win")
 
+  private val spawnScript = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath.toString
+
   private def keyList(file: String, start: String, end: String): Seq[String] =
     val body = Files.readString(Paths.get(file))
     val from = body.indexOf(start)
@@ -32,7 +34,9 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
         "PgPassword"               -> "odd",
         "pgPassword"               -> "exact",
         "encryptionKey"            -> "k",
-        "QOD_S3_SECRET_ACCESS_KEY" -> "from-metastore"
+        "QOD_S3_SECRET_ACCESS_KEY" -> "from-metastore",
+        // A tenant-db's metastore cannot replace the node's key the manager derived.
+        "QOD_NODE_AUTHZ_KEY" -> "from-metastore"
       ),
       extraSetupSql = "fed",
       objectStoreSql = "",
@@ -62,6 +66,8 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "QOD_ADMIN_PASSWORD",
       "QOD_SMTP_PASSWORD",
       "QOD_FLEET_JOIN_TOKEN",
+      // The master secret every node's key derives from.
+      "QOD_NODE_KEY_SECRET",
       "QOD_MANAGED_STORE_SECRET_ACCESS_KEY",
       "PGPASSWORD",
       "STRIPE_SECRET_KEY",
@@ -186,5 +192,48 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       NodeSecretFiles.EphemeralEnv -> "1"
     ).!(ProcessLogger(_ => (), _ => ()))
     exit should not be 0
+    Files.exists(dir) shouldBe false
+  }
+
+  /** The node directories (`quack-node.*`) the script left under `tmp`. */
+  private def nodeDirs(tmp: Path): List[String] =
+    val s = Files.list(tmp)
+    try s.iterator().asScala.map(_.getFileName.toString).filter(_.startsWith("quack-node.")).toList
+    finally s.close()
+
+  // qod-node checks every session handle against the node id the launcher names, so a script that
+  // was not given one must fail the spawn before it starts qod-node, and leave neither a node
+  // directory nor the secrets directory (which holds the node's key) behind.
+  it should "refuse to launch without QOD_NODE_ID, leaving no node or secrets directory" in {
+    assume(!isWindows, "bash script")
+    val tmp   = Files.createDirectories(tempDir.resolve("tmp"))
+    val start = Files.createDirectories(tempDir.resolve("start"))
+    val ran   = tempDir.resolve("stand-in.ran")
+    val fake  = tempDir.resolve("fake-qod-node")
+    // A stand-in that only says it ran.
+    Files.writeString(fake, s"#!/bin/sh\ntouch '$ran'\n")
+    fake.toFile.setExecutable(true)
+    val dir = NodeSecretFiles.writePrivateDir(
+      Map(NodeSecretFiles.TokenKey -> "tok", NodeSecretFiles.AuthzKey -> ("ab" * 32)),
+      Some(tempDir)
+    )
+    val pb  = new java.lang.ProcessBuilder("bash", spawnScript, "21999").directory(start.toFile)
+    val env = pb.environment()
+    // Unset, whatever this JVM inherited; a real launch, not a dry run.
+    env.remove(NodeSecretFiles.NodeIdEnv)
+    env.remove("QOD_SPAWN_DRY_RUN")
+    env.put("TMPDIR", tmp.toString)
+    env.put("kind", "memory")
+    env.put("dbName", "lake")
+    env.put("schemaName", "main")
+    env.put("QOD_NODE_BIN", fake.toString)
+    env.put(NodeSecretFiles.DirEnv, dir.toString)
+    env.put(NodeSecretFiles.EphemeralEnv, "1")
+    val stderr = new StringBuilder
+    val exit   = Process(pb).!(ProcessLogger(_ => (), l => stderr.append(l).append('\n')))
+    withClue(stderr.toString)(exit shouldBe 1)
+    stderr.toString should include("QOD_NODE_ID is not set")
+    Files.exists(ran) shouldBe false
+    nodeDirs(tmp) shouldBe Nil
     Files.exists(dir) shouldBe false
   }

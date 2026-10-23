@@ -186,13 +186,17 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     Files.setPosixFilePermissions(at, PosixFilePermissions.fromString("rwx------"))
     at
 
-  /** Runs the ps1 for real from `start` with qod-node `bin`; returns the started process. */
+  /** Runs the ps1 for real from `start` with qod-node `bin`; returns the started process. With
+    * `withNodeId = false` the node's id (`QOD_NODE_ID`) is not set at all, whatever this JVM
+    * inherited.
+    */
   private def launch(
       start: Path,
       bin: Path,
       port: Int,
       secrets: Map[String, String] = Map.empty,
-      extraEnv: Seq[(String, String)] = Nil
+      extraEnv: Seq[(String, String)] = Nil,
+      withNodeId: Boolean = true
   ): (java.lang.Process, Path, Path) =
     assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
     val tmp        = Files.createDirectories(tempDir.resolve("t"))
@@ -201,6 +205,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       (PowerShell.command.get ++ Seq("-File", ps1, port.toString)).asJava
     ).directory(Files.createDirectories(start).toFile)
     pb.environment().putAll(env.toMap.asJava)
+    if !withNodeId then pb.environment().remove(NodeSecretFiles.NodeIdEnv)
     pb.redirectErrorStream(true)
     (pb.start(), tmp, dir)
 
@@ -266,6 +271,24 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     p.waitFor(60, TimeUnit.SECONDS) shouldBe true
     p.exitValue() shouldBe 1
     out should include("ERROR: qod-node not found")
+    Files.exists(secrets) shouldBe false
+  }
+
+  // qod-node checks every session handle against the node id the launcher names, so a script that
+  // was not given one must fail before it starts qod-node, and leave neither a node directory nor
+  // the secrets directory (which holds the node's key) behind.
+  it should "refuse to launch without QOD_NODE_ID, leaving no node or secrets directory" in {
+    assume(!scala.util.Properties.isWin, "the stand-in qod-node is a shell script")
+    val probe             = Files.createDirectories(tempDir.resolve("probe"))
+    val (p, tmp, secrets) =
+      launch(tempDir.resolve("start"), fakeQodNode(probe), 23964, withNodeId = false)
+    val out = new String(p.getInputStream.readAllBytes(), StandardCharsets.UTF_8)
+    p.waitFor(60, TimeUnit.SECONDS) shouldBe true
+    withClue(out)(p.exitValue() shouldBe 1)
+    out should include("QOD_NODE_ID is not set")
+    // The stand-in never ran: it records its arguments first thing.
+    Files.exists(probe.resolve("args")) shouldBe false
+    nodeDirs(tmp) shouldBe Nil
     Files.exists(secrets) shouldBe false
   }
 

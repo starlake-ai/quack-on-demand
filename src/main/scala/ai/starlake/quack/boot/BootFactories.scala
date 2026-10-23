@@ -42,7 +42,9 @@ object BootFactories extends LazyLogging:
   /** @param nodeBin
     *   the qod-node local nodes run; Main resolves it whenever [[runsLocalNodes]].
     * @param nodeKeys
-    *   the manager's node keys: every node the backend starts gets the key derived for its id.
+    *   the manager's node keys: every node the local and Kubernetes backends start gets the key
+    *   derived for its id. The fleet backend does not use them: a fleet node's key is derived per
+    *   heartbeat by `FleetHandlers`, which Main builds with the same keys.
     */
   def quackBackend(
       mgrCfg: ManagerConfig,

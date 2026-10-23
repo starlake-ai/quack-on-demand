@@ -160,11 +160,12 @@ final class FleetHandlers(
                 FleetHeartbeatResponse(
                   cfg.heartbeatSec,
                   // Only an approved server is ever handed its assignment (which carries the
-                  // node token and pgPassword). A pending row should hold none, but a row can be
-                  // reset to pending while it still holds one (e.g. a re-address racing a
-                  // drain); the reply must not leak it then. Likewise only to the source the
-                  // approval is bound to: the row is read afresh here, after the store's check,
-                  // so a concurrent rebind must not hand the assignment to the old source.
+                  // node token, the node key and pgPassword). A pending row should hold none,
+                  // but a row can be reset to pending while it still holds one (e.g. a
+                  // re-address racing a drain); the reply must not leak it then. Likewise only
+                  // to the source the approval is bound to: the row is read afresh here, after
+                  // the store's check, so a concurrent rebind must not hand the assignment to
+                  // the old source.
                   row
                     .filter(r =>
                       r.approved && r.approvedSource.forall(b => hb.sourceAddr.contains(b))

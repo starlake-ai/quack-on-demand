@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.FleetConfig
+import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
@@ -29,11 +30,11 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private val t0                            = Instant.parse("2026-09-25T10:00:00Z")
   private val hbCfg                         = FleetConfig(joinToken = "secret", heartbeatSec = 7)
   private val loopback: Option[InetAddress] = Some(InetAddress.getByName("127.0.0.1"))
-  private def addr(s: String): Option[InetAddress] = Some(InetAddress.getByName(s))
-  private def fixture()                            =
+  private def addr(s: String): Option[InetAddress]               = Some(InetAddress.getByName(s))
+  private def fixture(nodeKeys: NodeKeys = NodeKeys.ephemeral()) =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val backend = new FleetQuackBackend(store, hbCfg, clock = () => t0)
-    (store, new FleetHandlers(store, hbCfg, backend = Some(backend)))
+    (store, new FleetHandlers(store, hbCfg, backend = Some(backend), nodeKeys = nodeKeys))
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
     FleetHeartbeatRequest(
       name,
@@ -79,7 +80,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "return the current assignment" in {
-    val (store, h) = fixture()
+    val keys       = NodeKeys.ephemeral()
+    val (store, h) = fixture(keys)
     h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
     store.claim(
       FleetAssignment(
@@ -101,6 +103,9 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val r = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().toOption.get
     r.assignment.map(a => (a.nodeId, a.epoch, a.poolKey.tenant, a.env("pgHost"))) shouldBe
       Some(("n1", 1L, "acme", "h"))
+    // The node's key is derived from the assignment's node id on every heartbeat, never stored
+    // (the check does not echo it).
+    r.assignment.map(_.authzKey == keys.keyHex("n1")) shouldBe Some(true)
   }
 
   it should "409 an address change on a known name even when idle (no takeover)" in {

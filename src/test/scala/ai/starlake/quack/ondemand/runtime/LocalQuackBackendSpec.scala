@@ -214,6 +214,70 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       java.nio.file.Files.exists(dir) shouldBe false
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-secrets").unsafeRunSync()
 
+  // The node's identity reaches the spawn script as the manager derived it: the key as a file of
+  // the secrets directory (never env or argv), the id as the plain env var the script passes on as
+  // --node-id. A metastore entry spelled like either one replaces neither. The environment checks
+  // are booleans: a failing `should not include` would print the whole environment dump.
+  it should "hand the node its key as a file and its id as env, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-identity-", ".txt")
+    capture.deleteOnExit()
+    val keys       = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val argv       = new java.util.concurrent.atomic.AtomicReference[List[String]](Nil)
+    val production = LocalQuackBackend.defaultCommand(
+      "spawn.sh",
+      "spawn.ps1",
+      LocalQuackBackend.managerMarker(20900)
+    )
+    val backend = new LocalQuackBackend(
+      min = 23092,
+      max = 23093,
+      nodeKeys = keys,
+      commandFor = (spec, port, token) =>
+        argv.set(production(spec, port, token))
+        envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val nodeId = "node-identity"
+    val key    = keys.keyHex(nodeId)
+    val spec   = NodeSpec(
+      PoolKey("t", "t_default", "p"),
+      nodeId,
+      Role.Dual,
+      // The id variable's own name, and the key file's name in another case (isKey compares names
+      // case-insensitively).
+      metastore = Map("pgHost" -> "h", "QOD_NODE_ID" -> "spoof", "qod_node_authz_key" -> "spoof"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      // The id is the node's own, set once; nothing the metastore spoofed reached the environment.
+      out.linesIterator.filter(_.startsWith("QOD_NODE_ID=")).toList shouldBe
+        List(s"QOD_NODE_ID=$nodeId")
+      withClue("a spoofed value in the node's environment")(out.contains("spoof") shouldBe false)
+      withClue("a variable named like the node key file")(
+        out.linesIterator
+          .map(_.takeWhile(_ != '='))
+          .exists(_.equalsIgnoreCase(NodeSecretFiles.AuthzKey)) shouldBe false
+      )
+      // The key is in no environment and no argv, only in its file.
+      withClue("the node's key in its environment")(out.contains(key) shouldBe false)
+      withClue("the node's key in its argv")(argv.get().exists(_.contains(key)) shouldBe false)
+      val dir = java.nio.file.Paths.get(
+        out.linesIterator
+          .find(_.startsWith(s"${NodeSecretFiles.DirEnv}="))
+          .value
+          .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
+      )
+      // Exactly the node's token and key, nothing the metastore named.
+      dir.toFile.list().toSet shouldBe Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
+      val onDisk = java.nio.file.Files.readString(dir.resolve(NodeSecretFiles.AuthzKey))
+      withClue("the key file does not hold the key derived for the node id")(
+        (onDisk == key) shouldBe true
+      )
+    finally backend.stop(PoolKey("t", "t_default", "p"), nodeId).unsafeRunSync()
+
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling
   // back to SIGKILL on stragglers), then clear its registry maps so a

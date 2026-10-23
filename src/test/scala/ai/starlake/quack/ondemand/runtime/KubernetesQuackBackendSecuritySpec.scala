@@ -334,13 +334,23 @@ class KubernetesQuackBackendSecuritySpec
       readEnv = _ => None,
       nodeKeys = keys
     )
-    backend.start(nodeEnvSpec("quack-nodeenv-key", lakeMeta)).unsafeRunSync()
+    // A metastore entry named like the id env var must not give the pod a second one: kubelet
+    // lets the last duplicate win, and a reader taking the first would see the spoofed value.
+    backend
+      .start(nodeEnvSpec("quack-nodeenv-key", lakeMeta + ("QOD_NODE_ID" -> "spoof")))
+      .unsafeRunSync()
     secretRefs("quack-nodeenv-key").get("QOD_NODE_AUTHZ_KEY") shouldBe
       Some(("qod-token-quack-nodeenv-key", KubernetesQuackBackend.AuthzKeySecretKey))
     secretPayload("qod-token-quack-nodeenv-key").value
       .get(KubernetesQuackBackend.AuthzKeySecretKey) shouldBe Some(keys.keyHex("quack-nodeenv-key"))
-    plainEnv("quack-nodeenv-key").find(_.getName == "QOD_NODE_ID").map(_.getValue) shouldBe
-      Some("quack-nodeenv-key")
+    podEnv("quack-nodeenv-key").filter(_.getName == "QOD_NODE_ID").map(_.getValue) shouldBe
+      List("quack-nodeenv-key")
+    // The key travels in the Secret only: no plain env value of the pod holds it (the check does
+    // not echo it).
+    withClue("a plain env value of the pod holds the node's key")(
+      plainEnv("quack-nodeenv-key").exists(_.getValue == keys.keyHex("quack-nodeenv-key")) shouldBe
+        false
+    )
 
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on
   // upgrade). These two pin that adoption of a pod from an EITHER shape is still lossless for
