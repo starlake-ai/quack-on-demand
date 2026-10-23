@@ -1,0 +1,170 @@
+name: qod-node spike
+
+# Spike for the in-engine authorization redesign. Builds native/qod-node against the official DuckDB
+# release libduckdb (never a patched or source build) on the six platforms nodes run on, and checks per
+# platform that:
+#   - it links against the release library and starts (on Windows: whether duckdb.dll exports the
+#     internal C++ symbols the planner hooks need);
+#   - the extensions nodes load (quack, ducklake, postgres, httpfs, iceberg) install and load;
+#   - post_bind reports a DuckLake table read through a secure view;
+#   - every setting's scope is recoverable at runtime.
+# On Linux and macOS it also serves over quack and queries with the release DuckDB CLI, checking that
+# statements run on tagged quack sessions and that a parse-screen refusal reaches the client.
+#
+# The DuckDB version is read from project/Versions.scala, like the quackwire workflow.
+
+on:
+  push:
+    branches: [spike/qod-node]
+    paths:
+      - 'native/qod-node/**'
+      - '.github/workflows/qod-node-spike.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: qod-node-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  pin:
+    name: read the DuckDB pin
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      duckdb: ${{ steps.pin.outputs.duckdb }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: pin
+        run: |
+          set -euo pipefail
+          # `val duckdb = "X.Y.Z.W"` -> X.Y.Z, the release tag's version.
+          duckdb="$(sed -nE 's/^[[:space:]]*val duckdb[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+".*/\1/p' project/Versions.scala)"
+          [[ -n "$duckdb" ]] || { echo "::error::cannot read val duckdb from project/Versions.scala"; exit 1; }
+          echo "DuckDB pin: v$duckdb"
+          echo "duckdb=$duckdb" >> "$GITHUB_OUTPUT"
+
+  unix:
+    name: ${{ matrix.platform }}
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            duckdb_platform: linux-amd64
+          - runner: ubuntu-22.04-arm
+            platform: linux-aarch64
+            duckdb_platform: linux-arm64
+          - runner: macos-15-intel
+            platform: osx-x86_64
+            duckdb_platform: osx-universal
+          - runner: macos-14
+            platform: osx-aarch64
+            duckdb_platform: osx-universal
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release library, full headers, CLI)
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/libs" "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/libs.tar.gz" "$base/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp"/libs/libduckdb.* "$home/lib/"
+          cp "$tmp/cli/duckdb" "$home/bin/duckdb"
+          # The archives carry only the C headers; the hooks need the internal ones of the same tag.
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          ls -l "$home/lib" "$home/bin"
+
+      - name: Build qod-node
+        run: |
+          cmake -S native/qod-node -B native/qod-node/build -DCMAKE_BUILD_TYPE=Release -DDUCKDB_HOME="$DUCKDB_HOME"
+          cmake --build native/qod-node/build --config Release
+
+      - name: Smoke (link, extensions, secure-view read, setting scopes)
+        run: native/qod-node/spike/check-smoke.sh "$GITHUB_WORKSPACE/native/qod-node/build/qod-node" "$RUNNER_TEMP/smoke"
+
+      - name: Quack round trip (qod-node serves, release CLI queries)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/round-trip.txt"
+          DUCKDB_CLI="$DUCKDB_HOME/bin/duckdb" native/qod-node/spike/run-spike.sh "$RUNNER_TEMP/round-trip" 23456 | tee "$out"
+          grep -q 'kind=quack-session' "$out" \
+            || { echo "::error::no statement ran on a tagged quack session"; exit 1; }
+          grep -q 'secure_views=\[memory.main.order_totals\]' "$out" \
+            || { echo "::error::the secure-view boundary was not reported over quack"; exit 1; }
+          grep -q 'refused by the parse screen' "$out" \
+            || { echo "::error::the parse-screen refusal did not reach the client"; exit 1; }
+
+  windows:
+    name: ${{ matrix.platform }}
+    needs: pin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      DUCKDB_VERSION: ${{ needs.pin.outputs.duckdb }}
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows-x86_64
+            duckdb_platform: windows-amd64
+            cmake_arch: x64
+          - runner: windows-11-arm
+            platform: windows-aarch64
+            duckdb_platform: windows-arm64
+            cmake_arch: ARM64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (import library, dll, full headers)
+        shell: bash
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/duckdb-home"
+          mkdir -p "$home/include" "$home/lib"
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/libs"
+          curl -fsSL -o "$tmp/libs.tar.gz" \
+            "https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
+          cp "$tmp/libs/duckdb.lib" "$tmp/libs/duckdb.dll" "$home/lib/"
+          git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
+          cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
+          echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
+          # qod-node.exe finds duckdb.dll on PATH.
+          cygpath -w "$home/lib" >> "$GITHUB_PATH"
+
+      - name: Build qod-node (Visual Studio 2022)
+        run: |
+          cmake -S native/qod-node -B native/qod-node/build -A ${{ matrix.cmake_arch }} -DDUCKDB_HOME="$env:DUCKDB_HOME"
+          cmake --build native/qod-node/build --config Release
+
+      - name: Smoke (link, extensions, secure-view read, setting scopes)
+        shell: bash
+        run: |
+          ws="$(cygpath -u "$GITHUB_WORKSPACE")"
+          native/qod-node/spike/check-smoke.sh "$ws/native/qod-node/build/Release/qod-node.exe" "$(cygpath -u "$RUNNER_TEMP")/smoke"

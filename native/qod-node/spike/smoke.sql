@@ -1,0 +1,14 @@
+INSTALL quack;
+LOAD quack;
+INSTALL ducklake;
+LOAD ducklake;
+INSTALL postgres;
+LOAD postgres;
+INSTALL httpfs;
+LOAD httpfs;
+INSTALL iceberg;
+LOAD iceberg;
+ATTACH 'ducklake:smoke.ducklake' AS lake (DATA_PATH 'smoke_data/');
+CREATE TABLE lake.main.orders AS SELECT range AS id, range * 10 AS amount FROM range(5);
+CREATE SECURE VIEW memory.main.big_orders AS SELECT id FROM lake.main.orders WHERE amount > 10;
+SELECT count(*) AS n FROM memory.main.big_orders;
