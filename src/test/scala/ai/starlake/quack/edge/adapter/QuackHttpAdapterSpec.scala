@@ -9,6 +9,41 @@ import java.time.Instant
 
 class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
+  "A draining node" should "reject a previously selected request without calling the client" in:
+    var called = false
+    val client = new FakeClient(Map("quack:127.0.0.1:0" -> (() => {
+      called = true
+      QuackResponse.Failed(QuackError.Permanent("should not be sent"))
+    })))
+    val tracker = new NodeLoadTracker
+    tracker.onStart("draining")
+    tracker.setDraining("draining", true)
+    val before  = tracker.snapshot("draining")
+    val adapter = new QuackHttpAdapter(client, tracker)
+
+    adapter.send(node("draining"), "SELECT 1", None).unsafeRunSync() should matchPattern {
+      case QuackResponse.Failed(QuackError.Transient(_), _) =>
+    }
+    called shouldBe false
+    tracker.snapshot("draining") shouldBe before
+
+  it should "reject a native relay call without changing load or health" in:
+    val tracker = new NodeLoadTracker
+    tracker.setDraining("draining", true)
+    val before  = tracker.snapshot("draining")
+    val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)
+    var called  = false
+    val out     = adapter
+      .tracked[String](node("draining"), recordLoad = true)(IO {
+        called = true
+        NodeOutcome.Permanent("should not be sent", 1L)
+      })
+      .unsafeRunSync()
+
+    out should matchPattern { case NodeOutcome.Transient(_, _) => }
+    called shouldBe false
+    tracker.snapshot("draining") shouldBe before
+
   private val key: PoolKey                  = PoolKey("acme", "acme_default", "sales")
   private def node(id: String): RunningNode =
     RunningNode(id, key, Role.Dual, "127.0.0.1", 0, "tok-" + id, Some(1L), None, Instant.EPOCH)

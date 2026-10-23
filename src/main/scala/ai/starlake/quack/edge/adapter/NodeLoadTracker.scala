@@ -18,6 +18,15 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def onStart(nodeId: String): Unit =
     ref(nodeId).updateAndGet(l => l.copy(inFlight = l.inFlight + 1))
 
+  /** Check admission and reserve the slot atomically with respect to setDraining. A route can have
+    * been selected before the supervisor marked the node as draining.
+    */
+  def tryStart(nodeId: String): Boolean =
+    val previous = ref(nodeId).getAndUpdate { l =>
+      if l.draining then l else l.copy(inFlight = l.inFlight + 1)
+    }
+    !previous.draining
+
   /** A request that ended without an outcome (cancelled or raised): release its in-flight slot
     * without a latency sample and without counting it as served.
     */
