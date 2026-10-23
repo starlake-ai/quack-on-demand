@@ -13,10 +13,10 @@ import scala.jdk.CollectionConverters.*
 import scala.sys.process.*
 import scala.util.Try
 
-/** A `memory` node spawned by the real `spawn-quack-node.sh` with the pinned DuckDB CLI, its
-  * federation blob produced by the real [[FederationBlobBuilder]] from typed sources, and queried
-  * over its own quack endpoint from another process, the way the manager reaches it. Shared by the
-  * Postgres and MySQL live specs.
+/** A `memory` node spawned by the real `spawn-quack-node.sh` with qod-node, its federation blob
+  * produced by the real [[FederationBlobBuilder]] from typed sources, and queried over its own
+  * quack endpoint from another process, the way the manager reaches it. Shared by the Postgres and
+  * MySQL live specs.
   */
 private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
 
@@ -42,7 +42,6 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     ).build("td-live").unsafeRunSync().getOrElse("")
 
   def start(extraSetupSql: String): Unit =
-    val bin = RdbmsFederationLiveNode.pinnedDuckdb.get
     nodePort = RdbmsFederationLiveNode.freePort()
     val secrets = NodeSecretFiles.writePrivateDir(
       Map(NodeSecretFiles.TokenKey -> Token, "extraSetupSql" -> extraSetupSql),
@@ -58,7 +57,7 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
           "kind"                 -> "memory",
           "schemaName"           -> "main",
           "dbName"               -> "acme_mem",
-          "DUCKDB_BIN"           -> bin.toString,
+          "QOD_NODE_BIN"         -> QodNodeTestBinary.path.get.toString,
           "QOD_NODE_BIND"        -> "127.0.0.1",
           "HOME"                 -> Files.createDirectories(tempDir.resolve("node-home")).toString,
           NodeSecretFiles.DirEnv -> secrets.toString,
@@ -74,7 +73,7 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     if !RdbmsFederationLiveNode.listening(nodePort) then
       throw new IllegalStateException(s"node did not come up:\n$log")
 
-  /** SIGKILL the wrapper and every duckdb it started, so a run can never leave an orphan. */
+  /** SIGKILL the wrapper and every qod-node it started, so a run can never leave an orphan. */
   def stop(): Unit =
     process.foreach { p =>
       Try(p.descendants().forEach(d => d.destroyForcibly()))
@@ -106,6 +105,9 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
 
 private[runtime] object RdbmsFederationLiveNode:
 
+  /** The pinned DuckDB CLI (the quack client, and the extension probe below), present only when a
+    * qod-node binary is too: these specs need both, so one check covers them.
+    */
   lazy val pinnedDuckdb: Option[Path] =
     val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")
     sys.env
@@ -114,6 +116,7 @@ private[runtime] object RdbmsFederationLiveNode:
       .map(Paths.get(_))
       .orElse(sys.env.get("DUCKDB_CACHE_DIR").map(d => Paths.get(d, abi, "bin", "duckdb")))
       .filter(Files.isExecutable(_))
+      .filter(_ => QodNodeTestBinary.path.nonEmpty)
 
   /** Whether the pinned CLI can load `extension` (statically linked, or installable). */
   def canLoad(extension: String): Boolean =

@@ -1,4 +1,4 @@
-// Unit tests for sql_script: statement splitting and literal quoting. Built with -DQOD_NODE_TESTS=ON
+// Unit tests for sql_script: statement splitting, literal quoting and the serve statement. Built with -DQOD_NODE_TESTS=ON
 // and run by CTest (ctest --test-dir <build>).
 
 #include "sql_script.hpp"
@@ -53,6 +53,14 @@ int main() {
 
 	Expect(qod::QuoteLiteral("abc") == "'abc'", "QuoteLiteral plain");
 	Expect(qod::QuoteLiteral("o'neil") == "'o''neil'", "QuoteLiteral doubles a single quote");
+
+	// The node serves plain HTTP to the manager, on any hostname, and reads back only listen_url.
+	auto serve = qod::ServeStatement("0.0.0.0", 21901, "t'ok");
+	Expect(serve.rfind("SELECT listen_url FROM quack_serve(", 0) == 0, "ServeStatement reads back listen_url only");
+	Expect(serve.find("'quack:0.0.0.0:21901'") != std::string::npos, "ServeStatement listen address");
+	Expect(serve.find("token := 't''ok'") != std::string::npos, "ServeStatement quotes the token");
+	Expect(serve.find("disable_ssl := true") != std::string::npos, "ServeStatement serves plain HTTP");
+	Expect(serve.find("allow_other_hostname := true") != std::string::npos, "ServeStatement allows other hostnames");
 
 	if (failures == 0) {
 		std::cout << "sql_script_test: all passed" << std::endl;

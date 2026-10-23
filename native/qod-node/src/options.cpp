@@ -73,9 +73,9 @@ NodeOptions ParseOptions(int argc, char **argv) {
 std::string Usage() {
 	return "usage:\n"
 	       "  qod-node --port <port> [--bind <address>] --secrets-dir <dir> [--secrets-ephemeral]\n"
-	       "           --secret-directory <path> [--init <file>]... [--parent-pid <pid>]\n"
+	       "           --secret-directory <path> [--init <file>|-]... [--parent-pid <pid>]\n"
 	       "  qod-node --build-info\n"
-	       "  qod-node --list-settings [--init <file>]...\n";
+	       "  qod-node --list-settings [--init <file>|-]...\n";
 }
 
 } // namespace qod

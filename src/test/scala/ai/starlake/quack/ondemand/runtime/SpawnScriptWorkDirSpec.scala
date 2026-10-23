@@ -13,9 +13,9 @@ import scala.sys.process.*
 /** DuckDB 2.0 replacement-scans an unquoted dotted name as a file when no such schema exists:
   * `SELECT * FROM x.csv` reads `./x.csv`. An unquoted name cannot hold a path separator, so the
   * only directory it reaches is the node process's working directory. The spawn script therefore
-  * starts duckdb in a fresh, empty, private directory of its own, after making every relative path
-  * the node relies on (dataPath, the DuckDB binary, the spill directory) absolute against the
-  * directory the script was started from, and removes that directory when the node stops.
+  * starts qod-node in a fresh, empty, private directory of its own, after making every relative
+  * path the node relies on (dataPath, the qod-node binary, the spill directory) absolute against
+  * the directory the script was started from, and removes that directory when the node stops.
   */
 class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
 
@@ -113,22 +113,21 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     )
   }
 
-  /** A stand-in duckdb that records where it runs and its init SQL (`-init <fifo>`, argv position
-    * 2), then blocks until SIGTERM like the real node (whose stdin is /dev/null).
+  /** A stand-in qod-node that records where it runs, its arguments and its init SQL (`--init -`:
+    * stdin), then blocks until SIGTERM like the real node.
     */
-  private def fakeDuckdb(at: Path, probe: Path): Path =
+  private def fakeQodNode(at: Path, probe: Path): Path =
     Files.createDirectories(at.getParent)
     Files.writeString(
       at,
       s"""#!/bin/sh
-         |[ "$$1" = -no-init ] && { echo qod-shell-ok; exit 0; }
+         |printf '%s\\n' "$$@" > '$probe/args'
          |pwd -P > '$probe/cwd.part'
          |ls -A | wc -l | tr -d ' ' > '$probe/entries'
          |(stat -f %Lp . 2>/dev/null || stat -c %a .) > '$probe/mode'
          |mv '$probe/cwd.part' '$probe/cwd'
-         |cat "$$2" > '$probe/init' & reader=$$!
-         |trap 'kill $$reader 2>/dev/null; exit 143' TERM INT
-         |wait $$reader
+         |cat > '$probe/init'
+         |trap 'exit 143' TERM INT
          |while :; do sleep 1; done
          |""".stripMargin
     )
@@ -151,12 +150,12 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     do Thread.sleep(50)
     text
 
-  "a node" should "run duckdb in an empty private directory that is removed when it stops" in {
+  "a node" should "run qod-node in an empty private directory that is removed when it stops" in {
     val start = dir("start")
     Files.writeString(start.resolve("x.csv"), "a,b\n1,2\n")
     val probe = dir("probe")
-    val bin   = fakeDuckdb(tempDir.resolve("bin/duckdb"), probe)
-    val p     = launch(start, memory ++ Seq("DUCKDB_BIN" -> bin.toString))
+    val bin   = fakeQodNode(tempDir.resolve("bin/qod-node"), probe)
+    val p     = launch(start, memory ++ Seq("QOD_NODE_BIN" -> bin.toString))
     try
       awaitFile(probe.resolve("cwd"))
       val cwd = Paths.get(Files.readString(probe.resolve("cwd")).trim)
@@ -164,7 +163,7 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
       Files.readString(probe.resolve("entries")).trim shouldBe "0"
       Files.readString(probe.resolve("mode")).trim shouldBe "700"
       awaitFile(probe.resolve("init"))
-      val sql   = awaitContains(probe.resolve("init"), "quack_serve")
+      val sql   = awaitContains(probe.resolve("init"), "SET temp_directory")
       val spill = TempDirRe.findFirstMatchIn(sql).map(_.group(1)).getOrElse(fail(sql))
       Files.isDirectory(Paths.get(spill)) shouldBe true
       stop(p)
@@ -173,31 +172,36 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     finally stop(p)
   }
 
-  it should "refuse a duckdb CLI that cannot run the .shell keep-alive" in {
-    val start = dir("start")
-    // A stand-in that answers nothing: no `qod-shell-ok` from the spawn-time probe.
-    val bin = tempDir.resolve("noshell/duckdb")
-    Files.createDirectories(bin.getParent)
-    Files.writeString(bin, "#!/bin/sh\nexit 0\n")
-    Files.setPosixFilePermissions(bin, PosixFilePermissions.fromString("rwx------"))
-    val p   = launch(start, memory ++ Seq("DUCKDB_BIN" -> bin.toString))
-    val out = new String(p.getInputStream.readAllBytes())
-    p.waitFor(30, TimeUnit.SECONDS) shouldBe true
-    p.exitValue() shouldBe 1
-    out should include("cannot run the .shell dot-command")
-  }
-
-  it should "resolve a relative DUCKDB_BIN before moving duckdb into its own directory" in {
+  it should "hand qod-node the port, bind, secret directory, its own pid and the init on stdin" in {
     val start = dir("start")
     val probe = dir("probe")
-    fakeDuckdb(start.resolve("bin/duckdb"), probe)
-    val p = launch(start, memory ++ Seq("DUCKDB_BIN" -> "bin/duckdb"))
+    val bin   = fakeQodNode(tempDir.resolve("bin/qod-node"), probe)
+    val p     =
+      launch(start, memory ++ Seq("QOD_NODE_BIN" -> bin.toString, "QOD_NODE_BIND" -> "127.0.0.1"))
+    try
+      awaitFile(probe.resolve("cwd"))
+      val args  = Files.readAllLines(probe.resolve("args")).asScala.toList
+      val pairs = args.sliding(2).collect { case List(k, v) if k.startsWith("--") => k -> v }.toMap
+      pairs("--port") shouldBe "23351"
+      pairs("--bind") shouldBe "127.0.0.1"
+      pairs("--secret-directory") should endWith("/secrets/none/s")
+      pairs("--init") shouldBe "-"
+      pairs("--parent-pid").toLong shouldBe p.pid()
+      args should contain("--secrets-ephemeral")
+    finally stop(p)
+  }
+
+  it should "resolve a relative QOD_NODE_BIN before moving qod-node into its own directory" in {
+    val start = dir("start")
+    val probe = dir("probe")
+    fakeQodNode(start.resolve("bin/qod-node"), probe)
+    val p = launch(start, memory ++ Seq("QOD_NODE_BIN" -> "bin/qod-node"))
     try awaitFile(probe.resolve("cwd"))
     finally stop(p)
   }
 
-  /** The DuckDB CLI this build pins: `DUCKDB_BIN`, else the `.duckdb/<abi>` cache build.sbt points
-    * forked tests at.
+  /** The DuckDB CLI this build pins (the control query below): `DUCKDB_BIN`, else the
+    * `.duckdb/<abi>` cache build.sbt points forked tests at.
     */
   private lazy val pinnedDuckdb: Option[Path] =
     val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")
@@ -210,6 +214,7 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
 
   it should "keep a file of its starting directory out of reach of an unquoted dotted name" in {
     assume(pinnedDuckdb.nonEmpty, "the pinned DuckDB CLI is not available")
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val duckdb = pinnedDuckdb.get.toString
     val start  = dir("start")
     Files.writeString(start.resolve("x.csv"), "a,b\n1,2\n")
@@ -223,7 +228,7 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     val p = launch(
       start,
       memory ++ Seq(
-        "DUCKDB_BIN"    -> duckdb,
+        "QOD_NODE_BIN"  -> QodNodeTestBinary.path.get.toString,
         "extraSetupSql" ->
           (s"COPY (SELECT * FROM x.csv) TO '$probe/leak.csv';\n" +
             s"COPY (SELECT count(*) AS n FROM glob('*')) TO '$probe/done.csv';")

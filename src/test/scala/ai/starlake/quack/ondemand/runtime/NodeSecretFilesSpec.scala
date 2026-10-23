@@ -5,6 +5,7 @@ import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.attribute.PosixFilePermissions
 import java.nio.file.{Files, Path, Paths}
+import scala.jdk.CollectionConverters.*
 import scala.sys.process.*
 
 class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
@@ -95,17 +96,29 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     Files.exists(fresh) shouldBe true
   }
 
-  /** Runs the real bash script up to the duckdb launch, with a stand-in duckdb that dumps its own
-    * environment: the values must reach the init SQL path but never duckdb's environment.
+  /** Runs the real bash script up to the node launch, with a stand-in qod-node that dumps its own
+    * environment and arguments: the values must reach the init SQL path but never the node's
+    * environment, and only qod-node's own key (the token) is left for it to read.
     */
-  "spawn-quack-node.sh" should "read the secrets, delete the directory and export none of them" in {
+  "spawn-quack-node.sh" should "read the secrets, leave qod-node only its own key, export none" in {
     assume(!isWindows, "bash script")
-    val envOut = tempDir.resolve("duckdb.env")
-    val fake   = tempDir.resolve("fake-duckdb")
-    // Answers the spawn script's `.shell` probe (-no-init), then records its environment and exits.
+    val envOut  = tempDir.resolve("node.env")
+    val argsOut = tempDir.resolve("node.args")
+    val dirOut  = tempDir.resolve("node.secrets")
+    val fake    = tempDir.resolve("fake-qod-node")
+    // Records its environment, its arguments and what its secrets directory holds, then exits.
     Files.writeString(
       fake,
-      s"#!/usr/bin/env bash\n[ \"$$1\" = -no-init ] && { echo qod-shell-ok; exit 0; }\nenv > '$envOut'\nsleep 0.5\n"
+      s"""#!/usr/bin/env bash
+         |env > '$envOut'
+         |printf '%s\\n' "$$@" > '$argsOut'
+         |while [ $$# -gt 0 ]; do
+         |  if [ "$$1" = --secrets-dir ]; then ls -A "$$2" > '$dirOut'; fi
+         |  shift
+         |done
+         |cat > /dev/null
+         |sleep 0.5
+         |""".stripMargin
     )
     fake.toFile.setExecutable(true)
     val secrets = Map(
@@ -125,7 +138,7 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "kind"                       -> "memory",
       "dbName"                     -> "lake",
       "schemaName"                 -> "main",
-      "DUCKDB_BIN"                 -> fake.toString,
+      "QOD_NODE_BIN"               -> fake.toString,
       NodeSecretFiles.DirEnv       -> dir.toString,
       NodeSecretFiles.EphemeralEnv -> "1",
       // A secret still handed over the environment is ignored, not exported.
@@ -134,12 +147,19 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     // The fake node exits on its own while the wrapper is alive, which the wrapper reports.
     withClue(stderr.toString)(exit shouldBe 1)
     stderr.toString should include("while its wrapper was still running")
+    // The script deleted every file it read, leaving qod-node only the token; once the node is gone
+    // the script removes the directory too.
+    Files.readAllLines(dirOut).asScala.toList shouldBe List(NodeSecretFiles.TokenKey)
     Files.exists(dir) shouldBe false
-    val duckEnv = Files.readString(envOut)
+    val args = Files.readAllLines(argsOut).asScala.toList
+    args.sliding(2).toList should contain(List("--secrets-dir", dir.toString))
+    args should contain("--secrets-ephemeral")
+    val nodeEnv = Files.readString(envOut)
     (secrets.values.toSeq :+ "hunter2-env").foreach { v =>
-      withClue(v)(duckEnv should not include v)
+      withClue(v)(nodeEnv should not include v)
+      withClue(v)(args.mkString("\n") should not include v)
     }
-    duckEnv should not include NodeSecretFiles.DirEnv
+    nodeEnv should not include NodeSecretFiles.DirEnv
     stderr.toString should include("ignoring pgPassword from the environment")
   }
 

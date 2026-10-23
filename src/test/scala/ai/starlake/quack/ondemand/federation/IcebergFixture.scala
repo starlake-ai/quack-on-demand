@@ -34,7 +34,8 @@ final case class DuckdbRun(code: Int, stdout: String, stderr: String):
   private def nonBlank(s: String): List[String] =
     s.linesIterator.map(_.trim).filter(_.nonEmpty).toList
 
-/** Shared access to the `scripts/fixtures/iceberg-fixture.yml` REST catalog and to a local duckdb CLI.
+/** Shared access to the `scripts/fixtures/iceberg-fixture.yml` REST catalog and to a local duckdb
+  * CLI.
   *
   * Following the repo's convention for specs that need an external dependency
   * (`QuackCompatibilitySpec` and the `duckdb` binary), the specs using this CANCEL rather than fail
@@ -52,11 +53,11 @@ final case class DuckdbRun(code: Int, stdout: String, stderr: String):
   *      as a single batch, so several statements sharing a line die together at the first error.
   *      Newline-separated, each one is submitted on its own and a failure only costs that one.
   *
-  * Both match how a real node is driven: `scripts/spawn-quack-node.sh` holds a FIFO open on
-  * duckdb's stdin and writes the assembled init SQL into it, accumulating it one statement per line
-  * (`INIT_SQL+="..."$'\n'`). That combination is precisely why a node can come up healthy with one
-  * catalog silently unattached, and therefore why `IcebergAttachVerifier` exists. Driving these
-  * specs any other way would model an engine the node does not have.
+  * Both match how a real node runs its init: qod-node executes the SQL
+  * `scripts/spawn-quack-node.sh` assembles statement by statement and carries on past a failing
+  * one. That is precisely why a node can come up healthy with one catalog silently unattached, and
+  * therefore why `IcebergAttachVerifier` exists. Driving these specs any other way would model an
+  * engine the node does not have.
   *
   * Output comes back in `-noheader -list` mode so a result is a bare value on its own line and a
   * spec can assert the producer's exact output instead of fishing for a substring inside ASCII box

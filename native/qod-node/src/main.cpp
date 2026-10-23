@@ -2,8 +2,9 @@
 //
 // It opens a DuckDB instance from an official release library, runs the init SQL the spawn script
 // assembled (statement by statement, best effort, as the DuckDB CLI did), then serves over quack
-// until a stop signal arrives or the spawn wrapper that started it ends. What must not fail silently
-// runs strict, here rather than in the SQL: the secret directory, loading quack and quack_serve.
+// until a stop signal arrives or the spawn wrapper that started it ends; either one, while it is still
+// starting, ends it at once. What must not fail silently runs strict, here rather than in the SQL: the
+// secret directory, loading quack and quack_serve.
 
 #include "build_info.hpp"
 #include "duckdb.hpp"
@@ -38,9 +39,20 @@ int ListSettingsMode(const NodeOptions &options) {
 	return 0;
 }
 
+// The secrets directory goes whether or not the read succeeds: nothing in it is needed again.
+std::string ReadNodeToken(const NodeOptions &options) {
+	try {
+		auto token = ReadSecret(options.secrets_dir, "QOD_NODE_TOKEN");
+		DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
+		return token;
+	} catch (...) {
+		DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
+		throw;
+	}
+}
+
 int Serve(const NodeOptions &options) {
-	auto token = ReadSecret(options.secrets_dir, "QOD_NODE_TOKEN");
-	DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
+	auto token = ReadNodeToken(options);
 
 	duckdb::DuckDB db(nullptr);
 	duckdb::Connection con(db);
@@ -54,19 +66,14 @@ int Serve(const NodeOptions &options) {
 
 	RunStrict(con, "INSTALL quack", "installing quack");
 	RunStrict(con, "LOAD quack", "loading quack");
-	// Only listen_url is read back, so the token never reaches the output.
-	auto served = RunStrict(con,
-	                        "SELECT listen_url FROM quack_serve(" +
-	                            QuoteLiteral("quack:" + options.bind + ":" + std::to_string(options.port)) +
-	                            ", token := " + QuoteLiteral(token) +
-	                            ", allow_other_hostname := true, disable_ssl := true)",
-	                        "quack_serve");
+	auto served = RunStrict(con, ServeStatement(options.bind, options.port, token), "quack_serve");
 	auto chunk = served->FetchRaw();
 	std::cerr << "[qod-node] serving on " << (chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : "?")
 	          << std::endl;
+	MarkServing();
 	std::cerr << "[qod-node] ready" << std::endl;
 
-	auto reason = WaitForStop(options.parent_pid);
+	auto reason = WaitForStop();
 	std::cerr << "[qod-node] stopping: " << reason << std::endl;
 	return 0;
 }
@@ -86,7 +93,7 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 
-	PrepareStopSignals();
+	StartStopWatch(options.parent_pid);
 	try {
 #ifdef QOD_NODE_DUCKDB_STATIC
 		RegisterStaticExtensions();

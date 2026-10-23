@@ -6,6 +6,10 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace qod {
 
@@ -17,7 +21,7 @@ size_t RunBestEffort(duckdb::Connection &con, const std::string &sql, const std:
 		if (result->HasError()) {
 			failed++;
 			std::cerr << "[qod-node] " << label << ": statement " << (i + 1) << " of " << statements.size()
-			          << " failed: " << result->GetError() << std::endl;
+			          << " failed: " << ErrorWithoutStatement(*result) << std::endl;
 		}
 	}
 	std::cerr << "[qod-node] " << label << ": " << (statements.size() - failed) << " of " << statements.size()
@@ -29,17 +33,35 @@ duckdb::unique_ptr<duckdb::QueryResult> RunStrict(duckdb::Connection &con, const
                                                               const std::string &label) {
 	auto result = con.Query(statement);
 	if (result->HasError()) {
-		throw std::runtime_error(label + " failed: " + result->GetError());
+		throw std::runtime_error(label + " failed: " + ErrorWithoutStatement(*result));
 	}
 	return result;
 }
 
+std::string ErrorWithoutStatement(const duckdb::QueryResult &result) {
+	auto &message = result.GetErrorObject().Message();
+	// DuckDB appends the statement's text as "\n\nLINE <n>: <text>" and a caret line.
+	auto excerpt = message.find("\n\nLINE ");
+	return excerpt == std::string::npos ? message : message.substr(0, excerpt);
+}
+
 std::string ReadAll(const std::string &path) {
+	std::stringstream buffer;
+	if (path == "-") {
+#ifdef _WIN32
+		// Bytes as written: text mode would turn CRLF into LF and stop at a Ctrl-Z.
+		_setmode(_fileno(stdin), _O_BINARY);
+#endif
+		buffer << std::cin.rdbuf();
+		if (std::cin.bad()) {
+			throw std::runtime_error("cannot read the init SQL from stdin");
+		}
+		return buffer.str();
+	}
 	std::ifstream in(path, std::ios::binary);
 	if (!in) {
 		throw std::runtime_error("cannot read init file " + path);
 	}
-	std::stringstream buffer;
 	buffer << in.rdbuf();
 	return buffer.str();
 }

@@ -266,7 +266,7 @@ def _stop_manager_and_nodes():
     # `<rest-port>-<boot id>` (LocalQuackBackend.managerMarker), so another manager on this host
     # (an isolated test stack) keeps its nodes.
     spawn_re = rf"spawn-quack-node\.sh [0-9]+ {mgr_port}-[0-9a-f]+"
-    duck_re = rf"duckdb .*-init .*quack-node\.{mgr_port}-[0-9a-f]+\."
+    node_re = rf"(qod-node .*--secret-directory|duckdb .*-init) .*quack-node\.{mgr_port}-[0-9a-f]+\."
 
     def discover() -> set[int]:
         pids = {_listening_pid(mgr_port), _listening_pid(edge_port), *_pgrep(spawn_re)}
@@ -298,11 +298,12 @@ def _stop_manager_and_nodes():
             return
 
     typer.echo(f"still running after {force_after}s; sending SIGKILL.", err=True)
-    # Re-discover: the spawn scripts trap TERM, but their duckdb children can
-    # survive a killed wrapper; sweep both. A node runs as
-    # `<abs path>/duckdb -init <tmp>/quack-node.<marker>.XXX/init`, so match that argv with this
-    # manager's marker (a bare `^duckdb` never matches the absolute path the spawn script uses).
-    leftovers = pids | discover() | {int(p) for p in _pgrep(duck_re) if p}
+    # Re-discover: the spawn scripts trap TERM, but a node process could outlive a killed wrapper for
+    # a moment; sweep both. A node runs as `<abs path>/qod-node ... --secret-directory
+    # <tmp>/quack-node.<marker>.XXX/secrets/...` (an earlier release's as `<abs path>/duckdb -init
+    # <tmp>/quack-node.<marker>.XXX/init`), so match that argv with this manager's marker (a bare
+    # `^qod-node` never matches the absolute path the spawn script uses).
+    leftovers = pids | discover() | {int(p) for p in _pgrep(node_re) if p}
     _kill_all(leftovers, signal.SIGKILL)
     time.sleep(2)
     if discover():

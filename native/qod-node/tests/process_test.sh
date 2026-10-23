@@ -86,6 +86,47 @@ status=$?
 [[ $status -eq 1 ]] || fail "missing token: exit $status, expected 1"
 grep -q 'has no QOD_NODE_TOKEN' "$work/no-token.out" || fail "missing token: message not found"
 
+# An ephemeral secrets directory goes even when the token read fails.
+mkdir -p "$work/empty-ephemeral"
+"$node_bin" --port "$(port)" --secrets-dir "$work/empty-ephemeral" --secrets-ephemeral \
+  --secret-directory "$work/secret-dir" > /dev/null 2>&1
+[[ ! -e "$work/empty-ephemeral" ]] || fail "missing token: the ephemeral secrets directory was kept"
+
+# --- a stop while starting ends the node at once --------------------------------------------------
+# An init FIFO no one writes blocks startup in open(), where only an immediate exit reaches it.
+mkfifo "$work/stuck-init"
+"$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-stuck)" \
+  --secret-directory "$work/secret-dir" --init "$work/stuck-init" > "$work/stuck-term.out" 2>&1 &
+stuck=$!
+pids+=("$stuck")
+sleep 1
+kill -TERM "$stuck"
+if wait_exit "$stuck"; then
+  [[ "$exit_status" -eq 143 ]] || fail "SIGTERM while starting: exit $exit_status, expected 143"
+  grep -q 'stopping before ready: signal 15' "$work/stuck-term.out" ||
+    fail "SIGTERM while starting: no 'stopping before ready: signal 15'"
+else
+  fail "SIGTERM while starting: the node did not stop"
+fi
+
+sleep 300 &
+stuck_parent=$!
+pids+=("$stuck_parent")
+"$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-orphan)" \
+  --secret-directory "$work/secret-dir" --init "$work/stuck-init" --parent-pid "$stuck_parent" \
+  > "$work/stuck-parent.out" 2>&1 &
+orphan=$!
+pids+=("$orphan")
+sleep 1
+kill "$stuck_parent"
+if wait_exit "$orphan"; then
+  [[ "$exit_status" -eq 1 ]] || fail "parent end while starting: exit $exit_status, expected 1"
+  grep -q 'stopping before ready: parent process' "$work/stuck-parent.out" ||
+    fail "parent end while starting: no 'stopping before ready: parent process'"
+else
+  fail "parent end while starting: the node outlived its parent"
+fi
+
 # --- serve: best-effort init, token kept out of the output, parent watch ---------------------------
 token="token-$RANDOM$RANDOM"
 secrets="$(new_secrets "$token")"
@@ -93,6 +134,7 @@ cat > "$work/init.sql" <<'SQL'
 CREATE TABLE answers AS SELECT 42 AS v;
 SELEC broken;
 CREATE TABLE more AS SELECT 'a;b' AS w;
+SELECT 'qod-init-credential' FROM;
 SQL
 serve_port="$(port)"
 sleep 300 &
@@ -107,7 +149,13 @@ if ! wait_for '\[qod-node\] ready' "$work/serve.out"; then
   fail "serve: node never became ready"
   cat "$work/serve.out"
 else
-  grep -q '2 of 3 statement(s) ran' "$work/serve.out" || fail "serve: expected 2 of 3 init statements to run"
+  grep -q '2 of 4 statement(s) ran' "$work/serve.out" || fail "serve: expected 2 of 4 init statements to run"
+  grep -q 'statement 4 of 4 failed: Parser Error: syntax error' "$work/serve.out" ||
+    fail "serve: the failing statement's error was not reported"
+  # DuckDB's error names the statement's text after `LINE 1:`; init SQL carries credentials.
+  if grep -q -e 'qod-init-credential' -e 'LINE 1:' "$work/serve.out"; then
+    fail "serve: a failing init statement's text reached the output"
+  fi
   grep -q "serving on" "$work/serve.out" || fail "serve: no listen url reported"
   if grep -q "$token" "$work/serve.out"; then
     fail "serve: the token reached the output"
@@ -133,12 +181,14 @@ SQL
   fi
 fi
 
-# --- serve: SIGTERM stops the node ----------------------------------------------------------------
-"$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-one)" \
-  --secret-directory "$work/secret-dir" > "$work/term.out" 2>&1 &
+# --- serve: init SQL on stdin, SIGTERM stops the node ---------------------------------------------
+printf 'CREATE TABLE piped AS SELECT 7 AS v;\nSELECT * FROM piped;' |
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-one)" \
+    --secret-directory "$work/secret-dir" --init - > "$work/term.out" 2>&1 &
 term_node=$!
 pids+=("$term_node")
 if wait_for '\[qod-node\] ready' "$work/term.out"; then
+  grep -q '2 of 2 statement(s) ran' "$work/term.out" || fail "stdin init: expected 2 of 2 statements to run"
   kill -TERM "$term_node"
   if wait_exit "$term_node"; then
     [[ "$exit_status" -eq 0 ]] || fail "SIGTERM: exit $exit_status, expected 0"

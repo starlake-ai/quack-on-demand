@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Kill the running `spawn-quack-node.sh` wrappers (and the duckdb child each one traps) of ONE
+# Kill the running `spawn-quack-node.sh` wrappers (and the qod-node child each one traps) of ONE
 # manager, leaving the manager JVM alone. Use it to nuke stuck child nodes without bouncing the
 # manager (e.g. after a crashed reconcile leaves orphaned spawn-quack-node.sh PIDs).
 #
@@ -12,7 +12,7 @@
 # asked for explicitly, and is the only mode that stops an earlier release's orphans (their wrapper
 # argv carries the node token where the marker now goes, so no other mode matches them).
 #
-# SIGTERM first so the script's `trap` tears down the duckdb child cleanly; SIGKILL after
+# SIGTERM first so the script's `trap` tears down the qod-node child cleanly; SIGKILL after
 # FORCE_AFTER seconds for anything still alive.
 #
 # Overrides via env vars:
@@ -59,18 +59,18 @@ if [[ "$MODE" == all ]]; then
   # Match the literal script name so we don't grab unrelated `quack-node` matches (e.g. log lines
   # piped through `tee`).
   SPAWN_RE='spawn-quack-node\.sh'
-  DUCK_RE='duckdb .*-init .*quack-node\.'
+  NODE_RE='(qod-node .*--secret-directory|duckdb .*-init) .*quack-node\.'
   scope="every manager"
 elif [[ "$MODE" == unmarked ]]; then
   # No marker: the wrapper argv ends at the node port, and the node directory is
   # `quack-node.XXXXXX` (mktemp's six characters) with no `<port>-<id>.` in front. A node of a
-  # manager older than this branch has no -init at all; it dies with its wrapper.
+  # manager older than the marker has no -init at all; it dies with its wrapper.
   SPAWN_RE='spawn-quack-node\.sh [0-9]+$'
-  DUCK_RE='duckdb .*-init .*quack-node\.[A-Za-z0-9]{6}/init'
+  NODE_RE='(qod-node .*--secret-directory .*quack-node\.[A-Za-z0-9]{6}/secrets|duckdb .*-init .*quack-node\.[A-Za-z0-9]{6}/init)'
   scope="unmarked nodes"
 else
   SPAWN_RE="spawn-quack-node\\.sh [0-9]+ ${MGR_PORT}-[0-9a-f]+"
-  DUCK_RE="duckdb .*-init .*quack-node\\.${MGR_PORT}-[0-9a-f]+\\."
+  NODE_RE="(qod-node .*--secret-directory|duckdb .*-init) .*quack-node\\.${MGR_PORT}-[0-9a-f]+\\."
   scope="the manager on port $MGR_PORT"
 fi
 
@@ -104,11 +104,13 @@ for pid in $remaining; do
   kill -9 "$pid" 2>/dev/null || true
 done
 
-# Sweep any orphaned duckdb children whose parent script died before its trap could fire. Nodes
-# run as `<abs path>/duckdb -init <tmp>/quack-node.<marker>.XXX/init`, so match that argv (a bare
-# `^duckdb` never matches the absolute path the spawn script uses).
-orphan_duck=$(pgrep -f "$DUCK_RE" 2>/dev/null || true)
-for pid in $orphan_duck; do
+# Sweep any orphaned node processes whose parent script died before its trap could fire (qod-node
+# also exits by itself once its wrapper is gone). Nodes run as `<abs path>/qod-node ...
+# --secret-directory <tmp>/quack-node.<marker>.XXX/secrets/...` (an earlier release's as
+# `<abs path>/duckdb -init <tmp>/quack-node.<marker>.XXX/init`), so match that argv; a bare
+# `^qod-node` never matches the absolute path the spawn script uses.
+orphan_nodes=$(pgrep -f "$NODE_RE" 2>/dev/null || true)
+for pid in $orphan_nodes; do
   kill -9 "$pid" 2>/dev/null || true
 done
 

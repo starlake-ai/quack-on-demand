@@ -3,6 +3,8 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -26,38 +28,58 @@
 namespace qod {
 namespace {
 
-std::mutex stop_lock;
-std::condition_variable stop_requested;
-std::string stop_reason;
+struct StopState {
+	std::mutex lock;
+	std::condition_variable requested;
+	std::string reason;
+	bool serving = false;
+};
 
-void RequestStop(const std::string &reason) {
+// Never destroyed: a watcher thread can still request a stop while main returns.
+StopState &State() {
+	static auto *state = new StopState();
+	return *state;
+}
+
+// Before MarkServing there is nothing to close, and startup may be blocked where no flag reaches it,
+// so the process ends at once. After it, the first request goes to WaitForStop and a second one (the
+// wrapper killed while the database closes) ends the process at once.
+void RequestStop(const std::string &reason, int status) {
+	auto &state = State();
 	{
-		std::lock_guard<std::mutex> guard(stop_lock);
-		if (stop_reason.empty()) {
-			stop_reason = reason;
+		std::lock_guard<std::mutex> guard(state.lock);
+		if (!state.serving || !state.reason.empty()) {
+			std::cerr << "[qod-node] stopping " << (state.serving ? "at once" : "before ready") << ": " << reason
+			          << std::endl;
+			std::_Exit(status);
 		}
+		state.reason = reason;
 	}
-	stop_requested.notify_all();
+	state.requested.notify_all();
+}
+
+std::string ParentEnded(long long parent_pid, const char *how) {
+	return "parent process " + std::to_string(parent_pid) + " " + how;
 }
 
 #ifdef _WIN32
 
 BOOL WINAPI OnConsoleControl(DWORD) {
-	RequestStop("console control event");
+	RequestStop("console control event", 1);
 	return TRUE;
 }
 
 void WatchParent(long long parent_pid) {
 	HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(parent_pid));
 	if (!parent) {
-		RequestStop("parent process " + std::to_string(parent_pid) + " is gone");
+		RequestStop(ParentEnded(parent_pid, "is gone"), 1);
 		return;
 	}
 	// A handle names this process, not its pid: a reused pid cannot keep the node alive.
 	std::thread([parent, parent_pid] {
 		WaitForSingleObject(parent, INFINITE);
 		CloseHandle(parent);
-		RequestStop("parent process " + std::to_string(parent_pid) + " ended");
+		RequestStop(ParentEnded(parent_pid, "ended"), 1);
 	}).detach();
 }
 
@@ -74,7 +96,7 @@ void PollParent(long long parent_pid) {
 		while (ParentAlive(parent_pid)) {
 			std::this_thread::sleep_for(std::chrono::seconds(1));
 		}
-		RequestStop("parent process " + std::to_string(parent_pid) + " ended");
+		RequestStop(ParentEnded(parent_pid, "ended"), 1);
 	}).detach();
 }
 
@@ -89,7 +111,7 @@ void WatchParent(long long parent_pid) {
 			struct kevent event;
 			kevent(queue, nullptr, 0, &event, 1, nullptr);
 			close(queue);
-			RequestStop("parent process " + std::to_string(parent_pid) + " ended");
+			RequestStop(ParentEnded(parent_pid, "ended"), 1);
 		}).detach();
 		return;
 	}
@@ -97,7 +119,7 @@ void WatchParent(long long parent_pid) {
 		close(queue);
 	}
 	if (!ParentAlive(parent_pid)) {
-		RequestStop("parent process " + std::to_string(parent_pid) + " is gone");
+		RequestStop(ParentEnded(parent_pid, "is gone"), 1);
 		return;
 	}
 #elif defined(__linux__)
@@ -106,7 +128,7 @@ void WatchParent(long long parent_pid) {
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
 		// The parent may have died before prctl took effect.
 		if (getppid() != static_cast<pid_t>(parent_pid)) {
-			RequestStop("parent process " + std::to_string(parent_pid) + " is gone");
+			RequestStop(ParentEnded(parent_pid, "is gone"), 1);
 			return;
 		}
 	}
@@ -118,7 +140,7 @@ void WatchParent(long long parent_pid) {
 
 } // namespace
 
-void PrepareStopSignals() {
+void StartStopWatch(long long parent_pid) {
 #ifdef _WIN32
 	SetConsoleCtrlHandler(OnConsoleControl, TRUE);
 #else
@@ -126,23 +148,31 @@ void PrepareStopSignals() {
 	sigaddset(&stop_signals, SIGINT);
 	sigaddset(&stop_signals, SIGTERM);
 	pthread_sigmask(SIG_BLOCK, &stop_signals, nullptr);
-#endif
-}
-
-std::string WaitForStop(long long parent_pid) {
-#ifndef _WIN32
 	std::thread([] {
-		int received = 0;
-		sigwait(&stop_signals, &received);
-		RequestStop("signal " + std::to_string(received));
+		for (;;) {
+			int received = 0;
+			if (sigwait(&stop_signals, &received) == 0) {
+				RequestStop("signal " + std::to_string(received), 128 + received);
+			}
+		}
 	}).detach();
 #endif
 	if (parent_pid > 0) {
 		WatchParent(parent_pid);
 	}
-	std::unique_lock<std::mutex> guard(stop_lock);
-	stop_requested.wait(guard, [] { return !stop_reason.empty(); });
-	return stop_reason;
+}
+
+void MarkServing() {
+	auto &state = State();
+	std::lock_guard<std::mutex> guard(state.lock);
+	state.serving = true;
+}
+
+std::string WaitForStop() {
+	auto &state = State();
+	std::unique_lock<std::mutex> guard(state.lock);
+	state.requested.wait(guard, [&state] { return !state.reason.empty(); });
+	return state.reason;
 }
 
 } // namespace qod

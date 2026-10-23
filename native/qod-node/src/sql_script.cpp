@@ -52,4 +52,9 @@ std::string QuoteLiteral(const std::string &value) {
 	return quoted;
 }
 
+std::string ServeStatement(const std::string &bind, int port, const std::string &token) {
+	return "SELECT listen_url FROM quack_serve(" + QuoteLiteral("quack:" + bind + ":" + std::to_string(port)) +
+	       ", token := " + QuoteLiteral(token) + ", allow_other_hostname := true, disable_ssl := true)";
+}
+
 } // namespace qod

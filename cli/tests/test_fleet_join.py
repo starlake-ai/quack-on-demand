@@ -327,8 +327,9 @@ def test_stale_secrets_dirs_are_swept_at_startup(tmp_path):
 
 
 def test_the_spawn_script_reads_then_deletes_the_secrets_dir(tmp_path):
-    # Runs the real bundled script in dry-run mode: the token and password come from the files,
-    # the directory is gone afterwards, and a value left in the environment is ignored.
+    # Runs the real bundled script in dry-run mode: the password comes from its file, the token stays
+    # out of the init SQL (qod-node reads it itself), the directory is gone afterwards, and a value
+    # left in the environment is ignored.
     from qod_cli.fleet_join import write_secrets_dir
     script = pathlib.Path(__file__).resolve().parents[1] / "src" / "qod_cli" / "scripts" / "spawn-quack-node.sh"
     d = write_secrets_dir(tmp_path / "secrets", {"pgPassword": "from-file", "QOD_NODE_TOKEN": "tok-file"})
@@ -337,7 +338,7 @@ def test_the_spawn_script_reads_then_deletes_the_secrets_dir(tmp_path):
            "dataPath": str(tmp_path / "lake"), "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1",
            "encryptionKey": "from-env"}
     out = subprocess.run(["bash", str(script), "21999"], env=env, capture_output=True, text=True, check=True)
-    assert "PASSWORD 'from-file'" in out.stdout and "token := 'tok-file'" in out.stdout
+    assert "PASSWORD 'from-file'" in out.stdout and "tok-file" not in out.stdout
     # The password rides a temporary secret, never an ATTACH string (duckdb_databases() prints it).
     attaches = [line for line in out.stdout.splitlines() if line.startswith("ATTACH")]
     assert attaches and all("password" not in line.lower() for line in attaches)

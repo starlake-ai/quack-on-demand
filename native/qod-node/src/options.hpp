@@ -20,7 +20,8 @@ struct NodeOptions {
 	bool secrets_ephemeral = false;
 	//! DuckDB's secret_directory, set before anything else runs.
 	std::string secret_directory;
-	//! Init SQL files (FIFOs from the spawn scripts), run statement by statement, best effort.
+	//! Init SQL files ("-": stdin, how the spawn scripts hand it over), run statement by statement,
+	//! best effort.
 	std::vector<std::string> init_files;
 	//! Exit when this process ends (the spawn script's wrapper). 0: no parent to watch.
 	long long parent_pid = 0;

@@ -56,7 +56,7 @@ private trait SpawnScriptCatalogSecretCases extends Matchers with SpawnScriptTem
       lines(lake + 1) should include("METADATA_PARAMETERS MAP {'SECRET': 'qod_catalog_pg'}")
     }
 
-    it should "drop the secret after the catalog ATTACH and before federation SQL and serving" in {
+    it should "drop the secret after the catalog ATTACH and before federation SQL" in {
       val lines  = ducklake()
       val create =
         lines.indexWhere(_.startsWith("CREATE OR REPLACE TEMPORARY SECRET qod_catalog_pg"))
@@ -66,7 +66,8 @@ private trait SpawnScriptCatalogSecretCases extends Matchers with SpawnScriptTem
       create should be < first
       lake should be < drop
       drop should be < lines.indexOf("SELECT 'federation';")
-      drop should be < lines.indexWhere(_.contains("quack_serve("))
+      // qod-node serves only after the whole init SQL has run, so the secret is gone by then.
+      lines.exists(_.contains("quack_serve(")) shouldBe false
     }
 
     it should "double an apostrophe in the password" in {

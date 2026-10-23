@@ -1,13 +1,13 @@
-"""The spawn script refuses dot-command init SQL, and its stale-dir sweep trusts nothing it did not make.
+"""The spawn script's init SQL holds no command channel, and its stale-dir sweep trusts nothing it did
+not make.
 
-A line starting with `.` in the init SQL is a DuckDB CLI dot-command, and `.shell` / `.system` run an
-OS command as the node's user: the script refuses one in every value it did not author, whatever
-launched it (the manager screens the same values first, InitSqlScreen.scala). The sweep of earlier
-node directories walks TMPDIR, often the shared /tmp: it must never follow a symlink, delete a path a
-node directory merely names, or let a stray entry abort the spawn.
+The node process is qod-node, not the DuckDB CLI: a line starting with `.` in the init SQL is plain SQL
+to it (a parse error at worst), never a dot-command, so the script neither writes nor screens any. The
+sweep of earlier node directories walks TMPDIR, often the shared /tmp: it must never follow a symlink,
+delete a path a node directory merely names, or let a stray entry abort the spawn.
 
 Every test runs the bundled script (what `qod fleet join` runs) in dry-run mode with a sandbox TMPDIR
-and starting directory; no duckdb is ever started.
+and starting directory; no node is ever started.
 """
 
 import os
@@ -46,39 +46,18 @@ def _dead_pid():
     return p.pid
 
 
-DOT_VALUES = [".shell touch qod-pwned", "SET threads = 2;\n  .shell id",
-              "SET threads = 2;\r.system id", "SELECT 1;\n\t.read /etc/passwd"]
-
-
-@pytest.mark.parametrize("value", DOT_VALUES)
-@pytest.mark.parametrize("key,secret", [("dbInitSql", False), ("lockdownSql", False),
-                                        ("extraSetupSql", True), ("objectStoreSql", True)])
-def test_a_dot_command_line_in_any_value_refuses_the_spawn(tmp_path, key, secret, value):
-    res = (_dry_run(tmp_path, secrets={key: value}) if secret
-           else _dry_run(tmp_path, **{key: value}))
-    assert res.returncode == 1, res.stdout + res.stderr
-    assert f"ERROR: {key} holds a line starting with '.'" in res.stderr
-    # Refused before any init SQL is assembled or any node directory is made.
-    assert res.stdout == ""
-    assert list((tmp_path / "tmpdir").iterdir()) == []
-
-
-def test_a_dot_command_smuggled_through_a_script_value_is_refused_too(tmp_path):
-    # The proxy is not a tenant value, but it is interpolated into the init SQL all the same.
-    res = _dry_run(tmp_path, HTTP_PROXY="proxy:3128\n.shell id")
-    assert res.returncode == 1, res.stdout + res.stderr
-    assert "the assembled init SQL holds a line starting with '.'" in res.stderr
-    assert res.stdout == ""
-
-
-def test_ordinary_init_sql_keeps_only_the_scripts_own_dot_commands(tmp_path):
+def test_the_init_sql_holds_no_dot_command_and_passes_values_through(tmp_path):
     res = _dry_run(tmp_path, secrets={"extraSetupSql": "SELECT 1.5 AS x;\nSELECT '.not a command';"},
                    dbInitSql="SET threads = 2;\n  SELECT 2;", lockdownSql="SET enable_external_access = false;")
     assert res.returncode == 0, res.stderr
     dots = [line for line in res.stdout.splitlines() if line.lstrip().startswith(".")]
-    assert dots[0] == ".bail off"
-    assert dots[1].startswith('.shell "tail --pid=')
-    assert dots[2:] == [".exit"]
+    assert dots == []
+    for value in ("SELECT 1.5 AS x;", "SELECT '.not a command';", "SET threads = 2;",
+                  "SET enable_external_access = false;"):
+        assert value in res.stdout
+    # The node token never enters the init SQL: qod-node reads it from the secrets directory itself.
+    assert "tok-hard" not in res.stdout
+    assert "quack_serve" not in res.stdout
 
 
 def test_the_sweep_never_follows_a_symlinked_node_directory(tmp_path):
@@ -151,7 +130,7 @@ def test_an_undeletable_stale_entry_never_aborts_the_spawn(tmp_path):
     try:
         res = _dry_run(tmp_path)
         assert res.returncode == 0, res.stderr
-        assert "SELECT listen_url FROM quack_serve" in res.stdout
+        assert "SET temp_directory" in res.stdout
     finally:
         locked.chmod(0o700)
 
