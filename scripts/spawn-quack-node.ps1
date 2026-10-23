@@ -291,6 +291,20 @@ if (-not $dryRun) {
 
 $onWindows = ($env:OS -eq 'Windows_NT')
 
+# Applies $acl to the directory $path through .NET rather than the Set-Acl cmdlet: Windows PowerShell
+# started from PowerShell 7 (a manager launched from pwsh, a CI step) inherits a PSModulePath that
+# lists PowerShell 7's own Microsoft.PowerShell.Security first, and then cannot load the module
+# Set-Acl lives in. The instance method is .NET Framework's (Windows PowerShell); .NET's (PowerShell
+# 7) is the FileSystemAclExtensions one.
+function Set-DirectoryAcl([string]$path, $acl) {
+  $dir = New-Object System.IO.DirectoryInfo($path)
+  if ($dir.PSObject.Methods['SetAccessControl']) {
+    $dir.SetAccessControl($acl)
+  } else {
+    [System.IO.FileSystemAclExtensions]::SetAccessControl($dir, $acl)
+  }
+}
+
 # A directory only the current user can reach (the analogue of mktemp's 0700).
 function New-PrivateDirectory([string]$path) {
   New-Item -ItemType Directory -Path $path -Force | Out-Null
@@ -300,7 +314,7 @@ function New-PrivateDirectory([string]$path) {
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
       $me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-    Set-Acl -LiteralPath $path -AclObject $acl
+    Set-DirectoryAcl $path $acl
   } else {
     & chmod 700 $path
   }
@@ -325,7 +339,7 @@ function New-SecretDirectory([string]$path) {
       $me, 'ReadAndExecute, Delete, DeleteSubdirectoriesAndFiles', 'None', 'None', 'Allow')))
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
       $me, 'CreateFiles, CreateDirectories', 'None', 'None', 'Deny')))
-    Set-Acl -LiteralPath $path -AclObject $acl
+    Set-DirectoryAcl $path $acl
   } else {
     & chmod 400 $marker
     & chmod 500 $path
@@ -364,7 +378,7 @@ function Remove-SpillDirectory([string]$dir) {
 function Remove-NodeDirectory([string]$dir) {
   # The secret directory is read-only around its marker file (New-SecretDirectory): give the current
   # user full control of it again first, inherited by the marker (on Windows the marker's DACL is
-  # empty once Set-Acl re-propagated the directory's), or chmod 700 elsewhere. The owner may always
+  # empty once the directory's protected ACL propagated), or chmod 700 elsewhere. The owner may always
   # rewrite the DACL. Never through a symlink or junction, which would change whatever it points at.
   $secrets = Join-Path $dir 'secrets'
   if (Test-RealDirectory $secrets) {
@@ -375,7 +389,7 @@ function Remove-NodeDirectory([string]$dir) {
         $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
           $me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-        Set-Acl -LiteralPath $secrets -AclObject $acl
+        Set-DirectoryAcl $secrets $acl
       } catch {
         [Console]::Error.WriteLine("WARN: could not restore access to $secrets before removing it: $($_.Exception.Message)")
       }
