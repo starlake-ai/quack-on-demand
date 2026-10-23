@@ -222,12 +222,15 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     server.start().unsafeRunSync()
 
   override def afterAll(): Unit =
-    if server != null then server.stop()
-    if live != null then live.stop()
-    if dir != null then
-      Thread.sleep(200)
-      try Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.delete(p))
-      catch case e: Exception => System.err.println(s"[QuackCompatibilitySpec] cleanup: $e")
+    // The node stops (and its directory goes) whether or not the front door stopped cleanly.
+    try if server != null then server.stop()
+    finally
+      if live != null then live.stop()
+      if dir != null then
+        Thread.sleep(200)
+        try
+          Files.walk(dir).sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.delete(p))
+        catch case e: Exception => System.err.println(s"[QuackCompatibilitySpec] cleanup: $e")
 
   /** Run SQL through the real DuckDB CLI; returns (exit code, stdout, stderr). */
   private def cli(sql: String): (Int, String, String) =
@@ -417,7 +420,12 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val seen = router.history.snapshot(256).reverse
     val boom = seen.lastIndexWhere(r => r.sql == "SELECT error('boom')" && r.status == "permanent")
     boom should be >= 0
-    seen.drop(boom + 1).exists(r => r.sql == "ROLLBACK" && r.status == "ok") shouldBe true
+    // What only the fenced path leaves behind, so the case cannot pass without exercising it: the
+    // node refuses the handle CALL in the aborted transaction (DuckDB's own words, booked against
+    // the client's ROLLBACK), then the ROLLBACK is served on a fresh link.
+    val rollbacks = seen.drop(boom + 1).filter(_.sql == "ROLLBACK")
+    rollbacks.map(_.status).take(2) shouldBe List("permanent", "ok")
+    rollbacks.head.error.getOrElse("") should include("(please ROLLBACK)")
     // The client's failure is no failure of the node: it is still routable, and a new session is
     // served by it.
     val snap = router.supervisor.snapshot(poolKey).getOrElse(fail("pool missing"))

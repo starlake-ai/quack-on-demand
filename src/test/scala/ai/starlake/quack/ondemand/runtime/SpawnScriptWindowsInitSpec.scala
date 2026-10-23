@@ -1,6 +1,5 @@
 package ai.starlake.quack.ondemand.runtime
 
-import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -22,6 +21,9 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
 
   private val ps1 = Paths.get("scripts/spawn-quack-node.ps1").toAbsolutePath.toString
 
+  private val NodeId = "quack-ps1-node-1"
+  private val Token  = "tok-ps1-7a01"
+
   private val keys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 
   /** The environment of a spawn with its node directories under `tmp` and its secrets in a fresh
@@ -34,8 +36,8 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
   ): (Seq[(String, String)], Path) =
     val dir = NodeSecretFiles.writePrivateDir(
       Map(
-        NodeSecretFiles.TokenKey -> "tok-ps1-7a01",
-        NodeSecretFiles.AuthzKey -> keys.keyHex("quack-ps1-node-1")
+        NodeSecretFiles.TokenKey -> Token,
+        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId)
       ) ++ secrets,
       Some(tempDir)
     )
@@ -48,7 +50,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       "schemaName"                 -> "main",
       NodeSecretFiles.DirEnv       -> dir.toString,
       NodeSecretFiles.EphemeralEnv -> "1",
-      NodeSecretFiles.NodeIdEnv    -> "quack-ps1-node-1"
+      NodeSecretFiles.NodeIdEnv    -> NodeId
     ) ++ extraEnv
     (env, dir)
 
@@ -97,7 +99,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     lines.exists(_.contains("LOAD quack")) shouldBe false
     // qod-node is no CLI: nothing in its init SQL is a dot-command, and the script writes none.
     lines.exists(_.startsWith(".")) shouldBe false
-    out should not include "tok-ps1-7a01"
+    out should not include Token
     // The dry run removes its node directory and the secrets directory it never handed over.
     nodeDirs(tmp) shouldBe Nil
     Files.exists(dir) shouldBe false
@@ -223,7 +225,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     pairs("--port") shouldBe "23961"
     pairs("--bind") shouldBe "0.0.0.0"
     pairs("--secrets-dir") shouldBe secrets.toString
-    pairs("--node-id") shouldBe "quack-ps1-node-1"
+    pairs("--node-id") shouldBe NodeId
     pairs("--parent-pid").toLong shouldBe p.pid()
     pairs("--init") shouldBe "-"
     args should contain("--secrets-ephemeral")
@@ -246,9 +248,9 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     val env   = Files.readString(probe.resolve("env"), StandardCharsets.UTF_8)
     val names = env.linesIterator.map(_.takeWhile(_ != '=')).toSet
     Seq(
-      "the token"    -> "tok-ps1-7a01",
+      "the token"    -> Token,
       "the password" -> "pw-ps1-9b",
-      "the node key" -> keys.keyHex("quack-ps1-node-1")
+      "the node key" -> keys.keyHex(NodeId)
     ).foreach { case (what, v) =>
       withClue(s"$what in the node's arguments")(args.exists(_.contains(v)) shouldBe false)
       withClue(s"$what in the node's environment")(env.contains(v) shouldBe false)
@@ -291,7 +293,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
 
   "a PowerShell node" should "serve its init tables over quack with the real qod-node" in {
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
-    val port            = 23963
+    val port            = LiveQodNode.freePort()
     val (p, _, secrets) = launch(
       tempDir.resolve("start"),
       QodNodeTestBinary.path.get,
@@ -301,35 +303,14 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     )
     val allocator = new org.apache.arrow.memory.RootAllocator()
     val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
-    val node      = ai.starlake.quack.model.RunningNode(
-      "quack-ps1-node-1",
-      LiveQodNode.Pool,
-      ai.starlake.quack.model.Role.Dual,
-      "127.0.0.1",
-      port,
-      "tok-ps1-7a01",
-      None,
-      None,
-      java.time.Instant.EPOCH
-    )
+    val at        = new LiveQodNode.At(NodeId, port, Token, keys)
     try
       val deadline = System.currentTimeMillis() + 60000
       // The manager's way to a node: the native client, after a superuser handle for this node.
-      def query(): Either[String, List[String]] =
-        LiveQodNode.lines(
-          client
-            .query(
-              s"quack:127.0.0.1:$port",
-              "tok-ps1-7a01",
-              "SELECT v FROM memory.main.fed",
-              None,
-              () => keys.prelude(node, LiveQodNode.Superuser)
-            )
-            .unsafeRunSync()
-        )
       var got: Either[String, List[String]] = Left("the node never answered")
       while {
-          got = Try(query()).getOrElse(Left("the node never answered"))
+          got = Try(at.query(client, "SELECT v FROM memory.main.fed"))
+            .getOrElse(Left("the node never answered"))
           got != Right(List("fed-served"))
         } && System.currentTimeMillis() < deadline
       do Thread.sleep(500)

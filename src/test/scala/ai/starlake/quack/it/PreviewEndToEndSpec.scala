@@ -6,7 +6,7 @@ import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDb, Ten
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.ArrowRowsDecoder
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.runtime.LocalQuackBackend
+import ai.starlake.quack.ondemand.runtime.{LocalQuackBackend, QodNodeTestBinary}
 import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.state.testkit.{PostgresFixture, TestPostgres}
 import cats.effect.unsafe.implicits.global
@@ -34,16 +34,16 @@ import scala.sys.process._
   * caller (a statement with no principal bound gets no session handle, so it never reaches a node),
   * so this spec proves SQL shape, routing, node execution, Arrow decode, and truncation -- NOT
   * authorization (which `PreviewAuthzSpec` and `CatalogPreviewHandlersSpec` pin at the handler
-  * layer, and which under the REAL `PostgresAclValidator` would fail-safe DENY a `None` effective
-  * set; the "superuser" user string has no bypass meaning to the validator).
+  * layer; the set's user has no tenant, so even the REAL `PostgresAclValidator` would admit it as a
+  * superuser, unchecked).
   *
   * The decoded rows are compared against a direct `duckdb` CLI query of the same catalog at the
   * same snapshot; comparison is unordered-set equality via an identical lexicographic re-sort of
   * both sides' rendered rows (the fixture data is comma- and quote-free by construction; this naive
   * CSV rendering is NOT safe to copy for tables with richer string data).
   *
-  * Cancels cleanly (not fails) when local Postgres or the `duckdb` CLI is unavailable -- same
-  * environment guard [[PostgresFixture]] uses.
+  * Cancels cleanly (not fails) when local Postgres, the `duckdb` CLI or a qod-node build is
+  * unavailable -- the first two are the environment guard [[PostgresFixture]] uses.
   */
 class PreviewEndToEndSpec
     extends AnyFunSpec
@@ -249,6 +249,7 @@ class PreviewEndToEndSpec
 
     it("returns rows identical to a direct duckdb AT (VERSION => n) query") {
       assume(duckdbPresent, "duckdb CLI not on PATH")
+      assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
       TestPostgres.ensureReachable()
       withCatalog("pve2e") { (reader, dataPath) =>
         val dbName     = currentDbName.get
@@ -279,6 +280,7 @@ class PreviewEndToEndSpec
 
     it("truncates: maxRows=2 on a 5-row table yields 2 rows and truncated=true") {
       assume(duckdbPresent, "duckdb CLI not on PATH")
+      assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
       TestPostgres.ensureReachable()
       withCatalog("pve2etrunc") { (reader, dataPath) =>
         val dbName     = currentDbName.get

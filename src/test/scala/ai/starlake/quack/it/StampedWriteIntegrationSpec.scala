@@ -1,6 +1,7 @@
 package ai.starlake.quack.it
 
 import ai.starlake.quack.edge.adapter.{QuackHttpClient, QuackResponse}
+import ai.starlake.quack.ondemand.runtime.LiveQodNode.rows
 import ai.starlake.quack.ondemand.runtime.{LiveQodNode, QodNodeTestBinary}
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.memory.RootAllocator
@@ -17,11 +18,11 @@ import java.nio.file.{Files, Path}
   */
 class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAndAfterAll:
 
-  private val port              = 29993
-  private val endpoint          = s"quack:127.0.0.1:$port"
   private val token             = "it-stamp-token"
   private var dir: Path         = null
   private var live: LiveQodNode = null
+
+  private def endpoint: String = live.endpoint
 
   // Shared allocator: one instance for the whole suite, closed in afterAll.
   private val allocator = new RootAllocator()
@@ -35,7 +36,7 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
            |USE lake;
            |CREATE TABLE t(i INT);
            |""".stripMargin
-      live = LiveQodNode.start(dir, init, port = port, token = token)
+      live = LiveQodNode.start(dir, init, token = token)
 
   override def afterAll(): Unit =
     // SIGKILL: the node leaves nothing behind.
@@ -57,18 +58,6 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
 
   private def client() =
     new QuackHttpClient(allocator)
-
-  private def rows(resp: QuackResponse): List[List[Any]] =
-    val ok   = resp.asInstanceOf[QuackResponse.Ok]
-    val out  = scala.collection.mutable.ListBuffer.empty[List[Any]]
-    val root = ok.rows.getVectorSchemaRoot
-    while ok.rows.loadNextBatch() do
-      (0 until root.getRowCount).foreach { i =>
-        out += root.getFieldVectors.toArray.toList
-          .map(_.asInstanceOf[org.apache.arrow.vector.FieldVector].getObject(i))
-      }
-    ok.close()
-    out.toList
 
   private def latestSnapshot(c: QuackHttpClient): (Any, Any) =
     val r = rows(
@@ -146,7 +135,9 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
         "USE lake.main; INSERT INTO lake.t VALUES (4)"
       )
       .unsafeRunSync()
-    resp.asInstanceOf[QuackResponse.Ok].close() // no drain
+    resp match
+      case ok: QuackResponse.Ok => ok.close() // no drain
+      case failed               => fail(s"the stamped write was refused: $failed")
     val r = rows(
       c.query(
         endpoint,
@@ -157,3 +148,60 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
       ).unsafeRunSync()
     )
     r.head.head.toString shouldBe "1"
+
+  // The node admits a handle once, and the client mints one per PREPARE: a stamped write is three
+  // (the stamp, the statement, the COMMIT), each a fresh handle the node admitted.
+  it("mints one fresh handle per PREPARE of a stamped write, and every one is admitted"):
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val c                      = client()
+    val fresh                  = live.authorize()
+    val mints                  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val counting: () => String = () =>
+      mints.incrementAndGet()
+      fresh()
+    val r = rows(
+      c.queryStamped(
+        endpoint,
+        token,
+        counting,
+        prelude,
+        "USE lake.main; INSERT INTO lake.t VALUES (5)"
+      ).unsafeRunSync()
+    )
+    r.head.head.toString shouldBe "1"
+    mints.get() shouldBe 3
+    rows(
+      c.query(
+        endpoint,
+        token,
+        "SELECT count(*) FROM lake.t WHERE i = 5",
+        None,
+        live.authorize()
+      ).unsafeRunSync()
+    ).head.head.toString shouldBe "1"
+
+  it("refuses a single-use handle at the statement's PREPARE, and commits nothing"):
+    assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val c    = client()
+    val once = live.keys.prelude(live.node, LiveQodNode.Superuser)
+    // The stamp installs it; the statement's PREPARE then replays it.
+    LiveQodNode.lines(
+      c.queryStamped(
+        endpoint,
+        token,
+        () => once,
+        prelude,
+        "USE lake.main; INSERT INTO lake.t VALUES (6)"
+      ).unsafeRunSync()
+    ) match
+      case Left(refusal) => refusal should include("already used")
+      case other         => fail(s"expected the replayed handle to be refused, got $other")
+    rows(
+      c.query(
+        endpoint,
+        token,
+        "SELECT count(*) FROM lake.t WHERE i = 6",
+        None,
+        live.authorize()
+      ).unsafeRunSync()
+    ).head.head.toString shouldBe "0"

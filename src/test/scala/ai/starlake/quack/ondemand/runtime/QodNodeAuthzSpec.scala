@@ -8,7 +8,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.nio.file.Files
+import java.nio.file.{Files, Path}
 
 /** A real qod-node, reached through the manager's own native client: a statement runs only after a
   * session handle for this node, signed with its key, unused, for the connection's one principal.
@@ -18,20 +18,29 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val allocator         = new RootAllocator()
   private val client            = new QuackHttpClient(allocator)
+  private var dir: Path         = null
   private var live: LiveQodNode = null
   private val Alice             =
     NodePrincipal("u-1", "alice", Some("acme"), superuser = false, system = false)
 
   override def beforeAll(): Unit =
     if QodNodeTestBinary.path.nonEmpty then
-      live = LiveQodNode.start(
-        Files.createTempDirectory("qod-node-authz"),
-        "CREATE TABLE answers AS SELECT 42 AS v;"
-      )
+      dir = Files.createTempDirectory("qod-node-authz")
+      live = LiveQodNode.start(dir, "CREATE TABLE answers AS SELECT 42 AS v;")
 
   override def afterAll(): Unit =
-    if live != null then live.stop()
-    allocator.close()
+    try
+      if live != null then live.stop()
+      allocator.close()
+    finally
+      // The node is gone (stop waits for it), so nothing holds the directory any more.
+      if dir != null then
+        val tree = Files.walk(dir)
+        try tree.sorted(java.util.Comparator.reverseOrder()).forEach(p => Files.delete(p))
+        catch
+          case e: Exception =>
+            System.err.println(s"[QodNodeAuthzSpec] afterAll: could not fully delete $dir: $e")
+        finally tree.close()
 
   private def node: LiveQodNode =
     assume(live != null, "no qod-node binary (QOD_NODE_BIN or a local build)")
@@ -49,11 +58,7 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     )
 
   it should "run after a session handle for this node" in {
-    LiveQodNode.lines(
-      client
-        .query(node.endpoint, node.token, "SELECT v FROM answers", None, node.authorize(Alice))
-        .unsafeRunSync()
-    ) shouldBe Right(List("42"))
+    node.query(client, "SELECT v FROM answers", Alice) shouldBe Right(List("42"))
   }
 
   "a handle" should "not install twice" in {
@@ -96,6 +101,11 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         conn.executeDiscard(node.keys.prelude(node.node, mallory)).unsafeRunSync()
       )
       e.msg should include("another principal")
+      // The refusal left alice installed: her connection still runs statements, with no handle of
+      // its own and after a fresh one of hers.
+      conn.executeDiscard("SELECT 1").unsafeRunSync()
+      conn.executeDiscard(node.keys.prelude(node.node, Alice)).unsafeRunSync()
+      conn.executeDiscard("SELECT 1").unsafeRunSync()
     finally conn.close().unsafeRunSync()
   }
 

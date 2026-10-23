@@ -31,8 +31,8 @@ import scala.util.Try
 /** End-to-end smoke of local nodes on qod-node: a real manager booted in-process with
   * `runtimeType = local` resolves its qod-node at boot ([[QodNodeBinary]]: `QOD_NODE_BIN`, which
   * build.sbt points at this checkout's build, else the binary vendored for this platform), a pool
-  * of one starts a node through the real spawn script, and `SELECT 42` reaches it through the
-  * FlightSQL edge.
+  * of one starts a node through the real spawn script, `SELECT 42` reaches it through the FlightSQL
+  * edge, and the node stays healthy and routable once a health tick (every 2 s here) has probed it.
   *
   * Manager on 20952 (REST) / 31352 (FlightSQL, plain gRPC), native front door off, nodes on
   * 23210-23219, against a throwaway control-plane database; never the default ports. Teardown stops
@@ -138,6 +138,7 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
          |  maxPort = 23219
          |  spawnScript = "$script"
          |  reconcileIntervalSec = 2
+         |  healthCheckIntervalSec = 2
          |  ha.enabled = false
          |  embeddedPostgres.enabled = false
          |  admin { username = "admin", password = "admin", role = "admin" }
@@ -282,4 +283,21 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     "3 FlightSQL SELECT 42"
   ) {
     await("SELECT 42 through the edge", 30.seconds)(Try(selectFortyTwo()).toOption) shouldBe "42"
+  }
+
+  // A node is healthy from the start (NodeLoad.empty) and only the health loop's tick probes it:
+  // the manager's handle as the system principal, then the canary, with this manager's keys. The
+  // engine-stats scrape follows only a probe that passed, so a sample on the node means a tick
+  // passed against the real node. The node must still be routable after it.
+  "local node smoke 4" should "keep the node healthy across a health tick" in step(
+    "4 health tick, node still routable"
+  ) {
+    val ticked = await("a health tick to pass on the node", 30.seconds) {
+      poolNodes().headOption.filter(
+        _.hcursor.get[Option[Long]]("duckdbMemoryBytes").exists(_.isDefined)
+      )
+    }
+    ticked.hcursor.get[Boolean]("healthy") shouldBe Right(true)
+    await("SELECT 42 through the edge", 30.seconds)(Try(selectFortyTwo()).toOption) shouldBe "42"
+    poolNodes().headOption.flatMap(_.hcursor.get[Boolean]("healthy").toOption) shouldBe Some(true)
   }

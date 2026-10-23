@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.BuildVersions
 import ai.starlake.quack.ondemand.DuckDbExtensionSource
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
-import cats.effect.unsafe.implicits.global
+import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -20,7 +20,11 @@ import scala.util.Try
   * DuckDB CLI only creates the operator's persistent secret of one case. Cancelled without
   * qod-node.
   */
-class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
+class SpawnScriptLiveNodeSpec
+    extends AnyFlatSpec
+    with Matchers
+    with SpawnScriptTempDir
+    with BeforeAndAfterAll:
 
   private val script = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath.toString
   private val Token  = "tok-live-node-7c41"
@@ -29,6 +33,8 @@ class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScript
   private val keys      = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
   private val allocator = new org.apache.arrow.memory.RootAllocator()
   private val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
+
+  override def afterAll(): Unit = allocator.close()
 
   /** The DuckDB CLI this build pins, which the persistent-secret case runs. */
   private lazy val pinnedDuckdb: Option[Path] =
@@ -141,28 +147,7 @@ class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScript
     * rows as lines, "") or (1, "", the node's error).
     */
   private def onNodeResult(port: Int, sql: String): (Int, String, String) =
-    val node = ai.starlake.quack.model.RunningNode(
-      NodeId,
-      LiveQodNode.Pool,
-      ai.starlake.quack.model.Role.Dual,
-      "127.0.0.1",
-      port,
-      Token,
-      None,
-      None,
-      java.time.Instant.EPOCH
-    )
-    LiveQodNode.lines(
-      client
-        .query(
-          s"quack:127.0.0.1:$port",
-          Token,
-          sql,
-          None,
-          () => keys.prelude(node, LiveQodNode.Superuser)
-        )
-        .unsafeRunSync()
-    ) match
+    new LiveQodNode.At(NodeId, port, Token, keys).query(client, sql) match
       case Right(lines) => (0, lines.mkString("\n"), "")
       case Left(err)    => (1, "", err)
 

@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.BuildVersions
 import ai.starlake.quack.edge.adapter.QuackHttpClient
 import ai.starlake.quack.edge.authz.NodeKeys
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Role, RunningNode}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
 import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -30,8 +30,8 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
 
   private val script = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath.toString
 
-  private lazy val allocator = new org.apache.arrow.memory.RootAllocator()
-  private lazy val client    = new QuackHttpClient(allocator)
+  private val allocator = new org.apache.arrow.memory.RootAllocator()
+  private val client    = new QuackHttpClient(allocator)
 
   private var process: Option[java.lang.Process] = None
   private var nodePort: Int                      = 0
@@ -87,7 +87,9 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     if !RdbmsFederationLiveNode.listening(nodePort) then
       throw new IllegalStateException(s"node did not come up:\n$log")
 
-  /** SIGKILL the wrapper and every qod-node it started, so a run can never leave an orphan. */
+  /** SIGKILL the wrapper and every qod-node it started, so a run can never leave an orphan, and
+    * close the client's allocator.
+    */
   def stop(): Unit =
     process.foreach { p =>
       Try(p.descendants().forEach(d => d.destroyForcibly()))
@@ -95,33 +97,13 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
       p.waitFor(20, TimeUnit.SECONDS)
     }
     process = None
+    allocator.close()
 
   /** `sql` on the node as the manager runs it: the native client, after a superuser handle. (0,
     * rows as lines, "") or (1, Nil, the node's error).
     */
   def run(sql: String): (Int, List[String], String) =
-    val node = RunningNode(
-      NodeId,
-      LiveQodNode.Pool,
-      Role.Dual,
-      "127.0.0.1",
-      nodePort,
-      Token,
-      None,
-      None,
-      java.time.Instant.EPOCH
-    )
-    LiveQodNode.lines(
-      client
-        .query(
-          s"quack:127.0.0.1:$nodePort",
-          Token,
-          sql,
-          None,
-          () => keys.prelude(node, LiveQodNode.Superuser)
-        )
-        .unsafeRunSync()
-    ) match
+    new LiveQodNode.At(NodeId, nodePort, Token, keys).query(client, sql) match
       case Right(lines) => (0, lines, "")
       case Left(err)    => (1, Nil, err)
 
