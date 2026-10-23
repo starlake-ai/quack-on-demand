@@ -86,7 +86,13 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     val journal = new EventJournal(store)
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(stub())
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
@@ -209,7 +215,13 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker
     val client  = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(defaultStub())
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry

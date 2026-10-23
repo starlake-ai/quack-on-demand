@@ -54,7 +54,8 @@ object FlightEdgeHarness:
           endpoint: String,
           token: String,
           sql: String,
-          session: Option[String]
+          session: Option[String],
+          authorize: () => String
       ): IO[QuackResponse] =
         IO(nodeQuery(sql))
     new QuackHttpAdapter(client, tracker)

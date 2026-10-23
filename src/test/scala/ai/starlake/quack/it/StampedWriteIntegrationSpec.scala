@@ -85,6 +85,10 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
   private def client() =
     new QuackHttpClient(allocator)
 
+  // The session-handle prelude the client sends before every PREPARE. This server is a plain
+  // DuckDB with no handle check, so the prelude is a no-op statement.
+  private val authorize: () => String = () => "SELECT 1"
+
   private def rows(resp: QuackResponse): List[List[Any]] =
     val ok   = resp.asInstanceOf[QuackResponse.Ok]
     val out  = scala.collection.mutable.ListBuffer.empty[List[Any]]
@@ -103,7 +107,8 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
         endpoint,
         token,
         "SELECT author, commit_message FROM ducklake_snapshots('lake') ORDER BY snapshot_id DESC LIMIT 1",
-        None
+        None,
+        authorize
       ).unsafeRunSync()
     )
     (r.head.head, r.head(1))
@@ -115,8 +120,13 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
     assume(duckdbPresent, "duckdb CLI not on PATH")
     val c = client()
     val r = rows(
-      c.queryStamped(endpoint, token, prelude, "USE lake.main; INSERT INTO lake.t VALUES (1)")
-        .unsafeRunSync()
+      c.queryStamped(
+        endpoint,
+        token,
+        authorize,
+        prelude,
+        "USE lake.main; INSERT INTO lake.t VALUES (1)"
+      ).unsafeRunSync()
     )
     r.head.head.toString shouldBe "1" // exact Count
     val (author, msg) = latestSnapshot(c)
@@ -127,7 +137,8 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
     assume(duckdbPresent, "duckdb CLI not on PATH")
     val c = client()
     rows(
-      c.query(endpoint, token, "USE lake.main; INSERT INTO lake.t VALUES (2)", None).unsafeRunSync()
+      c.query(endpoint, token, "USE lake.main; INSERT INTO lake.t VALUES (2)", None, authorize)
+        .unsafeRunSync()
     )
     val (author, _) = latestSnapshot(c)
     author shouldBe (null: Any)
@@ -137,8 +148,13 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
     val c   = client()
     val bad = "BEGIN; CALL ducklake_set_commit_message('no_such_catalog', 'a', 'm')"
     val r   = rows(
-      c.queryStamped(endpoint, token, bad, "USE lake.main; INSERT INTO lake.t VALUES (3)")
-        .unsafeRunSync()
+      c.queryStamped(
+        endpoint,
+        token,
+        authorize,
+        bad,
+        "USE lake.main; INSERT INTO lake.t VALUES (3)"
+      ).unsafeRunSync()
     )
     r.head.head.toString shouldBe "1"
     val (author, _) = latestSnapshot(c)
@@ -148,10 +164,17 @@ class StampedWriteIntegrationSpec extends AnyFunSpec with Matchers with BeforeAn
     assume(duckdbPresent, "duckdb CLI not on PATH")
     val c    = client()
     val resp = c
-      .queryStamped(endpoint, token, prelude, "USE lake.main; INSERT INTO lake.t VALUES (4)")
+      .queryStamped(
+        endpoint,
+        token,
+        authorize,
+        prelude,
+        "USE lake.main; INSERT INTO lake.t VALUES (4)"
+      )
       .unsafeRunSync()
     resp.asInstanceOf[QuackResponse.Ok].close() // no drain
     val r = rows(
-      c.query(endpoint, token, "SELECT count(*) FROM lake.t WHERE i = 4", None).unsafeRunSync()
+      c.query(endpoint, token, "SELECT count(*) FROM lake.t WHERE i = 4", None, authorize)
+        .unsafeRunSync()
     )
     r.head.head.toString shouldBe "1"

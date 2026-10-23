@@ -90,4 +90,8 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.exec(ExecCaller.system("restore-dryrun-acme"))
     f.routed.map((c, eff) => (c.system, eff.map(_.user.tenant))) shouldBe List((true, Some(None)))
+    // Nodes run its statements as the system principal; without `system = true` the synthetic
+    // set has id "" and every statement is refused at mint.
+    f.routed.map((_, eff) => ai.starlake.quack.edge.authz.NodePrincipal.of(eff)) shouldBe
+      List(ai.starlake.quack.edge.authz.NodePrincipal.System)
   }

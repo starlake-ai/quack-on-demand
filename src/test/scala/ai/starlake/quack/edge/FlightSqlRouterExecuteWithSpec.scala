@@ -87,7 +87,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   "executeWith" should "run the pipeline around a custom node call and record the outcome" in:
     val fx   = setup()
     var seen = List.empty[(String, String, Option[String], Boolean)]
-    val send: FlightSqlRouter.NodeSend[String] = (node, sql, prelude, recordLoad) =>
+    val send: FlightSqlRouter.NodeSend[String] = (node, sql, prelude, recordLoad, _) =>
       IO {
         seen = seen :+ (node.nodeId, sql, prelude, recordLoad)
         NodeOutcome.Ok("payload", 7L, () => ())
@@ -109,7 +109,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   it should "keep the statement registered until the caller closes it" in:
     val fx                                     = setup()
     var during                                 = -1
-    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _) =>
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
       IO {
         during = fx.router.registry.list().size
         NodeOutcome.Ok("payload", 1L, () => ())
@@ -123,7 +123,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   it should "retry a transient failure on another node" in:
     val fx                                     = setup(nodeCount = 2)
     var calls                                  = List.empty[String]
-    val send: FlightSqlRouter.NodeSend[String] = (node, _, _, _) =>
+    val send: FlightSqlRouter.NodeSend[String] = (node, _, _, _, _) =>
       IO {
         calls = calls :+ node.nodeId
         if calls.size == 1 then NodeOutcome.Transient("connection refused", 2L)
@@ -136,7 +136,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   it should "give up on a transient failure when no other node exists" in:
     val fx                                     = setup()
     val send: FlightSqlRouter.NodeSend[String] =
-      (_, _, _, _) => IO.pure(NodeOutcome.Transient("connection refused", 2L))
+      (_, _, _, _, _) => IO.pure(NodeOutcome.Transient("connection refused", 2L))
     val out = fx.router.executeWith("c-4", "alice", poolKey, "SELECT 1", None, send).unsafeRunSync()
     out match
       case Left(RouterFailure.Unavailable(_)) => succeed
@@ -145,7 +145,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   it should "classify a permanent node error without retrying" in:
     val fx                                     = setup(nodeCount = 2)
     var calls                                  = 0
-    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _) =>
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
       IO {
         calls += 1
         NodeOutcome.Permanent("Catalog Error: Table with name t does not exist", 2L)
@@ -162,7 +162,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     val fx                                     = setup(validator = denying)
     var calls                                  = 0
     val send: FlightSqlRouter.NodeSend[String] =
-      (_, _, _, _) => IO { calls += 1; NodeOutcome.Ok("never", 1L, () => ()) }
+      (_, _, _, _, _) => IO { calls += 1; NodeOutcome.Ok("never", 1L, () => ()) }
     val out = fx.router
       .executeWith(
         "c-6",
@@ -186,7 +186,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   it should "stamp a successful write's audit event with the caller's source" in:
     val fx                                     = setup()
     val send: FlightSqlRouter.NodeSend[String] =
-      (_, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
+      (_, _, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
     fx.router
       .executeWith(
         "c-7",
@@ -202,3 +202,21 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     fx.store.events should have size 1
     fx.store.events.head.origin shouldBe "quack"
     fx.store.events.head.action shouldBe "sql.write"
+
+  it should "hand every node call the principal of the statement's effective set" in:
+    val fx   = setup(nodeCount = 2)
+    var seen = List.empty[ai.starlake.quack.edge.authz.NodePrincipal]
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, principal) =>
+      IO {
+        seen = seen :+ principal
+        if seen.size == 1 then NodeOutcome.Transient("connection refused", 1L)
+        else NodeOutcome.Ok("ok", 1L, () => ())
+      }
+    val user = ai.starlake.quack.ondemand.state.RbacUser("u-7", Some("acme"), "alice", "user")
+    val eff  = ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
+    fx.router.executeWith("c-8", "alice", poolKey, "SELECT 1", Some(eff), send).unsafeRunSync()
+    // The retry on the second node runs for the same principal.
+    seen shouldBe List.fill(2)(
+      ai.starlake.quack.edge.authz
+        .NodePrincipal("u-7", "alice", Some("acme"), superuser = false, system = false)
+    )

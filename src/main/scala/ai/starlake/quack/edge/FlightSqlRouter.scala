@@ -402,9 +402,16 @@ final class FlightSqlRouter(
     * around. `session` is always None on the outbound wire.
     */
   private val adapterSend: FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
-    (node, wrappedSql, prelude, recordLoad) =>
+    (node, wrappedSql, prelude, recordLoad, principal) =>
       adapter
-        .send(node, wrappedSql, session = None, recordLoad = recordLoad, stampPrelude = prelude)
+        .send(
+          node,
+          wrappedSql,
+          principal,
+          session = None,
+          recordLoad = recordLoad,
+          stampPrelude = prelude
+        )
         .map(NodeOutcome.fromQuackResponse)
 
   /** Run a statement through the whole pipeline (session, lockdown, ACL, protected-write guard,
@@ -414,9 +421,9 @@ final class FlightSqlRouter(
     * its own node connection and returns the node's raw response bytes.
     *
     * `send` receives the routed node, the fully rewritten and `USE`-prefixed SQL, the author
-    * stamping prelude when one applies, and whether load should be booked (false for probes). The
-    * admin dialect is NOT dispatched here: it needs an Arrow renderer, so callers that want it go
-    * through [[execute]].
+    * stamping prelude when one applies, whether load should be booked (false for probes), and the
+    * principal the statement runs for. The admin dialect is NOT dispatched here: it needs an Arrow
+    * renderer, so callers that want it go through [[execute]].
     *
     * `source` is the audit origin recorded on denial and write events and on the SessionOpened
     * module event (`"flightsql"` or `"quack"`). `edge` is the OPA `client.edge` value used ONLY for
@@ -519,7 +526,8 @@ final class FlightSqlRouter(
       if recordExecution then events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, source))
       opened
     }
-    val kind = classifier.classify(sql)
+    val kind      = classifier.classify(sql)
+    val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet)
     // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
     // table refs resolve to what the node actually sees at execution time.
     val maybeState = supervisor.get(poolKey)
@@ -1005,7 +1013,7 @@ final class FlightSqlRouter(
                             obs.stays,
                             obs.switches
                           )
-                      send(node, wrappedSql, prelude, recordExecution)
+                      send(node, wrappedSql, prelude, recordExecution, principal)
                         .flatMap {
                           case NodeOutcome.Ok(reader, latency, close) =>
                             // Idempotent close: an admin kill and the Flight producer fire the
@@ -1045,6 +1053,7 @@ final class FlightSqlRouter(
                                 finalSql,
                                 exclude = nodeId,
                                 send = send,
+                                principal = principal,
                                 recordLoad = recordExecution,
                                 prelude = prelude,
                                 patId = patId
@@ -1185,6 +1194,7 @@ final class FlightSqlRouter(
       sql: String,
       exclude: String,
       send: FlightSqlRouter.NodeSend[A],
+      principal: ai.starlake.quack.edge.authz.NodePrincipal,
       recordLoad: Boolean = true,
       prelude: Option[String] = None,
       patId: Option[String] = None
@@ -1198,7 +1208,7 @@ final class FlightSqlRouter(
             snap.nodes.find(_.nodeId == nodeId) match
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
-                send(n, wrapped, prelude, recordLoad)
+                send(n, wrapped, prelude, recordLoad, principal)
                   .map {
                     case NodeOutcome.Ok(reader, latency, close) =>
                       // Mirror the primary path: registered, killable, gated on recordLoad.
@@ -1250,14 +1260,20 @@ object FlightSqlRouter:
   val ReservedAuditKeys: Set[String] = Set("sql", "denied", "reason", "durationMs")
 
   /** One node call for [[FlightSqlRouter.executeWith]]: `(node, wrappedSql, stampPrelude,
-    * recordLoad) => outcome`. Implementations must book load through
-    * [[ai.starlake.quack.edge.adapter.QuackHttpAdapter.tracked]] (or `send`) so both transports
-    * feed the per-node stats identically.
+    * recordLoad, principal) => outcome`. `principal` is who the statement runs for: the call sends
+    * a fresh session handle for it before every PREPARE
+    * ([[ai.starlake.quack.edge.adapter.QuackHttpAdapter.authorizer]]). Implementations must book
+    * load through [[ai.starlake.quack.edge.adapter.QuackHttpAdapter.tracked]] (or `send`) so both
+    * transports feed the per-node stats identically.
     */
   type NodeSend[A] =
-    (ai.starlake.quack.model.RunningNode, String, Option[String], Boolean) => IO[
-      ai.starlake.quack.edge.adapter.NodeOutcome[A]
-    ]
+    (
+        ai.starlake.quack.model.RunningNode,
+        String,
+        Option[String],
+        Boolean,
+        ai.starlake.quack.edge.authz.NodePrincipal
+    ) => IO[ai.starlake.quack.edge.adapter.NodeOutcome[A]]
 
   private val TransactionEnds = Set("ROLLBACK", "ABORT", "COMMIT", "END")
 

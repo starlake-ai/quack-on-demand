@@ -34,8 +34,14 @@ open class QuackHttpClient(
 ) extends LazyLogging:
 
   /** Execute `sql` on the Quack instance reachable at `endpoint` (a `quack:host:port` URI) using
-    * `token` for auth. Returns a streaming [[QuackResponse.Ok]] whose `close` callback the caller
-    * must invoke.
+    * `token` for auth, for the principal `authorize` vouches for: its prelude (`CALL
+    * system.main.qod_session(...)`, a fresh session handle per call) runs as its own PREPARE first,
+    * on the same connection. Returns a streaming [[QuackResponse.Ok]] whose `close` callback the
+    * caller must invoke.
+    *
+    * A refused prelude means `sql` is never sent: the connection is dropped and the failure is
+    * Transient (another node may take the statement). `authorize` throwing (no principal to vouch
+    * for) is Permanent.
     *
     * `session` is accepted for the callers' sake and unused: every call opens its own node
     * connection, so no server-side session is shared between calls.
@@ -44,9 +50,16 @@ open class QuackHttpClient(
       endpoint: String,
       token: String,
       sql: String,
-      session: Option[String]
+      session: Option[String],
+      authorize: () => String
   ): IO[QuackResponse] =
-    queryNative(endpoint, token, sql)
+    queryNative(endpoint, token, sql, Some(authorize))
+
+  /** `sql` with no session handle at all: the health probe's canary, which a node that enforces its
+    * checks refuses. Never used for a statement anyone asked for.
+    */
+  def queryWithoutHandle(endpoint: String, token: String, sql: String): IO[QuackResponse] =
+    queryNative(endpoint, token, sql, None)
 
   /** The JNI-backed native path. Opens a fresh [[QuackProtocol]] [[Connection]], runs `sql`, and
     * returns a [[QuackResponse.Ok]] whose `close` callback closes the chained Arrow reader.
@@ -66,7 +79,8 @@ open class QuackHttpClient(
   private def queryNative(
       endpoint: String,
       token: String,
-      sql: String
+      sql: String,
+      authorize: Option[() => String]
   ): IO[QuackResponse] =
     IO.uncancelable { poll =>
       IO.monotonic.flatMap { startNanos =>
@@ -78,7 +92,7 @@ open class QuackHttpClient(
         nativeProtocol
           .open(endpoint, token)
           .flatMap { conn =>
-            (checkpoint(poll, conn.close()) *> conn.execute(sql))
+            (checkpoint(poll, conn.close()) *> install(poll, conn, authorize) *> conn.execute(sql))
               .handleErrorWith(t => conn.close() *> IO.raiseError(t))
           }
           .attempt
@@ -107,6 +121,21 @@ open class QuackHttpClient(
   private def checkpoint(poll: Poll[IO], release: IO[Unit]): IO[Unit] =
     poll(IO.unit).onCancel(release)
 
+  /** Run `authorize`'s prelude on `conn` (its own PREPARE), then a cancel point; nothing for the
+    * canary. A node error on the prelude becomes [[QuackHttpClient.HandleRefused]].
+    */
+  private def install(poll: Poll[IO], conn: Connection, authorize: Option[() => String])(using
+      IORuntime
+  ): IO[Unit] =
+    authorize match
+      case None       => IO.unit
+      case Some(mint) =>
+        IO(mint()).flatMap { prelude =>
+          conn.executeDiscard(prelude).adaptError { case e: QuackWireError =>
+            QuackHttpClient.HandleRefused(e.getMessage)
+          }
+        } *> checkpoint(poll, conn.close())
+
   /** Hands `ok` to the caller, or runs `release` when a cancel is already pending: the last step of
     * a masked acquisition, so the response is closed rather than dropped with its connection.
     */
@@ -121,9 +150,10 @@ open class QuackHttpClient(
   private def mapNativeFailure(t: Throwable, startNanos: FiniteDuration): IO[QuackResponse] =
     IO.monotonic.map { endNanos =>
       val err = t match
-        case e: QuackWireError.Transient => QuackError.Transient(e.msg)
-        case e: QuackWireError.Permanent => QuackError.Permanent(e.msg)
-        case other                       =>
+        case e: QuackWireError.Transient      => QuackError.Transient(e.msg)
+        case e: QuackWireError.Permanent      => QuackError.Permanent(e.msg)
+        case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage)
+        case other                            =>
           QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
       logger.debug(s"native query failed: ${t.getMessage}")
       QuackResponse.Failed(err, (endNanos - startNanos).toMillis)
@@ -132,7 +162,9 @@ open class QuackHttpClient(
   /** Stamped-write bracket (EPIC P1). Runs `prelude` (BEGIN + ducklake_set_commit_message), then
     * `sql`, as separate PREPAREs on ONE wire connection (= one server-side DuckDB session), so
     * `sql`'s result reaches the caller byte-identical to the plain path; COMMIT fires through
-    * [[StampedCommitArrowReader]] once that result is consumed.
+    * [[StampedCommitArrowReader]] once that result is consumed. Every PREPARE of the bracket (the
+    * stamp, `sql`, the COMMIT) follows a fresh session handle from `authorize`; a refused one is
+    * never fail-open.
     *
     * Same release discipline as [[queryNative]]. A cancel that lands once `sql` has run closes the
     * inner reader, not the stamped one: the caller was told the write failed, so DISCONNECT rolls
@@ -145,6 +177,7 @@ open class QuackHttpClient(
   def queryStamped(
       endpoint: String,
       token: String,
+      authorize: () => String,
       prelude: String,
       sql: String
   ): IO[QuackResponse] =
@@ -154,41 +187,51 @@ open class QuackHttpClient(
         nativeProtocol.open(endpoint, token).attempt.flatMap {
           case Left(t)     => mapNativeFailure(t, startNanos)
           case Right(conn) =>
-            (checkpoint(poll, conn.close()) *> conn.executeDiscard(prelude)).attempt.flatMap {
-              case Left(t) =>
-                logger.warn(
-                  s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
-                )
-                // Nothing is held once conn is closed, so the fallback may be cancelled whole.
-                conn.close() *> poll(queryNative(endpoint, token, sql))
-              case Right(()) =>
-                (checkpoint(poll, conn.close()) *> conn.execute(sql)).attempt.flatMap {
-                  case Left(t) =>
-                    // DISCONNECT tears the server session down, rolling the open BEGIN back;
-                    // no explicit ROLLBACK round-trip needed.
-                    conn.close() *> mapNativeFailure(t, startNanos)
-                  case Right(reader) =>
-                    IO.monotonic.flatMap { endNanos =>
-                      val committed = new java.util.concurrent.atomic.AtomicBoolean(false)
-                      val commitSync: () => Unit = () =>
-                        if committed.compareAndSet(false, true) then
-                          conn.executeDiscard("COMMIT").unsafeRunSync()
-                      val stamped = new StampedCommitArrowReader(allocator, reader, commitSync)
-                      // DISCONNECT-owner rule: stamped.close() delegates to reader.close(),
-                      // which cascades Connection.close(); no separate conn.close() here.
-                      handOver(
-                        poll,
-                        QuackResponse.Ok(
-                          stamped,
-                          (endNanos - startNanos).toMillis,
-                          () => stamped.close()
-                        ),
-                        // reader, not stamped: no COMMIT for a caller that was told it failed.
-                        IO.blocking(reader.close())
+            (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize))).attempt
+              .flatMap {
+                // A refused handle is never fail-open: the write is not sent at all.
+                case Left(t)   => conn.close() *> mapNativeFailure(t, startNanos)
+                case Right(()) =>
+                  conn.executeDiscard(prelude).attempt.flatMap {
+                    case Left(t) =>
+                      logger.warn(
+                        s"stamping prelude failed on $endpoint; write proceeds unstamped: ${t.getMessage}"
                       )
-                    }
-                }
-            }
+                      // Nothing is held once conn is closed, so the fallback may be cancelled whole.
+                      conn.close() *> poll(queryNative(endpoint, token, sql, Some(authorize)))
+                    case Right(()) =>
+                      (checkpoint(poll, conn.close()) *> install(poll, conn, Some(authorize)) *>
+                        conn.execute(sql)).attempt.flatMap {
+                        case Left(t) =>
+                          // DISCONNECT tears the server session down, rolling the open BEGIN back;
+                          // no explicit ROLLBACK round-trip needed.
+                          conn.close() *> mapNativeFailure(t, startNanos)
+                        case Right(reader) =>
+                          IO.monotonic.flatMap { endNanos =>
+                            val committed = new java.util.concurrent.atomic.AtomicBoolean(false)
+                            // The COMMIT may come long after the statement: it gets its own handle.
+                            val commitSync: () => Unit = () =>
+                              if committed.compareAndSet(false, true) then
+                                (IO(authorize()).flatMap(p => conn.executeDiscard(p)) *>
+                                  conn.executeDiscard("COMMIT")).unsafeRunSync()
+                            val stamped =
+                              new StampedCommitArrowReader(allocator, reader, commitSync)
+                            // DISCONNECT-owner rule: stamped.close() delegates to reader.close(),
+                            // which cascades Connection.close(); no separate conn.close() here.
+                            handOver(
+                              poll,
+                              QuackResponse.Ok(
+                                stamped,
+                                (endNanos - startNanos).toMillis,
+                                () => stamped.close()
+                              ),
+                              // reader, not stamped: no COMMIT for a caller that was told it failed.
+                              IO.blocking(reader.close())
+                            )
+                          }
+                      }
+                  }
+              }
         }
       }
     }
@@ -207,3 +250,9 @@ open class QuackHttpClient(
           allocator,
           nodeLeaseSec
         )
+
+object QuackHttpClient:
+
+  /** The node refused a statement's session handle; the statement itself was never sent. */
+  final class HandleRefused(nodeError: String)
+      extends RuntimeException(s"the node refused the statement's session handle: $nodeError")

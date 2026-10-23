@@ -122,7 +122,7 @@ object RoutedExecutor:
             Right(
               Some(
                 ai.starlake.quack.ondemand.rbac
-                  .EffectiveSet(superuser, Nil, Nil, Nil, Nil)
+                  .EffectiveSet(superuser, Nil, Nil, Nil, Nil, system = true)
               )
             )
           )

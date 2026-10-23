@@ -886,7 +886,7 @@ object Main extends IOApp with LazyLogging:
     // The native client is the only client; the boot gate above already refused a platform
     // where it cannot load.
     val client  = new QuackHttpClient(arrowAllocator, nodeLeaseSec = mgrCfg.nodeLeaseSec)
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, nodeKeys)
     if lockdownCfg.enabled then logger.info("node lockdown: enabled")
     else
       logger.warn(
@@ -905,7 +905,13 @@ object Main extends IOApp with LazyLogging:
     // tested; this is wiring only. Fail-soft: any surprise becomes a Left, never an exception.
     def nodeCatalogs(n: RunningNode): IO[Either[String, Set[String]]] =
       adapter
-        .send(n, "SELECT database_name FROM duckdb_databases()", session = None, recordLoad = false)
+        .send(
+          n,
+          "SELECT database_name FROM duckdb_databases()",
+          ai.starlake.quack.edge.authz.NodePrincipal.System,
+          session = None,
+          recordLoad = false
+        )
         .map {
           case QuackResponse.Failed(err, _)     => Left(err.toString)
           case QuackResponse.Ok(rows, _, close) =>
@@ -940,10 +946,18 @@ object Main extends IOApp with LazyLogging:
             case None     => IO.pure(None),
         renderOne = src => builder.buildOne(src),
         runOnNode = (n, sql) =>
-          adapter.send(n, sql, session = None, recordLoad = false).map {
-            case QuackResponse.Ok(_, _, close) => close(); Right(())
-            case QuackResponse.Failed(err, _)  => Left(err.toString)
-          },
+          adapter
+            .send(
+              n,
+              sql,
+              ai.starlake.quack.edge.authz.NodePrincipal.System,
+              session = None,
+              recordLoad = false
+            )
+            .map {
+              case QuackResponse.Ok(_, _, close) => close(); Right(())
+              case QuackResponse.Failed(err, _)  => Left(err.toString)
+            },
         listCatalogs = nodeCatalogs,
         // The SAME enumeration the health probe itself ticks over (see `healthProbe.start`
         // below), so the registry is reconciled against the supervisor's own view of the fleet
@@ -1557,7 +1571,14 @@ object Main extends IOApp with LazyLogging:
             isAttached =
               (n, alias) => attachRegistry.isAttached(n.nodeId, n.startedAt.toEpochMilli, alias),
             attachSummary = (alias, ids) => attachRegistry.aliasSummary(alias, ids),
-            send = (n, sql) => adapter.send(n, sql, session = None, recordLoad = false),
+            send = (n, sql) =>
+              adapter.send(
+                n,
+                sql,
+                ai.starlake.quack.edge.authz.NodePrincipal.System,
+                session = None,
+                recordLoad = false
+              ),
             timeoutSec = mgrCfg.catalog.previewTimeoutSec,
             maxRows = 10000
           )

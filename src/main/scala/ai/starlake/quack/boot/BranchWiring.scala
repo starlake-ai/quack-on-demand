@@ -56,7 +56,13 @@ object BranchWiring extends LazyLogging:
                 )
               else
                 adapter
-                  .send(node, batch, session = None, recordLoad = false)
+                  .send(
+                    node,
+                    batch,
+                    ai.starlake.quack.edge.authz.NodePrincipal.System,
+                    session = None,
+                    recordLoad = false
+                  )
                   .map {
                     case QuackResponse.Ok(_, _, close) =>
                       close(); Right(())

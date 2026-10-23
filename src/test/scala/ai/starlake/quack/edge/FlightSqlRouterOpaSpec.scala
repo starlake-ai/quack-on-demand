@@ -99,7 +99,7 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
     Fixture(router, journal, store)
 
   private val okSend: FlightSqlRouter.NodeSend[String] =
-    (_, _, _, _) => IO.pure(NodeOutcome.Ok("ok", 1L, () => ()))
+    (_, _, _, _, _) => IO.pure(NodeOutcome.Ok("ok", 1L, () => ()))
 
   "FlightSqlRouter" should "pass poolKey, edge and statement class to the validator" in:
     var seen: Option[ValidationContext] = None

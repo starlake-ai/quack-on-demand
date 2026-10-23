@@ -335,7 +335,7 @@ final class QuackFrontDoor(
   private def onLink[A](s: QuackSession, cq: Long)(
       body: (QuackNodeLink, Boolean, Boolean, () => IO[Long]) => IO[NodeOutcome[A]]
   ): FlightSqlRouter.NodeSend[A] =
-    (node, _, prelude, recordLoad) =>
+    (node, _, prelude, recordLoad, principal) =>
       router.adapter.tracked(node, recordLoad) {
         IO.monotonic.flatMap { t0 =>
           val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
@@ -380,7 +380,7 @@ final class QuackFrontDoor(
     // A BEGIN hands its fresh link to the transaction (`afterPrepare` stores it in `txLink`), so
     // the statement's own closer must not disconnect it; `releaseTx` does, on COMMIT / ROLLBACK.
     val opensTx = router.classifier.classify(prep.sql) == StatementKind.Begin
-    (node, wrappedSql, prelude, recordLoad) =>
+    (node, wrappedSql, prelude, recordLoad, principal) =>
       onLink[PrepareOutcome](s, cq) { (link, stamped, reused, elapsed) =>
         val req = encodePrepareRequest(link.nodeConnectionId, cq, prep.copy(sql = wrappedSql))
         val reopen: IO[Either[LinkFailure, Unit]] =
@@ -406,7 +406,7 @@ final class QuackFrontDoor(
                   )
             }
         }
-      }(node, wrappedSql, prelude, recordLoad)
+      }(node, wrappedSql, prelude, recordLoad, principal)
 
   private def quoteIdent(s: String): String = "\"" + s.replace("\"", "\"\"") + "\""
 

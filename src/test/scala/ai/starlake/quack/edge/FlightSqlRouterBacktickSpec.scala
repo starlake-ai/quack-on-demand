@@ -79,7 +79,13 @@ class FlightSqlRouterBacktickSpec extends AnyFlatSpec with Matchers:
 
     val sent   = scala.collection.mutable.ListBuffer.empty[String]
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         sent += sql
         IO.pure(TestArrow.okResponse())
     val validator =

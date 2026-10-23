@@ -88,7 +88,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // fresh reader from `stub`. The stub function is used (not a single value)
     // because ArrowReader is single-use.
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(stub())
     val adapter = new QuackHttpAdapter(client, tracker)
 
@@ -553,7 +559,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val capturer = new CapturingValidator
     val client   = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
     val router  = new FlightSqlRouter(
@@ -583,7 +595,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val capturer = new CapturingValidator
     val client   = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
     val router  = new FlightSqlRouter(
@@ -653,7 +671,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .createPool(key, RoleDistribution(0, 0, replicas), maxConcurrentPerNode = maxConcurrent)
       .unsafeRunSync()
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
@@ -784,7 +808,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
               endpoint: String,
               token: String,
               sql: String,
-              session: Option[String]
+              session: Option[String],
+              authorize: () => String
           ) =
             IO.pure(TestArrow.okResponse())
         val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
@@ -880,7 +905,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val capturer    = new CapturingValidator
     var capturedSql = ""
     val client      = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         capturedSql = sql
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
@@ -1005,7 +1036,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // so a retried statement overwrites the first attempt's text.
     var capturedSql: String = ""
     val client              = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         capturedSql = sql
         IO.pure(stub())
 
@@ -2314,7 +2351,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val client2 =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO.pure(stub())
     val adapter2  = new QuackHttpAdapter(client2, tkr)
     val sessions2 = new SessionRegistry
@@ -2394,9 +2437,21 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val calls  = scala.collection.mutable.ListBuffer.empty[(Option[String], String)]
     val client =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO { calls += ((None, sql)); TestArrow.okResponse() }
-        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+        override def queryStamped(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
           IO { calls += ((Some(prelude), sql)); TestArrow.okResponse() }
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
@@ -2548,9 +2603,21 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val client =
       new QuackHttpClient(TestArrow.sharedAllocator):
-        override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
           IO { calls += ((None, sql)); TestArrow.okResponse() }
-        override def queryStamped(endpoint: String, token: String, prelude: String, sql: String) =
+        override def queryStamped(
+            endpoint: String,
+            token: String,
+            authorize: () => String,
+            prelude: String,
+            sql: String
+        ) =
           IO {
             calls += ((Some(prelude), sql))
             if callCount.getAndIncrement() == 0 then
@@ -2686,7 +2753,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     if failResumeStarts then failStart.set(true)
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, tracker)
     val router  = new FlightSqlRouter(
@@ -3387,7 +3460,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
 
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
-      override def query(endpoint: String, token: String, sql: String, session: Option[String]) =
+      override def query(
+          endpoint: String,
+          token: String,
+          sql: String,
+          session: Option[String],
+          authorize: () => String
+      ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, tracker)
     val reg     = new SimpleMeterRegistry
@@ -3709,7 +3788,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   )
 
   private def okSend: FlightSqlRouter.NodeSend[String] =
-    (_, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
+    (_, _, _, _, _) => IO.pure(NodeOutcome.Ok("count", 1L, () => ()))
 
   it should "refuse a client-fed INSERT on the FlightSQL path (the scan would wait forever)" in:
     val (router, _, _) =
