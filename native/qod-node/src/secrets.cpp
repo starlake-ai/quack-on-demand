@@ -1,5 +1,7 @@
 #include "secrets.hpp"
 
+#include "utf8_args.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -9,7 +11,7 @@
 namespace qod {
 
 std::string ReadSecret(const std::string &dir, const std::string &key) {
-	auto path = std::filesystem::path(dir) / key;
+	auto path = PathFromUtf8(dir) / key;
 	std::ifstream in(path, std::ios::binary);
 	if (!in) {
 		throw std::runtime_error("the secrets directory has no " + key);
@@ -31,7 +33,7 @@ void DisposeSecrets(const std::string &dir, bool ephemeral) {
 		return;
 	}
 	std::error_code ignored;
-	std::filesystem::remove_all(dir, ignored);
+	std::filesystem::remove_all(PathFromUtf8(dir), ignored);
 }
 
 } // namespace qod

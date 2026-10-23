@@ -1,6 +1,7 @@
 #include "init_runner.hpp"
 
 #include "sql_script.hpp"
+#include "utf8_args.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -58,7 +59,7 @@ std::string ReadAll(const std::string &path) {
 		}
 		return buffer.str();
 	}
-	std::ifstream in(path, std::ios::binary);
+	std::ifstream in(PathFromUtf8(path), std::ios::binary);
 	if (!in) {
 		throw std::runtime_error("cannot read init file " + path);
 	}

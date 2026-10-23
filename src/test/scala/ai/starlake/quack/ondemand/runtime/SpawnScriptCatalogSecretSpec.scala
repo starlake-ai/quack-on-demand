@@ -83,14 +83,12 @@ class SpawnScriptCatalogSecretSpec extends AnyFlatSpec with SpawnScriptCatalogSe
   behavior of "the ducklake arm (bash)"
   cases()
 
-// PowerShell twin: cancelled off Windows, like SpawnScriptEncryptionWindowsSpec.
+// PowerShell twin: pwsh off Windows, cancelled without PowerShell, like
+// SpawnScriptEncryptionWindowsSpec.
 class SpawnScriptCatalogSecretWindowsSpec extends AnyFlatSpec with SpawnScriptCatalogSecretCases:
-  protected val command =
-    Seq("powershell.exe", "-File", "scripts/spawn-quack-node.ps1", "21999")
+  protected def command =
+    PowerShell.command.getOrElse(Nil) ++ Seq("-File", "scripts/spawn-quack-node.ps1", "21999")
   protected def assumeHost(): Unit =
-    assume(
-      System.getProperty("os.name").toLowerCase.contains("win"),
-      "spawn-quack-node.ps1 runs on Windows only"
-    )
+    assume(PowerShell.command.nonEmpty, "no PowerShell on this host")
   behavior of "the ducklake arm (PowerShell)"
   cases()

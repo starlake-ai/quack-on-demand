@@ -5,12 +5,11 @@
 namespace qod {
 namespace {
 
-std::string Value(int argc, char **argv, int &i) {
-	std::string name = argv[i];
-	if (i + 1 >= argc) {
-		throw std::invalid_argument(name + " needs a value");
+std::string Value(const std::vector<std::string> &args, size_t &i) {
+	if (i + 1 >= args.size()) {
+		throw std::invalid_argument(args[i] + " needs a value");
 	}
-	return argv[++i];
+	return args[++i];
 }
 
 long long Number(const std::string &name, const std::string &text, long long min, long long max) {
@@ -30,28 +29,28 @@ long long Number(const std::string &name, const std::string &text, long long min
 
 } // namespace
 
-NodeOptions ParseOptions(int argc, char **argv) {
+NodeOptions ParseOptions(const std::vector<std::string> &args) {
 	NodeOptions options;
-	for (int i = 1; i < argc; i++) {
-		std::string arg = argv[i];
+	for (size_t i = 1; i < args.size(); i++) {
+		const auto &arg = args[i];
 		if (arg == "--build-info") {
 			options.mode = NodeOptions::Mode::BUILD_INFO;
 		} else if (arg == "--list-settings") {
 			options.mode = NodeOptions::Mode::LIST_SETTINGS;
 		} else if (arg == "--port") {
-			options.port = static_cast<int>(Number(arg, Value(argc, argv, i), 1, 65535));
+			options.port = static_cast<int>(Number(arg, Value(args, i), 1, 65535));
 		} else if (arg == "--bind") {
-			options.bind = Value(argc, argv, i);
+			options.bind = Value(args, i);
 		} else if (arg == "--secrets-dir") {
-			options.secrets_dir = Value(argc, argv, i);
+			options.secrets_dir = Value(args, i);
 		} else if (arg == "--secrets-ephemeral") {
 			options.secrets_ephemeral = true;
 		} else if (arg == "--secret-directory") {
-			options.secret_directory = Value(argc, argv, i);
+			options.secret_directory = Value(args, i);
 		} else if (arg == "--init") {
-			options.init_files.push_back(Value(argc, argv, i));
+			options.init_files.push_back(Value(args, i));
 		} else if (arg == "--parent-pid") {
-			options.parent_pid = Number(arg, Value(argc, argv, i), 1, 0x7fffffffLL);
+			options.parent_pid = Number(arg, Value(args, i), 1, 0x7fffffffLL);
 		} else {
 			throw std::invalid_argument("unknown option '" + arg + "'");
 		}

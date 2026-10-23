@@ -27,8 +27,9 @@ struct NodeOptions {
 	long long parent_pid = 0;
 };
 
-//! Parses argv. Throws std::invalid_argument naming the problem; Usage() describes the options.
-NodeOptions ParseOptions(int argc, char **argv);
+//! Parses the command line (UTF-8, the program name first; see Utf8Arguments). Throws
+//! std::invalid_argument naming the problem; Usage() describes the options.
+NodeOptions ParseOptions(const std::vector<std::string> &args);
 
 std::string Usage();
 

@@ -56,8 +56,9 @@ port() {
   echo $((30000 + RANDOM % 20000))
 }
 
+# A blank and non-ASCII letters in the name: the path reaches qod-node as an argument.
 new_secrets() {
-  local dir="$work/secrets.$RANDOM"
+  local dir="$work/secrets é ü.$RANDOM"
   mkdir -p "$dir"
   printf '%s' "$1" > "$dir/QOD_NODE_TOKEN"
   echo "$dir"

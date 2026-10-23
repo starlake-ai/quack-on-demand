@@ -14,6 +14,7 @@
 #include "secrets.hpp"
 #include "settings_list.hpp"
 #include "sql_script.hpp"
+#include "utf8_args.hpp"
 #ifdef QOD_NODE_DUCKDB_STATIC
 #include "static_extensions.hpp"
 #endif
@@ -83,10 +84,13 @@ int Serve(const NodeOptions &options) {
 int main(int argc, char **argv) {
 	NodeOptions options;
 	try {
-		options = ParseOptions(argc, argv);
+		options = ParseOptions(Utf8Arguments(argc, argv));
 	} catch (std::invalid_argument &error) {
 		std::cerr << "qod-node: " << error.what() << "\n" << Usage();
 		return 2;
+	} catch (std::exception &error) {
+		std::cerr << "qod-node: " << error.what() << std::endl;
+		return 1;
 	}
 	if (options.mode == NodeOptions::Mode::BUILD_INFO) {
 		std::cout << BuildInfo() << std::endl;

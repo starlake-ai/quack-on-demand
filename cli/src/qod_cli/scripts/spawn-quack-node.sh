@@ -96,6 +96,8 @@ if [[ -z "${QOD_SECRETS_DIR:-}" || ! -s "$QOD_SECRETS_DIR/QOD_NODE_TOKEN" ]]; th
   echo "ERROR: no node token: \$QOD_SECRETS_DIR/QOD_NODE_TOKEN is missing or empty" >&2
   exit 1
 fi
+# Absolute, since qod-node starts in its own directory.
+[[ "$QOD_SECRETS_DIR" == /* ]] || QOD_SECRETS_DIR="$START_DIR/$QOD_SECRETS_DIR"
 for key in "${SECRET_KEYS[@]}"; do
   [[ "$QOD_NODE_KEYS" == *" $key "* ]] && continue
   if [[ -f "$QOD_SECRETS_DIR/$key" ]]; then

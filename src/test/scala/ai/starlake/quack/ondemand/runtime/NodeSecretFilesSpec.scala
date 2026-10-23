@@ -154,12 +154,16 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     val args = Files.readAllLines(argsOut).asScala.toList
     args.sliding(2).toList should contain(List("--secrets-dir", dir.toString))
     args should contain("--secrets-ephemeral")
+    // These checks never print the environment, which holds whatever this test JVM inherited.
     val nodeEnv = Files.readString(envOut)
+    val names   = nodeEnv.linesIterator.map(_.takeWhile(_ != '=')).toSet
     (secrets.values.toSeq :+ "hunter2-env").foreach { v =>
-      withClue(v)(nodeEnv should not include v)
-      withClue(v)(args.mkString("\n") should not include v)
+      withClue(s"$v in the node's environment")(nodeEnv.contains(v) shouldBe false)
+      withClue(s"$v in the node's arguments")(args.exists(_.contains(v)) shouldBe false)
     }
-    nodeEnv should not include NodeSecretFiles.DirEnv
+    withClue("QOD_SECRETS_DIR in the node's environment")(
+      names.contains(NodeSecretFiles.DirEnv) shouldBe false
+    )
     stderr.toString should include("ignoring pgPassword from the environment")
   }
 

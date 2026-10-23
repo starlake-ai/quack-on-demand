@@ -564,8 +564,8 @@ def test_scripts_running_the_duckdb_cli_pin_agent_mode_off():
             rel = path.relative_to(repo).as_posix()
             flagged.add(rel)
             assert _AGENT_MODE_OFF.search(code), f"{rel} runs the duckdb CLI without DUCKDB_AGENT_MODE=0"
-    # The detector must keep seeing the known launchers, or the loop above proves nothing. The bash
-    # spawn script runs qod-node, not the CLI.
+    # The detector must keep seeing the known launchers, or the loop above proves nothing. The spawn
+    # scripts run qod-node, not the CLI.
     known = {
         f"{d}/{name}"
         for d in ("scripts", "cli/src/qod_cli/scripts")
@@ -576,8 +576,6 @@ def test_scripts_running_the_duckdb_cli_pin_agent_mode_off():
             "load-ssb-dbgen.sh",
         )
     } | {
-        "scripts/spawn-quack-node.ps1",
-        "cli/src/qod_cli/scripts/spawn-quack-node.ps1",
         "scripts/_load-common.ps1",
         "scripts/load-tpch-dbgen.ps1",
         "scripts/run-jar.sh",

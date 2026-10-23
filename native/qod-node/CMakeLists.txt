@@ -114,13 +114,18 @@ set(QOD_NODE_CORE_SOURCES
   src/options.cpp
   src/secrets.cpp
   src/settings_list.cpp
-  src/sql_script.cpp)
+  src/sql_script.cpp
+  src/utf8_args.cpp)
 if(QOD_NODE_DUCKDB_STATIC)
   list(APPEND QOD_NODE_CORE_SOURCES src/static_extensions.cpp)
 endif()
 add_library(qod_node_core STATIC ${QOD_NODE_CORE_SOURCES})
 target_include_directories(qod_node_core PUBLIC src)
 target_link_libraries(qod_node_core PUBLIC qod_node_duckdb)
+if(WIN32)
+  # CommandLineToArgvW (utf8_args.cpp).
+  target_link_libraries(qod_node_core PUBLIC shell32)
+endif()
 target_compile_definitions(qod_node_core PRIVATE
   QOD_NODE_PROTOCOL=${QOD_NODE_PROTOCOL}
   "QOD_NODE_DUCKDB_VERSION=\"${duckdb_version}\""
