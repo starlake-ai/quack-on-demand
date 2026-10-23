@@ -29,11 +29,16 @@ enum LinkFailure(val message: String):
   * The only node bytes the manager reads are headers and, best effort through the native bridge,
   * the `needs_more_fetch` flag and result uuid it needs to drain its own prelude and epilogue
   * statements.
+  *
+  * Every PREPARE it sends follows a fresh session handle from `authorize` (`CALL
+  * system.main.qod_session(...)`, its own PREPARE): [[prepare]] for a relayed client statement,
+  * [[runDiscard]] for the manager's own.
   */
 final class QuackNodeLink(
     transport: QuackTransport,
     val url: URI,
-    val nodeConnectionId: String
+    val nodeConnectionId: String,
+    authorize: () => String
 ) extends LazyLogging:
 
   /** POST already-framed bytes and return the node's response bytes. */
@@ -46,16 +51,56 @@ final class QuackNodeLink(
         Left(LinkFailure.Transient(Option(e.getMessage).getOrElse(e.toString)))
     }
 
-  /** Forward a client request: same body, the node's connection id in the header. */
+  /** Forward a client request: same body, the node's connection id in the header. Never a PREPARE,
+    * which goes through [[prepare]] after its session handle.
+    */
   def forward(frame: QuackWire.Frame): IO[Either[LinkFailure, Array[Byte]]] =
-    relay(QuackWire.rewriteHeader(frame, nodeConnectionId))
+    if frame.header.msgType == QuackWire.Type.PrepareRequest then
+      IO.pure(Left(LinkFailure.Permanent("a PREPARE is never relayed without its session handle")))
+    else relay(QuackWire.rewriteHeader(frame, nodeConnectionId))
 
-  /** Run `sql` on this connection and discard its result: the author-stamping prelude and the
-    * COMMIT epilogue. Drains the FETCH loop so the node releases the result. A node
-    * `ERROR_RESPONSE` is `Permanent(message)`. The query gets its own random uuid, as a Quack v3
-    * client names every query it prepares.
+  /** Relay `req` as this connection's next PREPARE, after a fresh session handle; the node's
+    * response bytes as they are.
+    */
+  def prepare(
+      req: QuackWire.PrepareRequest,
+      clientQueryId: Long
+  ): IO[Either[LinkFailure, Array[Byte]]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) =>
+        relay(QuackWire.encodePrepareRequest(nodeConnectionId, clientQueryId, req))
+    }
+
+  /** Run `sql` on this connection after a fresh session handle, and discard its result: the
+    * author-stamping prelude, a reopened BEGIN, the COMMIT epilogue. A node `ERROR_RESPONSE` is
+    * `Permanent(message)`.
     */
   def runDiscard(sql: String, clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) => run(sql, clientQueryId)
+    }
+
+  /** The session handle prelude, drained. A node refusal is Transient (another node may take the
+    * statement); no principal to vouch for (`authorize` throws) is Permanent.
+    */
+  private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
+    IO(authorize()).attempt.flatMap {
+      case Left(e) =>
+        IO.pure(Left(LinkFailure.Permanent(Option(e.getMessage).getOrElse(e.toString))))
+      case Right(prelude) =>
+        run(prelude, clientQueryId).map(
+          _.left.map(f =>
+            LinkFailure.Transient(s"the node refused the statement's session handle: ${f.message}")
+          )
+        )
+    }
+
+  /** One PREPARE of `sql`, drained through its FETCH loop so the node releases the result. The
+    * query gets its own random uuid, as a Quack v3 client names every query it prepares.
+    */
+  private def run(sql: String, clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     val prep = QuackWire.encodePrepareRequest(
       nodeConnectionId,
       clientQueryId,
@@ -116,19 +161,25 @@ object QuackNodeLink:
     val u = java.util.UUID.randomUUID()
     QuackWire.Hugeint(u.getMostSignificantBits, u.getLeastSignificantBits)
 
+  /** The `authorize` of a link that sends no statement (the handshake's version probe). */
+  val NoStatements: () => String =
+    () => throw new IllegalStateException("this node link sends no statement")
+
   /** Open a connection to `node` on the client's behalf: the client's own hello (versions,
     * platform, client id, heartbeat) with the node token as `auth_string`, so protocol negotiation
-    * runs end to end between the real client and the real node.
+    * runs end to end between the real client and the real node. The link's statements follow a
+    * session handle each, from `authorize`.
     */
   def open(
       transport: QuackTransport,
       node: RunningNode,
       hello: QuackWire.ConnectionRequest,
-      clientQueryId: Long
+      clientQueryId: Long,
+      authorize: () => String
   ): IO[Either[LinkFailure, (QuackNodeLink, QuackWire.ConnectionResponse)]] =
     val url  = QuackProtocol.endpointToHttp(s"quack:${node.host}:${node.port}")
     val body = QuackWire.encodeConnectionRequest(hello.copy(authString = node.token), clientQueryId)
-    val probe = new QuackNodeLink(transport, url, "")
+    val probe = new QuackNodeLink(transport, url, "", NoStatements)
     probe.relay(body).map {
       case Left(f)     => Left(f)
       case Right(resp) =>
@@ -136,7 +187,7 @@ object QuackNodeLink:
           case QuackWire.Type.ConnectionResponse =>
             QuackWire.decodeConnectionResponse(resp) match
               case Right((connId, r)) if connId.nonEmpty =>
-                Right((new QuackNodeLink(transport, url, connId), r))
+                Right((new QuackNodeLink(transport, url, connId, authorize), r))
               case Right(_) => Left(LinkFailure.Permanent("node answered without a connection id"))
               case Left(e)  =>
                 Left(LinkFailure.Permanent(s"unreadable CONNECTION_RESPONSE: ${e.message}"))

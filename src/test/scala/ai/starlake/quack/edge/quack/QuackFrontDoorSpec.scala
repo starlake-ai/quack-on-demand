@@ -46,12 +46,17 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
   private def fetchResp(chunk: Boolean) = QuackTestFixtures.serializeSampleFetchResponse(chunk)
   private val success                   = encodeSuccess()
 
-  /** Plays a node: records every request as a decoded frame and answers by message type. */
+  /** Plays a node: records every request as a decoded frame and answers by message type. A session
+    * handle prelude (`CALL system.main.qod_session(...)`) is answered apart and recorded in
+    * `preludes` only, so the sequence of `posted` frames is what it was before handles existed.
+    */
   private final class ScriptedTransport extends QuackTransport:
     @volatile var prepareNeedsMore: Boolean    = false
     @volatile var prepareError: Option[String] = None
+    @volatile var preludeError: Option[String] = None
     @volatile var fetchChunksBeforeEnd: Int    = 1
     val posted: ArrayBuffer[Frame]             = ArrayBuffer.empty
+    val preludes: ArrayBuffer[String]          = ArrayBuffer.empty
     val prepareUris: ArrayBuffer[URI]          = ArrayBuffer.empty
     @volatile var unreachablePorts: Set[Int]   = Set.empty
     private val connections                    = new AtomicInteger(0)
@@ -66,20 +71,31 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
       if unreachablePorts.contains(uri.getPort) then
         throw new java.io.IOException(s"connection refused: ${uri.getPort}")
-      val f = frame(body).toOption.get
-      posted.synchronized(posted += f)
-      f.header.msgType match
-        case Type.ConnectionRequest => connResp(s"NODE${connections.incrementAndGet()}")
-        case Type.PrepareRequest    =>
-          posted.synchronized(prepareUris += uri)
-          fetchesServed = 0
-          prepareError.map(encodeError).getOrElse(prepareResp(prepareNeedsMore))
-        case Type.FetchRequest =>
-          fetchesServed += 1
-          if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
-        // The pinned node refuses CANCEL_REQUEST; a fake that accepted it would hide that.
-        case Type.CancelRequest => encodeError("Unsupported message type for server")
-        case _                  => success
+      val f       = frame(body).toOption.get
+      val prelude =
+        if f.header.msgType != Type.PrepareRequest then None
+        else
+          decodePrepareRequest(f).toOption
+            .map(_.sql)
+            .filter(_.startsWith("CALL system.main.qod_session('"))
+      prelude match
+        case Some(sql) =>
+          posted.synchronized(preludes += sql)
+          preludeError.map(encodeError).getOrElse(prepareResp(false))
+        case None =>
+          posted.synchronized(posted += f)
+          f.header.msgType match
+            case Type.ConnectionRequest => connResp(s"NODE${connections.incrementAndGet()}")
+            case Type.PrepareRequest    =>
+              posted.synchronized(prepareUris += uri)
+              fetchesServed = 0
+              prepareError.map(encodeError).getOrElse(prepareResp(prepareNeedsMore))
+            case Type.FetchRequest =>
+              fetchesServed += 1
+              if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
+            // The pinned node refuses CANCEL_REQUEST; a fake that accepted it would hide that.
+            case Type.CancelRequest => encodeError("Unsupported message type for server")
+            case _                  => success
     }
 
   private final case class Fixture(
@@ -334,6 +350,24 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     rendered should include("VALUES")
     rendered should include("'ok'")
     rendered should include("status")
+
+  "a relayed statement" should "follow a session handle for the session's principal on its node" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    messageType(prepare(fx, connId, "SELECT 1")) shouldBe Type.PrepareResponse
+    fx.transport.preludes should have size 1
+    val payload = ai.starlake.quack.edge.authz.HandleInspector.payload(fx.transport.preludes.head)
+    payload.hcursor.downField("principal").get[String]("id") shouldBe Right("u-1")
+    fx.nodes.map(_.nodeId) should contain(payload.hcursor.get[String]("node").toOption.get)
+
+  it should "answer an error, relaying nothing, when every node refuses the handle" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    fx.transport.preludeError = Some("qod-node: session handle refused: handle MAC does not verify")
+    val resp = prepare(fx, connId, "SELECT 1")
+    messageType(resp) shouldBe Type.ErrorResponse
+    errorText(resp) should include("session handle")
+    fx.transport.sinceHandshake.exists(_.header.msgType == Type.PrepareRequest) shouldBe false
 
   "SEND_DATA_REQUEST" should "answer like a node when no statement is streaming" in:
     val fx     = setup()

@@ -170,7 +170,7 @@ final class QuackFrontDoor(
     node match
       case None    => IO.pure(Right(None))
       case Some(n) =>
-        QuackNodeLink.open(transport, n, hello, InvalidIndex).flatMap {
+        QuackNodeLink.open(transport, n, hello, InvalidIndex, QuackNodeLink.NoStatements).flatMap {
           case Right((link, r)) =>
             link.close().as(Right(Some(r.serverDuckdbVersion).filter(_.nonEmpty)))
           case Left(LinkFailure.Permanent(m))
@@ -339,12 +339,15 @@ final class QuackFrontDoor(
       router.adapter.tracked(node, recordLoad) {
         IO.monotonic.flatMap { t0 =>
           val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
-          val reuse                   = s.txLink.get().filter(_._1 == node.nodeId).map(_._2)
+          // A reused transaction link was opened by this same session, so it mints for this
+          // principal already.
+          val authorize = router.adapter.authorizer(node, principal)
+          val reuse     = s.txLink.get().filter(_._1 == node.nodeId).map(_._2)
           val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] = reuse match
             case Some(l) => IO.pure(Right((l, true)))
             case None    =>
               QuackNodeLink
-                .open(transport, node, s.hello, cq)
+                .open(transport, node, s.hello, cq, authorize)
                 .map(_.map { case (l, _) => (l, false) })
           openIO.flatMap {
             case Left(fail)            => elapsed().map(ms => toOutcome[A](fail, ms))
@@ -361,7 +364,7 @@ final class QuackFrontDoor(
                     s"stamping prelude failed on ${node.nodeId}; write proceeds unstamped: ${fail.message}"
                   )
                   dropLink(link, reused) *> QuackNodeLink
-                    .open(transport, node, s.hello, cq)
+                    .open(transport, node, s.hello, cq, authorize)
                     .flatMap {
                       case Left(fail2)    => elapsed().map(ms => toOutcome[A](fail2, ms))
                       case Right((l2, _)) => body(l2, false, false, elapsed)
@@ -382,13 +385,12 @@ final class QuackFrontDoor(
     val opensTx = router.classifier.classify(prep.sql) == StatementKind.Begin
     (node, wrappedSql, prelude, recordLoad, principal) =>
       onLink[PrepareOutcome](s, cq) { (link, stamped, reused, elapsed) =>
-        val req = encodePrepareRequest(link.nodeConnectionId, cq, prep.copy(sql = wrappedSql))
         val reopen: IO[Either[LinkFailure, Unit]] =
           if reopenTx then link.runDiscard("BEGIN", cq) else IO.pure(Right(()))
         reopen.flatMap {
           case Left(fail) => dropLink(link, reused) *> elapsed().map(ms => toOutcome(fail, ms))
           case Right(())  =>
-            link.relay(req).flatMap {
+            link.prepare(prep.copy(sql = wrappedSql), cq).flatMap {
               case Left(fail) =>
                 dropLink(link, reused) *> elapsed().map(ms => toOutcome(fail, ms))
               case Right(resp) =>
@@ -429,33 +431,40 @@ final class QuackFrontDoor(
             pickReadNode(s.bound.poolKey) match
               case None       => IO.pure(encodeError("no routable node to render the result"))
               case Some(node) =>
-                QuackNodeLink.open(transport, node, s.hello, cq).flatMap {
-                  case Left(fail)       => IO.pure(encodeError(fail.message))
-                  case Right((link, _)) =>
-                    link
-                      .relay(
-                        encodePrepareRequest(link.nodeConnectionId, cq, prep.copy(sql = rendered))
-                      )
-                      .flatMap {
-                        case Left(fail)  => link.close().as(encodeError(fail.message))
-                        case Right(resp) =>
-                          if messageType(resp) != Type.PrepareResponse then link.close().as(resp)
-                          else
-                            // Same lifecycle as a relayed result: the link stays current while
-                            // the node still has chunks to FETCH, and the sweeper, the next
-                            // statement or the disconnect releases it.
-                            val st = QuackStatement(
-                              link,
-                              node.nodeId,
-                              StatementKind.Select,
-                              cq,
-                              closer(s, link, cq, reused = false)
-                            )
-                            if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
-                              finishStatement(s, st, commit = false).as(resp)
-                            else IO { s.current.set(Some(st)); resp }
-                      }
-                }
+                QuackNodeLink
+                  .open(
+                    transport,
+                    node,
+                    s.hello,
+                    cq,
+                    router.adapter
+                      .authorizer(node, ai.starlake.quack.edge.authz.NodePrincipal.System)
+                  )
+                  .flatMap {
+                    case Left(fail)       => IO.pure(encodeError(fail.message))
+                    case Right((link, _)) =>
+                      link
+                        .prepare(prep.copy(sql = rendered), cq)
+                        .flatMap {
+                          case Left(fail)  => link.close().as(encodeError(fail.message))
+                          case Right(resp) =>
+                            if messageType(resp) != Type.PrepareResponse then link.close().as(resp)
+                            else
+                              // Same lifecycle as a relayed result: the link stays current while
+                              // the node still has chunks to FETCH, and the sweeper, the next
+                              // statement or the disconnect releases it.
+                              val st = QuackStatement(
+                                link,
+                                node.nodeId,
+                                StatementKind.Select,
+                                cq,
+                                closer(s, link, cq, reused = false)
+                              )
+                              if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
+                                finishStatement(s, st, commit = false).as(resp)
+                              else IO { s.current.set(Some(st)); resp }
+                        }
+                  }
           }
       }
 
