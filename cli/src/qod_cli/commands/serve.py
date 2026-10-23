@@ -711,8 +711,9 @@ def serve(
     try:
         duckdb_bin = launcher.ensure_duckdb_cli(app_home)
         libduckdb = launcher.ensure_libduckdb(app_home)
+        node_bin = launcher.node_binary(jar_path, app_home)
     except Exception as exc:
-        typer.echo(f"could not provision duckdb: {exc}", err=True)
+        typer.echo(f"could not provision the node runtime: {exc}", err=True)
         raise typer.Exit(1)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
 
@@ -760,7 +761,7 @@ def serve(
             raise typer.Exit(1)
 
     env = launcher.runtime_env(
-        base_env, app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
+        base_env, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb, qod_node_bin=node_bin
     )
     env.setdefault("QOD_DUCKLAKE_DATA_PATH", str(state_dir / "ducklake" / "data"))
     env["QOD_PG_EMBEDDED"] = "true"

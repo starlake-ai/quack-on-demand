@@ -485,6 +485,71 @@ def ensure_libduckdb(
     return lib_dir
 
 
+_WINDOWS_ARCH = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}
+
+
+def node_release(jar: Path) -> str:
+    """The GitHub release whose qod-node.exe goes with `jar`: v<version> for a release jar (named
+    by jar_name), else the rolling `snapshot` pre-release (a snapshot or a local build)."""
+    m = _CACHED_JAR_RE.match(Path(jar).name)
+    return f"v{m.group(1)}" if m else "snapshot"
+
+
+def qod_node_exe_url(release: str, arch: str) -> str:
+    return f"https://github.com/{GITHUB_REPO}/releases/download/{release}/qod-node-windows-{arch}.exe"
+
+
+def ensure_windows_qod_node(jar: Path, cache_dir: Path | None = None, arch: str | None = None) -> Path:
+    """qod-node.exe, the process every node of a Windows manager runs: the static Windows build is
+    a release asset (too large to bundle in the jar), so this downloads the one of `jar`'s release
+    (node_release), sha256-checked, into <cache>/qod-node/<release>/qod-node.exe. A release's is
+    reused once cached; the snapshot's is checked against its published digest on every call. The
+    manager checks at boot that the binary speaks its node protocol and links its DuckDB, and
+    refuses to boot otherwise."""
+    import platform
+
+    release = node_release(jar)
+    machine = (arch or platform.machine()).lower()
+    if machine not in _WINDOWS_ARCH:
+        raise RuntimeError(f"no qod-node.exe is published for Windows on {machine}")
+    base = cache_dir if cache_dir is not None else default_cache_dir()
+    exe = base / "qod-node" / release / "qod-node.exe"
+    if release != "snapshot" and exe.is_file():
+        return exe
+    url = qod_node_exe_url(release, _WINDOWS_ARCH[machine])
+    sha_resp = httpx.get(url + ".sha256", follow_redirects=True, timeout=30)
+    sha_resp.raise_for_status()
+    expected = parse_sha256(sha_resp.text)
+    if exe.is_file() and hashlib.sha256(exe.read_bytes()).hexdigest() == expected:
+        return exe
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    partial = exe.with_suffix(".exe.partial")
+    try:
+        actual = _download(url, partial, f"qod-node {release}")
+        if actual != expected:
+            raise IntegrityError(f"sha256 mismatch for {url}: expected {expected}, got {actual}")
+        os.replace(partial, exe)
+    finally:
+        partial.unlink(missing_ok=True)
+    return exe
+
+
+def node_binary(jar: Path, cache_dir: Path | None = None, os_name: str = sys.platform, environ=None) -> Path | None:
+    """The QOD_NODE_BIN to hand a launched manager: None off Windows (its jar bundles qod-node for
+    Linux and macOS) or when QOD_NODE_BIN is already set (a local build); on Windows the qod-node.exe
+    of the jar's release (ensure_windows_qod_node). Raises with what to do when it cannot."""
+    environ = os.environ if environ is None else environ
+    if os_name != "win32" or environ.get("QOD_NODE_BIN", "").strip():
+        return None
+    try:
+        return ensure_windows_qod_node(jar, cache_dir)
+    except Exception as e:
+        raise RuntimeError(
+            f"could not provision qod-node.exe for {Path(jar).name} ({e}); set QOD_NODE_BIN to a "
+            "qod-node.exe of this release"
+        ) from e
+
+
 def bundled_spawn_script(name: str):
     """The spawn script shipped inside this package, as an importlib.resources
     Traversable (a copy of scripts/<name>; a repo test pins the two in sync)."""
@@ -528,41 +593,40 @@ def materialize_loader_scripts(dest_dir: Path) -> dict[str, Path]:
 
 def runtime_env(
     base_env: dict,
-    app_home: Path,
     duckdb_bin: Path,
     spawn_sh: Path,
     spawn_ps1: Path,
     libduckdb_lib: Path,
     os_name: str = sys.platform,
+    qod_node_bin: Path | None = None,
 ) -> dict:
     """Environment for a launched manager JVM: spawn scripts resolved
-    absolutely, the pinned duckdb CLI first on PATH (spawned nodes and the demo
-    seeder inherit it), DUCKDB_BIN as an absolute pointer to that same exe,
-    QOD_APP_HOME so LocalQuackBackend prefixes node PATHs the same way, and the
-    native client's libduckdb: DUCKDB_CACHE_DIR for the manager's preload, plus
-    the platform dynamic-loader path.
+    absolutely, the pinned duckdb CLI first on PATH (the demo seeder and loaders
+    inherit it), DUCKDB_BIN as an absolute pointer to that same exe, the native
+    client's libduckdb: DUCKDB_CACHE_DIR for the manager's preload, plus the
+    platform dynamic-loader path, and QOD_NODE_BIN when the caller provisioned
+    the qod-node its nodes run (node_binary: Windows; the jar bundles it for
+    Linux and macOS).
 
     `libduckdb_lib` is required: every launcher path boots a manager whose only
     client to its nodes is the native one, which cannot load without it."""
     env = dict(base_env)
     env["QOD_SPAWN_SCRIPT"] = str(spawn_sh)
     env["QOD_SPAWN_SCRIPT_WINDOWS"] = str(spawn_ps1)
-    env["QOD_APP_HOME"] = str(app_home)
+    if qod_node_bin is not None:
+        env["QOD_NODE_BIN"] = str(qod_node_bin)
     # duckdb.dll lives in the lib dir, so on Windows that dir goes on PATH too (the DLL search
     # order has no other variable); elsewhere the loader variable below carries it.
     path_dirs = [duckdb_bin, libduckdb_lib] if os_name == "win32" else [duckdb_bin]
     env["PATH"] = os.pathsep.join([*map(str, path_dirs), env.get("PATH", "")])
-    # Pin the provisioned duckdb by absolute path, not just on PATH. spawn-quack-node.ps1
-    # prefers $env:DUCKDB_BIN over a PATH `Get-Command duckdb.exe` lookup: on Windows the
-    # prepended PATH dir does not always reach the spawned PowerShell node, leaving the node
-    # unable to find duckdb (health-probe reports it unhealthy) even though the JVM found it.
-    # An absolute pointer removes the dependency on PATH inheritance. spawn-quack-node.sh
-    # honours it too (Unix PATH inheritance already works, so this is belt-and-suspenders there).
+    # Pin the provisioned duckdb by absolute path, not just on PATH: the loaders prefer DUCKDB_BIN
+    # over a PATH lookup, and on Windows the prepended PATH dir does not always reach a process
+    # the JVM starts.
     exe = "duckdb.exe" if os_name == "win32" else "duckdb"
     env["DUCKDB_BIN"] = str(duckdb_bin / exe)
     # DuckDB 2.0's CLI switches to agent mode (markdown tables, JSON errors) when an agent env var
     # (AI_AGENT, CLAUDECODE) is set and stdout is not a terminal: pin the normal output for every
-    # node, loader and seeder the manager starts, even from inside an agent session.
+    # loader and seeder the manager starts, even from inside an agent session.
     env["DUCKDB_AGENT_MODE"] = "0"
     # The manager preloads $DUCKDB_CACHE_DIR/<abi>/lib/<libduckdb> by absolute path before
     # libquackwire, which is what makes the native load on every launcher path: macOS strips

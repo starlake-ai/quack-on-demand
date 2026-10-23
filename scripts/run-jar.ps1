@@ -20,6 +20,10 @@
                         rebuilding or consulting GitHub releases (falls back to
                         a build when distrib\ is empty).
 
+  Local nodes run qod-node.exe: the one of the jar's release (the rolling snapshot's for
+  latest-snapshot, BUILD and LOCAL), downloaded into $JAR_CACHE_DIR\qod-node\<release>, unless
+  $env:QOD_NODE_BIN names one (a build of this checkout).
+
   Boot extras (parity with run-jar.sh):
     - DuckDB CLI + libduckdb self-install (windows-amd64 or windows-arm64) onto PATH
     - Postgres reachability probe + PG16 version gate (when psql present)
@@ -285,7 +289,7 @@ function Get-LatestReleaseVersion {
 # CI publishes a `.sha256` sidecar (shasum -a 256 output: digest, two
 # spaces, filename) next to every release asset; compare its digest with
 # the local file's.
-function Test-JarCurrent([string]$Jar, [string]$Sha256Url) {
+function Test-AssetCurrent([string]$Jar, [string]$Sha256Url) {
   if (-not (Test-Path $Jar)) { return $false }
   try {
     $remote = (Invoke-WebRequest -Uri $Sha256Url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop).Content
@@ -298,6 +302,9 @@ function Test-JarCurrent([string]$Jar, [string]$Sha256Url) {
 }
 
 $Jar = $null
+# The release whose qod-node.exe goes with the jar (Install-QodNode): the jar's own release, else the
+# rolling snapshot.
+$NodeRelease = 'snapshot'
 $QodVersion = Get-EnvOr 'QOD_VERSION' 'latest'
 if ($QodVersion -ceq 'BUILD') {
   Write-Host "QOD_VERSION=BUILD: local source build"
@@ -331,7 +338,7 @@ if ($QodVersion -ceq 'BUILD') {
     $baseUrl = "https://github.com/$GhRepo/releases/download/snapshot"
     $Jar     = Join-Path $JarCacheDir "$Assembly-snapshot.jar"
     $jarUrl  = "$baseUrl/$Assembly-snapshot.jar"
-    if (Test-JarCurrent $Jar "$jarUrl.sha256") {
+    if (Test-AssetCurrent $Jar "$jarUrl.sha256") {
       Write-Host "snapshot cached (sha256 matches GitHub); skipping download."
     } else {
       Write-Host "downloading latest snapshot from GitHub releases..."
@@ -342,17 +349,52 @@ if ($QodVersion -ceq 'BUILD') {
     $baseUrl = "https://github.com/$GhRepo/releases/download/v$version"
     $Jar     = Join-Path $JarCacheDir "$Assembly-$version.jar"
     $jarUrl  = "$baseUrl/$Assembly-$version.jar"
-    if (Test-JarCurrent $Jar "$jarUrl.sha256") {
+    $NodeRelease = "v$version"
+    if (Test-AssetCurrent $Jar "$jarUrl.sha256") {
       Write-Host "release $version cached (sha256 matches GitHub); skipping download."
     } else {
       Write-Host "downloading $version from GitHub releases..."
       try { Invoke-WebRequest -Uri $jarUrl -OutFile $Jar -TimeoutSec 600 -ErrorAction Stop }
-      catch { Write-Warning "release download failed; falling back to local jar / build."; $Jar = Use-LocalJarOrBuild }
+      catch { Write-Warning "release download failed; falling back to local jar / build."; $Jar = Use-LocalJarOrBuild; $NodeRelease = 'snapshot' }
     }
   }
 }
 if (-not $Jar -or -not (Test-Path $Jar)) { Write-Error "no assembly jar available"; exit 1 }
 Write-Host "jar: $Jar"
+
+# ---- qod-node.exe, the process every local node runs ----
+# The static Windows build is a release asset (too large to bundle in the jar): the jar's release's,
+# or the rolling snapshot's for latest-snapshot, BUILD and LOCAL. $env:QOD_NODE_BIN wins (a build of
+# this checkout). The manager checks at boot that it speaks its node protocol and links its DuckDB
+# release, and refuses to boot otherwise, naming QOD_NODE_BIN.
+function Install-QodNode([string]$Release) {
+  if (-not [string]::IsNullOrEmpty($env:QOD_NODE_BIN)) {
+    Write-Host "qod-node: $env:QOD_NODE_BIN (QOD_NODE_BIN)"
+    return
+  }
+  $arch = if ((Resolve-DuckDbPlatform) -eq 'windows-arm64') { 'aarch64' } else { 'x86_64' }
+  $name = "qod-node-windows-$arch.exe"
+  $dir  = Join-Path (Join-Path $JarCacheDir 'qod-node') $Release
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $exe  = Join-Path $dir 'qod-node.exe'
+  $url  = "https://github.com/$GhRepo/releases/download/$Release/$name"
+  if (Test-AssetCurrent $exe "$url.sha256") {
+    Write-Host "qod-node: $Release cached -> $exe"
+  } else {
+    if ($Release -eq 'snapshot') {
+      Write-Host "qod-node: using the snapshot's $name (set QOD_NODE_BIN to run a build of this checkout)"
+    }
+    Write-Host "qod-node: downloading $name ($Release)"
+    try { Invoke-WebRequest -Uri $url -OutFile $exe -TimeoutSec 600 -ErrorAction Stop }
+    catch { Write-Error "could not download ${url}: set QOD_NODE_BIN to a qod-node.exe of this release"; exit 1 }
+    if (-not (Test-AssetCurrent $exe "$url.sha256")) {
+      Remove-Item -Force -LiteralPath $exe -ErrorAction SilentlyContinue
+      Write-Error "$name ($Release) does not match its published sha256"; exit 1
+    }
+  }
+  $env:QOD_NODE_BIN = $exe
+}
+Install-QodNode $NodeRelease
 
 # ---- Resolve java ----
 $JavaBin = if (-not [string]::IsNullOrEmpty($env:JAVA_HOME)) { Join-Path $env:JAVA_HOME 'bin\java.exe' } else { 'java' }

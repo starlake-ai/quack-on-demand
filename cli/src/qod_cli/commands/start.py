@@ -243,8 +243,9 @@ def start(
     try:
         duckdb_bin = launcher.ensure_duckdb_cli(app_home)
         libduckdb = launcher.ensure_libduckdb(app_home)
+        node_bin = launcher.node_binary(jar_path, app_home)
     except Exception as e:
-        typer.echo(f"could not provision duckdb: {e}", err=True)
+        typer.echo(f"could not provision the node runtime: {e}", err=True)
         raise typer.Exit(1)
     spawn_sh, spawn_ps1 = launcher.materialize_spawn_scripts(app_home / "scripts")
     # `qod setup` persists QOD_*/PROXY_* vars to the CLI config file; a real
@@ -255,7 +256,7 @@ def start(
     base_env = {**load_start_env(), **os.environ}
     sf_plan = _starflow.prepare(sf_request, base_env, java) if sf_request else None
     env = launcher.runtime_env(
-        base_env, app_home, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb
+        base_env, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb, qod_node_bin=node_bin
     )
     if sf_plan is not None:
         env.update(starflow.manager_env(sf_plan.url, sf_plan.api_key, sf_plan.secret))

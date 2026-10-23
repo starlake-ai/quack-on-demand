@@ -30,6 +30,7 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(
         launcher, "ensure_libduckdb", lambda cache_dir=None, **kw: tmp_path / "duckdb" / launcher.DUCKDB_CLI_VERSION / "lib"
     )
+    monkeypatch.setattr(launcher, "node_binary", lambda *a, **kw: None)
     monkeypatch.setattr(
         launcher, "materialize_spawn_scripts", lambda dest: (tmp_path / "s.sh", tmp_path / "s.ps1")
     )
