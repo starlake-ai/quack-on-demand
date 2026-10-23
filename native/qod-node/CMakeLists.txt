@@ -109,12 +109,14 @@ message(STATUS "qod-node: build marker protocol=${QOD_NODE_PROTOCOL} duckdb=${du
 
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
+  src/authz.cpp
   src/build_info.cpp
   src/crypto.cpp
   src/handle.cpp
   src/init_runner.cpp
   src/json.cpp
   src/lifetime.cpp
+  src/node_hooks.cpp
   src/options.cpp
   src/secrets.cpp
   src/settings_list.cpp
@@ -179,6 +181,10 @@ if(QOD_NODE_TESTS)
   add_test(NAME crypto COMMAND crypto_test)
   qod_node_test(handle_test)
   add_test(NAME handle COMMAND handle_test)
+  qod_node_test(authz_test)
+  add_test(NAME authz COMMAND authz_test)
+  qod_node_test(authz_engine_test)
+  add_test(NAME authz_engine COMMAND authz_engine_test)
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
     add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh $<TARGET_FILE:qod-node>)
