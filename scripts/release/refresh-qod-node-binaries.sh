@@ -108,5 +108,15 @@ for entry in "${staged[@]}"; do
   sha256_of "$VENDORED/$plat/qod-node" > "$VENDORED/$plat/qod-node.sha256"
 done
 printf 'protocol=%s;duckdb=%s;duckdb_source=%s\n' "$protocol" "$duckdb" "$source_id" > "$VENDORED/VERSION"
+# The qod CLI wheel bundles the same binaries for `qod fleet join` (cli/src/qod_cli/qod_node.py);
+# cli/tests/test_qod_node_bundle.py fails until its copy matches.
+CLI_COPY=cli/src/qod_cli/qod-node
+for entry in "${staged[@]}"; do
+  plat="${entry%%:*}"
+  mkdir -p "$CLI_COPY/$plat"
+  cp "$VENDORED/$plat/qod-node" "$CLI_COPY/$plat/qod-node"
+  chmod 755 "$CLI_COPY/$plat/qod-node"
+done
+cp "$VENDORED/VERSION" "$CLI_COPY/VERSION"
 echo "vendored: ${staged[*]%%:*}"
-echo "refreshed. Review with 'git status $VENDORED' and commit (git update-index --chmod=+x on a new binary: core.fileMode may be off)."
+echo "refreshed. Review with 'git status $VENDORED $CLI_COPY' and commit (git update-index --chmod=+x on a new binary: core.fileMode may be off)."

@@ -17,7 +17,6 @@ from qod_cli.fleet_join import (
     host_capacity,
     network_hint,
     node_failure_action,
-    probe_duckdb_version,
     status_hint,
 )
 
@@ -86,11 +85,31 @@ def read_secrets(env):
 
 
 def make_member(http, popen, tmp_path, port_open=lambda p: True, **kw):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     spawn = tmp_path / "spawn.sh"; spawn.write_text("#!/bin/sh\nexit 0\n")
     kw.setdefault("capacity", lambda: (8, 64 << 30))
+    kw.setdefault("node_bin", None)
     return FleetMember("https://mgr:20900", "secret", name="srv-1", advertise_host="10.0.0.7", bind_host="10.0.0.7",
-                 node_port=21900, spawn_script=spawn, duckdb_bin=None, state_dir=tmp_path / "state",
+                 node_port=21900, spawn_script=spawn, state_dir=tmp_path / "state",
                  insecure=False, http=http, popen=popen, sleep=lambda s: None, port_open=port_open, **kw)
+
+
+def test_the_node_runs_the_members_qod_node(tmp_path, monkeypatch):
+    # The node's binary comes from the member (the bundled install, or --qod-node-bin), never from a
+    # QOD_NODE_BIN or DUCKDB_BIN this process happens to carry.
+    monkeypatch.setenv("QOD_NODE_BIN", "/elsewhere/qod-node")
+    monkeypatch.setenv("DUCKDB_BIN", "/elsewhere/duckdb")
+    envs = []
+    def popen(cmd, env=None, **kw):
+        envs.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    make_member(http, popen, tmp_path, node_bin=tmp_path / "q" / "bin" / "qod-node").run_once()
+    assert envs[0]["QOD_NODE_BIN"] == str(tmp_path / "q" / "bin" / "qod-node")
+    assert "DUCKDB_BIN" not in envs[0]
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    envs.clear()
+    make_member(http, popen, tmp_path / "other").run_once()
+    assert "QOD_NODE_BIN" not in envs[0]
 
 
 def test_heartbeat_carries_identity_capacity_and_no_node_initially(tmp_path):
@@ -232,9 +251,9 @@ def test_reap_orphan_kills_recorded_pid_only_when_it_is_a_spawn_script(tmp_path,
 def test_refuses_plain_http_without_insecure(tmp_path):
     with pytest.raises(SystemExit):
         FleetMember("http://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-              spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
+              spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=False)
     FleetMember("http://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-          spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=True)
+          spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=True)
 
 
 def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp_path, monkeypatch):
@@ -498,7 +517,7 @@ def test_reap_orphan_never_signals_pid_1(tmp_path, monkeypatch, recorded_signals
 def test_scheme_check_is_case_insensitive(tmp_path):
     with pytest.raises(SystemExit):
         FleetMember("HTTP://mgr:20900", "s", name="a", advertise_host="h", bind_host="h", node_port=1,
-              spawn_script=tmp_path / "x", duckdb_bin=None, state_dir=tmp_path, insecure=False)
+              spawn_script=tmp_path / "x", node_bin=None, state_dir=tmp_path, insecure=False)
 
 
 def test_default_advertise_host_refuses_loopback(monkeypatch):
@@ -694,52 +713,6 @@ class _Done:
         self.stdout = stdout
 
 
-def test_probe_duckdb_version_parses_the_cli_banner(tmp_path):
-    run = lambda *a, **kw: _Done("v1.5.6 (Variegata) 0b83e5d2f6\n")
-    assert probe_duckdb_version(tmp_path / "duckdb", run=run) == "1.5.6"
-
-
-def test_probe_duckdb_version_runs_with_agent_mode_off(tmp_path):
-    seen = {}
-
-    def run(*a, **kw):
-        seen.update(kw.get("env") or {})
-        return _Done("v2.0.0 (Cyanoptera) b15358c371\n")
-
-    assert probe_duckdb_version(tmp_path / "duckdb", run=run) == "2.0.0"
-    assert seen.get("DUCKDB_AGENT_MODE") == "0"
-
-
-def test_probe_duckdb_version_fails_soft(tmp_path):
-    def boom(*a, **kw):
-        raise subprocess.TimeoutExpired("duckdb", 5)
-    assert probe_duckdb_version(tmp_path / "duckdb", run=boom) is None
-    assert probe_duckdb_version(tmp_path / "duckdb", run=lambda *a, **kw: _Done("garbage")) is None
-    def missing(*a, **kw):
-        raise FileNotFoundError("duckdb")
-    assert probe_duckdb_version(tmp_path / "duckdb", run=missing) is None
-
-
-def test_probe_duckdb_version_tolerates_non_utf8_output(tmp_path):
-    binary = tmp_path / "duckdb"
-    binary.write_text("#!/bin/sh\nprintf 'v1.5.6 \\377\\376 junk\\n'\n")
-    binary.chmod(0o755)
-    assert probe_duckdb_version(binary) == "1.5.6"
-
-
-def test_probe_duckdb_version_none_stdout_is_none(tmp_path):
-    class NoOut:
-        stdout = None
-
-    assert probe_duckdb_version(tmp_path / "duckdb", run=lambda *a, **kw: NoOut()) is None
-
-
-def test_probe_duckdb_version_non_executable_is_none(tmp_path):
-    binary = tmp_path / "duckdb"
-    binary.write_text("#!/bin/sh\necho v1.5.6\n")
-    assert probe_duckdb_version(binary) is None
-
-
 def test_refusal_prints_the_managers_fix_instead_of_the_local_hint(tmp_path, capsys):
     body = {"error": "address_change_refused",
             "message": "server 'srv-1' is registered at 10.0.0.9:21900; this heartbeat reports 10.0.0.7:21900 (not drained, holds no node)",
@@ -805,8 +778,9 @@ def test_network_failure_leads_with_the_explanation(tmp_path, capsys, plain_http
 
 
 @pytest.mark.parametrize("error,expected", [
-    ("exited with 1: ERROR: duckdb not found (DUCKDB_BIN='', 'duckdb' not on PATH)", "duckdb is missing on this server"),
-    ("exited with 1: ERROR: /x/duckdb cannot run the .shell dot-command the node keep-alive needs", "lacks the .shell dot-command"),
+    ("exited with 1: ERROR: qod-node not found (QOD_NODE_BIN='', 'qod-node' not on PATH)", "qod-node is missing on this server"),
+    ("exited with 134: dyld[42]: Library not loaded: @rpath/libduckdb.dylib", "cannot load its libduckdb"),
+    ("exited with 127: qod-node: error while loading shared libraries: libduckdb.so: cannot open shared object file", "cannot load its libduckdb"),
     ("exited with 1: IO Error: Could not bind: Address already in use", "another process holds port 21900"),
     ('exited with 1: HTTP Error: Failed to download extension "postgres_scanner" at URL "http://extensions.duckdb.org/x"', "cannot download DuckDB extensions"),
     ('exited with 1: IO Error: Unable to connect to Postgres at "host=pg port=5432": connection to server at "pg" (10.0.0.5), port 5432 failed: Connection refused', "cannot reach the catalog Postgres"),

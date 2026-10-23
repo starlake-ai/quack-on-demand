@@ -5,8 +5,8 @@ from pathlib import Path
 
 import typer
 
-from .. import launcher
-from ..fleet_join import FleetMember, default_advertise_host, probe_duckdb_version
+from .. import launcher, qod_node
+from ..fleet_join import FleetMember, default_advertise_host
 from ..registry import covers
 from ._run import call
 
@@ -22,7 +22,7 @@ def join(
     advertise_host: str = typer.Option(None, "--advertise-host", envvar="QOD_FLEET_ADVERTISE_HOST", help="Address the manager dials; default: first non-loopback IPv4. Set it explicitly on multi-NIC hosts and in containers."),
     bind_host: str = typer.Option(None, "--bind-host", envvar="QOD_FLEET_BIND_HOST", help="Interface the node listens on; default: the advertise host. 0.0.0.0 to listen everywhere."),
     node_port: int = typer.Option(21900, "--node-port", envvar="QOD_FLEET_NODE_PORT"),
-    duckdb_bin: Path = typer.Option(None, "--duckdb-bin", help="duckdb executable; default: provisioned into the qod cache."),
+    qod_node_bin: Path = typer.Option(None, "--qod-node-bin", help="qod-node executable the node runs; default: the one qod bundles, installed in the qod cache beside the pinned libduckdb."),
     state_dir: Path = typer.Option(None, "--state-dir", help="Where the node pidfile lives; default: the qod cache."),
     insecure: bool = typer.Option(False, "--insecure", help="Allow a plain http:// manager URL (it does not relax TLS checks on https://)."),
 ):
@@ -35,15 +35,15 @@ def join(
         raise typer.Exit(2)
     cache = launcher.default_cache_dir()
     spawn_sh, _ = launcher.materialize_spawn_scripts(cache / "scripts")
-    exe = duckdb_bin or (launcher.ensure_duckdb_cli(cache) / "duckdb")
-    # Report what the binary that runs the node says, cached or caller-supplied (the worker
-    # image's), not the pin: the fleet listing is how an operator spots a stale engine.
-    version = probe_duckdb_version(exe)
+    exe = qod_node_bin or qod_node.install(cache, launcher.ensure_libduckdb(cache))
+    # Report what the binary that runs the node says, bundled or caller-supplied, not the pin: the
+    # fleet listing is how an operator spots a stale engine. None when it cannot start here.
+    version = qod_node.probe_version(exe)
     adv = advertise_host or default_advertise_host()
     # The default state dir keeps its pre-rename name ("agent") so an upgraded server still
     # finds, and reaps, a node orphaned by the previous version's pidfile.
     runner = FleetMember(manager, join_token, name=name, advertise_host=adv, bind_host=bind_host or adv,
-                         node_port=node_port, spawn_script=spawn_sh, duckdb_bin=exe,
+                         node_port=node_port, spawn_script=spawn_sh, node_bin=exe,
                          state_dir=state_dir or cache / "agent", insecure=insecure, duckdb_version=version)
 
     # SIGTERM (systemd stop, kill) must unwind through run_forever's finally so the node, which

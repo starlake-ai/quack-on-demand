@@ -5,7 +5,7 @@ name: quack-node-snapshot
 #   starlakeai/quack-on-demand-node:latest-snapshot
 #
 # The node image is the data-plane pod the manager spawns via
-# KubernetesQuackBackend (a DuckDB CLI + the project's
+# KubernetesQuackBackend (qod-node on the release libduckdb + the project's
 # scripts/spawn-quack-node.sh). It's built from
 # docker/quack-node/Dockerfile and versioned in lockstep with the
 # manager image (same version.sbt) so operators get matched tags.
@@ -34,6 +34,7 @@ on:
     paths:
       - 'docker/quack-node/**'
       - 'scripts/spawn-quack-node.sh'
+      - 'native/qod-node/binaries/**'
       - 'version.sbt'
       - 'project/Versions.scala'
       - '.github/workflows/quack-node-snapshot.yml'

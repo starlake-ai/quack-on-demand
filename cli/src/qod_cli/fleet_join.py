@@ -38,12 +38,12 @@ PIDFILE = "node.pid"
 
 # A failed node's error (exit status and stderr tail) -> the fix to suggest; first match wins.
 _NODE_FAILURES: tuple[tuple[re.Pattern, str], ...] = (
-    (re.compile(r"duckdb not found"),
-     "duckdb is missing on this server: re-run qod fleet join without --duckdb-bin to let qod "
-     "provision it, or pass --duckdb-bin <path-to-duckdb>"),
-    (re.compile(r"cannot run the \.shell dot-command"),
-     "this duckdb build lacks the .shell dot-command the node needs: pass --duckdb-bin with the "
-     "DuckDB release CLI"),
+    (re.compile(r"qod-node not found"),
+     "qod-node is missing on this server: re-run qod fleet join without --qod-node-bin to use the "
+     "one qod bundles, or pass --qod-node-bin <path-to-qod-node>"),
+    (re.compile(r"Library not loaded|cannot open shared object file|loaded .* install the matching libduckdb"),
+     "qod-node cannot load its libduckdb: re-run qod fleet join without --qod-node-bin to let qod "
+     "provision both, or put the matching libduckdb in the lib/ directory beside its bin/"),
     (re.compile(r"address already in use", re.I),
      "another process holds port {port} on this server: stop it, or re-run qod fleet join with "
      "--node-port <free-port>"),
@@ -72,7 +72,6 @@ DRAIN_JOIN_S = 0.5
 _ENV_PASSTHROUGH = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "SHELL",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-    "DUCKDB_BIN", "QOD_APP_HOME",
     # The spawn script's CREATE DATABASE admin db, and libpq / OpenSSL settings for a metastore
     # reached over TLS: without them every node of the fleet fails, silently.
     "PG_ADMIN_DB", "PGSSLMODE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGCONNECT_TIMEOUT",
@@ -203,28 +202,6 @@ def host_capacity(root: Path = CGROUP_ROOT) -> tuple[int | None, int | None]:
     if mem_limit is not None:
         mem = mem_limit if mem is None else min(mem, mem_limit)
     return cpus, mem
-
-
-def probe_duckdb_version(binary: Path, run=subprocess.run) -> str | None:
-    """The version a duckdb binary reports (`v1.5.6 (Variegata) <sha>` -> "1.5.6"), or
-    None when it cannot be run or says nothing parsable."""
-    try:
-        out = run(
-            [str(binary), "--version"],
-            capture_output=True,
-            # Normal output even under an agent env var (DuckDB 2.0 agent mode).
-            env={**os.environ, "DUCKDB_AGENT_MODE": "0"},
-            text=True,
-            errors="replace",
-            timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for token in (out or "").split():
-        m = re.fullmatch(r"v?(\d+\.\d+\.\d+)", token)
-        if m:
-            return m.group(1)
-    return None
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -407,7 +384,7 @@ class _Node:
 
 class FleetMember:
     def __init__(self, manager_url: str, join_token: str, *, name: str, advertise_host: str, bind_host: str,
-                 node_port: int, spawn_script: Path, duckdb_bin: Path | None, state_dir: Path, insecure: bool,
+                 node_port: int, spawn_script: Path, node_bin: Path | None, state_dir: Path, insecure: bool,
                  http=httpx, popen=subprocess.Popen, sleep: Callable[[float], None] = time.sleep,
                  port_open: Callable[[int], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  capacity: Callable[[], tuple[int | None, int | None]] = host_capacity,
@@ -417,7 +394,7 @@ class FleetMember:
             raise SystemExit(2)
         self.manager_url, self.join_token = manager_url.rstrip("/"), join_token
         self.name, self.advertise_host, self.bind_host, self.node_port = name, advertise_host, bind_host, node_port
-        self.spawn_script, self.duckdb_bin, self.state_dir = spawn_script, duckdb_bin, Path(state_dir)
+        self.spawn_script, self.node_bin, self.state_dir = spawn_script, node_bin, Path(state_dir)
         self.http, self.popen, self.sleep, self.clock, self.capacity = http, popen, sleep, clock, capacity
         probe_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
         self.port_open = port_open or (lambda p: _port_open(probe_host, p))
@@ -520,9 +497,8 @@ class FleetMember:
             if assignment.get(key):
                 secrets[key] = str(assignment[key])
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])
-        if self.duckdb_bin is not None:
-            env["DUCKDB_BIN"] = str(self.duckdb_bin)
-            env["PATH"] = str(Path(self.duckdb_bin).parent) + os.pathsep + env.get("PATH", "")
+        if self.node_bin is not None:
+            env["QOD_NODE_BIN"] = str(self.node_bin)
         env["QOD_SECRETS_DIR_EPHEMERAL"] = "1"
         cmd = ["bash", str(self.spawn_script), str(int(assignment["port"]))]
         return cmd, env, {k: v for k, v in secrets.items() if v}

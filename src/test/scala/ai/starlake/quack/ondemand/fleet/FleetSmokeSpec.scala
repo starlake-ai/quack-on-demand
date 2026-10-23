@@ -4,6 +4,7 @@ import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
 import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, NodeLockdownConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
+import ai.starlake.quack.ondemand.runtime.QodNodeTestBinary
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import cats.effect.{ExitCode, FiberIO, IO}
 import cats.effect.unsafe.implicits.global
@@ -30,7 +31,8 @@ import scala.util.Try
 
 /** End-to-end smoke of the fleet backend: a real manager booted in-process with
   * `runtimeType = fleet`, a real `qod fleet join` (run from the CLI checkout through `uv run`), a
-  * real DuckDB node spawned by that join process, and a real FlightSQL statement routed to it.
+  * real node spawned by that join process (this checkout's qod-node build, `--qod-node-bin`), and a
+  * real FlightSQL statement routed to it.
   *
   * Steps (each one timed and printed):
   *   1. boot the manager on 20950 (REST) / 31350 (FlightSQL, plain gRPC), native front door off,
@@ -54,9 +56,10 @@ import scala.util.Try
   *   10. teardown (afterAll, also on failure, timed): join process and node processes, manager
   *       fiber, database.
   *
-  * Cancelled (not failed) when `duckdb` or `uv` is not on PATH, when the CLI checkout has no `cli/`
-  * directory, or when the test Postgres (SL_TEST_PG_* envs) is unreachable. Never touches the
-  * default ports 20900 / 31338 / 9494. Every wait is bounded (60 s ceilings).
+  * Cancelled (not failed) when there is no qod-node build (QOD_NODE_BIN or a local build), when
+  * `uv` is not on PATH, when the CLI checkout has no `cli/` directory, or when the test Postgres
+  * (SL_TEST_PG_* envs) is unreachable. Never touches the default ports 20900 / 31338 / 9494. Every
+  * wait is bounded (60 s ceilings).
   */
 class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   import Main.given
@@ -82,7 +85,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   /** Why the spec cannot run here, or None when every prerequisite is present. */
   private lazy val missing: Option[String] =
-    if !onPath("duckdb") then Some("duckdb not on PATH")
+    if QodNodeTestBinary.path.isEmpty then
+      Some("no qod-node binary (QOD_NODE_BIN or a local build)")
     else if !onPath("uv") then Some("uv not on PATH")
     else if !cliDir.isDirectory then Some("no cli/ directory next to the build")
     else if !TestPostgres.reachable then
@@ -214,8 +218,8 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       "127.0.0.1",
       "--node-port",
       NodePort.toString,
-      "--duckdb-bin",
-      Process(Seq("which", "duckdb")).!!.trim,
+      "--qod-node-bin",
+      QodNodeTestBinary.path.get.toString,
       "--state-dir",
       stateDir.toString,
       "--insecure"

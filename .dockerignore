@@ -7,6 +7,10 @@
 .claude
 .metals
 
+# Native build output (the images take the vendored binaries, never a local build)
+native/qod-node/build*
+native/quackwire/build
+
 # sbt / Scala build output
 target
 project/target
