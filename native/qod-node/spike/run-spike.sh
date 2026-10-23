@@ -3,26 +3,32 @@
 # over quack; the release DuckDB CLI queries them as a quack client; the node log shows what the
 # post_bind / pre_optimize hooks and prepare finalization saw for every statement.
 #
-#   DUCKDB_CLI=<release duckdb CLI> run-spike.sh <run dir> [port]
+#   DUCKDB_CLI=<release duckdb CLI> [QOD_NODE_BIN=<qod-node>] run-spike.sh <run dir> [port]
 #
 # The run dir is wiped and recreated; it holds the DuckLake files, the SQL and node.log.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-node_bin="$here/../build/qod-node"
+node_bin="${QOD_NODE_BIN:-$here/../build/qod-node}"
 duckdb_cli="${DUCKDB_CLI:?set DUCKDB_CLI to the release duckdb CLI}"
 run_dir="${1:?usage: run-spike.sh <run dir> [port]}"
 port="${2:-23456}"
 
 rm -rf "$run_dir"
 mkdir -p "$run_dir/lake/data"
+# Paths written into SQL reach DuckDB verbatim: on Windows (Git Bash) they must be Windows paths.
+if command -v cygpath > /dev/null 2>&1; then
+  sql_dir="$(cygpath -m "$run_dir")"
+else
+  sql_dir="$run_dir"
+fi
 
 cat > "$run_dir/serve.sql" <<SQL
 INSTALL quack;
 LOAD quack;
 INSTALL ducklake;
 LOAD ducklake;
-ATTACH 'ducklake:$run_dir/lake/meta.ducklake' AS lake (DATA_PATH '$run_dir/lake/data/');
+ATTACH 'ducklake:$sql_dir/lake/meta.ducklake' AS lake (DATA_PATH '$sql_dir/lake/data/');
 CREATE TABLE lake.main.orders AS SELECT range AS id, range * 10 AS amount, 'c' || (range % 3) AS customer FROM range(10);
 CREATE TABLE memory.main.notes AS SELECT 1 AS id, 'n1' AS note;
 CREATE SECURE VIEW memory.main.order_totals AS SELECT customer, sum(amount) AS total FROM lake.main.orders GROUP BY customer;

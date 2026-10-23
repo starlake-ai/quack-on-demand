@@ -10,6 +10,9 @@
 #include "plan_probe.hpp"
 #include "screen_probe.hpp"
 #include "stop_signal.hpp"
+#ifdef QOD_NODE_DUCKDB_STATIC
+#include "static_extensions.hpp"
+#endif
 
 #include <fstream>
 #include <iostream>
@@ -90,6 +93,9 @@ int main(int argc, char **argv) {
 	}
 
 	qod::PrepareStopSignal();
+#ifdef QOD_NODE_DUCKDB_STATIC
+	qod::RegisterStaticExtensions();
+#endif
 
 	DuckDB db(nullptr);
 	qod::RegisterProbes(DBConfig::GetConfig(*db.instance));

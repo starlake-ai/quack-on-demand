@@ -1,15 +1,15 @@
 name: qod-node spike
 
-# Spike for the in-engine authorization redesign. Builds native/qod-node against the official DuckDB
-# release libduckdb (never a patched or source build) on the six platforms nodes run on, and checks per
-# platform that:
-#   - it links against the release library and starts (on Windows: whether duckdb.dll exports the
-#     internal C++ symbols the planner hooks need);
+# Spike for the in-engine authorization redesign. Builds native/qod-node against official DuckDB
+# release libraries (never a patched or source build) on the six platforms nodes run on: the shared
+# libduckdb on Linux and macOS, the release static libraries on Windows (the release duckdb.dll does
+# not export the internal C++ symbols the planner hooks use). Checks per platform that:
+#   - it links and starts;
 #   - the extensions nodes load (quack, ducklake, postgres, httpfs, iceberg) install and load;
 #   - post_bind reports a DuckLake table read through a secure view;
-#   - every setting's scope is recoverable at runtime.
-# On Linux and macOS it also serves over quack and queries with the release DuckDB CLI, checking that
-# statements run on tagged quack sessions and that a parse-screen refusal reaches the client.
+#   - every setting's scope is recoverable at runtime;
+#   - over quack, with the release DuckDB CLI as client, statements run on tagged quack sessions and a
+#     parse-screen refusal reaches the client.
 #
 # The DuckDB version is read from project/Versions.scala, like the quackwire workflow.
 
@@ -140,27 +140,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (import library, dll, full headers)
+      # The release duckdb.dll does not export the internal C++ symbols the planner hooks use (the
+      # first spike run failed at link time with 10 unresolved externals), so qod-node links the
+      # official release STATIC libraries instead: the same ones the official duckdb.exe is built from.
+      - name: Stage DuckDB v${{ env.DUCKDB_VERSION }} (release static libraries, full headers, CLI)
         shell: bash
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/duckdb-home"
-          mkdir -p "$home/include" "$home/lib"
+          mkdir -p "$home/include" "$home/lib" "$home/bin"
           tmp="$(mktemp -d)"
-          mkdir -p "$tmp/libs"
-          curl -fsSL -o "$tmp/libs.tar.gz" \
-            "https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION/duckdb-shared-libs-$DUCKDB_PLATFORM.tar.gz"
-          tar -xzf "$tmp/libs.tar.gz" -C "$tmp/libs"
-          cp "$tmp/libs/duckdb.lib" "$tmp/libs/duckdb.dll" "$home/lib/"
+          mkdir -p "$tmp/cli"
+          base="https://github.com/duckdb/duckdb/releases/download/v$DUCKDB_VERSION"
+          curl -fsSL -o "$tmp/static.tar.gz" "$base/duckdb-static-libs-$DUCKDB_PLATFORM.tar.gz"
+          curl -fsSL -o "$tmp/cli.tar.gz" "$base/duckdb-cli-$DUCKDB_PLATFORM.tar.gz"
+          tar -xzf "$tmp/static.tar.gz" -C "$home/lib"
+          tar -xzf "$tmp/cli.tar.gz" -C "$tmp/cli"
+          cp "$tmp/cli/duckdb.exe" "$home/bin/duckdb.exe"
           git clone --depth 1 --branch "v$DUCKDB_VERSION" https://github.com/duckdb/duckdb "$tmp/duckdb-src"
           cp -r "$tmp/duckdb-src/src/include/." "$home/include/"
           echo "DUCKDB_HOME=$home" >> "$GITHUB_ENV"
-          # qod-node.exe finds duckdb.dll on PATH.
-          cygpath -w "$home/lib" >> "$GITHUB_PATH"
+          ls -l "$home/lib" "$home/bin"
 
-      - name: Build qod-node (Visual Studio 2022)
+      - name: Build qod-node (Visual Studio 2022, static DuckDB)
         run: |
-          cmake -S native/qod-node -B native/qod-node/build -A ${{ matrix.cmake_arch }} -DDUCKDB_HOME="$env:DUCKDB_HOME"
+          cmake -S native/qod-node -B native/qod-node/build -A ${{ matrix.cmake_arch }} -DQOD_NODE_DUCKDB_STATIC=ON -DDUCKDB_HOME="$env:DUCKDB_HOME"
           cmake --build native/qod-node/build --config Release
 
       - name: Smoke (link, extensions, secure-view read, setting scopes)
@@ -168,3 +172,20 @@ jobs:
         run: |
           ws="$(cygpath -u "$GITHUB_WORKSPACE")"
           native/qod-node/spike/check-smoke.sh "$ws/native/qod-node/build/Release/qod-node.exe" "$(cygpath -u "$RUNNER_TEMP")/smoke"
+
+      - name: Quack round trip (qod-node serves, release CLI queries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ws="$(cygpath -u "$GITHUB_WORKSPACE")"
+          tmp="$(cygpath -u "$RUNNER_TEMP")"
+          out="$tmp/round-trip.txt"
+          QOD_NODE_BIN="$ws/native/qod-node/build/Release/qod-node.exe" \
+            DUCKDB_CLI="$(cygpath -u "$DUCKDB_HOME")/bin/duckdb.exe" \
+            native/qod-node/spike/run-spike.sh "$tmp/round-trip" 23456 | tee "$out"
+          grep -q 'kind=quack-session' "$out" \
+            || { echo "::error::no statement ran on a tagged quack session"; exit 1; }
+          grep -q 'secure_views=\[memory.main.order_totals\]' "$out" \
+            || { echo "::error::the secure-view boundary was not reported over quack"; exit 1; }
+          grep -q 'refused by the parse screen' "$out" \
+            || { echo "::error::the parse-screen refusal did not reach the client"; exit 1; }

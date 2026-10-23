@@ -49,5 +49,17 @@ CI runs both on the six platforms: `.github/workflows/qod-node-spike.yml`.
 - The quack client sends each query twice (each statement is bound twice) and retries a refused
   statement several times; a verdict cache absorbs both.
 
-Still open: Windows (whether `duckdb.dll` exports what the hooks need), the other platforms' extension
-loading, Iceberg and Postgres plans, and latency.
+## Results across platforms (CI)
+
+- Linux x86_64/arm64 and macOS x86_64/arm64 against the shared release libduckdb: smoke and quack
+  round trip pass.
+- Windows: the release `duckdb.dll` does not export the internal C++ symbols the hooks use (link
+  fails with 10 unresolved externals, x64 and ARM64). The fallback is to link the official release
+  static libraries (`duckdb-static-libs-<platform>.tar.gz`, `-DQOD_NODE_DUCKDB_STATIC=ON`), the same
+  ones the official `duckdb.exe` is built from. A static host must register what those libraries
+  link like extensions before opening a database (`duckdb_register_static_extension` with the
+  `loadable_extensions` and `httplib` capabilities and the built-in extensions; see
+  `src/static_extensions.cpp`): without the capability, INSTALL and LOAD are refused. Verified on
+  macOS arm64 (official extensions install and load, round trip passes); CI checks Windows.
+
+Still open: Iceberg and Postgres plans, and latency.
