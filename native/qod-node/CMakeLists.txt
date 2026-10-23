@@ -110,7 +110,10 @@ message(STATUS "qod-node: build marker protocol=${QOD_NODE_PROTOCOL} duckdb=${du
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
   src/build_info.cpp
+  src/crypto.cpp
+  src/handle.cpp
   src/init_runner.cpp
+  src/json.cpp
   src/lifetime.cpp
   src/options.cpp
   src/secrets.cpp
@@ -162,12 +165,20 @@ endif()
 # ---- tests --------------------------------------------------------------------------------------
 if(QOD_NODE_TESTS)
   enable_testing()
-  add_executable(sql_script_test tests/sql_script_test.cpp)
-  target_link_libraries(sql_script_test PRIVATE qod_node_core)
-  if(NOT QOD_NODE_DUCKDB_STATIC)
-    set_target_properties(sql_script_test PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
-  endif()
+  # One test program per tests/<name>.cpp, linked like qod-node.
+  function(qod_node_test name)
+    add_executable(${name} tests/${name}.cpp)
+    target_link_libraries(${name} PRIVATE qod_node_core)
+    if(NOT QOD_NODE_DUCKDB_STATIC)
+      set_target_properties(${name} PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
+    endif()
+  endfunction()
+  qod_node_test(sql_script_test)
   add_test(NAME sql_script COMMAND sql_script_test)
+  qod_node_test(crypto_test)
+  add_test(NAME crypto COMMAND crypto_test)
+  qod_node_test(handle_test)
+  add_test(NAME handle COMMAND handle_test)
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
     add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh $<TARGET_FILE:qod-node>)
