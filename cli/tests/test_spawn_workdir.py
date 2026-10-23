@@ -29,7 +29,8 @@ def _env(tmp_path, **extra):
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "TMPDIR": str(tmpdir), "kind": "memory", "dbName": "m",
-           "schemaName": "main", "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1"}
+           "schemaName": "main", "QOD_SECRETS_DIR": str(d), "QOD_SECRETS_DIR_EPHEMERAL": "1",
+           "QOD_NODE_ID": "quack-workdir-1"}
     env.update(extra)
     return env, tmpdir
 

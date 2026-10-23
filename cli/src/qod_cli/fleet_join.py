@@ -85,9 +85,9 @@ _SQL_KEYS = ("dbInitSql", "lockdownSql")
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
 # spawn-quack-node.sh and NodeSecretFiles.Keys on the manager.
 _SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN",
-                "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING",
-                "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
-_CLOUD_CRED_KEYS = _SECRET_KEYS[5:]
+                "QOD_NODE_AUTHZ_KEY", "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY",
+                "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
+_CLOUD_CRED_KEYS = _SECRET_KEYS[6:]
 SECRETS_DIR = "secrets"
 
 
@@ -497,6 +497,8 @@ class FleetMember:
             if assignment.get(key):
                 secrets[key] = str(assignment[key])
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])
+        secrets["QOD_NODE_AUTHZ_KEY"] = str(assignment["authzKey"])
+        env["QOD_NODE_ID"] = str(assignment["nodeId"])
         if self.node_bin is not None:
             env["QOD_NODE_BIN"] = str(self.node_bin)
         env["QOD_SECRETS_DIR_EPHEMERAL"] = "1"

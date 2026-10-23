@@ -332,6 +332,7 @@ final case class FleetAssignmentDto(
     poolKey: FleetPoolKeyDto,
     port: Int,
     token: String,
+    authzKey: String,
     kind: String,
     env: Map[String, String],
     dbInitSql: String,

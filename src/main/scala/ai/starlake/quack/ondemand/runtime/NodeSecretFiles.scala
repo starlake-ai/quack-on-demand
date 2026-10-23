@@ -39,6 +39,17 @@ object NodeSecretFiles extends LazyLogging:
   /** File holding the bearer token the manager presents to the node. */
   val TokenKey: String = "QOD_NODE_TOKEN"
 
+  /** File holding the node's key (64 lowercase hex digits), derived from the manager's node-key
+    * secret and the node id ([[ai.starlake.quack.edge.authz.NodeKeys]]): every session handle the
+    * node accepts is signed with it. qod-node reads it itself.
+    */
+  val AuthzKey: String = "QOD_NODE_AUTHZ_KEY"
+
+  /** Env var naming the node's id, which qod-node checks every session handle against. Not a
+    * secret.
+    */
+  val NodeIdEnv: String = "QOD_NODE_ID"
+
   /** Object-store credentials the spawn script turns into a global `CREATE SECRET` for a remote
     * `dataPath`. Read from the manager's (or fleet join process's) own environment, never forwarded
     * as env.
@@ -56,8 +67,14 @@ object NodeSecretFiles extends LazyLogging:
     * `scripts/spawn-quack-node.sh` / `.ps1` and `_SECRET_KEYS` in `qod_cli/fleet_join.py`.
     */
   val Keys: Seq[String] =
-    Seq("pgPassword", TenantDb.EncryptionKeyName, "extraSetupSql", "objectStoreSql", TokenKey) ++
-      CloudCredKeys
+    Seq(
+      "pgPassword",
+      TenantDb.EncryptionKeyName,
+      "extraSetupSql",
+      "objectStoreSql",
+      TokenKey,
+      AuthzKey
+    ) ++ CloudCredKeys
 
   require(
     TenantDb.NodeSecretEnvKeys.subsetOf(Keys.toSet),
@@ -96,6 +113,7 @@ object NodeSecretFiles extends LazyLogging:
       extraSetupSql: String,
       objectStoreSql: String,
       token: String,
+      authzKey: String,
       inheritedEnv: Map[String, String]
   ): Map[String, String] =
     val inherited = CloudCredKeys.flatMap(k => inheritedEnv.get(k).filter(_.nonEmpty).map(k -> _))
@@ -105,7 +123,8 @@ object NodeSecretFiles extends LazyLogging:
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }
     val sql = Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql)
       .filter(_._2.nonEmpty)
-    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token)).filter(_._2.nonEmpty)
+    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey))
+      .filter(_._2.nonEmpty)
 
   /** Prefix of every secrets directory a launcher creates under the JVM temp dir. */
   val DirPrefix: String = "qod-node-secrets-"

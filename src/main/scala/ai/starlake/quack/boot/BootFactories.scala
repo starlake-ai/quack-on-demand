@@ -41,11 +41,14 @@ object BootFactories extends LazyLogging:
 
   /** @param nodeBin
     *   the qod-node local nodes run; Main resolves it whenever [[runsLocalNodes]].
+    * @param nodeKeys
+    *   the manager's node keys: every node the backend starts gets the key derived for its id.
     */
   def quackBackend(
       mgrCfg: ManagerConfig,
       fleetStore: => FleetServerStore,
-      nodeBin: Option[Path]
+      nodeBin: Option[Path],
+      nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
   ): QuackBackend =
     mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
       case "local" =>
@@ -57,7 +60,8 @@ object BootFactories extends LazyLogging:
             mgrCfg.spawnScriptWindows,
             LocalQuackBackend.managerMarker(mgrCfg.port)
           ),
-          nodeBin = nodeBin
+          nodeBin = nodeBin,
+          nodeKeys = nodeKeys
         )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
@@ -72,7 +76,8 @@ object BootFactories extends LazyLogging:
           serviceAccount = mgrCfg.k8s.serviceAccount,
           serviceType = mgrCfg.k8s.serviceType,
           runAsUser = mgrCfg.k8s.runAsUser,
-          stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec
+          stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec,
+          nodeKeys = nodeKeys
         )
       case "fleet" =>
         val proxies =
@@ -102,7 +107,8 @@ object BootFactories extends LazyLogging:
   def ephemeralBackend(
       mgrCfg: ManagerConfig,
       main: QuackBackend,
-      nodeBin: Option[Path]
+      nodeBin: Option[Path],
+      nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
   ): QuackBackend =
     if FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
       logger.info(
@@ -116,7 +122,8 @@ object BootFactories extends LazyLogging:
           mgrCfg.spawnScriptWindows,
           LocalQuackBackend.managerMarker(mgrCfg.port)
         ),
-        nodeBin = nodeBin
+        nodeBin = nodeBin,
+        nodeKeys = nodeKeys
       )
     else main
 

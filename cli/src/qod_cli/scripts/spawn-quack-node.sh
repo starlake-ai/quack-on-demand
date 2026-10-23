@@ -35,9 +35,9 @@
 # Scala twin is NodeSecretFiles.Keys). The local and fleet launchers create that directory private
 # to the current user (0700, files 0600) and set QOD_SECRETS_DIR_EPHEMERAL=1. This script reads the
 # keys it assembles into the init SQL and deletes each file right after; qod-node reads its own keys
-# (QOD_NODE_KEYS: the node token) and removes the directory, which this script also removes when it
-# exits. On Kubernetes it is a read-only Secret volume. A key still present in the environment is
-# ignored (with a warning) rather than used.
+# (QOD_NODE_KEYS: the node token and the node key) and removes the directory, which this script also
+# removes when it exits. On Kubernetes it is a read-only Secret volume. A key still present in the
+# environment is ignored (with a warning) rather than used.
 #
 # The init SQL reaches qod-node on its stdin (--init -), a pipe it reads once to the end: never on
 # disk, and nothing else reaches the node's own connection through it. qod-node runs it statement by
@@ -70,10 +70,11 @@ START_DIR="${START_DIR%/}"
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.ps1 and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
 SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql QOD_NODE_TOKEN
-  QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING QOD_GCS_KEY_ID
-  QOD_GCS_SECRET)
-# The keys qod-node reads from $QOD_SECRETS_DIR itself; this script never reads them.
-QOD_NODE_KEYS=" QOD_NODE_TOKEN "
+  QOD_NODE_AUTHZ_KEY QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING
+  QOD_GCS_KEY_ID QOD_GCS_SECRET)
+# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
+# script never reads them.
+QOD_NODE_KEYS=" QOD_NODE_TOKEN QOD_NODE_AUTHZ_KEY "
 # qod-node removes an ephemeral secrets directory once it has read its keys. This script removes it
 # too, on every exit, so no exit before the launch (a failed check, a dry run) leaves the node token
 # on disk; by the time it exits, its qod-node has read the directory or never will (cleanup below
@@ -564,8 +565,13 @@ if [[ "${QOD_SPAWN_DRY_RUN:-}" == "1" ]]; then
   exit 0
 fi
 
+# QOD_NODE_ID: the node's id, which every session handle qod-node accepts must name. Not secret.
+if [[ -z "${QOD_NODE_ID:-}" ]]; then
+  echo "ERROR: QOD_NODE_ID is not set (the launcher names the node it starts)" >&2
+  exit 1
+fi
 NODE_ARGS=(--port "$PORT" --bind "$NODE_BIND" --secrets-dir "$QOD_SECRETS_DIR"
-  --secret-directory "$SECRET_PATH" --parent-pid "$$" --init -)
+  --secret-directory "$SECRET_PATH" --node-id "$QOD_NODE_ID" --parent-pid "$$" --init -)
 if [[ "${QOD_SECRETS_DIR_EPHEMERAL:-}" == "1" ]]; then
   NODE_ARGS+=(--secrets-ephemeral)
 fi

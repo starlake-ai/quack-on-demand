@@ -29,7 +29,9 @@ import scala.jdk.CollectionConverters._
   *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
   *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads it
   *     back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing after a
-  *     restart.
+  *     restart. It also holds the node's key ([[KubernetesQuackBackend.AuthzKeySecretKey]]), which
+  *     the manager derives from its node-key secret and the node id, so every start writes the same
+  *     one.
   *   - per-pod `qod-store-${nodeId}` holds the scoped per-database object-store `CREATE SECRET` SQL
   *     (authored by `ObjectStoreSecret.sql`, [[ai.starlake.quack.model.NodeSpec.objectStoreSql]])
   *     when non-empty; only that one node's pod references it.
@@ -57,7 +59,11 @@ final class KubernetesQuackBackend(
     runAsUser: Long = 1000L,
     // Bound on stop()'s wait for the pod object to actually disappear (and on start()'s
     // poll for a Terminating twin to clear before retrying a 409'd create).
-    stopTimeoutSec: Int = 60
+    stopTimeoutSec: Int = 60,
+    // The keys every pod's QOD_NODE_AUTHZ_KEY file derives from (Main passes the manager's, so its
+    // session handles verify).
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 ) extends QuackBackend,
       LazyLogging:
 
@@ -156,6 +162,10 @@ final class KubernetesQuackBackend(
     portEnv.setName("QOD_NODE_PORT")
     portEnv.setValue(quackPort.toString)
     envs.add(portEnv)
+    val nodeIdEnv = new EnvVar()
+    nodeIdEnv.setName(NodeSecretFiles.NodeIdEnv)
+    nodeIdEnv.setValue(spec.nodeId)
+    envs.add(nodeIdEnv)
 
     val containerPort = new ContainerPort()
     containerPort.setContainerPort(quackPort)
@@ -297,7 +307,15 @@ final class KubernetesQuackBackend(
       .toSeq
       .sortBy(_._2)
     val sources =
-      Seq(projection(tokenSecretNameFor(spec.nodeId), Seq(TokenSecretKeyPath))) ++
+      Seq(
+        projection(
+          tokenSecretNameFor(spec.nodeId),
+          Seq(
+            TokenSecretKeyPath,
+            KubernetesQuackBackend.AuthzKeySecretKey -> NodeSecretFiles.AuthzKey
+          )
+        )
+      ) ++
         Option.when(nodeEnvItems.nonEmpty)(
           projection(nodeEnvSecretNameFor(spec.poolKey), nodeEnvItems)
         ) ++
@@ -743,6 +761,7 @@ final class KubernetesQuackBackend(
     secret.setMetadata(meta)
     val data = new java.util.HashMap[String, String]()
     data.put(KubernetesQuackBackend.TokenSecretKey, token)
+    data.put(KubernetesQuackBackend.AuthzKeySecretKey, nodeKeys.keyHex(nodeId))
     secret.setStringData(data)
     client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
     ()
@@ -1002,6 +1021,9 @@ object KubernetesQuackBackend:
     * `spawn-quack-node.sh` expects.
     */
   val TokenSecretKey: String = "QOD_NODE_TOKEN"
+
+  /** Key inside the per-pod token Secret holding the node's key (NodeSecretFiles.AuthzKey). */
+  val AuthzKeySecretKey: String = "authzKey"
 
   /** Key inside the per-pod object-store Secret holding the scoped `CREATE SECRET` SQL. Same string
     * as the env var name `buildPod` sets on the pod (matches the `objectStoreSql` env var

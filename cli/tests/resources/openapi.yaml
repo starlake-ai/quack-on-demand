@@ -8181,6 +8181,7 @@ components:
       - poolKey
       - port
       - token
+      - authzKey
       - kind
       - env
       - dbInitSql
@@ -8199,6 +8200,8 @@ components:
           type: integer
           format: int32
         token:
+          type: string
+        authzKey:
           type: string
         kind:
           type: string

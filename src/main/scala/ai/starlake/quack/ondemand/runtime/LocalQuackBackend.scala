@@ -20,13 +20,18 @@ import scala.jdk.CollectionConverters.*
   *   the qod-node every spawn runs, handed to the script as `QOD_NODE_BIN` ([[QodNodeBinary]]; Main
   *   resolves it at boot). None leaves the script to its inherited `QOD_NODE_BIN` or `PATH`, for
   *   tests whose `commandFor` runs no script at all.
+  * @param nodeKeys
+  *   the keys every spawn's `QOD_NODE_AUTHZ_KEY` derives from; Main passes the manager's, so its
+  *   handles verify
   */
 final class LocalQuackBackend(
     min: Int,
     max: Int,
     commandFor: (NodeSpec, Int, String) => List[String] =
       LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript),
-    nodeBin: Option[Path] = None
+    nodeBin: Option[Path] = None,
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 ) extends QuackBackend
     with LazyLogging:
 
@@ -69,16 +74,17 @@ final class LocalQuackBackend(
     val env = pb.environment()
     // Nothing secret may sit in the node's environment (or argv): a node user reads both back
     // through getenv() / /proc/<pid>/environ. The sensitive values (NodeSecretFiles.Keys: metastore
-    // pgPassword / encryptionKey, federation and object-store SQL, the node token, the manager's
-    // own QOD_S3_* / QOD_AZURE_* credentials) go to a private directory the script reads and
-    // deletes; the manager's other credentials it inherited (QOD_API_KEY, the session JWT secret,
-    // passwords...) are dropped outright.
+    // pgPassword / encryptionKey, federation and object-store SQL, the node token, the node's key,
+    // the manager's own QOD_S3_* / QOD_AZURE_* credentials) go to a private directory the script
+    // reads and deletes; the manager's other credentials it inherited (QOD_API_KEY, the session
+    // JWT secret, passwords...) are dropped outright.
     val inherited = env.asScala.toMap
     val secrets   = NodeSecretFiles.collect(
       spec.metastore,
       spec.extraSetupSql,
       spec.objectStoreSql,
       token,
+      nodeKeys.keyHex(spec.nodeId),
       inherited
     )
     inherited.keys.foreach { k =>
@@ -95,6 +101,9 @@ final class LocalQuackBackend(
     // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
     spec.metastore.foreach { case (k, v) => if !NodeSecretFiles.isKey(k) then env.put(k, v) }
     env.put("kind", spec.kindWire)
+    // The node's id, which qod-node checks every session handle against (the script passes it as
+    // --node-id). After the metastore overlay, so no metastore key of this name can replace it.
+    env.put(NodeSecretFiles.NodeIdEnv, spec.nodeId)
     // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy settings and before the
     // catalog ATTACH, unlike extraSetupSql which runs after it.
     if spec.dbInitSql.nonEmpty then env.put("dbInitSql", spec.dbInitSql)

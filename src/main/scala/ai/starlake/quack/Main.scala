@@ -408,7 +408,7 @@ object Main extends IOApp with LazyLogging:
             mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port)
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
-    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin)
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
     val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
       backend match
         case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
@@ -416,7 +416,7 @@ object Main extends IOApp with LazyLogging:
     fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
     // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
     val ephemeralBackend: QuackBackend =
-      BootFactories.ephemeralBackend(mgrCfg, backend, qodNodeBin)
+      BootFactories.ephemeralBackend(mgrCfg, backend, qodNodeBin, nodeKeys)
     // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"
@@ -1785,7 +1785,8 @@ object Main extends IOApp with LazyLogging:
             mgrCfg.fleet,
             backend = fleetBackend,
             publish = publisher,
-            audit = auditRecorder
+            audit = auditRecorder,
+            nodeKeys = nodeKeys
           )
         ),
         patAuth = Some(patAuthenticator),

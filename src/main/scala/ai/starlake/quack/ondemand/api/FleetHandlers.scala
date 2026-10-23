@@ -37,7 +37,9 @@ final class FleetHandlers(
     cfg: FleetConfig,
     backend: Option[FleetQuackBackend] = None,
     publish: StateChangePublisher = StateChangePublisher.noop,
-    audit: AuditRecorder = AuditRecorder.noop
+    audit: AuditRecorder = AuditRecorder.noop,
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 ) extends LazyLogging:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -168,7 +170,7 @@ final class FleetHandlers(
                       r.approved && r.approvedSource.forall(b => hb.sourceAddr.contains(b))
                     )
                     .flatMap(_.assignment)
-                    .map(FleetHandlers.toDto),
+                    .map(a => FleetHandlers.toDto(a, nodeKeys.keyHex(a.nodeId))),
                   approval
                 )
               )
@@ -323,13 +325,15 @@ object FleetHandlers:
     case ServerLiveness.Unreachable(_) => "unreachable"
     case ServerLiveness.Dead           => "dead"
 
-  def toDto(a: FleetAssignment): FleetAssignmentDto =
+  /** The heartbeat's assignment, with the node key derived for its node id (never stored). */
+  def toDto(a: FleetAssignment, authzKey: String): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
       a.nodeId,
       FleetPoolKeyDto(a.poolKey.tenant, a.poolKey.tenantDb, a.poolKey.pool),
       a.port,
       a.token,
+      authzKey,
       a.kind,
       a.env,
       a.dbInitSql,

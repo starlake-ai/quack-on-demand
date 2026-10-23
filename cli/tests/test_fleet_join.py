@@ -74,7 +74,8 @@ def recorded_signals(monkeypatch):
 
 def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
     return {"epoch": epoch, "nodeId": node_id, "poolKey": {"tenant": "acme", "tenantDb": "db", "pool": "bi"},
-            "port": port, "token": "tok", "kind": "memory", "env": {"pgHost": "h", "pgPassword": "pw"},
+            "port": port, "token": "tok", "authzKey": "ab" * 32, "kind": "memory",
+            "env": {"pgHost": "h", "pgPassword": "pw"},
             "dbInitSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
 
 
@@ -136,8 +137,9 @@ def test_assignment_starts_node_with_spawn_contract_and_reports_running(tmp_path
     member.run_once()
     cmd, env, kw, secrets = procs[0]
     assert cmd[-1] == "21900" and env["kind"] == "memory"
-    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok"}
+    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
     assert env["QOD_NODE_BIND"] == "10.0.0.7" and env["QOD_SECRETS_DIR_EPHEMERAL"] == "1"
+    assert env["QOD_NODE_ID"] == "quack-acme-db-bi-1"
     assert kw["start_new_session"] is True
     assert (tmp_path / "state" / "node.pid").read_text().strip() == "4242"
     member.run_once()
@@ -274,7 +276,7 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
 
 
 SECRET_VALUES = {"pw", "tok", "hunter2", "fed-sql-secret", "store-sql-secret", "s3-key-id", "s3-secret",
-                 "az-conn"}
+                 "az-conn", "ab" * 32}
 
 
 def secret_assignment():
@@ -301,6 +303,7 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
         assert not any(value in v for v in env.values()), value
     assert secrets == {"pgPassword": "hunter2", "encryptionKey": "k3y", "extraSetupSql": "fed-sql-secret",
                        "objectStoreSql": "store-sql-secret", "QOD_NODE_TOKEN": "tok",
+                       "QOD_NODE_AUTHZ_KEY": "ab" * 32,
                        "QOD_S3_ACCESS_KEY_ID": "s3-key-id", "QOD_S3_SECRET_ACCESS_KEY": "s3-secret",
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}
     assert env["QOD_S3_ENDPOINT"] == "minio:9000"

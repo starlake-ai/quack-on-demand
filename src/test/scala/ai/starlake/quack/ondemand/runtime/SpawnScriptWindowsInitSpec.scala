@@ -40,7 +40,10 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       extraEnv: Seq[(String, String)] = Nil
   ): (Seq[(String, String)], Path) =
     val dir = NodeSecretFiles.writePrivateDir(
-      Map(NodeSecretFiles.TokenKey -> "tok-ps1-7a01") ++ secrets,
+      Map(
+        NodeSecretFiles.TokenKey -> "tok-ps1-7a01",
+        NodeSecretFiles.AuthzKey -> ("ab" * 32)
+      ) ++ secrets,
       Some(tempDir)
     )
     val env = Seq(
@@ -51,7 +54,8 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       "dbName"                     -> "m",
       "schemaName"                 -> "main",
       NodeSecretFiles.DirEnv       -> dir.toString,
-      NodeSecretFiles.EphemeralEnv -> "1"
+      NodeSecretFiles.EphemeralEnv -> "1",
+      NodeSecretFiles.NodeIdEnv    -> "quack-ps1-node-1"
     ) ++ extraEnv
     (env, dir)
 
@@ -221,6 +225,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     pairs("--port") shouldBe "23961"
     pairs("--bind") shouldBe "0.0.0.0"
     pairs("--secrets-dir") shouldBe secrets.toString
+    pairs("--node-id") shouldBe "quack-ps1-node-1"
     pairs("--parent-pid").toLong shouldBe p.pid()
     pairs("--init") shouldBe "-"
     args should contain("--secrets-ephemeral")
@@ -228,10 +233,10 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     secretPath.isAbsolute shouldBe true
     secretPath.toString should endWith("/secrets/none/s")
     secretPath.getParent.getParent.getParent.getFileName.toString should startWith("quack-node.")
-    // The script read and deleted the secrets it uses; the token is qod-node's, and the directory
-    // is gone once the node is.
+    // The script read and deleted the secrets it uses; the token and the node key are qod-node's,
+    // and the directory is gone once the node is.
     Files.readAllLines(probe.resolve("secrets")).asScala.toList shouldBe
-      List(NodeSecretFiles.TokenKey)
+      List(NodeSecretFiles.AuthzKey, NodeSecretFiles.TokenKey)
     Files.exists(secrets) shouldBe false
     // The init SQL arrived on stdin as UTF-8, the starting directory's quote doubled.
     val sql   = Files.readString(probe.resolve("init"), StandardCharsets.UTF_8)
@@ -242,7 +247,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     // environment, which holds whatever this test JVM inherited.
     val env   = Files.readString(probe.resolve("env"), StandardCharsets.UTF_8)
     val names = env.linesIterator.map(_.takeWhile(_ != '=')).toSet
-    Seq("tok-ps1-7a01", "pw-ps1-9b").foreach { v =>
+    Seq("tok-ps1-7a01", "pw-ps1-9b", "ab" * 32).foreach { v =>
       withClue(s"$v in the node's arguments")(args.exists(_.contains(v)) shouldBe false)
       withClue(s"$v in the node's environment")(env.contains(v) shouldBe false)
     }

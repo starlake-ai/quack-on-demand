@@ -45,7 +45,7 @@ def _spawn(tmp_path, name, node_port, marker, node_bin):
     tmpdir.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "TMPDIR": str(tmpdir), "kind": "memory", "dbName": "m",
            "schemaName": "main", "QOD_NODE_BIN": str(node_bin), "QOD_SECRETS_DIR": str(secrets),
-           "QOD_SECRETS_DIR_EPHEMERAL": "1"}
+           "QOD_SECRETS_DIR_EPHEMERAL": "1", "QOD_NODE_ID": f"quack-scope-{name}"}
     start = tmp_path / f"start-{name}"
     start.mkdir()
     argv = ["bash", str(SPAWN), str(node_port)] + ([marker] if marker else [])

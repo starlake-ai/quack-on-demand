@@ -37,6 +37,7 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       extraSetupSql = "fed",
       objectStoreSql = "",
       token = "tok",
+      authzKey = "ab" * 32,
       inheritedEnv = Map(
         "QOD_S3_SECRET_ACCESS_KEY" -> "from-manager",
         "QOD_S3_ACCESS_KEY_ID"     -> "id",
@@ -48,6 +49,7 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "encryptionKey"            -> "k",
       "extraSetupSql"            -> "fed",
       "QOD_NODE_TOKEN"           -> "tok",
+      "QOD_NODE_AUTHZ_KEY"       -> "ab" * 32,
       "QOD_S3_SECRET_ACCESS_KEY" -> "from-metastore",
       "QOD_S3_ACCESS_KEY_ID"     -> "id"
     )
@@ -98,9 +100,10 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
 
   /** Runs the real bash script up to the node launch, with a stand-in qod-node that dumps its own
     * environment and arguments: the values must reach the init SQL path but never the node's
-    * environment, and only qod-node's own key (the token) is left for it to read.
+    * environment, and only qod-node's own keys (the token and the node key) are left for it to
+    * read.
     */
-  "spawn-quack-node.sh" should "read the secrets, leave qod-node only its own key, export none" in {
+  "spawn-quack-node.sh" should "read the secrets, leave qod-node only its own keys, export none" in {
     assume(!isWindows, "bash script")
     val envOut  = tempDir.resolve("node.env")
     val argsOut = tempDir.resolve("node.args")
@@ -127,6 +130,7 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "extraSetupSql"            -> "SELECT 'fed-file';",
       "objectStoreSql"           -> "SELECT 'store-file';",
       "QOD_NODE_TOKEN"           -> "token-file",
+      "QOD_NODE_AUTHZ_KEY"       -> ("ab" * 32),
       "QOD_S3_SECRET_ACCESS_KEY" -> "s3-file"
     )
     val dir    = NodeSecretFiles.writePrivateDir(secrets, Some(tempDir))
@@ -141,18 +145,21 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "QOD_NODE_BIN"               -> fake.toString,
       NodeSecretFiles.DirEnv       -> dir.toString,
       NodeSecretFiles.EphemeralEnv -> "1",
+      NodeSecretFiles.NodeIdEnv    -> "quack-spec-node-1",
       // A secret still handed over the environment is ignored, not exported.
       "pgPassword" -> "hunter2-env"
     ).!(ProcessLogger(_ => (), l => stderr.append(l).append('\n')))
     // The fake node exits on its own while the wrapper is alive, which the wrapper reports.
     withClue(stderr.toString)(exit shouldBe 1)
     stderr.toString should include("while its wrapper was still running")
-    // The script deleted every file it read, leaving qod-node only the token; once the node is gone
-    // the script removes the directory too.
-    Files.readAllLines(dirOut).asScala.toList shouldBe List(NodeSecretFiles.TokenKey)
+    // The script deleted every file it read, leaving qod-node only its token and node key; once the
+    // node is gone the script removes the directory too.
+    Files.readAllLines(dirOut).asScala.toList shouldBe
+      List(NodeSecretFiles.AuthzKey, NodeSecretFiles.TokenKey)
     Files.exists(dir) shouldBe false
     val args = Files.readAllLines(argsOut).asScala.toList
     args.sliding(2).toList should contain(List("--secrets-dir", dir.toString))
+    args.sliding(2).toList should contain(List("--node-id", "quack-spec-node-1"))
     args should contain("--secrets-ephemeral")
     // These checks never print the environment, which holds whatever this test JVM inherited.
     val nodeEnv = Files.readString(envOut)

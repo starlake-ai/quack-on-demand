@@ -245,7 +245,14 @@ class KubernetesQuackBackendSecuritySpec
     env.filter(_.getValueFrom != null) shouldBe empty
     env.map(_.getName).filter(NodeSecretFiles.isKey) shouldBe empty
     secretRefs("quack-nodeenv-noenv").keySet shouldBe
-      Set("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN")
+      Set(
+        "pgPassword",
+        "encryptionKey",
+        "extraSetupSql",
+        "objectStoreSql",
+        "QOD_NODE_TOKEN",
+        "QOD_NODE_AUTHZ_KEY"
+      )
 
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
@@ -313,6 +320,27 @@ class KubernetesQuackBackendSecuritySpec
     backend.start(nodeEnvSpec("quack-nodeenv-8b", lakeMeta + ("pgPassword" -> "p"))).unsafeRunSync()
     backend.stop(nodeEnvKey, "quack-nodeenv-8a").unsafeRunSync()
     secretPayload(nodeEnvSecretName) should not be empty
+
+  "the token Secret" should "carry the node's key, and the pod its id" in:
+    val keys    = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeKeys = keys
+    )
+    backend.start(nodeEnvSpec("quack-nodeenv-key", lakeMeta)).unsafeRunSync()
+    secretRefs("quack-nodeenv-key").get("QOD_NODE_AUTHZ_KEY") shouldBe
+      Some(("qod-token-quack-nodeenv-key", KubernetesQuackBackend.AuthzKeySecretKey))
+    secretPayload("qod-token-quack-nodeenv-key").value
+      .get(KubernetesQuackBackend.AuthzKeySecretKey) shouldBe Some(keys.keyHex("quack-nodeenv-key"))
+    plainEnv("quack-nodeenv-key").find(_.getName == "QOD_NODE_ID").map(_.getValue) shouldBe
+      Some("quack-nodeenv-key")
 
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on
   // upgrade). These two pin that adoption of a pod from an EITHER shape is still lossless for

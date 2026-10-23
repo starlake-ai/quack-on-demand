@@ -32,14 +32,14 @@
   $env:QOD_NODE_BIN names it (an absolute path the launcher sets); otherwise the first `qod-node`
   on PATH.
 
-  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, the node token and
-  the object-store credentials, see $SecretKeys below) NEVER arrive through the environment or the
-  command line: another process of the same user can read both. They arrive as one file per key in
-  the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an ACL granting only the
-  current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the keys it assembles into the init
-  SQL and deletes each file right after; qod-node reads its own key (the node token) and removes the
-  directory, which this script also removes when it exits. A key still present in the environment
-  is ignored with a warning.
+  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, the node token, the
+  node key and the object-store credentials, see $SecretKeys below) NEVER arrive through the
+  environment or the command line: another process of the same user can read both. They arrive as
+  one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an
+  ACL granting only the current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the keys it
+  assembles into the init SQL and deletes each file right after; qod-node reads its own keys (the
+  node token and the node key) and removes the directory, which this script also removes when it
+  exits. A key still present in the environment is ignored with a warning.
 
   The init SQL reaches qod-node on its stdin (--init -), UTF-8 bytes down a pipe it reads once to
   the end: never on disk, and nothing else reaches the node's own connection through it. qod-node
@@ -78,10 +78,11 @@ $startDir = (Get-Location).ProviderPath
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.sh and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
 $SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql', 'QOD_NODE_TOKEN',
-  'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY', 'QOD_AZURE_CONNECTION_STRING',
-  'QOD_GCS_KEY_ID', 'QOD_GCS_SECRET')
-# The keys qod-node reads from $QOD_SECRETS_DIR itself; this script never reads them.
-$QodNodeKeys = @('QOD_NODE_TOKEN')
+  'QOD_NODE_AUTHZ_KEY', 'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY',
+  'QOD_AZURE_CONNECTION_STRING', 'QOD_GCS_KEY_ID', 'QOD_GCS_SECRET')
+# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
+# script never reads them.
+$QodNodeKeys = @('QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY')
 # Deletes a variable from this process's environment, so the qod-node child never inherits it.
 # [Environment]::SetEnvironmentVariable($name, $null) would not: PowerShell passes $null to a string
 # parameter as an empty string, which pwsh keeps as an empty variable.
@@ -614,8 +615,15 @@ function ConvertTo-CommandLineArgument([string]$arg) {
 
 # QOD_NODE_BIND: interface the node listens on (0.0.0.0 by default). Mirrors spawn-quack-node.sh.
 $nodeBind = Env-Or 'QOD_NODE_BIND' '0.0.0.0'
+# QOD_NODE_ID: the node's id, which every session handle qod-node accepts must name. Not secret.
+$qodNodeId = [Environment]::GetEnvironmentVariable('QOD_NODE_ID')
+if ([string]::IsNullOrEmpty($qodNodeId)) {
+  [Console]::Error.WriteLine('ERROR: QOD_NODE_ID is not set (the launcher names the node it starts)')
+  Remove-NodeDirectory $nodeDir
+  Exit-Spawn 1
+}
 $nodeArgs = @('--port', "$Port", '--bind', $nodeBind, '--secrets-dir', $secretsDir,
-  '--secret-directory', $secretPath, '--parent-pid', "$PID", '--init', '-')
+  '--secret-directory', $secretPath, '--node-id', $qodNodeId, '--parent-pid', "$PID", '--init', '-')
 if ($secretsEphemeral) { $nodeArgs += '--secrets-ephemeral' }
 
 # stdout/stderr are inherited so node logs flow to the manager's console (LocalQuackBackend uses

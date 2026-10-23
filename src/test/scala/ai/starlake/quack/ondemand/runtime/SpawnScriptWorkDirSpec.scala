@@ -29,7 +29,10 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
   private def launch(cwd: Path, env: Seq[(String, String)]): java.lang.Process =
     val (secret, plain) = env.partition { case (k, _) => NodeSecretFiles.isKey(k) }
     val dir             = NodeSecretFiles.writePrivateDir(
-      (Seq(NodeSecretFiles.TokenKey -> "tok-workdir") ++ secret).toMap,
+      (Seq(
+        NodeSecretFiles.TokenKey -> "tok-workdir",
+        NodeSecretFiles.AuthzKey -> ("ab" * 32)
+      ) ++ secret).toMap,
       Some(tempDir)
     )
     val pb = new java.lang.ProcessBuilder("bash", script, "23351").directory(cwd.toFile)
@@ -37,7 +40,8 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
       .putAll(
         (plain ++ Seq(
           NodeSecretFiles.DirEnv       -> dir.toString,
-          NodeSecretFiles.EphemeralEnv -> "1"
+          NodeSecretFiles.EphemeralEnv -> "1",
+          NodeSecretFiles.NodeIdEnv    -> "quack-workdir-node-1"
         )).toMap.asJava
       )
     pb.redirectErrorStream(true)
