@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.BuildVersions
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.edge.adapter.QuackHttpClient
+import ai.starlake.quack.edge.authz.NodeKeys
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Role, RunningNode}
 import ai.starlake.quack.ondemand.federation.{FederationBlobBuilder, PostgresSecretResolver}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -15,14 +17,21 @@ import scala.util.Try
 
 /** A `memory` node spawned by the real `spawn-quack-node.sh` with qod-node, its federation blob
   * produced by the real [[FederationBlobBuilder]] from typed sources, and queried over its own
-  * quack endpoint from another process, the way the manager reaches it. Shared by the Postgres and
-  * MySQL live specs.
+  * quack endpoint through the manager's native client after a session handle, the way the manager
+  * reaches it. Shared by the Postgres and MySQL live specs.
   */
 private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
 
   val Token: String = "tok-rdbms-fed-5e21"
 
+  private val NodeId = "quack-rdbms-live-1"
+
+  private val keys = NodeKeys.ephemeral()
+
   private val script = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath.toString
+
+  private lazy val allocator = new org.apache.arrow.memory.RootAllocator()
+  private lazy val client    = new QuackHttpClient(allocator)
 
   private var process: Option[java.lang.Process] = None
   private var nodePort: Int                      = 0
@@ -44,7 +53,11 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
   def start(extraSetupSql: String): Unit =
     nodePort = RdbmsFederationLiveNode.freePort()
     val secrets = NodeSecretFiles.writePrivateDir(
-      Map(NodeSecretFiles.TokenKey -> Token, "extraSetupSql" -> extraSetupSql),
+      Map(
+        NodeSecretFiles.TokenKey -> Token,
+        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId),
+        "extraSetupSql"          -> extraSetupSql
+      ),
       Some(tempDir)
     )
     val pb = new java.lang.ProcessBuilder("bash", script, nodePort.toString)
@@ -61,7 +74,8 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
           "QOD_NODE_BIND"        -> "127.0.0.1",
           "HOME"                 -> Files.createDirectories(tempDir.resolve("node-home")).toString,
           NodeSecretFiles.DirEnv -> secrets.toString,
-          NodeSecretFiles.EphemeralEnv -> "1"
+          NodeSecretFiles.EphemeralEnv -> "1",
+          NodeSecretFiles.NodeIdEnv    -> NodeId
         ).asJava
       )
     val p = pb.start()
@@ -82,31 +96,39 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     }
     process = None
 
-  /** `sql` on the node through `quack_query` from a separate DuckDB process: (exit code, CSV rows,
-    * stderr).
+  /** `sql` on the node as the manager runs it: the native client, after a superuser handle. (0,
+    * rows as lines, "") or (1, Nil, the node's error).
     */
   def run(sql: String): (Int, List[String], String) =
-    val inner = sql.replace("'", "''")
-    val out   = new StringBuilder
-    val err   = new StringBuilder
-    val rc    = Process(
-      Seq(
-        RdbmsFederationLiveNode.pinnedDuckdb.get.toString,
-        "-csv",
-        "-noheader",
-        "-c",
-        s"SELECT * FROM quack_query('quack:127.0.0.1:$nodePort', '$inner', token := '$Token');"
-      ),
-      tempDir.toFile,
-      "DUCKDB_AGENT_MODE" -> "0",
-      "HOME"              -> Files.createDirectories(tempDir.resolve("client-home")).toString
-    ) ! ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n'))
-    (rc, out.toString.linesIterator.toList, err.toString)
+    val node = RunningNode(
+      NodeId,
+      LiveQodNode.Pool,
+      Role.Dual,
+      "127.0.0.1",
+      nodePort,
+      Token,
+      None,
+      None,
+      java.time.Instant.EPOCH
+    )
+    LiveQodNode.lines(
+      client
+        .query(
+          s"quack:127.0.0.1:$nodePort",
+          Token,
+          sql,
+          None,
+          () => keys.prelude(node, LiveQodNode.Superuser)
+        )
+        .unsafeRunSync()
+    ) match
+      case Right(lines) => (0, lines, "")
+      case Left(err)    => (1, Nil, err)
 
 private[runtime] object RdbmsFederationLiveNode:
 
-  /** The pinned DuckDB CLI (the quack client, and the extension probe below), present only when a
-    * qod-node binary is too: these specs need both, so one check covers them.
+  /** The pinned DuckDB CLI (the extension probe below), present only when a qod-node binary is too:
+    * these specs need both, so one check covers them.
     */
   lazy val pinnedDuckdb: Option[Path] =
     val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")

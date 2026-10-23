@@ -5,8 +5,9 @@ import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackHttpAdapter, QuackH
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.ArrowRowsDecoder
+import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.LocalQuackBackend
-import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.state.testkit.{PostgresFixture, TestPostgres}
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.memory.RootAllocator
@@ -29,11 +30,12 @@ import scala.sys.process._
   * directly), then decoded through the real [[ArrowRowsDecoder]].
   *
   * NOT exercised here: the ACL/RLS/CLS half. The router is constructed with the default
-  * `StatementValidator.allowAll` and `effectiveSet = None`, so this spec proves SQL shape, routing,
-  * node execution, Arrow decode, and truncation -- NOT authorization (which `PreviewAuthzSpec` and
-  * `CatalogPreviewHandlersSpec` pin at the handler layer, and which under the REAL
-  * `PostgresAclValidator` would fail-safe DENY a `None` effective set; the "superuser" user string
-  * has no bypass meaning to the validator).
+  * `StatementValidator.allowAll` and the synthetic system set `RoutedExecutor` gives a superuser
+  * caller (a statement with no principal bound gets no session handle, so it never reaches a node),
+  * so this spec proves SQL shape, routing, node execution, Arrow decode, and truncation -- NOT
+  * authorization (which `PreviewAuthzSpec` and `CatalogPreviewHandlersSpec` pin at the handler
+  * layer, and which under the REAL `PostgresAclValidator` would fail-safe DENY a `None` effective
+  * set; the "superuser" user string has no bypass meaning to the validator).
   *
   * The decoded rows are compared against a direct `duckdb` CLI query of the same catalog at the
   * same snapshot; comparison is unordered-set equality via an identical lexicographic re-sort of
@@ -41,7 +43,7 @@ import scala.sys.process._
   * CSV rendering is NOT safe to copy for tables with richer string data).
   *
   * Cancels cleanly (not fails) when local Postgres or the `duckdb` CLI is unavailable -- same
-  * environment guard [[StampedWriteIntegrationSpec]] and [[PostgresFixture]] use.
+  * environment guard [[PostgresFixture]] uses.
   */
 class PreviewEndToEndSpec
     extends AnyFunSpec
@@ -86,7 +88,8 @@ class PreviewEndToEndSpec
   ): A =
     val store    = new InMemoryControlPlaneStore()
     val tracker  = new NodeLoadTracker
-    val backend  = new LocalQuackBackend(min = 24900, max = 24999)
+    val keys     = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val backend  = new LocalQuackBackend(min = 24900, max = 24999, nodeKeys = keys)
     val sup      = new PoolSupervisor(backend, tracker, store)
     val tenant   = "pvtenant"
     val tenantDb = "pv_e2e"
@@ -150,7 +153,7 @@ class PreviewEndToEndSpec
               s"quack node at ${node.host}:${node.port} never came up (last poll error: $lastError)"
             )
           val client   = new QuackHttpClient(allocator)
-          val adapter  = new QuackHttpAdapter(client, tracker)
+          val adapter  = new QuackHttpAdapter(client, tracker, keys)
           val sessions = new ai.starlake.quack.edge.SessionRegistry
           val router   = new FlightSqlRouter(sup, sessions, tracker, adapter)
           test(router, poolKey)
@@ -170,12 +173,24 @@ class PreviewEndToEndSpec
     // (`limit + 1`) so the decoder can observe truncation; ArrowRowsDecoder.decode still stops
     // collecting at `limit`, so the response never carries the extra row.
     val sql = buildPreviewSql(schema, table, snapshotId, limit + 1)
+    // The set RoutedExecutor builds for a superuser caller: the manager acting for itself. The node
+    // runs the statement for NodePrincipal.System; with no set bound there is no principal to
+    // vouch for, so no session handle can be minted.
+    val system = EffectiveSet(
+      RbacUser(id = "", tenant = None, username = "superuser", kind = "admin"),
+      Nil,
+      Nil,
+      Nil,
+      Nil,
+      system = true
+    )
     router
       .execute(
         connectionId = s"preview-${poolKey.tenant}-${poolKey.tenantDb}",
         user = "superuser",
         poolKey = poolKey,
         sql = sql,
+        effectiveSet = Some(system),
         recordExecution = false
       )
       .unsafeRunSync() match

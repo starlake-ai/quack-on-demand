@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.BuildVersions
+import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -15,21 +15,14 @@ import scala.util.Try
 /** The PowerShell spawn script, run through PowerShell on any OS (pwsh off Windows): the init SQL
   * it hands qod-node on stdin, the arguments it passes, the secrets it leaves, and the node
   * directories its sweep removes. A stand-in qod-node records what it is given (off Windows); the
-  * real one serves a table end to end when a local build and the pinned DuckDB CLI are present.
-  * Cancelled without PowerShell.
+  * real one serves a table end to end, to the manager's native client, when a local build is
+  * present. Cancelled without PowerShell.
   */
 class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
 
   private val ps1 = Paths.get("scripts/spawn-quack-node.ps1").toAbsolutePath.toString
 
-  private lazy val pinnedDuckdb: Option[Path] =
-    val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")
-    sys.env
-      .get("DUCKDB_BIN")
-      .filter(_.nonEmpty)
-      .map(Paths.get(_))
-      .orElse(sys.env.get("DUCKDB_CACHE_DIR").map(d => Paths.get(d, abi, "bin", "duckdb")))
-      .filter(Files.isExecutable(_))
+  private val keys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 
   /** The environment of a spawn with its node directories under `tmp` and its secrets in a fresh
     * private directory, returned with it.
@@ -42,7 +35,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     val dir = NodeSecretFiles.writePrivateDir(
       Map(
         NodeSecretFiles.TokenKey -> "tok-ps1-7a01",
-        NodeSecretFiles.AuthzKey -> ("ab" * 32)
+        NodeSecretFiles.AuthzKey -> keys.keyHex("quack-ps1-node-1")
       ) ++ secrets,
       Some(tempDir)
     )
@@ -252,9 +245,13 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     // environment, which holds whatever this test JVM inherited.
     val env   = Files.readString(probe.resolve("env"), StandardCharsets.UTF_8)
     val names = env.linesIterator.map(_.takeWhile(_ != '=')).toSet
-    Seq("tok-ps1-7a01", "pw-ps1-9b", "ab" * 32).foreach { v =>
-      withClue(s"$v in the node's arguments")(args.exists(_.contains(v)) shouldBe false)
-      withClue(s"$v in the node's environment")(env.contains(v) shouldBe false)
+    Seq(
+      "the token"    -> "tok-ps1-7a01",
+      "the password" -> "pw-ps1-9b",
+      "the node key" -> keys.keyHex("quack-ps1-node-1")
+    ).foreach { case (what, v) =>
+      withClue(s"$what in the node's arguments")(args.exists(_.contains(v)) shouldBe false)
+      withClue(s"$what in the node's environment")(env.contains(v) shouldBe false)
     }
     (NodeSecretFiles.Keys :+ NodeSecretFiles.DirEnv :+ NodeSecretFiles.EphemeralEnv).foreach { k =>
       withClue(s"$k in the node's environment")(names.contains(k) shouldBe false)
@@ -294,7 +291,6 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
 
   "a PowerShell node" should "serve its init tables over quack with the real qod-node" in {
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
-    assume(pinnedDuckdb.nonEmpty, "the pinned DuckDB CLI is not available")
     val port            = 23963
     val (p, _, secrets) = launch(
       tempDir.resolve("start"),
@@ -303,32 +299,46 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       secrets = Map("extraSetupSql" -> "CREATE TABLE fed AS SELECT 'fed-served' AS v;"),
       extraEnv = Seq("QOD_NODE_BIND" -> "127.0.0.1")
     )
+    val allocator = new org.apache.arrow.memory.RootAllocator()
+    val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
+    val node      = ai.starlake.quack.model.RunningNode(
+      "quack-ps1-node-1",
+      LiveQodNode.Pool,
+      ai.starlake.quack.model.Role.Dual,
+      "127.0.0.1",
+      port,
+      "tok-ps1-7a01",
+      None,
+      None,
+      java.time.Instant.EPOCH
+    )
     try
-      val deadline        = System.currentTimeMillis() + 60000
-      def query(): String =
-        Process(
-          Seq(pinnedDuckdb.get.toString, "-noheader", "-list"),
-          tempDir.toFile,
-          "DUCKDB_AGENT_MODE" -> "0",
-          "HOME"              -> Files.createDirectories(tempDir.resolve("home")).toString
-        ).#<(
-          new java.io.ByteArrayInputStream(
-            (s"INSTALL quack;\nLOAD quack;\nATTACH 'quack:127.0.0.1:$port' AS q " +
-              s"(TYPE quack, TOKEN 'tok-ps1-7a01');\n" +
-              "FROM quack_query_by_name('q', 'SELECT v FROM memory.main.fed');\n")
-              .getBytes(StandardCharsets.UTF_8)
-          )
-        ).lazyLines_!(ProcessLogger(_ => ()))
-          .mkString("\n")
-      var got = ""
-      while { got = Try(query()).getOrElse(""); !got.contains("fed-served") } &&
-        System.currentTimeMillis() < deadline
+      val deadline = System.currentTimeMillis() + 60000
+      // The manager's way to a node: the native client, after a superuser handle for this node.
+      def query(): Either[String, List[String]] =
+        LiveQodNode.lines(
+          client
+            .query(
+              s"quack:127.0.0.1:$port",
+              "tok-ps1-7a01",
+              "SELECT v FROM memory.main.fed",
+              None,
+              () => keys.prelude(node, LiveQodNode.Superuser)
+            )
+            .unsafeRunSync()
+        )
+      var got: Either[String, List[String]] = Left("the node never answered")
+      while {
+          got = Try(query()).getOrElse(Left("the node never answered"))
+          got != Right(List("fed-served"))
+        } && System.currentTimeMillis() < deadline
       do Thread.sleep(500)
-      got should include("fed-served")
+      got shouldBe Right(List("fed-served"))
       // qod-node read the token and removed the secrets directory as it started.
       Files.exists(secrets) shouldBe false
     finally
       Try(p.descendants().forEach(d => d.destroyForcibly()))
       p.destroyForcibly()
       p.waitFor(20, TimeUnit.SECONDS)
+      Try(allocator.close())
   }

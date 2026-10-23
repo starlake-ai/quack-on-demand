@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.BuildVersions
 import ai.starlake.quack.ondemand.DuckDbExtensionSource
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -14,16 +15,22 @@ import scala.jdk.CollectionConverters.*
 import scala.sys.process.*
 import scala.util.Try
 
-/** A node spawned by the real script with qod-node, queried over its own quack endpoint from
-  * another process (the pinned DuckDB CLI as a quack client), the way the manager reaches it.
-  * Cancelled without qod-node or the pinned CLI.
+/** A node spawned by the real script with qod-node, queried over its own quack endpoint through the
+  * manager's native client after a session handle, the way the manager reaches it. The pinned
+  * DuckDB CLI only creates the operator's persistent secret of one case. Cancelled without
+  * qod-node.
   */
 class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScriptTempDir:
 
   private val script = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath.toString
   private val Token  = "tok-live-node-7c41"
+  private val NodeId = "quack-live-node-1"
 
-  /** The DuckDB CLI this build pins, the quack client of these tests. */
+  private val keys      = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+  private val allocator = new org.apache.arrow.memory.RootAllocator()
+  private val client    = new ai.starlake.quack.edge.adapter.QuackHttpClient(allocator)
+
+  /** The DuckDB CLI this build pins, which the persistent-secret case runs. */
   private lazy val pinnedDuckdb: Option[Path] =
     val abi = BuildVersions.duckdb.split('.').take(3).mkString(".")
     sys.env
@@ -68,11 +75,14 @@ class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScript
       extraSetupSql: String = "",
       env: Seq[(String, String)] = Nil
   ): (java.lang.Process, Int) =
-    assume(pinnedDuckdb.nonEmpty, "the pinned DuckDB CLI is not available")
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val port    = freePort()
     val secrets = NodeSecretFiles.writePrivateDir(
-      Map(NodeSecretFiles.TokenKey -> Token, "extraSetupSql" -> extraSetupSql),
+      Map(
+        NodeSecretFiles.TokenKey -> Token,
+        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId),
+        "extraSetupSql"          -> extraSetupSql
+      ),
       Some(tempDir)
     )
     val pb = new java.lang.ProcessBuilder("bash", script, port.toString)
@@ -94,7 +104,8 @@ class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScript
           // The node directory (and the secret directory in it) lands where the test can see it.
           "TMPDIR"                     -> nodeTmp.toString,
           NodeSecretFiles.DirEnv       -> secrets.toString,
-          NodeSecretFiles.EphemeralEnv -> "1"
+          NodeSecretFiles.EphemeralEnv -> "1",
+          NodeSecretFiles.NodeIdEnv    -> NodeId
         ) ++ env).toMap.asJava
       )
     val p        = pb.start()
@@ -118,30 +129,42 @@ class SpawnScriptLiveNodeSpec extends AnyFlatSpec with Matchers with SpawnScript
     try body(port)
     finally hardStop(p)
 
-  /** `sql` run on the node through `quack_query` from a separate DuckDB process; CSV rows. */
+  /** `sql` run on the node through the manager's native client, after a superuser handle; one line
+    * per row.
+    */
   private def onNode(port: Int, sql: String): List[String] =
     val (rc, out, err) = onNodeResult(port, sql)
     withClue(err)(rc shouldBe 0)
     out.linesIterator.toList
 
-  /** [[onNode]] without the success check: (exit code, stdout, stderr). */
+  /** `sql` on the node as the manager runs it: the native client, after a superuser handle. (0,
+    * rows as lines, "") or (1, "", the node's error).
+    */
   private def onNodeResult(port: Int, sql: String): (Int, String, String) =
-    val inner = sql.replace("'", "''")
-    val out   = new StringBuilder
-    val err   = new StringBuilder
-    val rc    = Process(
-      Seq(
-        pinnedDuckdb.get.toString,
-        "-csv",
-        "-noheader",
-        "-c",
-        s"SELECT * FROM quack_query('quack:127.0.0.1:$port', '$inner', token := '$Token');"
-      ),
-      tempDir.toFile,
-      "DUCKDB_AGENT_MODE" -> "0",
-      "HOME"              -> Files.createDirectories(tempDir.resolve("client-home")).toString
-    ) ! ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n'))
-    (rc, out.toString, err.toString)
+    val node = ai.starlake.quack.model.RunningNode(
+      NodeId,
+      LiveQodNode.Pool,
+      ai.starlake.quack.model.Role.Dual,
+      "127.0.0.1",
+      port,
+      Token,
+      None,
+      None,
+      java.time.Instant.EPOCH
+    )
+    LiveQodNode.lines(
+      client
+        .query(
+          s"quack:127.0.0.1:$port",
+          Token,
+          sql,
+          None,
+          () => keys.prelude(node, LiveQodNode.Superuser)
+        )
+        .unsafeRunSync()
+    ) match
+      case Right(lines) => (0, lines.mkString("\n"), "")
+      case Left(err)    => (1, "", err)
 
   // The DuckDB 2.0 CLI recorded every statement it read from stdin in shell_history(), which any
   // session of the node could query, and the init SQL carries the catalog password and the
