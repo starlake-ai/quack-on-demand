@@ -20,6 +20,7 @@ endif()
 #                     libraries the official duckdb.exe is built from. Windows, where the release
 #                     duckdb.dll does not export the internal C++ symbols qod-node uses.
 option(QOD_NODE_DUCKDB_STATIC "Link the official DuckDB release static libraries" OFF)
+option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary (vendored builds)" OFF)
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
@@ -134,10 +135,24 @@ target_compile_definitions(qod_node_core PRIVATE
 add_executable(qod-node src/main.cpp)
 target_link_libraries(qod-node PRIVATE qod_node_core)
 if(NOT QOD_NODE_DUCKDB_STATIC)
-  # Development builds find libduckdb where they were linked from; installed nodes rely on the
-  # launchers' DUCKDB_CACHE_DIR layout, like libquackwire.
+  # libduckdb is found in ../lib next to the binary: the manager installs a bundled qod-node as
+  # <dir>/bin/qod-node with <dir>/lib linking to the libduckdb it loaded (QodNodeBinary.scala).
+  # A development build also finds the libduckdb it was linked from, first; a vendored build
+  # (QOD_NODE_RELATIVE_RPATH=ON) carries nothing of the machine that built it.
+  if(APPLE)
+    set(QOD_NODE_LIB_RPATH "@executable_path/../lib")
+  else()
+    set(QOD_NODE_LIB_RPATH "$ORIGIN/../lib")
+  endif()
   get_filename_component(DUCKDB_LIB_DIR ${DUCKDB_LIB} DIRECTORY)
-  set_target_properties(qod-node PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
+  if(QOD_NODE_RELATIVE_RPATH)
+    # The install rpath alone: CMake would otherwise add the directory of every full-path library
+    # the target links (libduckdb's, on this machine) to the build rpath.
+    set_target_properties(qod-node PROPERTIES BUILD_WITH_INSTALL_RPATH ON
+      INSTALL_RPATH "${QOD_NODE_LIB_RPATH}")
+  else()
+    set_target_properties(qod-node PROPERTIES BUILD_RPATH "${DUCKDB_LIB_DIR};${QOD_NODE_LIB_RPATH}")
+  endif()
 endif()
 if(UNIX AND NOT APPLE)
   # Bind every symbol at load, so a libduckdb missing one fails at start, not mid-query.

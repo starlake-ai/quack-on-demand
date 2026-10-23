@@ -9,11 +9,13 @@
 #   <version>         - download that exact release (e.g. QOD_VERSION=0.3.2).
 #   latest-snapshot   - download the rolling `snapshot` pre-release
 #                       (published by snapshot.yml on every push to main).
-#   BUILD             - rebuild libquackwire for the host platform (cmake)
-#                       into the vendored libquackwire/binaries/ tree, then
-#                       `sbt assembly` from this checkout. Non-host platforms
-#                       come from the git-tracked binaries already in the
-#                       repo. Uses the freshly-built jar in distrib/.
+#   BUILD             - rebuild libquackwire and qod-node for the host
+#                       platform (cmake) into the vendored
+#                       libquackwire/binaries/ and native/qod-node/binaries/
+#                       trees, then `sbt assembly` from this checkout.
+#                       Non-host platforms come from the git-tracked binaries
+#                       already in the repo. Uses the freshly-built jar in
+#                       distrib/.
 #   LOCAL             - run the newest jar already in distrib/ without
 #                       rebuilding or consulting GitHub releases (falls back
 #                       to a build when distrib/ is empty).
@@ -476,9 +478,26 @@ rebuild_libquackwire_locally() {
     > "$REPO_DIR/libquackwire/binaries/$host_platform/libquackwire.$host_ext.sha256"
 }
 
+# Re-build qod-node (the process every local node runs) for the host platform into the vendored
+# native/qod-node/binaries/<host>/ tree, like libquackwire above, so the jar's node is built from
+# this checkout. Runs after rebuild_libquackwire_locally, which staged the pinned DuckDB headers.
+rebuild_qod_node_locally() {
+  if [[ ! -f "$REPO_DIR/native/qod-node/CMakeLists.txt" ]]; then
+    echo "no native/qod-node/CMakeLists.txt found; skipping the qod-node rebuild" >&2
+    return 0
+  fi
+  command -v cmake >/dev/null 2>&1 || {
+    echo "WARN: cmake not on PATH; skipping the qod-node rebuild (assembly will use the vendored binaries already in the repo)." >&2
+    return 0
+  }
+  FETCH_CI=0 DUCKDB_CACHE_DIR="$DUCKDB_CACHE_DIR" \
+    "$REPO_DIR/scripts/release/refresh-qod-node-binaries.sh"
+}
+
 build_locally() {
   ensure_sbt
   rebuild_libquackwire_locally
+  rebuild_qod_node_locally
   # Stale pre-vendoring BUILD output collides with the resourceGenerator.
   rm -rf "$REPO_DIR/src/main/resources/native"
   echo "running '$SBT_CMD assembly' (local build)..."

@@ -281,7 +281,7 @@ object Main extends IOApp with LazyLogging:
       .foreach(msg => sys.error(msg))
 
     mgrCfg.fleet
-      .validateForRuntime(mgrCfg.runtimeType, duckdbOnHost = BootPreflight.duckdbOnHost())
+      .validateForRuntime(mgrCfg.runtimeType)
       .left
       .foreach(msg => sys.error(msg))
 
@@ -301,6 +301,16 @@ object Main extends IOApp with LazyLogging:
       .bootCheck()
       .left
       .foreach(msg => sys.error(msg))
+
+    // Nodes started on this host run qod-node: resolve it now, after the native check loaded
+    // libduckdb (a bundled qod-node links the same one), so a manager that could not start a single
+    // node refuses to boot with the reason.
+    val qodNodeBin: Option[java.nio.file.Path] =
+      if BootFactories.runsLocalNodes(mgrCfg) then
+        ai.starlake.quack.ondemand.runtime.QodNodeBinary.default match
+          case Left(msg)  => sys.error(msg)
+          case Right(bin) => Some(bin)
+      else None
 
     // Lockout enabled with no SMTP relay would strand a locked-out user with no way
     // back in. Pure check, no DB/network required, so it runs before the Postgres
@@ -385,14 +395,15 @@ object Main extends IOApp with LazyLogging:
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
     // After the store: the fleet backend claims servers through it (FleetServerStore).
-    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store)
+    val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin)
     val fleetBackend: Option[ai.starlake.quack.ondemand.runtime.FleetQuackBackend] =
       backend match
         case f: ai.starlake.quack.ondemand.runtime.FleetQuackBackend => Some(f)
         case _                                                       => None
     fleetBackend.foreach(f => f.nodeRowExists = id => store.nodeExists(id))
     // Maintenance and branch-merge nodes: the main backend unless fleet mode runs them locally.
-    val ephemeralBackend: QuackBackend = BootFactories.ephemeralBackend(mgrCfg, backend)
+    val ephemeralBackend: QuackBackend =
+      BootFactories.ephemeralBackend(mgrCfg, backend, qodNodeBin)
     // HA leader election and cross-replica NOTIFY run against this database.
     val meta      = mgrCfg.defaultMetastore.asMap
     val cpJdbcUrl = s"jdbc:postgresql://${meta("pgHost")}:${meta("pgPort")}/${meta("dbName")}"

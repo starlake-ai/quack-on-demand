@@ -94,6 +94,16 @@ int main(int argc, char **argv) {
 	}
 	if (options.mode == NodeOptions::Mode::BUILD_INFO) {
 		std::cout << BuildInfo() << std::endl;
+#ifndef QOD_NODE_DUCKDB_STATIC
+		// Also the libduckdb this process loaded: the manager runs --build-info at boot to learn the
+		// binary starts here, against the release it was built for.
+		try {
+			CheckLinkedDuckDB();
+		} catch (std::exception &error) {
+			std::cerr << "[qod-node] " << error.what() << std::endl;
+			return 1;
+		}
+#endif
 		return 0;
 	}
 

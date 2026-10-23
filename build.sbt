@@ -156,6 +156,27 @@ lazy val root = (project in file("."))
       IO.copyFile(srcRoot / "VERSION", stamp)
       natives :+ stamp
     }.taskValue,
+    // Vendored qod-node binaries (native/qod-node, the process every local node runs): copy
+    // native/qod-node/binaries/<p>/qod-node into resourceManaged as qod-node/<p>/qod-node, with the
+    // VERSION stamp. QodNodeBinary installs the running platform's at boot. Linux and macOS only:
+    // the static Windows qod-node.exe is too large to bundle, and the launchers download it.
+    // refresh-qod-node-binaries.sh vendors them; a platform without one boots only with
+    // QOD_NODE_BIN set.
+    Compile / resourceGenerators += Def.task {
+      val srcRoot   = baseDirectory.value / "native" / "qod-node" / "binaries"
+      val outRoot   = (Compile / resourceManaged).value / "qod-node"
+      val platforms = Seq("linux-x86_64", "linux-aarch64", "osx-x86_64", "osx-aarch64")
+      val binaries  = platforms.filter(p => (srcRoot / p / "qod-node").exists).map { p =>
+        val out = outRoot / p / "qod-node"
+        IO.copyFile(srcRoot / p / "qod-node", out)
+        out
+      }
+      val stamp = srcRoot / "VERSION"
+      if (stamp.exists) {
+        IO.copyFile(stamp, outRoot / "VERSION")
+        binaries :+ (outRoot / "VERSION")
+      } else binaries
+    }.taskValue,
     // The pinned DuckDB release at runtime, from project/Versions.scala, so behaviour that differs
     // between engine generations (BacktickScreen) follows the pin with no source edit on a bump.
     Compile / sourceGenerators += Def.task {
@@ -301,6 +322,14 @@ lazy val root = (project in file("."))
       else {
         Map("DUCKDB_CACHE_DIR" -> (mainCheckoutDir(baseDirectory.value) / ".duckdb").getAbsolutePath)
       }
+    },
+    // Specs that start a node through the real spawn script run this checkout's own qod-node build
+    // (cmake -S native/qod-node -B native/qod-node/build), unless QOD_NODE_BIN is already set.
+    Test / envVars ++= {
+      val local = baseDirectory.value / "native" / "qod-node" / "build" / "qod-node"
+      if (sys.env.get("QOD_NODE_BIN").exists(_.trim.nonEmpty) || !local.isFile)
+        Map.empty[String, String]
+      else Map("QOD_NODE_BIN" -> local.getAbsolutePath)
     },
 
     // For `java -jar distrib/...assembly.jar`: the Add-Opens manifest attribute

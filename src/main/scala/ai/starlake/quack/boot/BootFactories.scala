@@ -1,5 +1,6 @@
 package ai.starlake.quack.boot
 
+import java.nio.file.Path
 import java.util.Locale
 import ai.starlake.quack.{FleetConfig, ManagerConfig}
 import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
@@ -30,7 +31,22 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootFactories extends LazyLogging:
 
-  def quackBackend(mgrCfg: ManagerConfig, fleetStore: => FleetServerStore): QuackBackend =
+  /** True when this manager starts nodes on its own host, which then run qod-node
+    * ([[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]): the local runtime, or fleet mode with
+    * QOD_FLEET_EPHEMERAL=local for its maintenance and branch-merge nodes.
+    */
+  def runsLocalNodes(mgrCfg: ManagerConfig): Boolean =
+    mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local" ||
+      (FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal)
+
+  /** @param nodeBin
+    *   the qod-node local nodes run; Main resolves it whenever [[runsLocalNodes]].
+    */
+  def quackBackend(
+      mgrCfg: ManagerConfig,
+      fleetStore: => FleetServerStore,
+      nodeBin: Option[Path]
+  ): QuackBackend =
     mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
       case "local" =>
         new LocalQuackBackend(
@@ -40,7 +56,8 @@ object BootFactories extends LazyLogging:
             mgrCfg.spawnScript,
             mgrCfg.spawnScriptWindows,
             LocalQuackBackend.managerMarker(mgrCfg.port)
-          )
+          ),
+          nodeBin = nodeBin
         )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
@@ -82,7 +99,11 @@ object BootFactories extends LazyLogging:
   /** Backend for maintenance and branch-merge nodes. Same as `main` unless fleet mode asks for them
     * to run on the manager host (QOD_FLEET_EPHEMERAL=local).
     */
-  def ephemeralBackend(mgrCfg: ManagerConfig, main: QuackBackend): QuackBackend =
+  def ephemeralBackend(
+      mgrCfg: ManagerConfig,
+      main: QuackBackend,
+      nodeBin: Option[Path]
+  ): QuackBackend =
     if FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
       logger.info(
         "fleet: ephemeral maintenance/merge nodes run on the manager host (local backend)"
@@ -94,7 +115,8 @@ object BootFactories extends LazyLogging:
           mgrCfg.spawnScript,
           mgrCfg.spawnScriptWindows,
           LocalQuackBackend.managerMarker(mgrCfg.port)
-        )
+        ),
+        nodeBin = nodeBin
       )
     else main
 

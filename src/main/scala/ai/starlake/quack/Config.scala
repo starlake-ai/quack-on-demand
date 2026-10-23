@@ -865,14 +865,13 @@ final case class FleetConfig(
 
   def ephemeralLocal: Boolean = ephemeral == "local"
 
-  def validateForRuntime(runtimeType: String, duckdbOnHost: => Boolean): Either[String, Unit] =
+  /** QOD_FLEET_EPHEMERAL=local also needs qod-node on the manager host: Main resolves it for every
+    * manager that runs local nodes (BootFactories.runsLocalNodes) and refuses to boot without it.
+    */
+  def validateForRuntime(runtimeType: String): Either[String, Unit] =
     if !FleetConfig.isFleet(runtimeType) then Right(())
     else if joinToken.trim.isEmpty then
       Left("QOD_FLEET_JOIN_TOKEN must be set when runtimeType=fleet")
-    else if ephemeralLocal && !duckdbOnHost then
-      Left(
-        "QOD_FLEET_EPHEMERAL=local needs a duckdb binary on the manager host (DUCKDB_BIN or PATH)"
-      )
     else Right(())
 
 object FleetConfig:
