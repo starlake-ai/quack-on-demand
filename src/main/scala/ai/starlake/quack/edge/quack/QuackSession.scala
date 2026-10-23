@@ -45,11 +45,13 @@ final class QuackSession(
   val current: AtomicReference[Option[QuackStatement]]         = new AtomicReference(None)
   val txLink: AtomicReference[Option[(String, QuackNodeLink)]] = new AtomicReference(None)
 
-  /** Set when an admin kill disconnected `txLink` under a client transaction: the client still
-    * believes it is inside one, so every statement is refused until it rolls back (or its COMMIT
-    * fails, which also ends the transaction on the client side).
+  /** The fence, with the answer it gives: raised when the client transaction on `txLink` ended on
+    * the node behind the client's back (an admin kill disconnected it, or a session handle failed
+    * on it). The client still believes it is inside a transaction, so every statement is refused
+    * with that answer until it rolls back (or its COMMIT fails, which also ends the transaction on
+    * the client side).
     */
-  val txAborted: AtomicBoolean = new AtomicBoolean(false)
+  val txAborted: AtomicReference[Option[String]] = new AtomicReference(None)
 
   /** The node that served this session's last catalog read (a statement calling a `duckdb_*()`
     * catalog function, see [[QuackFrontDoor.readsCatalog]]). The client builds its view of the

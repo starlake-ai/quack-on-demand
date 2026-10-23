@@ -189,22 +189,34 @@ final class QuackFrontDoor(
       case Right(prep) =>
         // A new statement supersedes the previous one; an abandoned result is never committed.
         finishCurrent(s, commit = false) *> {
-          if s.txAborted.get() then
-            router.classifier.classify(prep.sql) match
-              case StatementKind.Rollback =>
-                // The fence lifts only once the relayed ROLLBACK succeeded (`relayPrepare`).
-                relayPrepare(s, f, prep, reopenTx = true)
-              case StatementKind.Commit =>
-                // DuckDB ends a transaction whose COMMIT fails; so does the client, so the fence
-                // lifts here too. Nothing was committed: the node connection is gone.
-                s.txAborted.set(false)
-                IO.pure(encodeError(QuackFrontDoor.TxKilledMessage))
-              case _ => IO.pure(encodeError(QuackFrontDoor.TxKilledMessage))
-          else if AdminSqlParser.claims(prep.sql) then admin(s, f, prep)
-          else relayPrepare(s, f, prep)
+          s.txAborted.get() match
+            case Some(answer) => fenced(s, f, prep, answer)
+            case None         =>
+              if AdminSqlParser.claims(prep.sql) then admin(s, f, prep)
+              else relayPrepare(s, f, prep)
         }
 
-  /** `reopenTx`: the client's ROLLBACK after an admin kill. Its transaction connection is gone, and
+  /** A statement of a fenced session (`txAborted`), whose client transaction the node no longer
+    * holds: a ROLLBACK is served on a fresh link, anything else gets the fence's `answer`.
+    */
+  private def fenced(
+      s: QuackSession,
+      f: Frame,
+      prep: PrepareRequest,
+      answer: String
+  ): IO[Array[Byte]] =
+    router.classifier.classify(prep.sql) match
+      case StatementKind.Rollback =>
+        // The fence lifts only once the relayed ROLLBACK succeeded (`relayPrepare`).
+        relayPrepare(s, f, prep, reopenTx = true)
+      case StatementKind.Commit =>
+        // DuckDB ends a transaction whose COMMIT fails; so does the client, so the fence
+        // lifts here too. Nothing was committed: the node connection is gone.
+        s.txAborted.set(None)
+        IO.pure(encodeError(answer))
+      case _ => IO.pure(encodeError(answer))
+
+  /** `reopenTx`: the client's ROLLBACK in a fenced session. Its transaction connection is gone, and
     * DuckDB refuses a ROLLBACK outside a transaction, so the fresh link is put into one first and
     * the client gets a genuine ROLLBACK response.
     */
@@ -239,11 +251,18 @@ final class QuackFrontDoor(
         clientDataScans = true
       )
       .flatMap {
-        case Left(fail)    => IO.pure(encodeError(fail.reason))
+        case Left(fail) =>
+          s.txAborted.get() match
+            // The statement's session handle failed on its transaction's link and fenced the
+            // session (`linkFailed`): the fence was down when the statement began, and no other
+            // statement was live to be killed meanwhile. It is answered as the fence answers, so a
+            // ROLLBACK runs at once on a fresh link.
+            case Some(answer) if !reopenTx => fenced(s, f, prep, answer)
+            case _                         => IO.pure(encodeError(fail.reason))
         case Right(routed) =>
           if catalogRead then s.catalogNode.set(Some(routed.nodeId))
           // A failed recovery keeps the fence: the client is still inside its dead transaction.
-          if reopenTx then s.txAborted.set(false)
+          if reopenTx then s.txAborted.set(None)
           afterPrepare(s, cq, prep.sql, routed)
       }
 
@@ -291,11 +310,46 @@ final class QuackFrontDoor(
   private def toOutcome[A](f: LinkFailure, ms: Long): NodeOutcome[A] = f match
     case LinkFailure.Transient(m) => NodeOutcome.Transient(m, ms)
     case LinkFailure.Permanent(m) => NodeOutcome.Permanent(m, ms)
-    // The statement was not sent, so another node may take it, as on the Arrow path.
-    case LinkFailure.HandleFailed(m) => NodeOutcome.Transient(m, ms)
+    // The statement was not sent, so another node may take it, as on the Arrow path. Not on a
+    // client transaction's link, which `linkFailed` answers first.
+    case h: LinkFailure.HandleFailed => NodeOutcome.Transient(h.message, ms)
 
   private def dropLink(link: QuackNodeLink, reused: Boolean): IO[Unit] =
     if reused then IO.unit else link.close()
+
+  /** The outcome of a node call that failed on `link`, which is released unless a client
+    * transaction holds it (`reused`). A session handle that failed on such a link, whatever the
+    * cause (in an aborted transaction DuckDB 2.0 refuses every statement but ROLLBACK and COMMIT,
+    * the handle's CALL included; a key mismatch; an expiry), means the transaction cannot go on
+    * there: it is ended ([[abortTx]]) and the statement fails Permanent, so nothing is booked
+    * against the node's health (a node that really refuses handles fails its health probe, which
+    * runs on a fresh connection of its own). Anywhere else the failure keeps its class.
+    */
+  private def linkFailed[A](
+      s: QuackSession,
+      link: QuackNodeLink,
+      reused: Boolean,
+      fail: LinkFailure,
+      elapsed: () => IO[Long]
+  ): IO[NodeOutcome[A]] =
+    fail match
+      case h: LinkFailure.HandleFailed if reused =>
+        val answer = QuackFrontDoor.txAbortedMessage(h)
+        abortTx(s, link, answer) *> elapsed().map(ms => NodeOutcome.Permanent(answer, ms))
+      case _ => dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
+
+  /** End the client transaction on `link`: DISCONNECT the link, which takes the transaction with it
+    * (the node rolls it back), forget it as the session's `txLink`, drop the router's view of the
+    * transaction (open, pinned to this node), and fence the session (`txAborted`) with `answer`, so
+    * the client, which still believes it is inside a transaction, cannot run on, and above all
+    * cannot have a later statement silently auto-commit, until it rolls back.
+    */
+  private def abortTx(s: QuackSession, link: QuackNodeLink, answer: String): IO[Unit] =
+    IO {
+      s.txLink.updateAndGet(cur => if cur.exists(_._2 eq link) then None else cur)
+      s.txAborted.set(Some(answer))
+      router.sessions.invalidatePin(s.connectionId)
+    } *> link.close()
 
   /** The router's close-and-kill handle for a relayed statement. Synchronous on purpose: an admin
     * kill (a REST thread) and `finishStatement` (which runs it on the blocking pool) both need the
@@ -306,11 +360,9 @@ final class QuackFrontDoor(
     * therefore simply DISCONNECTed, which both releases it and kills whatever runs on it. A link
     * reused inside a client transaction must outlive the statement (`releaseTx` disconnects it on
     * COMMIT / ROLLBACK), so its handle only acts while the statement is still the session's live
-    * one, that is, on an admin kill: it DISCONNECTs the link, which takes the transaction with it,
-    * forgets it as the session's `txLink`, and fences the session (`txAborted`) so the client,
-    * which still believes it is inside a transaction, cannot run on, and above all cannot have a
-    * later statement silently auto-commit, until it rolls back. Once `finishStatement` has retired
-    * the statement the same handle is a no-op.
+    * one, that is, on an admin kill: it ends the transaction ([[abortTx]]), and the fence answers
+    * [[QuackFrontDoor.TxKilledMessage]]. Once `finishStatement` has retired the statement the same
+    * handle is a no-op.
     */
   private def closer(
       s: QuackSession,
@@ -322,19 +374,18 @@ final class QuackFrontDoor(
       () =>
         s.current.get() match
           case Some(st) if (st.link eq link) && !st.finished.get() =>
-            s.txLink.updateAndGet(cur => if cur.exists(_._2 eq link) then None else cur)
-            s.txAborted.set(true)
-            // The router's view of the transaction (open, pinned to this node) dies with it.
-            router.sessions.invalidatePin(s.connectionId)
-            link.close().unsafeRunSync()
+            abortTx(s, link, QuackFrontDoor.TxKilledMessage).unsafeRunSync()
           case _ => ()
     else () => link.close().unsafeRunSync()
 
   /** Open (or reuse, inside a client transaction) a node link, run the stamping prelude, then hand
     * the link to `body`. The rule is the Arrow path's (`QuackHttpClient.queryStamped`): a failure
     * of the stamp SQL itself is fail-open, the write proceeds unstamped on a fresh link; a failed
-    * session handle never is, the write is not sent and the failure is Transient. Load bookkeeping
-    * goes through the adapter exactly as for the Arrow transport.
+    * session handle never is, the write is not sent, and the failure is Transient on a fresh link
+    * and ends the transaction on a reused one ([[linkFailed]]). A handle that cannot be minted
+    * would fail open too, but a front door session always has a principal bound, and the write's
+    * own mint would then fail Permanent, so nothing would go out. Load bookkeeping goes through the
+    * adapter exactly as for the Arrow transport.
     */
   private def onLink[A](s: QuackSession, cq: Long)(
       body: (QuackNodeLink, Boolean, Boolean, () => IO[Long]) => IO[NodeOutcome[A]]
@@ -364,10 +415,12 @@ final class QuackFrontDoor(
                 case Right(()) => body(link, stampedPrelude.isDefined, reused, elapsed)
                 // A failed handle is never fail-open: the write is not sent, whatever the cause.
                 case Left(fail: LinkFailure.HandleFailed) =>
-                  dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
+                  linkFailed[A](s, link, reused, fail, elapsed)
                 case Left(fail) =>
                   // The stamp SQL itself failed: fail open like the Arrow path, the write proceeds
-                  // unstamped on a fresh link whose own PREPAREs each follow a handle.
+                  // unstamped on a fresh link whose own PREPAREs each follow a handle. (A mint
+                  // failure would land here as well, but never for a front door session, whose
+                  // principal is always bound; and the write's own mint would fail Permanent.)
                   logger.warn(
                     s"stamping prelude failed on ${node.nodeId}; write proceeds unstamped: ${fail.message}"
                   )
@@ -396,11 +449,10 @@ final class QuackFrontDoor(
         val reopen: IO[Either[LinkFailure, Unit]] =
           if reopenTx then link.runDiscard("BEGIN", cq) else IO.pure(Right(()))
         reopen.flatMap {
-          case Left(fail) => dropLink(link, reused) *> elapsed().map(ms => toOutcome(fail, ms))
+          case Left(fail) => linkFailed(s, link, reused, fail, elapsed)
           case Right(())  =>
             link.prepare(prep.copy(sql = wrappedSql), cq).flatMap {
-              case Left(fail) =>
-                dropLink(link, reused) *> elapsed().map(ms => toOutcome(fail, ms))
+              case Left(fail)  => linkFailed(s, link, reused, fail, elapsed)
               case Right(resp) =>
                 if messageType(resp) == Type.ErrorResponse then
                   dropLink(link, reused) *> elapsed().map(ms =>
@@ -672,6 +724,18 @@ object QuackFrontDoor:
   /** Answer to every statement a client sends inside a transaction an admin kill tore down. */
   val TxKilledMessage: String =
     "transaction aborted: a statement was killed by an administrator; ROLLBACK to continue"
+
+  /** Answer to a statement whose session handle `h` failed on its client transaction's link, and to
+    * every statement after it until ROLLBACK. When the node says the transaction is aborted (DuckDB
+    * 2.0 then refuses every statement but ROLLBACK and COMMIT, the handle's CALL included), its own
+    * error, the one DuckDB would have answered the statement with; otherwise the refusal, and the
+    * way out.
+    */
+  def txAbortedMessage(h: LinkFailure.HandleFailed): String =
+    if h.refused && h.detail.contains("Current transaction is aborted") then h.detail
+    else
+      s"transaction aborted: ${LinkFailure.handleCause(h.refused)} (${h.detail}); " +
+        "ROLLBACK to continue"
 
   /** Seconds a fully served statement keeps its node link for late fetches before the sweeper
     * releases it.

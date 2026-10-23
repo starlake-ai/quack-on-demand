@@ -124,9 +124,12 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
-      case Left(LinkFailure.HandleFailed(m)) =>
-        m should include("refused the statement's session handle")
-        m should include("session handle refused: expired")
+      case Left(h: LinkFailure.HandleFailed) =>
+        // The node's own text, kept as is: the front door may answer a client with it verbatim.
+        h.refused shouldBe true
+        h.detail shouldBe "session handle refused: expired"
+        h.message should include("refused the statement's session handle")
+        h.message should include("session handle refused: expired")
       case other => fail(s"expected HandleFailed, got $other")
     // The connection request and the refused handle; the statement itself never went out.
     preparedSql(t) shouldBe List(handleSql)
@@ -136,11 +139,13 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
-      case Left(LinkFailure.HandleFailed(m)) =>
-        m should include("did not reach the node")
-        m should include("HTTP 503")
+      case Left(h: LinkFailure.HandleFailed) =>
+        h.refused shouldBe false
+        h.detail shouldBe "HTTP 503"
+        h.message should include("did not reach the node")
+        h.message should include("HTTP 503")
         // A 503 is not a refusal, and the message must not claim one.
-        m should not include "refused"
+        h.message should not include "refused"
       case other => fail(s"expected HandleFailed, got $other")
     preparedSql(t) shouldBe List(handleSql)
     t.posted should have size 2
@@ -237,9 +242,11 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t    = new FakeTransport(connResp("NODE1"), errorResp("session handle refused: expired"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.runDiscard("COMMIT", 9L).unsafeRunSync() match
-      case Left(LinkFailure.HandleFailed(m)) =>
-        m should include("refused the statement's session handle")
-        m should include("session handle refused: expired")
+      case Left(h: LinkFailure.HandleFailed) =>
+        h.refused shouldBe true
+        h.detail shouldBe "session handle refused: expired"
+        h.message should include("refused the statement's session handle")
+        h.message should include("session handle refused: expired")
       case other => fail(s"expected HandleFailed, got $other")
     // Only the refused handle was prepared; the COMMIT never went out.
     preparedSql(t) shouldBe List(handleSql)
@@ -249,10 +256,12 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val t    = new FakeTransport(connResp("NODE1"), QuackWireError.Transient("HTTP 503"))
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.runDiscard("COMMIT", 9L).unsafeRunSync() match
-      case Left(LinkFailure.HandleFailed(m)) =>
-        m should include("did not reach the node")
-        m should include("HTTP 503")
-        m should not include "refused"
+      case Left(h: LinkFailure.HandleFailed) =>
+        h.refused shouldBe false
+        h.detail shouldBe "HTTP 503"
+        h.message should include("did not reach the node")
+        h.message should include("HTTP 503")
+        h.message should not include "refused"
       case other => fail(s"expected HandleFailed, got $other")
     preparedSql(t) shouldBe List(handleSql)
     t.posted should have size 2

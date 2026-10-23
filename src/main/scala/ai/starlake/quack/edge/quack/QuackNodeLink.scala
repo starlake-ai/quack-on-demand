@@ -16,17 +16,27 @@ import java.net.URI
 /** Why a node round trip failed, in the two classes the router already distinguishes: a transport
   * problem (5xx, refused, timeout) is retried once on another node, an `ERROR_RESPONSE` from the
   * node is final and its message goes to the client. [[HandleFailed]] is a third class, for the
-  * front door: the router retries it like a transport problem, and the stamping fallback never
-  * mistakes it for the failure of the stamp SQL.
+  * front door: on a fresh link the router retries it like a transport problem, on the link of a
+  * client transaction it ends that transaction, and the stamping fallback never mistakes it for the
+  * failure of the stamp SQL.
   */
 enum LinkFailure(val message: String):
   case Transient(msg: String) extends LinkFailure(msg)
   case Permanent(msg: String) extends LinkFailure(msg)
 
-  /** The session handle prelude before a PREPARE failed (the node refused it, or it got no answer),
-    * so the statement was not sent.
+  /** The session handle prelude before a PREPARE failed, so the statement was not sent: the node
+    * refused it (`refused`, and `detail` is the node's own error text), or it got no answer
+    * (`detail` is the transport's).
     */
-  case HandleFailed(msg: String) extends LinkFailure(msg)
+  case HandleFailed(refused: Boolean, detail: String)
+      extends LinkFailure(s"${LinkFailure.handleCause(refused)}: $detail")
+
+object LinkFailure:
+
+  /** A failed session handle's cause, worded so that a 503 is not reported as a refusal. */
+  def handleCause(refused: Boolean): String =
+    if refused then "the node refused the statement's session handle"
+    else "the statement's session handle did not reach the node"
 
 /** One raw Quack connection from the manager to a node, opened for one client statement.
   *
@@ -95,10 +105,11 @@ final class QuackNodeLink(
     }
 
   /** The session handle prelude, drained. Any failure of the prelude itself is `HandleFailed`, and
-    * the statement is not sent: a node error on it (the node refused the handle) and a transport
-    * failure on it (the handle never reached the node), each worded for what happened so that a 503
-    * is not reported as a refusal. No principal to vouch for (`authorize` throws) is `Permanent`:
-    * nothing could be minted, and no other node would do better.
+    * the statement is not sent: a node error on it (the node refused the handle, and its text is
+    * kept as is) and a transport failure on it (the handle never reached the node), each worded for
+    * what happened so that a 503 is not reported as a refusal. No principal to vouch for
+    * (`authorize` throws) is `Permanent`: nothing could be minted, and no other node would do
+    * better.
     */
   private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     IO(authorize()).attempt.flatMap {
@@ -110,10 +121,8 @@ final class QuackNodeLink(
 
   /** [[run]] answers a node error with `Permanent` and a transport failure with `Transient`. */
   private def handleFailure(f: LinkFailure): LinkFailure.HandleFailed = f match
-    case LinkFailure.Permanent(m) =>
-      LinkFailure.HandleFailed(s"the node refused the statement's session handle: $m")
-    case LinkFailure.Transient(m) =>
-      LinkFailure.HandleFailed(s"the statement's session handle did not reach the node: $m")
+    case LinkFailure.Permanent(m)    => LinkFailure.HandleFailed(refused = true, m)
+    case LinkFailure.Transient(m)    => LinkFailure.HandleFailed(refused = false, m)
     case h: LinkFailure.HandleFailed => h // never produced by run; keeps the match exhaustive
 
   /** One PREPARE of `sql`, drained through its FETCH loop so the node releases the result. The
