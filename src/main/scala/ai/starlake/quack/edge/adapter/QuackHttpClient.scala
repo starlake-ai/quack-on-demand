@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
+import ai.starlake.quack.edge.authz.NodeHandles
 import cats.effect.{IO, Poll}
 import cats.effect.unsafe.IORuntime
 import com.typesafe.scalalogging.LazyLogging
@@ -122,22 +123,26 @@ open class QuackHttpClient(
   private def checkpoint(poll: Poll[IO], release: IO[Unit]): IO[Unit] =
     poll(IO.unit).onCancel(release)
 
-  /** Run `authorize`'s prelude on `conn` (its own PREPARE), then a cancel point; nothing for the
-    * canary. The node's error on the prelude (its ERROR_RESPONSE) becomes
-    * [[QuackHttpClient.HandleRefused]]; a transport failure keeps its own error, Transient for a
-    * 5xx, so a 503 is never reported as a refusal.
+  /** Run `authorize`'s prelude on `conn` ([[runPrelude]]), then a cancel point; nothing for the
+    * canary.
     */
   private def install(poll: Poll[IO], conn: Connection, authorize: Option[() => String])(using
       IORuntime
   ): IO[Unit] =
     authorize match
       case None       => IO.unit
-      case Some(mint) =>
-        IO(mint()).flatMap { prelude =>
-          conn.executeDiscard(prelude).adaptError { case e: QuackWireError.Permanent =>
-            QuackHttpClient.HandleRefused(e.msg)
-          }
-        } *> checkpoint(poll, conn.close())
+      case Some(mint) => runPrelude(conn, mint) *> checkpoint(poll, conn.close())
+
+  /** A fresh session handle's prelude from `mint`, as its own PREPARE on `conn`. The node's error
+    * on it (its ERROR_RESPONSE) becomes [[QuackHttpClient.HandleRefused]]; a transport failure
+    * keeps its own error, Transient for a 5xx, so a 503 is never reported as a refusal.
+    */
+  private def runPrelude(conn: Connection, mint: () => String)(using IORuntime): IO[Unit] =
+    IO(mint()).flatMap { prelude =>
+      conn.executeDiscard(prelude).adaptError { case e: QuackWireError.Permanent =>
+        QuackHttpClient.HandleRefused(e.msg)
+      }
+    }
 
   /** Hands `ok` to the caller, or runs `release` when a cancel is already pending: the last step of
     * a masked acquisition, so the response is closed rather than dropped with its connection.
@@ -173,9 +178,10 @@ open class QuackHttpClient(
     * inner reader, not the stamped one: the caller was told the write failed, so DISCONNECT rolls
     * the BEGIN back instead of committing it.
     *
-    * Fail-open: a prelude failure never blocks the write. The bracket connection is dropped
-    * (server-side session teardown rolls the BEGIN back) and the statement is re-sent unstamped on
-    * a fresh plain connection, with a warning.
+    * Fail-open: a failure of the stamp prelude itself never blocks the write. The bracket
+    * connection is dropped (server-side session teardown rolls the BEGIN back) and the statement is
+    * re-sent unstamped on a fresh plain connection, after a session handle of its own, with a
+    * warning.
     */
   def queryStamped(
       endpoint: String,
@@ -215,8 +221,8 @@ open class QuackHttpClient(
                             // The COMMIT may come long after the statement: it gets its own handle.
                             val commitSync: () => Unit = () =>
                               if committed.compareAndSet(false, true) then
-                                (IO(authorize()).flatMap(p => conn.executeDiscard(p)) *>
-                                  conn.executeDiscard("COMMIT")).unsafeRunSync()
+                                (runPrelude(conn, authorize) *> conn.executeDiscard("COMMIT"))
+                                  .unsafeRunSync()
                             val stamped =
                               new StampedCommitArrowReader(allocator, reader, commitSync)
                             // DISCONNECT-owner rule: stamped.close() delegates to reader.close(),
@@ -257,10 +263,15 @@ open class QuackHttpClient(
 object QuackHttpClient:
 
   /** The node refused a statement's session handle (its ERROR_RESPONSE to the prelude); the
-    * statement itself was never sent. `nodeText` is the node's answer.
+    * statement itself was never sent.
     */
-  final class HandleRefused(val nodeText: String)
-      extends RuntimeException(HandleRefused.Prefix + nodeText)
+  final class HandleRefused(nodeError: String)
+      extends RuntimeException(HandleRefused.Prefix + NodeHandles.refusalText(nodeError)):
+
+    /** The node's answer, without DuckDB's excerpt of the statement, which would carry the handle:
+      * this is what is answered, logged or recorded, never `nodeError` itself.
+      */
+    val nodeText: String = NodeHandles.refusalText(nodeError)
 
   object HandleRefused:
 

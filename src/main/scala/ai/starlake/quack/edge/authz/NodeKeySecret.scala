@@ -28,18 +28,21 @@ object NodeKeySecret extends LazyLogging:
     else Right(loadOrCreate(controlPlane))
 
   /** The control plane's secret, inserted first when absent. `ON CONFLICT DO NOTHING` then a read:
-    * replicas booting at once all read the one row that won.
+    * replicas booting at once all read the one row that won. Postgres generates the value (64 hex
+    * digits from two `gen_random_uuid()`, core since PostgreSQL 13), so it never travels as a bind
+    * parameter, which statement logging or pgaudit would record on every boot.
     */
   def loadOrCreate(ds: DataSource): String =
     val c = ds.getConnection
     try
-      val insert = c.prepareStatement(
-        "INSERT INTO qodstate_node_authz (id, key_secret) VALUES (1, ?) ON CONFLICT (id) DO NOTHING"
-      )
+      val insert  = c.createStatement()
       val created =
         try
-          insert.setString(1, NodeKeys.randomSecret())
-          insert.executeUpdate() == 1
+          insert.executeUpdate(
+            "INSERT INTO qodstate_node_authz (id, key_secret) VALUES (1, " +
+              "replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')) " +
+              "ON CONFLICT (id) DO NOTHING"
+          ) == 1
         finally insert.close()
       val st = c.createStatement()
       try

@@ -61,6 +61,26 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   "prelude" should "be the exact statement qod-node's parse screen admits" in {
     NodeHandles.prelude("abc.0f") shouldBe "CALL system.main.qod_session('abc.0f')"
+    // The golden handle's prelude, which handle_test reads the handle back out of
+    // (qod::PreludeHandle): a spelling change on either side breaks one of the two.
+    NodeHandles.prelude(golden("handle")) shouldBe golden("prelude")
+  }
+
+  "refusalText" should "drop DuckDB's excerpt of the statement, which would carry the handle" in {
+    val refusal = "Permission Error: qod-node: session handle refused: handle MAC does not verify"
+    val excerpt = "\n\nLINE 1: CALL system.main.qod_session('eyJ2IjoxfQ.0123abcd')\n" +
+      "                                         ^"
+    NodeHandles.refusalText(refusal + excerpt) shouldBe refusal
+    NodeHandles.refusalText(s"$refusal\n\nLINE 12: SELECT 1") shouldBe refusal
+    // Flattened onto one line, it still goes.
+    NodeHandles.refusalText(s"$refusal LINE 3: CALL x('y')") shouldBe refusal
+  }
+
+  it should "keep a text with no excerpt as it is" in {
+    val refusal = "qod-node: session handle refused: handle expired"
+    NodeHandles.refusalText(refusal) shouldBe refusal
+    NodeHandles.refusalText("Binder Error: no PIPELINE 2: here") shouldBe
+      "Binder Error: no PIPELINE 2: here"
   }
 
   "NodeKeys" should "mint for the node's own id and pool, at its clock" in {

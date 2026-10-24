@@ -45,6 +45,19 @@ object NodeHandles:
     */
   val ClockRefusals: List[String] = List("handle expired", "valid too long")
 
+  /** `nodeError`, a node's answer to a session handle, as the manager may answer, fence, log or
+    * record it: without the excerpt of the statement DuckDB appends to an error raised at parse or
+    * bind (`LINE <n>: ...` and the caret line after it), which for a refused prelude would carry
+    * the handle. qod-node drops it from its own init errors the same way (init_runner.cpp).
+    */
+  def refusalText(nodeError: String): String =
+    StatementExcerpt.findFirstMatchIn(nodeError) match
+      case Some(m) => nodeError.substring(0, m.start).stripTrailing()
+      case None    => nodeError
+
+  /** Where DuckDB's statement excerpt starts: `LINE <n>:` at the start or after a blank. */
+  private val StatementExcerpt = """(?:^|\s)LINE \d+:""".r
+
   /** The key of node `nodeId`: HMAC-SHA256(secret, "qod-node-key/v1/" + nodeId), 32 bytes. */
   def nodeKey(secret: String, nodeId: String): Array[Byte] =
     hmac(

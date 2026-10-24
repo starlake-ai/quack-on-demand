@@ -116,6 +116,8 @@ final class QuackHttpAdapter(
           unenforced.remove(node.nodeId)
           ProbeVerdict.Ok
         case QuackResponse.Failed(err, _) =>
+          // Inconclusive passes on purpose: the probe statement already ran after its handle, so
+          // the node serves, and a canary that fails otherwise (a 5xx, a timeout) must not flap it.
           logger.debug(s"canary on ${node.nodeId} inconclusive: $err")
           ProbeVerdict.Ok
       }

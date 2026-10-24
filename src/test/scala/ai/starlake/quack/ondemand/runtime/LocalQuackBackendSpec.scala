@@ -270,8 +270,11 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
           .value
           .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
       )
-      // Exactly the node's token and key, nothing the metastore named.
-      dir.toFile.list().toSet shouldBe Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
+      // Exactly the node's token and key, nothing the metastore named. A cloud credential the
+      // developer's shell exports is delivered too (the backend forwards the manager's own), so it
+      // is set aside rather than counted.
+      (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
+        Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
       val onDisk = java.nio.file.Files.readString(dir.resolve(NodeSecretFiles.AuthzKey))
       withClue("the key file does not hold the key derived for the node id")(
         (onDisk == key) shouldBe true

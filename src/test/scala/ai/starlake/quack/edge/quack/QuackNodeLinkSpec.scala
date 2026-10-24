@@ -125,7 +125,8 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
     val link = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
     link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
       case Left(h: LinkFailure.HandleFailed) =>
-        // The node's own text, kept as is: the front door may answer a client with it verbatim.
+        // The node's own text, kept as is (it holds no statement excerpt): the front door may
+        // answer a client with it verbatim.
         h.refused shouldBe true
         h.detail shouldBe "session handle refused: expired"
         h.message should include("refused the statement's session handle")
@@ -149,6 +150,19 @@ class QuackNodeLinkSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected HandleFailed, got $other")
     preparedSql(t) shouldBe List(handleSql)
     t.posted should have size 2
+
+  it should "drop DuckDB's excerpt of the statement from the node's refusal" in:
+    // An excerpt would quote the prelude, handle and all, to whoever reads the answer.
+    val refusal = "Permission Error: qod-node: session handle refused: handle MAC does not verify"
+    val excerpt = "\n\nLINE 1: CALL system.main.qod_session('eyJ2IjoxfQ.0123abcd')\n  ^"
+    val t       = new FakeTransport(connResp("NODE1"), errorResp(refusal + excerpt))
+    val link    = QuackNodeLink.open(t, node, hello, 1L, authorize).unsafeRunSync().toOption.get._1
+    link.prepare(PrepareRequest("SELECT 1", None, None), 4L).unsafeRunSync() match
+      case Left(h: LinkFailure.HandleFailed) =>
+        h.detail shouldBe refusal
+        h.message should not include "eyJ2IjoxfQ"
+        h.message should not include "LINE 1"
+      case other => fail(s"expected HandleFailed, got $other")
 
   it should "send nothing and fail Permanent when there is no principal to mint a handle for" in:
     val t       = new FakeTransport(connResp("NODE1"))

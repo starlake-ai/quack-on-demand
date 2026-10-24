@@ -7,6 +7,7 @@ import ai.starlake.quack.edge.adapter.{
   QuackTransport,
   QuackWireError
 }
+import ai.starlake.quack.edge.authz.NodeHandles
 import ai.starlake.quack.model.RunningNode
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -106,10 +107,10 @@ final class QuackNodeLink(
 
   /** The session handle prelude, drained. Any failure of the prelude itself is `HandleFailed`, and
     * the statement is not sent: a node error on it (the node refused the handle, and its text is
-    * kept as is) and a transport failure on it (the handle never reached the node), each worded for
-    * what happened so that a 503 is not reported as a refusal. No principal to vouch for
-    * (`authorize` throws) is `Permanent`: nothing could be minted, and no other node would do
-    * better.
+    * kept as is but for DuckDB's excerpt of the statement, which would carry the handle) and a
+    * transport failure on it (the handle never reached the node), each worded for what happened so
+    * that a 503 is not reported as a refusal. No principal to vouch for (`authorize` throws) is
+    * `Permanent`: nothing could be minted, and no other node would do better.
     */
   private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
     IO(authorize()).attempt.flatMap {
@@ -119,10 +120,15 @@ final class QuackNodeLink(
         run(prelude, clientQueryId).map(_.left.map(handleFailure))
     }
 
-  /** [[run]] answers a node error with `Permanent` and a transport failure with `Transient`. */
+  /** [[run]] answers a node error with `Permanent` and a transport failure with `Transient`. Either
+    * text loses any statement excerpt ([[NodeHandles.refusalText]]) here, before it is answered,
+    * fenced, logged or recorded.
+    */
   private def handleFailure(f: LinkFailure): LinkFailure.HandleFailed = f match
-    case LinkFailure.Permanent(m)    => LinkFailure.HandleFailed(refused = true, m)
-    case LinkFailure.Transient(m)    => LinkFailure.HandleFailed(refused = false, m)
+    case LinkFailure.Permanent(m) =>
+      LinkFailure.HandleFailed(refused = true, NodeHandles.refusalText(m))
+    case LinkFailure.Transient(m) =>
+      LinkFailure.HandleFailed(refused = false, NodeHandles.refusalText(m))
     case h: LinkFailure.HandleFailed => h // never produced by run; keeps the match exhaustive
 
   /** One PREPARE of `sql`, drained through its FETCH loop so the node releases the result. The

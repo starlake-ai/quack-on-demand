@@ -1,6 +1,8 @@
 // Unit tests for json and handle: the strict JSON reader, handle verification (format, MAC, shape,
-// node, expiry) and the nonce ledger. Built with -DQOD_NODE_TESTS=ON and run by CTest.
+// node, expiry) and the nonce ledger, then the golden handle and prelude NodeHandlesSpec (Scala) pins
+// too (the golden file's path is the one argument). Built with -DQOD_NODE_TESTS=ON and run by CTest.
 
+#include "authz.hpp"
 #include "crypto.hpp"
 #include "handle.hpp"
 #include "json.hpp"
@@ -53,7 +55,8 @@ std::string Sign(const std::string &payload, const std::string &key = kKey) {
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(key, payload));
 }
 
-// The golden handle NodeHandlesSpec (Scala) mints from fixed inputs: both sides agree on the format.
+// The golden handle NodeHandlesSpec (Scala) mints from fixed inputs, and its prelude: both sides agree
+// on the handle's format and on the prelude's spelling.
 void VerifyGolden(const std::string &path) {
 	std::ifstream in(path);
 	if (!in) {
@@ -61,14 +64,18 @@ void VerifyGolden(const std::string &path) {
 		failures++;
 		return;
 	}
-	std::string line, key_hex, text;
+	std::string line, key_hex, text, prelude;
 	while (std::getline(in, line)) {
 		if (line.rfind("key=", 0) == 0) {
 			key_hex = line.substr(4);
 		} else if (line.rfind("handle=", 0) == 0) {
 			text = line.substr(7);
+		} else if (line.rfind("prelude=", 0) == 0) {
+			prelude = line.substr(8);
 		}
 	}
+	// The manager's spelling of the prelude is the one the node reads a handle out of.
+	Expect(!text.empty() && qod::PreludeHandle(prelude) == text, "golden prelude carries the golden handle");
 	try {
 		auto handle = qod::VerifyHandle(text, qod::FromHex(key_hex), "quack-acme-db-bi-1", 1761200000000);
 		Expect(handle.principal.id == "u-1" && handle.principal.name == "alice" && handle.principal.tenant == "acme",
@@ -160,7 +167,11 @@ int main(int argc, char **argv) {
 	Expect(alice == qod::Principal({"u-1", "alice", "acme", false, false}), "same principal");
 	Expect(alice != promoted, "another flag is another principal");
 
-	if (argc > 1) {
+	// Run without the golden file, the cross-language checks would be skipped and the run still pass.
+	if (argc < 2) {
+		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v1.txt" << std::endl;
+		failures++;
+	} else {
 		VerifyGolden(argv[1]);
 	}
 

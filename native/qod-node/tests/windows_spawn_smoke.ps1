@@ -5,7 +5,8 @@
 .DESCRIPTION
   Starts scripts/spawn-quack-node.ps1 under Windows PowerShell (what LocalQuackBackend runs) with
   -NodeBin as QOD_NODE_BIN, then checks that:
-    - qod-node ran the init SQL the script handed it;
+    - qod-node ran the init SQL the script handed it, extraSetupSql included: its second statement
+      reads a table that does not exist, and qod-node's init failure line must name it;
     - over quack, through the release DuckDB CLI (-DuckdbCli), a statement without a session handle
       is refused by the parse screen and a valid prelude (minted by -HandleTool) installs;
     - qod-node removed the secrets directory once it read its token and key;
@@ -31,7 +32,11 @@ $nodeKey = '4242424242424242424242424242424242424242424242424242424242424242'
 $nodeId = 'quack-windows-smoke-1'
 [System.IO.File]::WriteAllText((Join-Path $secrets 'QOD_NODE_TOKEN'), $token)
 [System.IO.File]::WriteAllText((Join-Path $secrets 'QOD_NODE_AUTHZ_KEY'), $nodeKey)
-[System.IO.File]::WriteAllText((Join-Path $secrets 'extraSetupSql'), "CREATE TABLE fed AS SELECT 'fed-ok' AS v;")
+# The second statement fails on purpose, naming a table nothing else creates: the spawn script's own
+# statements satisfy the init count alone, so only this failure shows extraSetupSql reached qod-node.
+$extraMarker = 'qod_smoke_extra_setup_marker'
+[System.IO.File]::WriteAllText((Join-Path $secrets 'extraSetupSql'),
+  "CREATE TABLE fed AS SELECT 'fed-ok' AS v;`nSELECT * FROM $extraMarker;")
 $start = Join-Path $work 'start'
 New-Item -ItemType Directory -Path $start | Out-Null
 
@@ -85,10 +90,14 @@ while (-not ((Test-Path -LiteralPath $err) -and ((Get-Content -LiteralPath $err 
 }
 Write-Host 'node ready'
 
-if ((Get-Content -LiteralPath $err -Raw) -notmatch '\[qod-node\] init: [1-9]\d* of \d+ statement\(s\) ran') {
+$nodeErr = Get-Content -LiteralPath $err -Raw
+if ($nodeErr -notmatch '\[qod-node\] init: [1-9]\d* of \d+ statement\(s\) ran') {
   Fail 'qod-node reported no init SQL run'
 }
-Write-Host 'init SQL ran'
+if ($nodeErr -notmatch "\[qod-node\] init: statement \d+ of \d+ failed: [^\r\n]*$extraMarker") {
+  Fail "qod-node never ran extraSetupSql: no init failure names $extraMarker"
+}
+Write-Host 'init SQL ran, extraSetupSql included'
 
 # A table that does not exist: only the parse screen refuses before binding (quack words it
 # "Authorization callback failed"); the post_bind backstop refuses after it, and then a missing table

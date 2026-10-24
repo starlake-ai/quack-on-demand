@@ -88,7 +88,8 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
       throw new IllegalStateException(s"node did not come up:\n$log")
 
   /** SIGKILL the wrapper and every qod-node it started, so a run can never leave an orphan, and
-    * close the client's allocator.
+    * close the client's allocator. A leaked buffer makes that close throw: it is swallowed, so it
+    * cannot skip the caller's own cleanup (a spec's database and role drop) after this.
     */
   def stop(): Unit =
     process.foreach { p =>
@@ -97,7 +98,7 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
       p.waitFor(20, TimeUnit.SECONDS)
     }
     process = None
-    allocator.close()
+    Try(allocator.close())
 
   /** `sql` on the node as the manager runs it: the native client, after a superuser handle. (0,
     * rows as lines, "") or (1, Nil, the node's error).
