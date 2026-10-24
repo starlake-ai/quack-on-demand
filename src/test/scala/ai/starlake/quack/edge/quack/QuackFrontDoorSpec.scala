@@ -73,6 +73,11 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
   private val TxAbortedError =
     "TransactionContext Error: Current transaction is aborted (please ROLLBACK)"
 
+  /** How [[ScriptedTransport.statementTransportFailures]] fails a statement: a 5xx, after the node
+    * received it.
+    */
+  private val StatementTransportError = "HTTP 503 from Quack node"
+
   /** A PREPARE a scripted node received: its SQL, the node (URI) it reached and the node connection
     * it rode.
     */
@@ -86,28 +91,31 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     * `posted`, so the sequence of `posted` frames is what it was before handles existed; every
     * PREPARE, the handles included, is listed in arrival order in `prepared`. `preludeError`
     * refuses the next `preludeRefusals` handles (all of them by default) and the node accepts them
-    * again after that; `stampError` fails the author-stamping PREPARE only. `abortsTx` plays
-    * DuckDB's transactions on each node connection: BEGIN opens one, COMMIT, ROLLBACK and
-    * DISCONNECT end it, and once a PREPARE failed inside it, every PREPARE but ROLLBACK and COMMIT
-    * (which DuckDB runs as a ROLLBACK), a session handle included, answers [[TxAbortedError]].
+    * again after that; `stampError` fails the author-stamping PREPARE only;
+    * `statementTransportFailures` fails that many statement PREPAREs (never a handle) in transport,
+    * once the node received them. `abortsTx` plays DuckDB's transactions on each node connection:
+    * BEGIN opens one, COMMIT, ROLLBACK and DISCONNECT end it, and once a PREPARE failed inside it,
+    * every PREPARE but ROLLBACK and COMMIT (which DuckDB runs as a ROLLBACK), a session handle
+    * included, answers [[TxAbortedError]].
     */
   private final class ScriptedTransport extends QuackTransport:
-    @volatile var prepareNeedsMore: Boolean    = false
-    @volatile var prepareError: Option[String] = None
-    @volatile var preludeError: Option[String] = None
-    @volatile var preludeRefusals: Int         = Int.MaxValue
-    @volatile var stampError: Option[String]   = None
-    @volatile var abortsTx: Boolean            = false
-    @volatile var fetchChunksBeforeEnd: Int    = 1
-    val posted: ArrayBuffer[Frame]             = ArrayBuffer.empty
-    val prepared: ArrayBuffer[Prepared]        = ArrayBuffer.empty
-    val prepareUris: ArrayBuffer[URI]          = ArrayBuffer.empty
-    @volatile var unreachablePorts: Set[Int]   = Set.empty
-    private val connections                    = new AtomicInteger(0)
-    private val transactions                   = TrieMap.empty[String, Boolean] // id -> aborted
-    private var fetchesServed                  = 0
-    def types: List[Int]                       = posted.toList.map(_.header.msgType)
-    def preludes: List[String]                 = prepared.toList.filter(_.isHandle).map(_.sql)
+    @volatile var prepareNeedsMore: Boolean       = false
+    @volatile var prepareError: Option[String]    = None
+    @volatile var preludeError: Option[String]    = None
+    @volatile var preludeRefusals: Int            = Int.MaxValue
+    @volatile var stampError: Option[String]      = None
+    @volatile var statementTransportFailures: Int = 0
+    @volatile var abortsTx: Boolean               = false
+    @volatile var fetchChunksBeforeEnd: Int       = 1
+    val posted: ArrayBuffer[Frame]                = ArrayBuffer.empty
+    val prepared: ArrayBuffer[Prepared]           = ArrayBuffer.empty
+    val prepareUris: ArrayBuffer[URI]             = ArrayBuffer.empty
+    @volatile var unreachablePorts: Set[Int]      = Set.empty
+    private val connections                       = new AtomicInteger(0)
+    private val transactions                      = TrieMap.empty[String, Boolean] // id -> aborted
+    private var fetchesServed                     = 0
+    def types: List[Int]                          = posted.toList.map(_.header.msgType)
+    def preludes: List[String]                    = prepared.toList.filter(_.isHandle).map(_.sql)
 
     /** Every PREPARE in arrival order, a session handle shown as [[HandleMarker]]. */
     def shape: List[String] = prepared.toList.map(_.label)
@@ -149,6 +157,12 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
             case Type.PrepareRequest    =>
               posted.synchronized(prepareUris += uri)
               fetchesServed = 0
+              val lost = posted.synchronized {
+                val fails = statementTransportFailures > 0
+                if fails then statementTransportFailures -= 1
+                fails
+              }
+              if lost then throw QuackWireError.Transient(StatementTransportError)
               val failure =
                 if sent.exists(_.sql.startsWith(StampPrefix)) then stampError.orElse(prepareError)
                 else prepareError
@@ -546,6 +560,41 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       Type.PrepareRequest,
       Type.Disconnect
     )
+
+  "a transport failure inside a transaction" should "end the transaction and send nothing elsewhere" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    val node     = txNode(fx, connId)
+    val posted   = fx.transport.posted.size
+    val prepared = fx.transport.prepared.size
+    fx.transport.statementTransportFailures = 1
+    val answer = "transaction aborted: the transaction's node connection failed " +
+      s"($StatementTransportError); ROLLBACK to continue"
+    errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) shouldBe answer
+    // The handle and the write went out on the transaction's connection, and nothing went to
+    // another node: a retry there would have run the write on a fresh link, outside the client's
+    // transaction. The link was DISCONNECTed, which rolls the node's transaction back.
+    val sent = fx.transport.prepared.toList.drop(prepared)
+    sent.map(p => (p.connectionId, p.isHandle)) shouldBe List(("NODE2", true), ("NODE2", false))
+    sent(1).sql should include("INSERT INTO t VALUES (1)")
+    postedSince(fx, posted) shouldBe List(
+      (Type.PrepareRequest, "NODE2"),
+      (Type.Disconnect, "NODE2")
+    )
+    // Permanent: nothing booked against the node, and the router no longer holds the transaction.
+    fx.tracker.snapshot(node).healthy shouldBe true
+    fx.router.sessions.get(connId).get.txOpen shouldBe false
+    fx.sessions.get(connId).get.txLink.get() shouldBe None
+    // Fenced, with nothing sent, until the client rolls back; its ROLLBACK is a genuine response
+    // from a fresh link, and the session runs on.
+    val fenced = fx.transport.prepared.size
+    errorText(prepare(fx, connId, "INSERT INTO t VALUES (2)")) shouldBe answer
+    fx.transport.prepared.size shouldBe fenced
+    prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+    fx.transport.shape.takeRight(4) shouldBe List(HandleMarker, "BEGIN", HandleMarker, "ROLLBACK")
+    fx.sessions.get(connId).get.txAborted.get() shouldBe None
+    prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
 
   // ---- DuckDB 2.0 aborts a transaction on a failed statement and then runs only ROLLBACK ----
 

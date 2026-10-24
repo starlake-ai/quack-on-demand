@@ -253,10 +253,10 @@ final class QuackFrontDoor(
       .flatMap {
         case Left(fail) =>
           s.txAborted.get() match
-            // The statement's session handle failed on its transaction's link and fenced the
-            // session (`linkFailed`): the fence was down when the statement began, and no other
-            // statement was live to be killed meanwhile. It is answered as the fence answers, so a
-            // ROLLBACK runs at once on a fresh link.
+            // The statement failed on its transaction's link (its session handle, or the link
+            // itself) and fenced the session (`linkFailed`): the fence was down when the statement
+            // began, and no other statement was live to be killed meanwhile. It is answered as the
+            // fence answers, so a ROLLBACK runs at once on a fresh link.
             case Some(answer) if !reopenTx => fenced(s, f, prep, answer)
             case _                         => IO.pure(encodeError(fail.reason))
         case Right(routed) =>
@@ -318,12 +318,16 @@ final class QuackFrontDoor(
     if reused then IO.unit else link.close()
 
   /** The outcome of a node call that failed on `link`, which is released unless a client
-    * transaction holds it (`reused`). A session handle that failed on such a link, whatever the
-    * cause (in an aborted transaction DuckDB 2.0 refuses every statement but ROLLBACK and COMMIT,
-    * the handle's CALL included; a key mismatch; an expiry), means the transaction cannot go on
-    * there: it is ended ([[abortTx]]) and the statement fails Permanent, so nothing is booked
-    * against the node's health (a node that really refuses handles fails its health probe, which
-    * runs on a fresh connection of its own). Anywhere else the failure keeps its class.
+    * transaction holds it (`reused`). Any failure on such a link means the transaction cannot go on
+    * there: a session handle that failed, whatever the cause (in an aborted transaction DuckDB 2.0
+    * refuses every statement but ROLLBACK and COMMIT, the handle's CALL included; a key mismatch;
+    * an expiry), and a statement that failed in transport, which may have run before its answer was
+    * lost. It is ended ([[abortTx]]) and the statement fails Permanent, so the router neither
+    * retries it on another node, where a fresh link would run it outside the client's transaction,
+    * nor books it against the node's health (a node at fault fails its health probe, which runs on
+    * a fresh connection of its own). Anywhere else the failure keeps its class. The node's own
+    * answer to a statement (its ERROR_RESPONSE) never comes here: the link is kept and the node's
+    * answer to the next handle decides.
     */
   private def linkFailed[A](
       s: QuackSession,
@@ -332,11 +336,10 @@ final class QuackFrontDoor(
       fail: LinkFailure,
       elapsed: () => IO[Long]
   ): IO[NodeOutcome[A]] =
-    fail match
-      case h: LinkFailure.HandleFailed if reused =>
-        val answer = QuackFrontDoor.txAbortedMessage(h)
-        abortTx(s, link, answer) *> elapsed().map(ms => NodeOutcome.Permanent(answer, ms))
-      case _ => dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
+    if reused then
+      val answer = QuackFrontDoor.txAbortedMessage(fail)
+      abortTx(s, link, answer) *> elapsed().map(ms => NodeOutcome.Permanent(answer, ms))
+    else dropLink(link, reused) *> elapsed().map(ms => toOutcome[A](fail, ms))
 
   /** End the client transaction on `link`: DISCONNECT the link, which takes the transaction with it
     * (the node rolls it back), forget it as the session's `txLink`, drop the router's view of the
@@ -725,16 +728,21 @@ object QuackFrontDoor:
   val TxKilledMessage: String =
     "transaction aborted: a statement was killed by an administrator; ROLLBACK to continue"
 
-  /** Answer to a statement whose session handle `h` failed on its client transaction's link, and to
-    * every statement after it until ROLLBACK. When the node says the transaction is aborted (DuckDB
-    * 2.0 then refuses every statement but ROLLBACK and COMMIT, the handle's CALL included), its own
-    * error, the one DuckDB would have answered the statement with; otherwise the refusal, and the
+  /** Answer to a statement that failed (`f`) on its client transaction's link, and to every
+    * statement after it until ROLLBACK. When the node says the transaction is aborted (DuckDB 2.0
+    * then refuses every statement but ROLLBACK and COMMIT, the handle's CALL included), its own
+    * error, the one DuckDB would have answered the statement with; otherwise what failed, and the
     * way out.
     */
-  def txAbortedMessage(h: LinkFailure.HandleFailed): String =
-    if h.refused && h.detail.contains("Current transaction is aborted") then h.detail
-    else
+  def txAbortedMessage(f: LinkFailure): String = f match
+    case h: LinkFailure.HandleFailed
+        if h.refused && h.detail.contains("Current transaction is aborted") =>
+      h.detail
+    case h: LinkFailure.HandleFailed =>
       s"transaction aborted: ${LinkFailure.handleCause(h.refused)} (${h.detail}); " +
+        "ROLLBACK to continue"
+    case other =>
+      s"transaction aborted: the transaction's node connection failed (${other.message}); " +
         "ROLLBACK to continue"
 
   /** Seconds a fully served statement keeps its node link for late fetches before the sweeper

@@ -16,9 +16,9 @@ import java.net.URI
 /** Why a node round trip failed, in the two classes the router already distinguishes: a transport
   * problem (5xx, refused, timeout) is retried once on another node, an `ERROR_RESPONSE` from the
   * node is final and its message goes to the client. [[HandleFailed]] is a third class, for the
-  * front door: on a fresh link the router retries it like a transport problem, on the link of a
-  * client transaction it ends that transaction, and the stamping fallback never mistakes it for the
-  * failure of the stamp SQL.
+  * front door: on a fresh link the router retries it like a transport problem, and the stamping
+  * fallback never mistakes it for the failure of the stamp SQL. On the link of a client
+  * transaction, any of the three ends that transaction.
   */
 enum LinkFailure(val message: String):
   case Transient(msg: String) extends LinkFailure(msg)
