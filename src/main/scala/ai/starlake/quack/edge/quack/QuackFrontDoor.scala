@@ -428,8 +428,8 @@ final class QuackFrontDoor(
                 case Some(p) => link.runDiscard(p, cq)
               preludeIO.flatMap {
                 case Right(()) => body(link, stampedPrelude.isDefined, reused, elapsed)
-                // A failed handle is never fail-open: the write is not sent, whatever the cause. The
-                // statement behind a stamp is a write, never a COMMIT.
+                // A failed handle is never fail-open: the write is not sent, whatever the cause.
+                // The statement behind a stamp is a write, never a COMMIT.
                 case Left(fail: LinkFailure.HandleFailed) =>
                   linkFailed[A](s, link, reused, fail, elapsed, clientCommit = false)
                 case Left(fail) =>

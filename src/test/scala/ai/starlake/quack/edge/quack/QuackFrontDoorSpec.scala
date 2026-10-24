@@ -579,8 +579,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     val answer = StatementLostAnswer
     errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) shouldBe answer
     // The handle and the write went out on the transaction's connection, and nothing went to
-    // another node: a retry there would have run the write on a fresh link, outside the client's
-    // transaction. The link was DISCONNECTed, which rolls the node's transaction back.
+    // another node: the fence keeps every later statement off a fresh link, where it would run
+    // outside the client's transaction. The link was DISCONNECTed, which rolls the node's
+    // transaction back.
     val sent = fx.transport.prepared.toList.drop(prepared)
     sent.map(p => (p.connectionId, p.isHandle)) shouldBe List(("NODE2", true), ("NODE2", false))
     sent(1).sql should include("INSERT INTO t VALUES (1)")
