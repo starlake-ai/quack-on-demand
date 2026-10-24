@@ -24,6 +24,8 @@ import ai.starlake.quack.ondemand.auth.{
 }
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.state.UserGrant
+import ai.starlake.quack.ondemand.telemetry.AuditRecorder
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -89,7 +91,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       capturedScope: scala.collection.mutable.Buffer[(AuthScope, String, String)],
       tokens: SessionTokenStore = new SessionTokenStore,
       cookieSecureOverride: Option[Boolean] = None,
-      resolveTenant: String => Option[String] = _ => None
+      resolveTenant: String => Option[String] = _ => None,
+      // Every tenant is a db tenant unless a test passes its own registry.
+      loadTenant: String => Option[Tenant] = id => Some(Tenant(id = id, authProvider = "db")),
+      audit: AuditRecorder = AuditRecorder.noop
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -107,11 +112,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       identitySource = ManagementIdentitySource.Db,
       grantsForIdentity = (_, _, _) => Nil, // unused in Db mode
       cookieSecureOverride = cookieSecureOverride,
-      authModeResolver = new ManagementAuthModeResolver(
-        id => Some(Tenant(id = id, authProvider = "db")),
-        ManagementAuthMode.Db
-      ),
-      resolveTenant = resolveTenant
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
+      resolveTenant = resolveTenant,
+      audit = audit
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -369,6 +372,157 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         resp.admin shouldBe false
         tokens.isAdmin(resp.token) shouldBe false
       case Left(e) => fail(s"expected the rotated login to succeed, got $e")
+  }
+
+  // ----- tenants that sign in through their identity provider -----
+  //
+  // A tenant whose sign-in mode is OIDC takes no password: the login answers sso_required before
+  // the authentication service is asked, so no password is checked and no lockout counter moves.
+  // An unknown or misconfigured tenant still authenticates first and keeps its answers.
+
+  private val ssoTenant = Tenant(
+    id = "t-sso",
+    displayName = "Acme",
+    authProvider = "keycloak",
+    authConfig = Map(
+      "issuerUrl"       -> "https://idp.example/t-sso",
+      "clientId"        -> "qod-console",
+      "clientSecretRef" -> "env:T_SSO_CLIENT_SECRET"
+    )
+  )
+
+  private val ssoTenants: String => Option[Tenant] = Map(ssoTenant.id -> ssoTenant).get
+
+  // What the fake authentication service answers if it is asked: a valid admin of the tenant, so
+  // a session would follow if the password were checked.
+  private val ssoAdmin =
+    AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("t-sso"))
+
+  it should "refuse a password login into an OIDC tenant with 400 sso_required before any password check" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(ssoAdmin), calls, loadTenant = ssoTenants)
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-sso"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err shouldBe ErrorResponse(
+          "sso_required",
+          "tenant 't-sso' signs in through its identity provider: open /ui/?tenant=t-sso, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  it should "name the tenant as the caller typed it in sso_required, checking the mode on the resolved id" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "Acme" => Some("t-sso"); case _ => None },
+      loadTenant = ssoTenants
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("  Acme "))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 'Acme' signs in through its identity provider: open /ui/?tenant=Acme, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  it should "audit the sso_required refusal as a denied login with reason sso_required" in {
+    val telemetry = new RecordingTelemetryStore
+    val calls     = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h         = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      loadTenant = ssoTenants,
+      audit = new AuditRecorder(telemetry, _ => None)
+    )
+
+    h.login(LoginRequest("alice", "pw", tenant = Some("t-sso"))).unsafeRunSync()
+
+    telemetry.events should have size 1
+    val e = telemetry.events.head
+    e.family shouldBe "auth"
+    e.action shouldBe "auth.login.failure"
+    e.outcome shouldBe "denied"
+    e.actor shouldBe "alice"
+    e.tenant shouldBe Some("t-sso")
+    e.detail shouldBe Map("username" -> "alice", "reason" -> "sso_required")
+  }
+
+  it should "keep authenticating an unknown tenant first (401 invalid_credentials)" in {
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Left(AuthFailure.InvalidCredentials("invalid credentials")),
+      calls,
+      loadTenant = _ => None
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-ghost"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.Unauthorized
+        err.error shouldBe "invalid_credentials"
+      case Right(_) => fail("expected 401 invalid_credentials")
+    calls.map(_._1).toList shouldBe List(AuthScope.Tenant("t-ghost"))
+  }
+
+  it should "keep authenticating a misconfigured OIDC tenant first (400 tenant_oidc_misconfigured)" in {
+    val misconfigured =
+      Tenant(id = "t-bad", authProvider = "keycloak", authConfig = Map("clientId" -> "c"))
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("t-bad"))),
+      calls,
+      loadTenant = Map(misconfigured.id -> misconfigured).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-bad"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "tenant_oidc_misconfigured"
+      case Right(_) => fail("expected 400 tenant_oidc_misconfigured")
+    calls should have size 1
+  }
+
+  it should "keep the password login of a db tenant, whatever OIDC keys its config carries" in {
+    // The provider decides the mode, not leftover keys in the config.
+    val dbTenant = Tenant(
+      id = "t-db",
+      authProvider = "db",
+      authConfig = Map(
+        "issuerUrl"       -> "https://idp.example/t-db",
+        "clientId"        -> "c",
+        "clientSecretRef" -> "env:T_DB_CLIENT_SECRET"
+      )
+    )
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("t-db"))),
+      calls,
+      loadTenant = Map(dbTenant.id -> dbTenant).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t-db"))).unsafeRunSync()
+
+    out match
+      case Right((_, resp)) => resp.manageableTenants shouldBe List("t-db")
+      case Left(e)          => fail(s"expected the db tenant login to succeed, got $e")
+    calls should have size 1
   }
 
   "whoami" should "surface the tenant and scope from the stored session" in {
@@ -631,18 +785,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     err.error shouldBe "not_provisioned"
   }
 
-  it should "keep the OIDC path admin-only for a tenant-scoped grant (no profile-only minting)" in {
-    // Pinning test for the selfTenants leak fix: a `role=user` grant on t-a would
-    // mint a profile-only session under Db mode, but OIDC's profile.role is an
-    // IdP claim with zero qodstate authority -- it must stay admin_required here.
-    val profile = AuthenticatedProfile(
-      username = "alice@corp",
-      role = "admin", // IdP claim -- decoupled from qodstate authority
-      groups = Set.empty,
-      claims = Map("email" -> "alice@corp"),
-      authMethod = "keycloak-ropc",
-      tenant = None
-    )
+  it should "refuse a tenant password login under identitySource=oidc when that tenant signs in through SSO (400 sso_required)" in {
+    // The tenant's own authProvider decides before any grant is read: an admin row of the tenant
+    // does not reopen the password path. The admin-only rule of the tenant SSO login itself is
+    // pinned in AuthHandlersOidcSpec.
     val oidcTenant = Tenant(
       id = "t-a",
       authProvider = "keycloak",
@@ -650,14 +796,15 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         Map("issuerUrl" -> "https://idp.example/t-a", "clientId" -> "c", "clientSecretRef" -> "s")
     )
     val h = oidcHandlers(
-      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "user"))),
-      profile = profile,
+      directory = Map("alice@corp" -> List(UserGrant(Some("t-a"), "admin"))),
       loadTenant = { case "t-a" => Some(oidcTenant); case _ => None }
     )
-    val out         = h.login(LoginRequest("alice@corp", "p", tenant = Some("t-a"))).unsafeRunSync()
-    val (code, err) = out.swap.toOption.get
-    code shouldBe StatusCode.Forbidden
-    err.error shouldBe "admin_required"
+    val out = h.login(LoginRequest("alice@corp", "p", tenant = Some("t-a"))).unsafeRunSync()
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+      case Right(_) => fail("expected 400 sso_required, got a session")
   }
 
   it should "mint role=admin for an admin principal whose IdP role claim says user" in {

@@ -312,6 +312,42 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
   }
 
   // ================================================================
+  // 4b. identitySource=db manager: an OIDC tenant still signs in through its IdP
+  // ================================================================
+
+  it should "302 an OIDC tenant to its own issuer on a manager whose identitySource is db" in {
+    // identitySource governs only the bare /ui/ login; the tenant's own authProvider makes its
+    // login SSO, served by the same service whatever the manager-wide source is.
+    val acmeOidc = Tenant(
+      id = "acme",
+      displayName = "Acme Corp",
+      authProvider = "keycloak",
+      authConfig = Map(
+        "issuerUrl"       -> "https://idp.example.com",
+        "clientId"        -> "acme-app",
+        "clientSecretRef" -> "env:ACME"
+      )
+    )
+    val handlers = new AuthHandlers(
+      authService = dummyAuthService,
+      tokens = new SessionTokenStore,
+      identitySource = ManagementIdentitySource.Db,
+      grantsForIdentity = (_, _, _) => Nil,
+      authModeResolver =
+        new ManagementAuthModeResolver(Map(acmeOidc.id -> acmeOidc).get, ManagementAuthMode.Db),
+      oidc = Some(buildSvc("s4b"))
+    )
+    handlers.authMode(None).unsafeRunSync().map(_.mode) shouldBe Right("db")
+    handlers.authMode(Some("acme")).unsafeRunSync().map(_.mode) shouldBe Right("oidc")
+    handlers.oidcStart(Some("acme"), None).unsafeRunSync() match
+      case Right((status, location, _)) =>
+        status shouldBe StatusCode.Found
+        location should startWith("https://idp.example.com/authorize?")
+        location should include("client_id=acme-app")
+      case Left(e) => fail(s"expected a redirect to the tenant issuer, got $e")
+  }
+
+  // ================================================================
   // 5. oidcCallback happy path: SUPERUSER + system scope -> success
   // ================================================================
 
@@ -534,6 +570,21 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       new RecordingDirectory(List(UserGrant(None, "admin"))).lookup
     )
     tokens.get(session).map(_.profile.tenant) shouldBe Some(None)
+  }
+
+  it should "keep the tenant-scope login admin-only: a regular user row mints no profile-only session" in {
+    // Profile-only sessions are a DB-login feature. The IdP's role claim (admin, from the stub
+    // validator) carries no qodstate authority, so a `kind=user` row on the tenant ends in
+    // admin_required.
+    val (status, location, session, _) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s19",
+      new RecordingDirectory(List(UserGrant(Some("acme"), "user"))).lookup
+    )
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/?error=admin_required"
+    session shouldBe ""
   }
 
   // ---- SQL-token flow (/api/auth/sql-token) ----
