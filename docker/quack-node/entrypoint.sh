@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # K8s entrypoint for the Quack node image. The manager (KubernetesQuackBackend)
-# passes the listen port via QOD_NODE_PORT and the node's id via QOD_NODE_ID; every
-# other plain env var (pgHost, pgPort, pgUser, dbName, schemaName, dataPath, plus the
-# optional non-secret QOD_S3_* knobs) is the merged defaultMetastore + spec.metastore
-# that LocalQuackBackend would read in local mode. The sensitive values (token, node
+# passes the listen port via QOD_NODE_PORT and the node's id via QOD_NODE_ID; the
+# other plain env vars are the metastore keys the spawn script reads (TenantDb.NodeEnvKeys:
+# pgHost, pgPort, pgUser, dbName, catalogAlias, schemaName, dataPath, encrypted; no other
+# metastore key reaches a pod) and what the manager sets itself (kind, dbInitSql,
+# lockdownSql, the optional non-secret QOD_S3_* knobs). The sensitive values (token, node
 # key, pgPassword, encryptionKey, federation and object-store SQL, object-store
 # credentials) are NOT env vars: they are files of the read-only Secret volume named
 # by QOD_SECRETS_DIR, which spawn-quack-node.sh reads itself (qod-node reads the

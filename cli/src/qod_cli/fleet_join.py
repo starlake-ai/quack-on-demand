@@ -88,6 +88,16 @@ _SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql"
                 "QOD_NODE_AUTHZ_KEY", "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY",
                 "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
 _CLOUD_CRED_KEYS = _SECRET_KEYS[6:]
+# An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
+# reads from its environment are laid over the node's environment, and only the metastore's own
+# secrets below become files. Any other name (BASH_ENV, which bash expands before running the
+# script, PATH, QOD_NODE_BIN, lockdownSql...) would run commands on this server or replace what this
+# process sets. The manager filters too; this is defense in depth against an older manager or a
+# manager bug. Same set as TenantDb.NodeEnvKeys on the manager (NodeSecretFilesSpec pins it).
+_NODE_ENV_KEYS = ("pgHost", "pgPort", "pgUser", "dbName", "catalogAlias", "schemaName", "dataPath", "encrypted")
+# The metastore's own secrets, taken from an assignment's env in any spelling: same set as
+# TenantDb.NodeSecretEnvKeys (NodeSecretFilesSpec pins it).
+_METASTORE_SECRET_KEYS = ("pgPassword", "encryptionKey")
 SECRETS_DIR = "secrets"
 
 
@@ -413,6 +423,8 @@ class FleetMember:
         self.approval: str | None = None
         # Monotonic deadline of the scheduled restart of a failed node; None while none is scheduled.
         self.next_restart_at: float | None = None
+        # (pool, key) of each assignment env key already named as dropped, so it is named once.
+        self.dropped_keys: set[tuple[str, str]] = set()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- pidfile ----
@@ -472,6 +484,16 @@ class FleetMember:
                 "action": node_failure_action(n.error, n.assignment["port"]) if n.state == "failed" else None}
 
     # ---- process control ----
+    def _warn_dropped(self, assignment: dict, keys: list[str]) -> None:
+        """Name each assignment env key that reaches no node, once per pool and key, never its value."""
+        pool = assignment.get("poolKey") or {}
+        pool_id = "/".join(str(pool.get(p, "?")) for p in ("tenant", "tenantDb", "pool"))
+        for k in sorted(keys):
+            if (pool_id, k) not in self.dropped_keys:
+                self.dropped_keys.add((pool_id, k))
+                sys.stderr.write(f"qod fleet join: WARN ignoring {k!r} in the assignment env for {pool_id}: a node "
+                                 f"gets only {', '.join(_NODE_ENV_KEYS)} and the metastore's own secrets\n")
+
     def _launch_spec(self, assignment: dict) -> tuple[list[str], dict[str, str], dict[str, str]]:
         """Command, environment and secret files for `assignment`. Raises KeyError/TypeError on a
         malformed assignment, before anything is stopped."""
@@ -479,14 +501,19 @@ class FleetMember:
                if (k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES))
                and _canonical_secret(k) is None}
         secrets = {k: os.environ[k] for k in _CLOUD_CRED_KEYS if os.environ.get(k)}
+        dropped = []
         for k, v in assignment["env"].items():
-            canonical = _canonical_secret(str(k))
-            if canonical is None:
-                env[str(k)] = str(v)
-            elif canonical == str(k) or canonical not in secrets or canonical in _CLOUD_CRED_KEYS:
-                # The exact spelling wins over a differently-cased one; the assignment wins over this
-                # process's own object-store credentials.
-                secrets[canonical] = str(v)
+            k = str(k)
+            canonical = _canonical_secret(k)
+            if k in _NODE_ENV_KEYS:
+                env[k] = str(v)
+            elif canonical in _METASTORE_SECRET_KEYS:
+                if canonical == k or canonical not in secrets:
+                    # The exact spelling wins over a differently-cased one.
+                    secrets[canonical] = str(v)
+            else:
+                dropped.append(k)
+        self._warn_dropped(assignment, dropped)
         env["kind"] = str(assignment["kind"])
         env["QOD_NODE_BIND"] = self.bind_host
         # Always from the assignment, empty when absent: a stray value in this process's environment

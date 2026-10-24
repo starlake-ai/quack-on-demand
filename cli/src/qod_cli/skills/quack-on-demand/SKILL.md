@@ -447,6 +447,10 @@ qod tenant list
 qod tenant create acme
 qod database create --tenant acme --name tpch \
   --metastore dbName=tpch --metastore schemaName=tpch1
+# A metastore holds only pgHost, pgPort, pgUser, pgPassword, dbName, schemaName,
+# dataPath, catalogAlias and encryptionKey. Any other key is refused with
+# 400 invalid_metastore_key (database create, database update, manifest import),
+# before anything is written: a metastore never reaches a node's environment beyond those.
 
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 qod pool create --tenant acme --db acme_tpch --pool bi --size 3 \
@@ -1039,6 +1043,9 @@ qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit 
 
 # Rotate the metastore password (restarts the db's nodes):
 # Send the FULL metastore map when editing it (minus pgPassword to keep it): the map is replaced, and dropping a required key is rejected.
+# A database stored with another key (from an older release) keeps running without it: the key
+# never reaches its nodes (the manager logs it once per pool), and an update that sends it back
+# is refused with 400 invalid_metastore_key, so leave it out of the map.
 qod database update --tenant acme --name acme_tpch \
   --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
   --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass

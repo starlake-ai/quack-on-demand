@@ -1,6 +1,7 @@
 import io
 import os
 import pathlib
+import re
 import signal
 import stat
 import subprocess
@@ -309,6 +310,75 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}
     assert env["QOD_S3_ENDPOINT"] == "minio:9000"
     assert dir_mode == 0o700 and set(file_modes.values()) == {0o600}
+
+
+# SEC-1: an assignment's env is a tenant-db's metastore, tenant-admin input. Only the keys the
+# spawn script reads from its environment (TenantDb.NodeEnvKeys) are laid over the node's
+# environment, and only the metastore's own secrets become files: BASH_ENV (bash expands it before
+# running the script), PATH or QOD_NODE_BIN would run commands on this server. Defense in depth: the
+# manager filters too, but an older manager or a manager bug must not reach a node.
+SEC1_ALLOWED = {"pgHost": "h", "pgPort": "5432", "pgUser": "u", "dbName": "lake", "catalogAlias": "lake",
+                "schemaName": "main", "dataPath": "s3://lake/acme", "encrypted": "true"}
+SEC1_HOSTILE = {"BASH_ENV": "/nonexistent/sec1-marker-bash-env", "PATH": "/nonexistent/sec1-marker-path",
+                "QOD_NODE_BIN": "/nonexistent/sec1-marker-node-bin", "lockdownSql": "SELECT 'sec1-marker-lockdown';",
+                "dbInitSql": "SELECT 'sec1-marker-db-init';", "kind": "sec1-marker-kind",
+                "QOD_NODE_ID": "sec1-marker-node-id", "QOD_NODE_BIND": "sec1-marker-bind",
+                "extraSetupSql": "SELECT 'sec1-marker-extra';", "QOD_S3_SECRET_ACCESS_KEY": "sec1-marker-s3-secret",
+                "QOD_NODE_TOKEN": "sec1-marker-token", "sec1Unknown": "sec1-marker-unknown"}
+
+
+def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, capsys):
+    for k in fleet_join._CLOUD_CRED_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("QOD_NODE_BIN", raising=False)
+    a = dict(assignment(1), env={**SEC1_ALLOWED, "PgPassword": "pw", **SEC1_HOSTILE})
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append((cmd, env, read_secrets(env))); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    cmd, env, secrets = seen[0]
+    # The checks name variables, never print the environment: it holds this process's own values.
+    leaked = sorted(k for k, v in env.items() if "sec1-marker" in v)
+    assert leaked == []
+    assert {k: env.get(k) for k in SEC1_ALLOWED} == SEC1_ALLOWED
+    assert [k for k in ("BASH_ENV", "sec1Unknown", "QOD_NODE_BIN") if k in env] == []
+    own_path = env.get("PATH") == os.environ.get("PATH")
+    assert own_path, "the node's PATH is not this process's own"
+    assert [env.get(k) for k in ("lockdownSql", "dbInitSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
+        ["", "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
+    assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
+    err = capsys.readouterr().err
+    named = "'BASH_ENV'" in err and "'sec1Unknown'" in err
+    assert named, "the dropped keys are not named on stderr"
+    assert "sec1-marker" not in err, "a dropped value was printed"
+
+
+def test_a_dropped_assignment_key_is_named_once_per_pool(tmp_path, capsys):
+    member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
+    a = dict(assignment(1), env={**SEC1_ALLOWED, "PATH": "/nonexistent/sec1-marker-path"})
+    member._launch_spec(a)
+    member._launch_spec(dict(a, epoch=2))
+    assert capsys.readouterr().err.count("'PATH'") == 1
+    member._launch_spec(dict(a, poolKey={"tenant": "acme", "tenantDb": "db", "pool": "etl"}))
+    assert capsys.readouterr().err.count("'PATH'") == 1
+
+
+def test_node_env_keys_match_the_manager():
+    # The manager's TenantDb.NodeEnvKeys (NodeSecretFilesSpec pins the same list from the Scala side).
+    scala = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main" / "scala" / "ai" / "starlake" / "quack"
+             / "model" / "TenantDb.scala")
+    if not scala.exists():
+        pytest.skip("repo checkout not present (running from an sdist)")
+    text = scala.read_text(encoding="utf-8")
+    start = text.index("val NodeEnvKeys: Set[String] =")
+    body = text[text.index("Set(", start):text.index(")", text.index("Set(", start))]
+    assert sorted(fleet_join._NODE_ENV_KEYS) == sorted(re.findall(r'"([^"]+)"', body))
+
+
+def test_metastore_secret_keys_are_pinned_by_name():
+    # TenantDb.NodeSecretEnvKeys (NodeSecretFilesSpec pins the same list against the Scala constant).
+    assert sorted(fleet_join._METASTORE_SECRET_KEYS) == ["encryptionKey", "pgPassword"]
 
 
 def test_cloud_credential_keys_are_pinned_by_name():

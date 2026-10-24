@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
+import ai.starlake.quack.model.TenantDb
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -27,16 +28,31 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     keyList("cli/src/qod_cli/fleet_join.py", "_SECRET_KEYS = (", ")") shouldBe NodeSecretFiles.Keys
   }
 
+  // SEC-1: the join process overlays an assignment's env with these names only, and takes only
+  // the metastore's own secrets from it.
+  "the node env key list" should "be the same in TenantDb and fleet join" in {
+    keyList("cli/src/qod_cli/fleet_join.py", "_NODE_ENV_KEYS = (", ")").sorted shouldBe
+      TenantDb.NodeEnvKeys.toList.sorted
+  }
+
+  "the metastore secret key list" should "be the same in TenantDb and fleet join" in {
+    keyList("cli/src/qod_cli/fleet_join.py", "_METASTORE_SECRET_KEYS = (", ")").sorted shouldBe
+      TenantDb.NodeSecretEnvKeys.toList.sorted
+  }
+
   "collect" should "gather every sensitive value under its canonical name" in {
     val values = NodeSecretFiles.collect(
       metastore = Map(
-        "pgHost"                   -> "h",
-        "PgPassword"               -> "odd",
-        "pgPassword"               -> "exact",
-        "encryptionKey"            -> "k",
+        "pgHost"        -> "h",
+        "PgPassword"    -> "odd",
+        "pgPassword"    -> "exact",
+        "encryptionKey" -> "k",
+        // Neither replaces the manager's own credential nor the node key it derived: a metastore
+        // holds no QOD_* key (TenantDb.KnownMetastoreKeys).
         "QOD_S3_SECRET_ACCESS_KEY" -> "from-metastore",
-        // A tenant-db's metastore cannot replace the node's key the manager derived.
-        "QOD_NODE_AUTHZ_KEY" -> "from-metastore"
+        "QOD_NODE_AUTHZ_KEY"       -> "from-metastore",
+        // Nor does it supply the SQL the manager authors.
+        "objectStoreSql" -> "from-metastore"
       ),
       extraSetupSql = "fed",
       objectStoreSql = "",
@@ -54,8 +70,29 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "extraSetupSql"            -> "fed",
       "QOD_NODE_TOKEN"           -> "tok",
       "QOD_NODE_AUTHZ_KEY"       -> "ab" * 32,
-      "QOD_S3_SECRET_ACCESS_KEY" -> "from-metastore",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "from-manager",
       "QOD_S3_ACCESS_KEY_ID"     -> "id"
+    )
+  }
+
+  it should "take only the metastore's own secrets from a metastore" in {
+    val values = NodeSecretFiles.collect(
+      metastore = Map(
+        "PgPassword"     -> "odd",
+        "extraSetupSql"  -> "from-metastore",
+        "objectStoreSql" -> "from-metastore",
+        "QOD_GCS_SECRET" -> "from-metastore"
+      ),
+      extraSetupSql = "",
+      objectStoreSql = "",
+      token = "tok",
+      authzKey = "ab" * 32,
+      inheritedEnv = Map.empty
+    )
+    values shouldBe Map(
+      "pgPassword"         -> "odd",
+      "QOD_NODE_TOKEN"     -> "tok",
+      "QOD_NODE_AUTHZ_KEY" -> "ab" * 32
     )
   }
 

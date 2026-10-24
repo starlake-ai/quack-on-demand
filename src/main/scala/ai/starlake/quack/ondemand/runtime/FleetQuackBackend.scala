@@ -72,7 +72,11 @@ final class FleetQuackBackend(
     */
   var nodeRowExists: String => Boolean = _ => true
 
+  // Metastore keys that reach no fleet server, named once per pool and key.
+  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
+
   private def assignmentFor(spec: NodeSpec, token: String): FleetAssignment =
+    droppedKeys.report(spec.poolKey, spec.metastore)
     FleetAssignment(
       epoch = 0L, // the store bumps and writes the real epoch
       nodeId = spec.nodeId,
@@ -80,10 +84,13 @@ final class FleetQuackBackend(
       port = 0, // the store stamps the claimed server's node_port
       token = token,
       kind = spec.kindWire,
+      // Only TenantDb.NodeEnvKeys of the metastore and its own secrets (NodeMetastore), which the
+      // join process lays over the spawn script's environment and writes to files: the metastore
+      // is tenant-admin input, and any other name would reach the fleet server's node launcher.
       // The managed Postgres as servers reach it (QOD_FLEET_NODE_PG_HOST), never the manager's
       // own connection.
       env = NodePgAddress.rewrite(
-        spec.metastore,
+        NodeMetastore.env(spec.metastore) ++ NodeMetastore.secrets(spec.metastore),
         defaultPgHost,
         defaultPgPort,
         cfg.nodePgHost,

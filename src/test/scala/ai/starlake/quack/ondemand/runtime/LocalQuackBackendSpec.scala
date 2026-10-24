@@ -281,6 +281,114 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       )
     finally backend.stop(PoolKey("t", "t_default", "p"), nodeId).unsafeRunSync()
 
+  // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
+  // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
+  // QOD_NODE_BIN would run commands as the manager's user, lockdownSql would replace the manager's
+  // own. The metastore's other keys never become a secret file either. The values are inert
+  // markers, and the checks are booleans: a failing `should not include` would print the dump.
+  it should "pass only TenantDb.NodeEnvKeys of the metastore to the spawn environment" in:
+    val captures = scala.collection.concurrent.TrieMap.empty[String, java.io.File]
+    def capture(nodeId: String): java.io.File =
+      captures.getOrElseUpdate(
+        nodeId, {
+          val f = java.io.File.createTempFile(s"env-capture-$nodeId-", ".txt")
+          f.deleteOnExit()
+          f
+        }
+      )
+    val managerBin = java.nio.file.Paths.get("/opt/qod-sec1/manager/bin/qod-node")
+    val backend    = new LocalQuackBackend(
+      min = 23096,
+      max = 23097,
+      nodeBin = Some(managerBin),
+      commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5)
+    )
+    val allowed = Map(
+      "pgHost"       -> "sec1-pg-host",
+      "pgPort"       -> "15432",
+      "pgUser"       -> "sec1_user",
+      "dbName"       -> "sec1_db",
+      "catalogAlias" -> "sec1_alias",
+      "schemaName"   -> "sec1_schema",
+      "dataPath"     -> "/data/sec1",
+      "encrypted"    -> "true"
+    )
+    // A PATH that still resolves `env` and `sleep`, so the dump is written whether or not it leaks.
+    val markedPath =
+      "/nonexistent/sec1-marker-path" + java.io.File.pathSeparator +
+        sys.env.getOrElse("PATH", "/usr/bin:/bin")
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> markedPath,
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "kind"                     -> "sec1-marker-kind",
+      "extraSetupSql"            -> "SELECT 'sec1-marker-extra';",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    val key             = PoolKey("t", "t_default", "p")
+    val managerLockdown = "SET enable_external_access = false;"
+
+    def spec(nodeId: String, lockdownSql: String) = NodeSpec(
+      key,
+      nodeId,
+      Role.Dual,
+      metastore = allowed ++ hostile + ("pgPassword" -> "sec1-pg-password"),
+      s3 = Map.empty,
+      kindWire = "memory",
+      lockdownSql = lockdownSql
+    )
+    def dumpOf(nodeId: String): String =
+      val f        = capture(nodeId)
+      val deadline = System.currentTimeMillis() + 3000
+      while f.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      java.nio.file.Files.readString(f.toPath)
+    def lines(out: String, name: String): List[String] =
+      out.linesIterator.filter(_.startsWith(s"$name=")).toList
+    backend.start(spec("node-sec1-open", lockdownSql = "")).unsafeRunSync()
+    backend.start(spec("node-sec1-locked", lockdownSql = managerLockdown)).unsafeRunSync()
+    try
+      val open   = dumpOf("node-sec1-open")
+      val locked = dumpOf("node-sec1-locked")
+      Seq(open, locked).foreach { out =>
+        withClue("a metastore marker in the spawn environment: ")(
+          out.contains("sec1-marker") shouldBe false
+        )
+        allowed.foreach { case (k, v) =>
+          withClue(s"$k as the metastore has it: ")((lines(out, k) == List(s"$k=$v")) shouldBe true)
+        }
+        withClue("the unknown key: ")(lines(out, "sec1Unknown").isEmpty shouldBe true)
+        // What the manager sets stays the manager's, whatever the metastore names.
+        withClue("the manager's qod-node: ")(
+          (lines(out, "QOD_NODE_BIN") == List(s"QOD_NODE_BIN=$managerBin")) shouldBe true
+        )
+        withClue("the kind: ")((lines(out, "kind") == List("kind=memory")) shouldBe true)
+        // The secrets directory holds the metastore's password and the node's own keys, and nothing
+        // the metastore named otherwise (a cloud credential the developer's shell exports is the
+        // manager's own, delivered too, so it is set aside rather than counted).
+        val dir = java.nio.file.Paths.get(
+          lines(out, NodeSecretFiles.DirEnv).headOption.value
+            .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
+        )
+        (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
+          Set("pgPassword", NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
+        val s3 = dir.resolve("QOD_S3_SECRET_ACCESS_KEY")
+        withClue("the metastore's cloud credential in its file: ")(
+          (java.nio.file.Files.exists(s3) &&
+            java.nio.file.Files.readString(s3).contains("sec1-marker")) shouldBe false
+        )
+      }
+      withClue("lockdownSql without the manager's: ")(
+        lines(open, "lockdownSql").isEmpty shouldBe true
+      )
+      withClue("the manager's lockdownSql: ")(
+        (lines(locked, "lockdownSql") == List(s"lockdownSql=$managerLockdown")) shouldBe true
+      )
+    finally
+      backend.stop(key, "node-sec1-open").unsafeRunSync()
+      backend.stop(key, "node-sec1-locked").unsafeRunSync()
+
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling
   // back to SIGKILL on stragglers), then clear its registry maps so a

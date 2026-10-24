@@ -24,6 +24,11 @@
 #                                       MUST differ from the alias or 2-part identifiers
 #                                       like "$dbName"."customer" resolve as ambiguous.)
 #   dataPath                           (DuckLake data files directory)
+#   encrypted                          (`true` for an encrypted database, stamped by the manager)
+#
+# These are TenantDb.NodeEnvKeys: every launcher passes these metastore keys and no other (a
+# metastore is tenant-admin input), so a metastore key this script starts reading must be added
+# there too (NodeMetastoreSpec checks this script reads each of them).
 #
 # The node process is qod-node (native/qod-node), not the DuckDB CLI: it links an official DuckDB
 # release library, runs the init SQL this script assembles, and serves over quack. $QOD_NODE_BIN

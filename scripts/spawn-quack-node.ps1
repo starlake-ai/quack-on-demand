@@ -22,6 +22,13 @@
                                         MUST differ from the alias or 2-part identifiers
                                         like "$dbName"."customer" resolve as ambiguous.)
     dataPath                           (DuckLake data files directory)
+    encrypted                          (`true` for an encrypted database, stamped by the manager)
+
+  These metastore keys are TenantDb.NodeEnvKeys: every launcher passes them and no other metastore
+  key (a metastore is tenant-admin input), so a metastore key this script starts reading must be
+  added there too (NodeMetastoreSpec checks this script reads each of them). The launcher sets the
+  rest itself:
+
     kind                               (ducklake | duckdb-file | memory)
     dbInitSql                          (optional per-db init SQL)
     lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs

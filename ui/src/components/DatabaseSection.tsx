@@ -526,13 +526,15 @@ export default function DatabaseSection({ tenant }: { tenant: string }) {
               <details style={{ marginTop: '0.25rem' }}>
                 <summary style={{ cursor: 'pointer', color: 'var(--text-mute)' }}>Advanced metastore keys</summary>
                 <p className="subtle" style={{ marginBottom: 4 }}>
-                  Extra <code>key=value</code> pairs, one per line. Use for non-standard metastore options.
+                  Extra <code>key=value</code> pairs, one per line, for metastore keys the form does not
+                  set, such as <code>dbName</code> (required for a DuckDB file) or{' '}
+                  <code>catalogAlias</code>. A key a metastore does not hold is refused.
                 </p>
                 <textarea
                   value={extrasText}
                   onChange={ev => setExtrasText(ev.target.value)}
                   rows={6}
-                  placeholder={"# example:\n# applicationName=quack-prod"}
+                  placeholder={"# example:\n# dbName=sales"}
                 />
               </details>
             )}

@@ -328,12 +328,13 @@ final class PoolSupervisor(
         else withDb.removed("dataPath")
 
     // `encrypted` reaches both spawn scripts as a plain env var through the metastore-to-env
-    // plumbing every backend already has (LocalQuackBackend.scala:55,
-    // KubernetesQuackBackend.buildPod), the same indirection `catalogAlias` uses. Emitted only
-    // when true, and never for InMemory, which has nothing at rest: the scripts treat an absent
-    // value as false.
-    if td.encrypted && td.kind != TenantDbKind.InMemory then perKind.updated("encrypted", "true")
-    else perKind.removed("encrypted")
+    // plumbing every backend has (it is one of TenantDb.NodeEnvKeys), the same indirection
+    // `catalogAlias` uses. Stamped from the row's flag, whatever the stored metastore says (no
+    // caller may store it: TenantDb.KnownMetastoreKeys). Emitted only when true, and never for
+    // InMemory, which has nothing at rest: the scripts treat an absent value as false.
+    if td.encrypted && td.kind != TenantDbKind.InMemory then
+      perKind.updated(TenantDb.EncryptedKey, "true")
+    else perKind.removed(TenantDb.EncryptedKey)
 
   /** True when `key`'s tenant-db is in [[dataPathBlocked]]. False when the pool has no persisted
     * row (InMemory-only test pools): such a pool never wrote to the store, so it can't race a

@@ -104,9 +104,10 @@ object NodeSecretFiles extends LazyLogging:
     !SdkPrefixes.exists(p => name.toUpperCase(java.util.Locale.ROOT).startsWith(p)) &&
       SecretNamePattern.matches(name)
 
-  /** The values to deliver by file, keyed by canonical name. A metastore entry wins over an
-    * inherited cloud credential of the same name; among metastore spellings of one key, the exact
-    * canonical spelling wins.
+  /** The values to deliver by file, keyed by canonical name. The metastore (tenant-admin input)
+    * supplies only its own secrets ([[NodeMetastore.secrets]]: `pgPassword`, `encryptionKey`), the
+    * exact canonical spelling winning among spellings of one key; the cloud credentials, the SQL,
+    * the token and the node key all come from the manager.
     */
   def collect(
       metastore: Map[String, String],
@@ -117,7 +118,9 @@ object NodeSecretFiles extends LazyLogging:
       inheritedEnv: Map[String, String]
   ): Map[String, String] =
     val inherited = CloudCredKeys.flatMap(k => inheritedEnv.get(k).filter(_.nonEmpty).map(k -> _))
-    val fromMetastore = metastore.toSeq
+    val fromMetastore = NodeMetastore
+      .secrets(metastore)
+      .toSeq
       .flatMap { case (k, v) => canonical(k).map(c => (c, k == c, v)) }
       .groupBy(_._1)
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }

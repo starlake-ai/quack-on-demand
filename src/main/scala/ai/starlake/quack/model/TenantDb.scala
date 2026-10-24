@@ -72,6 +72,65 @@ object TenantDb {
     */
   val CatalogAliasKey: String = "catalogAlias"
 
+  /** Metastore key the manager stamps from the row's own `encrypted` flag for the spawn scripts
+    * (`PoolSupervisor`'s effective metastore). Never a caller's key: [[KnownMetastoreKeys]] leaves
+    * it out.
+    */
+  val EncryptedKey: String = "encrypted"
+
+  /** The non-secret metastore keys a node's launcher reads from its environment:
+    * `scripts/spawn-quack-node.sh` and `.ps1` read exactly these (the node image's entrypoint and
+    * `qod fleet join` run the bash script). Every launcher overlay passes these and no other
+    * metastore key: `LocalQuackBackend`'s spawn environment, `KubernetesQuackBackend`'s pod env,
+    * `FleetQuackBackend`'s assignment env and `qod fleet join` (`_NODE_ENV_KEYS`, pinned equal by
+    * `NodeSecretFilesSpec`). Any other name would become an environment variable of a bash script
+    * and of qod-node: `BASH_ENV` (bash expands it before running the script), `PATH`, `LD_PRELOAD`,
+    * `QOD_NODE_BIN`, or a variable the manager sets itself (`kind`, `dbInitSql`, `lockdownSql`).
+    * The metastore's secrets ([[NodeSecretEnvKeys]]) reach the launcher as files, never env. A key
+    * the scripts start reading from the metastore must be added here, or every launcher drops it.
+    */
+  val NodeEnvKeys: Set[String] =
+    Set(
+      "pgHost",
+      "pgPort",
+      "pgUser",
+      "dbName",
+      "catalogAlias",
+      "schemaName",
+      "dataPath",
+      "encrypted"
+    )
+
+  /** Every key a caller may store in a tenant-db's metastore, compared by exact name: the
+    * launcher's [[NodeEnvKeys]] minus [[EncryptedKey]] (stamped by the manager from the row's
+    * flag), plus the secrets [[NodeSecretEnvKeys]]. They are also every metastore key manager-side
+    * code reads (the DuckLake initializer, the catalog reader, the branch cloner and merge fence).
+    * `database/create`, `database/update` and a manifest import refuse any other key with
+    * `400 invalid_metastore_key` before anything is written.
+    */
+  val KnownMetastoreKeys: Set[String] = (NodeEnvKeys - EncryptedKey) ++ NodeSecretEnvKeys
+
+  /** The keys of `metastore` outside [[KnownMetastoreKeys]], sorted. */
+  def unknownMetastoreKeys(metastore: Map[String, String]): List[String] =
+    metastore.keys.filterNot(KnownMetastoreKeys.contains).toList.sorted
+
+  /** The refusal of a metastore holding a key outside [[KnownMetastoreKeys]], naming every such key
+    * and never a value; None when every key is known.
+    */
+  def metastoreKeyError(metastore: Map[String, String]): Option[String] =
+    unknownMetastoreKeys(metastore) match
+      case Nil  => None
+      case keys =>
+        val (noun, verb) = if keys.size == 1 then ("key", "is") else ("keys", "are")
+        val hint         =
+          if keys.contains(EncryptedKey) then
+            s" (`$EncryptedKey` is the database's own flag, set at create)"
+          else ""
+        Some(
+          s"metastore $noun ${keys.map(k => s"'$k'").mkString(", ")} $verb not accepted: a " +
+            s"metastore holds only ${KnownMetastoreKeys.toList.sorted.mkString(", ")}$hint"
+        )
+
   /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
     * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author
     * stamp, attached-catalog set, health probe, maintenance alias) must go through here so the

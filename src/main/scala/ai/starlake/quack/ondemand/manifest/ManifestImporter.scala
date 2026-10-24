@@ -92,6 +92,9 @@ object ManifestImporter extends LazyLogging:
       dup(t.pools, _.name, s"pool within ${t.name}")
     }
 
+    // Metastore keys, like database/create: before apply() writes a single row.
+    errs ++= metastoreKeyErrors(m)
+
     // Cross-references
     m.users.foreach { u =>
       u.tenant.foreach { tn =>
@@ -188,6 +191,19 @@ object ManifestImporter extends LazyLogging:
     }
 
     if errs.isEmpty then Right(()) else Left(errs.toList)
+
+  /** One error per manifest tenant-db whose metastore holds a key outside
+    * [[TenantDb.KnownMetastoreKeys]], naming the tenant, the tenant-db and every such key, never a
+    * value: the refusal `database/create` and `database/update` apply to a metastore, which feeds
+    * every node's launcher. [[validate]] refuses them; `ManifestHandlers` answers them
+    * `400 invalid_metastore_key`.
+    */
+  def metastoreKeyErrors(m: ConfigManifest): List[String] =
+    for
+      t   <- m.tenants
+      db  <- t.tenantDbs
+      err <- TenantDb.metastoreKeyError(db.metastore).toList
+    yield s"tenant '${t.name}' tenant-db '${db.name}': $err"
 
   /** A manifest role that names a built-in AND carries exactly its built-in content:
     * `qod_no_tables` holds nothing, `qod_all_tables` holds the single `* * * ALL` permission, and

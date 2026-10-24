@@ -74,6 +74,9 @@ final class KubernetesQuackBackend(
 
   private val tokens = scala.collection.concurrent.TrieMap.empty[String, String]
 
+  // Metastore keys that reach no pod, named once per pool and key.
+  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
+
   override val supportsPlacement: Boolean = true
 
   private def buildLabels(spec: NodeSpec): java.util.Map[String, String] =
@@ -109,12 +112,12 @@ final class KubernetesQuackBackend(
     // token, the forwarded QOD_S3_* / QOD_AZURE_* credentials) reaches the spawn script as a file of
     // the read-only `qod-node-secrets` projected volume instead (secretsVolume below), whose
     // Secrets start() creates before the pod.
-    // The node's id is the manager's alone (nodeIdEnv below): a metastore entry of that name would
-    // give the pod a second one.
-    val merged = spec.metastore.filterNot { case (k, _) =>
-      NodeSecretFiles.isKey(k) || k == NodeSecretFiles.NodeIdEnv
-    }
-    merged.foreach { case (k, v) =>
+    // Only TenantDb.NodeEnvKeys of the metastore become env (NodeMetastore): the metastore is
+    // tenant-admin input, and any other name (BASH_ENV, PATH, LD_PRELOAD, QOD_NODE_BIN...) would run
+    // commands in the pod before node lockdown applies, or give the pod a second value of a
+    // variable set below (its id, kind, lockdownSql...).
+    droppedKeys.report(spec.poolKey, spec.metastore)
+    NodeMetastore.env(spec.metastore).foreach { case (k, v) =>
       val e = new EnvVar()
       e.setName(k)
       e.setValue(v)
@@ -123,16 +126,15 @@ final class KubernetesQuackBackend(
     // Mirror the env-inheritance LocalQuackBackend gets for free (via ProcessBuilder): forward the
     // non-secret object-store settings present on the manager process so spawn-quack-node.sh can
     // build CREATE SECRET for s3:// / az:// / gs:// data paths (the credentials themselves ride
-    // the node-env Secret, see nodeEnvSecretValues). `spec.metastore` wins if it already carries
-    // an explicit value for one of these keys.
+    // the node-env Secret, see nodeEnvSecretValues). The manager's own: no metastore key replaces
+    // or suppresses one.
     KubernetesQuackBackend.cloudCredEnvVars.filterNot(NodeSecretFiles.isKey).foreach { name =>
-      if !spec.metastore.contains(name) then
-        readEnv(name).foreach { v =>
-          val e = new EnvVar()
-          e.setName(name)
-          e.setValue(v)
-          envs.add(e)
-        }
+      readEnv(name).foreach { v =>
+        val e = new EnvVar()
+        e.setName(name)
+        e.setValue(v)
+        envs.add(e)
+      }
     }
     // Pass the tenant-db kind so spawn-quack-node.sh selects the right
     // catalog attach path (ducklake / duckdb-file / in-memory).
@@ -706,16 +708,11 @@ final class KubernetesQuackBackend(
     // `PoolSupervisor.mergeSecretKeys`: a metastore key spelled `PgPassword` is redacted from every
     // API response by those two, so it must not be the one spelling that lands in a pod spec as a
     // plain EnvVar. The key keeps its original spelling in the Secret; the volume maps it to the
-    // canonical file name the script reads.
-    val fromMetastore = spec.metastore.view
-      .filterKeys(k =>
-        KubernetesQuackBackend.NodeEnvSecretKeys.exists(_.equalsIgnoreCase(k)) ||
-          NodeSecretFiles.CloudCredKeys.exists(_.equalsIgnoreCase(k))
-      )
-      .toMap
+    // canonical file name the script reads. Only the metastore's own secrets (NodeMetastore): a
+    // metastore holds no cloud credential.
+    val fromMetastore = NodeMetastore.secrets(spec.metastore)
     // The manager's own object-store credentials, forwarded as env before: now Secret-backed.
     val fromManager = NodeSecretFiles.CloudCredKeys
-      .filterNot(k => fromMetastore.keys.exists(_.equalsIgnoreCase(k)))
       .flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _))
     fromMetastore ++ fromManager
 
@@ -1044,11 +1041,10 @@ object KubernetesQuackBackend:
   /** File mode of the projected files: 0400 (owner read-only), as a decimal Integer for the API. */
   val SecretsFileMode: Int = Integer.parseInt("400", 8)
 
-  /** Metastore keys delivered through the per-pool node-env Secret rather than a plain pod EnvVar.
-    * Delegates to the model so the strip in [[KubernetesQuackBackend.buildPod]] and the contents of
-    * the Secret [[KubernetesQuackBackend.start]] creates share one definition and cannot drift: a
-    * key stripped from the plain env but absent from the Secret would leave the pod referencing a
-    * Secret key that does not exist, and kubelet would refuse to start it.
+  /** Metastore keys delivered through the per-pool node-env Secret rather than a plain pod EnvVar:
+    * the model's list, which [[NodeMetastore.secrets]] takes from a metastore for the Secret
+    * [[KubernetesQuackBackend.start]] creates. [[KubernetesQuackBackend.buildPod]]'s env takes only
+    * `TenantDb.NodeEnvKeys`, which holds none of them.
     */
   val NodeEnvSecretKeys: Set[String] = ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys
 

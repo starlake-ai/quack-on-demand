@@ -113,7 +113,9 @@ class KubernetesQuackBackendSpec
     env.get("QOD_S3_USE_SSL") shouldBe Some("false")
     env.contains("PATH") shouldBe false
 
-  it should "let per-node metastore override the forwarded env var" in:
+  // SEC-1: the object-store settings are the manager's own. A tenant-db's metastore (tenant-admin
+  // input) neither replaces a forwarded value nor suppresses it.
+  it should "forward the manager's object-store settings whatever the metastore names" in:
     val fakeEnv = Map("QOD_S3_ENDPOINT" -> "http://from-manager:8333")
     val backend = new KubernetesQuackBackend(
       client = server.getClient,
@@ -144,9 +146,10 @@ class KubernetesQuackBackendSpec
       .getSpec
       .getContainers
       .get(0)
-    val env = container.getEnv.asScala.map(e => e.getName -> e.getValue).toMap
+    val endpoints =
+      container.getEnv.asScala.filter(_.getName == "QOD_S3_ENDPOINT").map(_.getValue).toList
 
-    env("QOD_S3_ENDPOINT") shouldBe "http://per-pool:8333"
+    endpoints shouldBe List("http://from-manager:8333")
 
   it should "discover existing pods by label on restart" in:
     val client = server.getClient

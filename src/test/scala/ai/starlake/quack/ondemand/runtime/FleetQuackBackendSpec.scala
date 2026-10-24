@@ -169,6 +169,44 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       Some(("host.docker.internal", "15432"))
   }
 
+  // SEC-1: a tenant-db's metastore is tenant-admin input, and `qod fleet join` lays the
+  // assignment's env over the spawn script's environment. Only TenantDb.NodeEnvKeys and the
+  // metastore's own secrets (which the join process writes to files) travel; the SQL the manager
+  // sets keeps its own fields.
+  it should "hand servers only TenantDb.NodeEnvKeys and the metastore's own secrets" in {
+    val (store, backend, _, _) = fixture()
+    val agent                  = new FakeAgent(store, "srv-1"); agent.beat()
+    val allowed                = Map(
+      "pgHost"       -> "h",
+      "pgPort"       -> "5432",
+      "pgUser"       -> "u",
+      "dbName"       -> "lake",
+      "catalogAlias" -> "lake",
+      "schemaName"   -> "main",
+      "dataPath"     -> "s3://lake/acme",
+      "encrypted"    -> "true"
+    )
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> "/nonexistent/sec1-marker-path",
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "extraSetupSql"            -> "SELECT 'sec1-marker-extra';",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "QOD_NODE_TOKEN"           -> "sec1-marker-token",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    val sec1 = spec("n1").copy(
+      metastore = allowed ++ hostile + ("PgPassword" -> "pw"),
+      lockdownSql = "SET enable_external_access = false;"
+    )
+    withAgent(agent)(backend.start(sec1))
+    val a = store.get("srv-1").get.assignment.get
+    a.env shouldBe allowed + ("PgPassword" -> "pw")
+    a.lockdownSql shouldBe "SET enable_external_access = false;"
+    a.extraSetupSql shouldBe ""
+  }
+
   it should "raise NoFreeServer with a reason" in {
     val (store, backend, _, _) = fixture()
     the[NoFreeServer] thrownBy backend.start(spec("n1")).unsafeRunSync() should have message

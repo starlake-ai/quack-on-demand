@@ -261,6 +261,53 @@ class KubernetesQuackBackendSecuritySpec
     plain should contain("pgHost")
     plain should contain("dbName")
 
+  // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may
+  // become pod env: BASH_ENV (bash expands it before running the spawn script), PATH, LD_PRELOAD
+  // or QOD_NODE_BIN would run commands inside the pod before node lockdown applies, and a name the
+  // manager sets itself would give the pod a second value of it.
+  it should "carry only TenantDb.NodeEnvKeys of the metastore, plus what the manager sets" in:
+    val backend = makeBackend()
+    val allowed = lakeMeta ++ Map(
+      "catalogAlias" -> "acme_lake",
+      "schemaName"   -> "main",
+      "dataPath"     -> "s3://lake/acme",
+      "encrypted"    -> "true"
+    )
+    val hostile = Map(
+      "BASH_ENV"                 -> "/nonexistent/sec1-marker-bash-env",
+      "PATH"                     -> "/nonexistent/sec1-marker-path",
+      "LD_PRELOAD"               -> "/nonexistent/sec1-marker-preload.so",
+      "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
+      "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
+      "dbInitSql"                -> "SELECT 'sec1-marker-db-init';",
+      "kind"                     -> "sec1-marker-kind",
+      "QOD_SECRETS_DIR"          -> "/nonexistent/sec1-marker-secrets",
+      "QOD_NODE_PORT"            -> "1",
+      "QOD_S3_ENDPOINT"          -> "sec1-marker-endpoint",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
+      "sec1Unknown"              -> "sec1-marker-unknown"
+    )
+    backend
+      .start(nodeEnvSpec("quack-nodeenv-sec1", allowed ++ hostile + ("pgPassword" -> "p")))
+      .unsafeRunSync()
+    val env   = podEnv("quack-nodeenv-sec1")
+    val names = env.map(_.getName)
+    // One value per name: kubelet lets the last duplicate win, a reader of the first sees another.
+    names.distinct shouldBe names
+    names.toSet shouldBe allowed.keySet ++
+      Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv)
+    val values = env.map(e => e.getName -> e.getValue).toMap
+    allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
+    values.get("kind") shouldBe Some("ducklake")
+    values.get(NodeSecretFiles.DirEnv) shouldBe Some(KubernetesQuackBackend.SecretsMountPath)
+    values.get("QOD_NODE_PORT") shouldBe Some("8080")
+    values.get(NodeSecretFiles.NodeIdEnv) shouldBe Some("quack-nodeenv-sec1")
+    withClue("a metastore marker in the pod env: ")(
+      env.exists(e => Option(e.getValue).exists(_.contains("sec1-marker"))) shouldBe false
+    )
+    // The node-env Secret holds the metastore's own secret only: no metastore cloud credential.
+    secretPayload(nodeEnvSecretName).value shouldBe Map("pgPassword" -> "p")
+
   "the node-env Secret" should "hold exactly the keys the pod references, with their values" in:
     val backend = makeBackend()
     backend

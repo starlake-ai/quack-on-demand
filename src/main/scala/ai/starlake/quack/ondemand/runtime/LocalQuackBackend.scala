@@ -50,6 +50,8 @@ final class LocalQuackBackend(
   private val reserved = TrieMap.empty[Int, ProcessHandle]
   // The OS reported no start instant for a node: logged once, see start().
   private val startInstantMissingLogged = new java.util.concurrent.atomic.AtomicBoolean(false)
+  // Metastore keys that reach no node, named once per pool and key.
+  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
 
   // A manager killed together with a node it was spawning can leave a secrets directory behind.
   NodeSecretFiles.sweepStale()
@@ -70,7 +72,7 @@ final class LocalQuackBackend(
     val token = LocalQuackBackend.randomToken()
     val cmd   = commandFor(spec, port, token)
     val pb    = new JProcessBuilder(cmd*).inheritIO()
-    // Propagate the non-sensitive metastore as environment variables to the spawned Quack node.
+    // Propagate the metastore's TenantDb.NodeEnvKeys as environment variables to the spawned node.
     val env = pb.environment()
     // Nothing secret may sit in the node's environment (or argv): a node user reads both back
     // through getenv() / /proc/<pid>/environ. The sensitive values (NodeSecretFiles.Keys: metastore
@@ -99,10 +101,15 @@ final class LocalQuackBackend(
     // would resurrect a key `effectiveMetastoreFor` deliberately removed (e.g. the
     // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
     // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
-    spec.metastore.foreach { case (k, v) => if !NodeSecretFiles.isKey(k) then env.put(k, v) }
+    // Only TenantDb.NodeEnvKeys of it reach the script (NodeMetastore): the metastore is
+    // tenant-admin input, and any other name (BASH_ENV, PATH, QOD_NODE_BIN, lockdownSql...) would
+    // run commands as this process's user or replace a variable set here, whatever the order of
+    // the puts.
+    droppedKeys.report(spec.poolKey, spec.metastore)
+    NodeMetastore.env(spec.metastore).foreach { case (k, v) => env.put(k, v) }
     env.put("kind", spec.kindWire)
     // The node's id, which qod-node checks every session handle against (the script passes it as
-    // --node-id). After the metastore overlay, so no metastore key of this name can replace it.
+    // --node-id). No metastore key of this name reaches the environment.
     env.put(NodeSecretFiles.NodeIdEnv, spec.nodeId)
     // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy settings and before the
     // catalog ATTACH, unlike extraSetupSql which runs after it.
