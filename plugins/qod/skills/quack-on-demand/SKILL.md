@@ -451,9 +451,13 @@ qod database create --tenant acme --name tpch \
 # dataPath, catalogAlias and encryptionKey. Only the non-secret ones become a node's
 # environment variables; pgPassword and encryptionKey reach the node only as files.
 # Any other key is refused with 400 invalid_metastore_key (database create, database
-# update, manifest import) before anything is written. A database stored with one by an
-# older release keeps running without it: the key is dropped when a node starts and left
-# out of a manifest export.
+# update, manifest import) before anything is written; database update still takes one
+# named like an object-store secret sent empty, which removes it (see "Update a
+# database"). A database stored with another key by an older release keeps running
+# without it: the key is dropped when a node starts and left out of a manifest export.
+# A password or encryption key stored under another spelling (PgPassword, EncryptionKey)
+# is not dropped: its nodes still use it, but a manifest export leaves it out too (to
+# export a password, first store it as pgPassword: see "Update a database").
 
 # Create a pool (1 WriteOnly + 1 ReadOnly + 1 Dual = 3 nodes)
 qod pool create --tenant acme --db acme_tpch --pool bi --size 3 \
@@ -1052,6 +1056,9 @@ qod database update --tenant acme --name acme_tpch --init-sql "SET memory_limit 
 # object-store secret (s3_secret_access_key, azure_account_key, gcs_hmac_secret) is hidden from
 # responses and kept when left out: remove it by sending it empty with the rest of the map, e.g.
 # --metastore s3_secret_access_key=
+# A password stored under another spelling (PgPassword) still reaches its nodes, but a manifest
+# export leaves it out (logged at ERROR): store it as pgPassword by sending
+# pgPassword=<the password> with the rest of the map, which replaces every spelling.
 qod database update --tenant acme --name acme_tpch \
   --metastore dbName=acme_tpch --metastore pgHost=localhost --metastore pgPort=5432 \
   --metastore pgUser=postgres --metastore schemaName=main --metastore pgPassword=newpass

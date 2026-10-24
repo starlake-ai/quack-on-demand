@@ -106,9 +106,17 @@ object TenantDb {
     * flag), plus the secrets [[NodeSecretEnvKeys]]. They are also every metastore key manager-side
     * code reads (the DuckLake initializer, the catalog reader, the branch cloner and merge fence).
     * `database/create`, `database/update` and a manifest import refuse any other key with
-    * `400 invalid_metastore_key` before anything is written.
+    * `400 invalid_metastore_key` before anything is written, except that `database/update` also
+    * takes a secret-named key ([[SecretKeys]]) sent empty, which removes it
+    * ([[metastoreUpdateKeyError]]).
     */
   val KnownMetastoreKeys: Set[String] = (NodeEnvKeys - EncryptedKey) ++ NodeSecretEnvKeys
+
+  /** The clause naming [[KnownMetastoreKeys]], sorted, in every line that refuses or drops another
+    * key: the API's refusal, a node's dropped key, a manifest export's left-out key.
+    */
+  val MetastoreHoldsOnly: String =
+    s"a metastore holds only ${KnownMetastoreKeys.toList.sorted.mkString(", ")}"
 
   /** The keys of `metastore` outside [[KnownMetastoreKeys]], sorted. */
   def unknownMetastoreKeys(metastore: Map[String, String]): List[String] =
@@ -127,8 +135,8 @@ object TenantDb {
             s" (`$EncryptedKey` is the database's own flag, set at create)"
           else ""
         Some(
-          s"metastore $noun ${keys.map(k => s"'$k'").mkString(", ")} $verb not accepted: a " +
-            s"metastore holds only ${KnownMetastoreKeys.toList.sorted.mkString(", ")}$hint"
+          s"metastore $noun ${keys.map(k => s"'$k'").mkString(", ")} $verb not accepted: " +
+            s"$MetastoreHoldsOnly$hint"
         )
 
   /** [[metastoreKeyError]] for `database/update`, which also takes a secret-named key outside
@@ -146,6 +154,25 @@ object TenantDb {
     */
   def printableKey(key: String): String =
     key.flatMap(c => if c.isControl then f"\\u${c.toInt}%04x" else c.toString)
+
+  /** How `database/update` removes `key`, a stored key outside [[KnownMetastoreKeys]] that no node
+    * uses, for the lines that name one (a node's dropped key, a manifest export's left-out key).
+    * Not for a spelling of [[NodeSecretEnvKeys]] (`PgPassword`): the nodes use that as their
+    * secret, so it is stored under its own name, never removed. An update replaces the whole
+    * metastore, so the advice always sends the full map: one sending only the key would revert
+    * every other key (a branch row would lose its `catalogAlias`). A secret-named key
+    * ([[SecretKeys]], in any spelling) is hidden from responses and kept by an update that leaves
+    * it out, so it goes by sending its [[SecretKeys]] name empty, which removes every spelling
+    * ([[metastoreUpdateKeyError]] accepts that).
+    */
+  def metastoreKeyRemoval(key: String): String =
+    SecretKeys.find(_.equalsIgnoreCase(key)) match
+      case Some(secret) =>
+        "Remove it by sending the database's full metastore through database/update with " +
+          s"'$secret' set to an empty value: an update replaces the metastore, and one that " +
+          "leaves a secret key out keeps it."
+      case None =>
+        "Remove it by sending the database's full metastore without it through database/update."
 
   /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
     * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author

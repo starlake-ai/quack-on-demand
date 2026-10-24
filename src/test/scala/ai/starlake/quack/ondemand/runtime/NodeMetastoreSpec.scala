@@ -1,18 +1,16 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{PoolKey, TenantDb}
-import ch.qos.logback.classic.{Level, Logger as LogbackLogger}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
 import com.typesafe.scalalogging.Logger
 import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import org.slf4j.LoggerFactory
 
 import java.nio.file.{Files, Paths}
 import java.util.UUID
-import scala.jdk.CollectionConverters.*
 
 /** SEC-1: a tenant-db's metastore is tenant-admin input, and only [[TenantDb.NodeEnvKeys]] of it
   * may become a launcher's environment, only its own secrets may become files, and every other key
@@ -96,59 +94,60 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
     NodeMetastore.dropped(allowed + ("pgPassword" -> "p")) shouldBe Nil
   }
 
-  /** A [[NodeMetastore.DroppedKeys]] over a fresh logger, and what that logger receives at every
-    * level (the level is part of what is pinned), kept off the console.
+  /** What a [[NodeMetastore.DroppedKeys]] over a fresh logger logs while `body` reports through it,
+    * at every level (the level is part of what is pinned), kept off the console.
     */
-  private def droppedKeys(): (NodeMetastore.DroppedKeys, () => List[ILoggingEvent]) =
-    val logger =
-      LoggerFactory.getLogger(s"NodeMetastoreSpec.${UUID.randomUUID}").asInstanceOf[LogbackLogger]
-    val appender = new ListAppender[ILoggingEvent]()
-    appender.start()
-    logger.addAppender(appender)
-    logger.setLevel(Level.TRACE)
-    logger.setAdditive(false)
-    (new NodeMetastore.DroppedKeys(Logger(logger)), () => appender.list.asScala.toList)
+  private def droppedKeys(body: NodeMetastore.DroppedKeys => Unit): List[ILoggingEvent] =
+    val name = s"NodeMetastoreSpec.${UUID.randomUUID}"
+    LogCapture.logged(name)(body(new NodeMetastore.DroppedKeys(Logger(name))))._2
 
-  "NodeMetastore.DroppedKeys" should "log at ERROR once per pool and key, by name, never by value" in {
-    val (log, events) = droppedKeys()
-    def lines         = events().map(_.getFormattedMessage)
-    val m             = allowed ++ Map("BASH_ENV" -> "value-a", "PATH" -> "value-b")
-    log.report(poolA, m)
-    log.report(poolA, m)
-    lines.size shouldBe 2
-    lines.head should include(poolA.toString)
-    lines.head should include("'BASH_ENV'")
-    lines(1) should include("'PATH'")
-    log.report(poolB, m)
-    log.report(poolA, m + ("lockdownSql" -> "value-c"))
-    lines.size shouldBe 5
-    lines.last should include("'lockdownSql'")
-    withClue("a metastore value in the log: ")(lines.exists(_.contains("value-")) shouldBe false)
-    // A key carrying a line break cannot forge a second log line.
-    log.report(poolA, Map("a\nb" -> "v"))
-    lines.size shouldBe 6
-    lines.last.exists(_.isControl) shouldBe false
+  "NodeMetastore.DroppedKeys" should "log at ERROR once per pool and key, by name, not value" in {
+    val m      = allowed ++ Map("BASH_ENV" -> "value-a", "PATH" -> "value-b")
+    val events = droppedKeys { log =>
+      log.report(poolA, m)
+      log.report(poolA, m)
+      log.report(poolB, m)
+      log.report(poolA, m + ("lockdownSql" -> "value-c"))
+      // A key carrying a line break cannot forge a second log line.
+      log.report(poolA, Map("a\nb" -> "v"))
+    }
     // The default root level is ERROR (logback.xml): a WARN would reach no operator.
-    events().map(_.getLevel).distinct shouldBe List(Level.ERROR)
+    LogCapture.droppedKeyLines(events) shouldBe List(
+      (Level.ERROR, poolA.toString, "BASH_ENV"),
+      (Level.ERROR, poolA.toString, "PATH"),
+      (Level.ERROR, poolB.toString, "BASH_ENV"),
+      (Level.ERROR, poolB.toString, "PATH"),
+      (Level.ERROR, poolA.toString, "lockdownSql"),
+      (Level.ERROR, poolA.toString, "a\\u000ab")
+    )
+    val lines = events.map(_.getFormattedMessage)
+    lines.size shouldBe 6
+    withClue("a metastore value in the log: ")(lines.exists(_.contains("value-")) shouldBe false)
+    lines.exists(_.exists(_.isControl)) shouldBe false
   }
 
-  it should "say how to remove each key: a secret-named one by sending it empty" in {
-    val (log, events) = droppedKeys()
-    log.report(
-      poolA,
-      Map("applicationName" -> "v", "s3_secret_access_key" -> "v", "AZURE_ACCOUNT_KEY" -> "v")
+  it should "say how to remove each key, always sending the database's full metastore" in {
+    val events = droppedKeys(
+      _.report(
+        poolA,
+        Map("applicationName" -> "v", "s3_secret_access_key" -> "v", "AZURE_ACCOUNT_KEY" -> "v")
+      )
     )
-    def line(key: String) = events().map(_.getFormattedMessage).find(_.contains(s"'$key'")).value
+    def line(key: String) = events.map(_.getFormattedMessage).find(_.contains(s"'$key'")).value
+    // An update replaces the whole metastore: one sending only the key would revert every other key
+    // (a branch row would lose its catalogAlias), so the advice always sends the full map.
     // Shown in responses and not carried over: an update that leaves it out removes it.
     line("applicationName") should include(
-      "sending the database's metastore without it through database/update"
+      "sending the database's full metastore without it through database/update"
     )
     // Hidden from responses and carried over by an update that leaves it out: sent empty, under
     // the name the API accepts (any spelling of it is removed), is the one way to remove it.
     line("s3_secret_access_key") should include(
-      "sending 's3_secret_access_key' with an empty value through database/update"
+      "sending the database's full metastore through database/update with " +
+        "'s3_secret_access_key' set to an empty value"
     )
     line("AZURE_ACCOUNT_KEY") should include(
-      "sending 'azure_account_key' with an empty value through database/update"
+      "sending the database's full metastore through database/update with " +
+        "'azure_account_key' set to an empty value"
     )
   }

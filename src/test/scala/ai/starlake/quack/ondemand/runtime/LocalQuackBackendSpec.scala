@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -247,8 +249,15 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       metastore = Map("pgHost" -> "h", "QOD_NODE_ID" -> "spoof", "qod_node_authz_key" -> "spoof"),
       s3 = Map.empty
     )
-    backend.start(spec).unsafeRunSync()
+    val (_, logged) =
+      LogCapture.logged(classOf[LocalQuackBackend].getName)(backend.start(spec).unsafeRunSync())
     try
+      // Each spoofed key named once, at ERROR, never with its value.
+      LogCapture.droppedKeyLines(logged) shouldBe
+        List("QOD_NODE_ID", "qod_node_authz_key").map((Level.ERROR, spec.poolKey.toString, _))
+      withClue("a spoofed value in the backend's log")(
+        logged.exists(_.getFormattedMessage.contains("spoof")) shouldBe false
+      )
       val deadline = System.currentTimeMillis() + 3000
       while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
       val out = java.nio.file.Files.readString(capture.toPath)
@@ -346,9 +355,18 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       java.nio.file.Files.readString(f.toPath)
     def lines(out: String, name: String): List[String] =
       out.linesIterator.filter(_.startsWith(s"$name=")).toList
-    backend.start(spec("node-sec1-open", lockdownSql = "")).unsafeRunSync()
-    backend.start(spec("node-sec1-locked", lockdownSql = managerLockdown)).unsafeRunSync()
+    val (_, logged) = LogCapture.logged(classOf[LocalQuackBackend].getName) {
+      backend.start(spec("node-sec1-open", lockdownSql = "")).unsafeRunSync()
+      backend.start(spec("node-sec1-locked", lockdownSql = managerLockdown)).unsafeRunSync()
+    }
     try
+      // Each dropped key named once for the pool, not once per node, at ERROR, never with its value
+      // (a boolean check: the PATH value holds this process's own PATH).
+      LogCapture.droppedKeyLines(logged) shouldBe
+        hostile.keys.toList.sorted.map((Level.ERROR, key.toString, _))
+      withClue("a metastore marker in the backend's log: ")(
+        logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+      )
       val open   = dumpOf("node-sec1-open")
       val locked = dumpOf("node-sec1-locked")
       Seq(open, locked).foreach { out =>

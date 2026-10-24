@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import io.fabric8.kubernetes.api.model.{Container, ObjectMeta, Pod, PodSpec}
 import io.fabric8.kubernetes.client.server.mock.KubernetesServer
 import org.scalatest.{BeforeAndAfterEach, OptionValues}
@@ -127,17 +129,25 @@ class KubernetesQuackBackendSpec
       readPodReady = _ => true,
       readEnv = name => fakeEnv.get(name)
     )
-    val node = backend
-      .start(
-        NodeSpec(
-          PoolKey("acme", "acme_default", "sales"),
-          "quack-cred-override",
-          Role.Dual,
-          metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
-          s3 = Map.empty
+    val (node, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(
+          NodeSpec(
+            PoolKey("acme", "acme_default", "sales"),
+            "quack-cred-override",
+            Role.Dual,
+            metastore = Map("QOD_S3_ENDPOINT" -> "http://per-pool:8333"),
+            s3 = Map.empty
+          )
         )
-      )
-      .unsafeRunSync()
+        .unsafeRunSync()
+    )
+    // The metastore's key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      List((Level.ERROR, "acme/acme_default/sales", "QOD_S3_ENDPOINT"))
+    withClue("the metastore's value in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("per-pool")) shouldBe false
+    )
 
     val container = server.getClient.pods
       .inNamespace("default")

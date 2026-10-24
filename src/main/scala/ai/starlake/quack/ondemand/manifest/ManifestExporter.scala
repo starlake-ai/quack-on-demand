@@ -149,7 +149,16 @@ object ManifestExporter extends LazyLogging:
           // comment does not depend on that.) Unlike `pgPassword` (also a SecretKeys member but
           // carried verbatim here so a manifest replay can still connect), this key is minted or
           // caller-supplied per database and has no legitimate reason to travel with a backup.
-          metastore = knownMetastore(t.id, d) - TenantDb.EncryptionKeyName,
+          // Removed in every spelling, silently: a row stored before the API compared names
+          // exactly may hold `EncryptionKey`, which its nodes use as the key
+          // (`NodeMetastore.secrets`), and an export never carries an encryption key, whatever
+          // its spelling. No line is logged for one: the API offers no way to change an
+          // encryption key, so the line would have no remedy.
+          metastore = knownMetastore(
+            t.id,
+            d.name,
+            d.metastore.filterNot { case (k, _) => k.equalsIgnoreCase(TenantDb.EncryptionKeyName) }
+          ),
           dataPath = d.dataPath,
           objectStore = d.objectStore,
           defaultDatabase = d.defaultDatabase,
@@ -347,23 +356,42 @@ object ManifestExporter extends LazyLogging:
       users = superusers ++ tenants.flatMap(_._4)
     )
 
-  /** `d`'s metastore without its keys outside [[TenantDb.KnownMetastoreKeys]], which a manifest
-    * import refuses as `database/create` does: one of them would make the whole manifest
-    * unimportable. A row holds one when it was stored before the API refused them (the admin UI
-    * once suggested `applicationName`); the row itself keeps it. Each key left out is logged by
-    * name, never by value, at ERROR: the default root level (logback.xml) drops a WARN.
+  /** `metastore` (of `tenant`'s `database`) without its keys outside
+    * [[TenantDb.KnownMetastoreKeys]], which a manifest import refuses as `database/create` does:
+    * one of them would make the whole manifest unimportable. A row holds one when it was stored
+    * before the API refused them (the admin UI once suggested `applicationName`) or compared their
+    * names exactly (`PgPassword`); the row itself keeps it. Each key left out is logged by name,
+    * never by value, at ERROR (the default root level, logback.xml, drops a WARN), with how to fix
+    * the row: every export repeats the line until then.
     */
-  private def knownMetastore(tenant: String, d: TenantDb): Map[String, String] =
+  private def knownMetastore(
+      tenant: String,
+      database: String,
+      metastore: Map[String, String]
+  ): Map[String, String] =
     val (known, other) =
-      d.metastore.partition { case (k, _) => TenantDb.KnownMetastoreKeys.contains(k) }
+      metastore.partition { case (k, _) => TenantDb.KnownMetastoreKeys.contains(k) }
     other.keys.toList.sorted.foreach { k =>
       logger.error(
-        s"manifest export: tenant '$tenant' database '${d.name}': left out metastore key " +
-          s"'${TenantDb.printableKey(k)}', which a manifest import refuses (a metastore holds " +
-          s"only ${TenantDb.KnownMetastoreKeys.toList.sorted.mkString(", ")})"
+        s"manifest export: tenant '$tenant' database '$database': left out metastore key " +
+          s"'${TenantDb.printableKey(k)}', which a manifest import refuses " +
+          s"(${TenantDb.MetastoreHoldsOnly}). ${leftOutAdvice(k)}"
       )
     }
     known
+
+  /** What the line for a left-out `key` advises. A password stored under another spelling
+    * (`PgPassword`) is no leftover: the database's nodes use it as the catalog password
+    * (`NodeMetastore.secrets` matches any spelling), so removing it would cut them off, and storing
+    * it under its own name replaces every spelling (`PoolSupervisor.mergeSecretKeys`). Any other
+    * key is removed ([[TenantDb.metastoreKeyRemoval]], the advice a node's dropped-key line gives).
+    */
+  private def leftOutAdvice(key: String): String =
+    if key.equalsIgnoreCase("pgPassword") then
+      "The database's nodes use it as the catalog password, so a replay of this export runs " +
+        "without it. Fix the row: send the database's full metastore through database/update " +
+        "with 'pgPassword' set to the password (that replaces every spelling), then export again."
+    else TenantDb.metastoreKeyRemoval(key)
 
   /** Resolve a single [[ai.starlake.quack.ondemand.state.PoolPermission]] into a
     * [[ManifestPoolGrant]]. `pool = None` when the permission has no pool id (a tenant-wide

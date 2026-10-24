@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.ondemand.state.{
   FleetAssignment,
   FleetServerRow,
@@ -13,6 +14,7 @@ import ai.starlake.quack.ondemand.state.{
 }
 import cats.effect.{IO, Ref}
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -200,7 +202,14 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       metastore = allowed ++ hostile + ("PgPassword" -> "pw"),
       lockdownSql = "SET enable_external_access = false;"
     )
-    withAgent(agent)(backend.start(sec1))
+    val (_, logged) =
+      LogCapture.logged(classOf[FleetQuackBackend].getName)(withAgent(agent)(backend.start(sec1)))
+    // Each dropped key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      hostile.keys.toList.sorted.map((Level.ERROR, pk.toString, _))
+    withClue("a metastore marker in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+    )
     val a = store.get("srv-1").get.assignment.get
     a.env shouldBe allowed + ("PgPassword" -> "pw")
     a.lockdownSql shouldBe "SET enable_external_access = false;"

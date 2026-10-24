@@ -5,19 +5,15 @@ import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.manifest.{ConfigManifest, ManifestExporter, ManifestImporter}
-import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
+import ai.starlake.quack.ondemand.runtime.testkit.{LogCapture, StubQuackBackend}
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.unsafe.implicits.global
-import ch.qos.logback.classic.{Level, Logger as LogbackLogger}
+import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
 import io.circe.yaml.v12.parser
 import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import org.slf4j.LoggerFactory
-
-import scala.jdk.CollectionConverters.*
 
 /** SEC-1: a tenant-db's metastore is tenant-admin input, and its keys used to become environment
   * variables of every node's launcher. `database/create`, `database/update` and a manifest import
@@ -115,23 +111,6 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
     err.error shouldBe "invalid_metastore_key"
     err.message should include(s"'$key'")
     withClue("the refused value in the message: ")(err.message.contains(marker) shouldBe false)
-
-  /** `body`'s result, and what the logger `name` receives meanwhile at every level (the level is
-    * part of what is pinned), kept off the console.
-    */
-  private def logged[A](name: String)(body: => A): (A, List[ILoggingEvent]) =
-    val logger            = LoggerFactory.getLogger(name).asInstanceOf[LogbackLogger]
-    val (level, additive) = (logger.getLevel, logger.isAdditive)
-    val appender          = new ListAppender[ILoggingEvent]()
-    appender.start()
-    logger.addAppender(appender)
-    logger.setLevel(Level.TRACE)
-    logger.setAdditive(false)
-    try (body, appender.list.asScala.toList)
-    finally
-      logger.detachAppender(appender)
-      logger.setLevel(level)
-      logger.setAdditive(additive)
 
   "database/create" should "refuse a key outside KnownMetastoreKeys, writing nothing" in:
     refused.foreach { key =>
@@ -263,6 +242,16 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
       requireEncryption = false
     )
 
+  /** `store`'s manifest export, and every line the exporter logs meanwhile at every level (the
+    * level is part of what is pinned), kept off the console.
+    */
+  private def exportLogged(
+      store: InMemoryControlPlaneStore
+  ): (Either[(sttp.model.StatusCode, ErrorResponse), String], List[ILoggingEvent]) =
+    LogCapture.logged(ManifestExporter.getClass.getName)(
+      manifestHandlers(store).exportYaml(None)(noScope).unsafeRunSync()
+    )
+
   "a manifest import" should "refuse a key outside KnownMetastoreKeys, writing nothing" in:
     refused.foreach { key =>
       withClue(s"$key: ") {
@@ -307,10 +296,8 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
         dataPath = "/nonexistent/sec1/acme_files.duckdb"
       )
     )
-    val (exported, events) = logged(ManifestExporter.getClass.getName) {
-      manifestHandlers(store).exportYaml(None)(noScope).unsafeRunSync()
-    }
-    val yaml = exported.toOption.value
+    val (exported, events) = exportLogged(store)
+    val yaml               = exported.toOption.value
     List("applicationName", "s3_secret_access_key", marker).foreach { s =>
       withClue(s"$s in the export: ")(yaml.contains(s) shouldBe false)
     }
@@ -324,7 +311,73 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
     names("acme_lake", "applicationName") shouldBe true
     names("acme_files", "s3_secret_access_key") shouldBe true
     withClue("a metastore value in the log: ")(lines.exists(_.contains(marker)) shouldBe false)
+    // With how to clean the row (every export repeats the line until then), as a node's dropped-key
+    // line says it: the database's full metastore without the key, or with a secret-named one
+    // sent empty.
+    def advises(key: String, advice: String) =
+      lines.exists(l => l.contains(s"'$key'") && l.contains(advice))
+    advises(
+      "applicationName",
+      "Remove it by sending the database's full metastore without it through database/update."
+    ) shouldBe true
+    advises(
+      "s3_secret_access_key",
+      "Remove it by sending the database's full metastore through database/update with " +
+        "'s3_secret_access_key' set to an empty value"
+    ) shouldBe true
     val replay = new InMemoryControlPlaneStore()
     manifestHandlers(replay).importYaml(yaml, None)(noScope).unsafeRunSync().isRight shouldBe true
     replay.snapshot().tenantDbs.map(d => d.name -> d.metastore).toMap shouldBe
       Map("acme_lake" -> fileMeta, "acme_files" -> filesMeta)
+
+  // A row stored before the API compared names exactly may hold its password as `PgPassword`. Its
+  // nodes use it as the catalog password (NodeMetastore.secrets matches any spelling), so the line
+  // says so and how to store it under its own name: removing it would cut the nodes off.
+  it should "leave out a password spelled otherwise, saying how to store it as pgPassword" in:
+    val (store, sup, h) = fixture()
+    create(h, fileMeta).isRight shouldBe true
+    storeRow(store, sup, fileMeta + ("PgPassword" -> marker))
+    val (exported, events) = exportLogged(store)
+    val yaml               = exported.toOption.value
+    withClue("a spelling of the password in the export: ")(
+      yaml.toLowerCase.contains("pgpassword") shouldBe false
+    )
+    withClue("the password in the export: ")(yaml.contains(marker) shouldBe false)
+    events.map(_.getLevel) shouldBe List(Level.ERROR)
+    val line = events.head.getFormattedMessage
+    withClue("the password in the log: ")(line.contains(marker) shouldBe false)
+    List(
+      "tenant 'acme' database 'acme_lake': left out metastore key 'PgPassword'",
+      "The database's nodes use it as the catalog password, so a replay of this export runs " +
+        "without it.",
+      "Fix the row: send the database's full metastore through database/update with " +
+        "'pgPassword' set to the password (that replaces every spelling), then export again."
+    ).foreach(s => withClue(s"the line says '$s': ")(line.contains(s) shouldBe true))
+    withClue("the line advises removing the password: ")(line.contains("Remove it") shouldBe false)
+
+  it should "carry the password once an update stores it as pgPassword, logging nothing" in:
+    val (store, sup, h) = fixture()
+    create(h, fileMeta).isRight shouldBe true
+    storeRow(store, sup, fileMeta + ("PgPassword" -> marker))
+    // What the line advises: the database's full metastore, with pgPassword set to the password.
+    update(h, fileMeta + ("pgPassword" -> marker)).isRight shouldBe true
+    store.snapshot().tenantDbs.head.metastore shouldBe fileMeta + ("pgPassword" -> marker)
+    val (exported, events) = exportLogged(store)
+    events.size shouldBe 0
+    val m = parser.parse(exported.toOption.value).flatMap(_.as[ConfigManifest]).toOption.value
+    m.tenants.flatMap(_.tenantDbs).map(d => d.name -> d.metastore) shouldBe
+      List("acme_lake" -> (fileMeta + ("pgPassword" -> marker)))
+
+  // An export never carries an encryption key, whatever its spelling, and says nothing about one:
+  // the API offers no way to change an encryption key, so a line would have no remedy.
+  it should "leave out an encryption key spelled otherwise, silently" in:
+    val (store, sup, h) = fixture()
+    create(h, fileMeta, encrypted = true).isRight shouldBe true
+    storeRow(store, sup, fileMeta + ("EncryptionKey" -> marker))
+    val (exported, events) = exportLogged(store)
+    val yaml               = exported.toOption.value
+    withClue("a spelling of the key in the export: ")(
+      yaml.toLowerCase.contains("encryptionkey") shouldBe false
+    )
+    withClue("the key in the export: ")(yaml.contains(marker) shouldBe false)
+    events.size shouldBe 0

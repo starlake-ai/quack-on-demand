@@ -1,7 +1,9 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import cats.effect.unsafe.implicits.global
+import ch.qos.logback.classic.Level
 import io.fabric8.kubernetes.api.model.EnvVar
 import io.fabric8.kubernetes.client.server.mock.KubernetesServer
 import org.scalatest.{BeforeAndAfterEach, OptionValues}
@@ -287,9 +289,17 @@ class KubernetesQuackBackendSecuritySpec
       "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
       "sec1Unknown"              -> "sec1-marker-unknown"
     )
-    backend
-      .start(nodeEnvSpec("quack-nodeenv-sec1", allowed ++ hostile + ("pgPassword" -> "p")))
-      .unsafeRunSync()
+    val (_, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(nodeEnvSpec("quack-nodeenv-sec1", allowed ++ hostile + ("pgPassword" -> "p")))
+        .unsafeRunSync()
+    )
+    // Each dropped key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      hostile.keys.toList.sorted.map((Level.ERROR, nodeEnvKey.toString, _))
+    withClue("a metastore marker in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
+    )
     val env   = podEnv("quack-nodeenv-sec1")
     val names = env.map(_.getName)
     // One value per name: kubelet lets the last duplicate win, a reader of the first sees another.
@@ -383,9 +393,17 @@ class KubernetesQuackBackendSecuritySpec
     )
     // A metastore entry named like the id env var must not give the pod a second one: kubelet
     // lets the last duplicate win, and a reader taking the first would see the spoofed value.
-    backend
-      .start(nodeEnvSpec("quack-nodeenv-key", lakeMeta + ("QOD_NODE_ID" -> "spoof")))
-      .unsafeRunSync()
+    val (_, logged) = LogCapture.logged(classOf[KubernetesQuackBackend].getName)(
+      backend
+        .start(nodeEnvSpec("quack-nodeenv-key", lakeMeta + ("QOD_NODE_ID" -> "spoof")))
+        .unsafeRunSync()
+    )
+    // The spoofed key named once, at ERROR, never with its value.
+    LogCapture.droppedKeyLines(logged) shouldBe
+      List((Level.ERROR, nodeEnvKey.toString, "QOD_NODE_ID"))
+    withClue("a spoofed value in the backend's log: ")(
+      logged.exists(_.getFormattedMessage.contains("spoof")) shouldBe false
+    )
     secretRefs("quack-nodeenv-key").get("QOD_NODE_AUTHZ_KEY") shouldBe
       Some(("qod-token-quack-nodeenv-key", KubernetesQuackBackend.AuthzKeySecretKey))
     secretPayload("qod-token-quack-nodeenv-key").value

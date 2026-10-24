@@ -40,10 +40,11 @@ object NodeMetastore:
     TenantDb.NodeSecretEnvKeys.exists(_.equalsIgnoreCase(key))
 
   /** Names each [[dropped]] key through a backend's `logger`, once per pool and key, never its
-    * value, with how to remove it: a stored row keeps its keys until an update removes them, so
-    * every spawn of its pools would repeat it. At ERROR, not WARN: the default root level is ERROR
-    * (logback.xml), and a key that stops reaching its nodes (a per-database setting a pool relied
-    * on) must reach the operator.
+    * value, with how to remove it ([[TenantDb.metastoreKeyRemoval]], the advice a manifest export
+    * gives too): a stored row keeps its keys until an update removes them, so every spawn of its
+    * pools would repeat it. At ERROR, not WARN: the default root level is ERROR (logback.xml), and
+    * a key that stops reaching its nodes (a per-database setting a pool relied on) must reach the
+    * operator.
     */
   final class DroppedKeys(logger: Logger):
     private val reported = TrieMap.empty[(PoolKey, String), Unit]
@@ -51,22 +52,8 @@ object NodeMetastore:
     def report(pool: PoolKey, metastore: Map[String, String]): Unit =
       dropped(metastore).foreach { k =>
         if reported.putIfAbsent((pool, k), ()).isEmpty then
-          val known = TenantDb.KnownMetastoreKeys.toList.sorted.mkString(", ")
           logger.error(
             s"$pool: ignoring metastore key '${TenantDb.printableKey(k)}', which reaches no " +
-              s"node: a metastore holds only $known. ${removal(k)}"
+              s"node: ${TenantDb.MetastoreHoldsOnly}. ${TenantDb.metastoreKeyRemoval(k)}"
           )
       }
-
-  /** How `database/update` removes a dropped key. A secret-named one ([[TenantDb.SecretKeys]], in
-    * any spelling) is hidden from responses and kept by an update that leaves it out, so it goes by
-    * sending its own name empty ([[TenantDb.metastoreUpdateKeyError]] accepts that); any other by
-    * sending the metastore without it.
-    */
-  private def removal(key: String): String =
-    TenantDb.SecretKeys.find(_.equalsIgnoreCase(key)) match
-      case Some(secret) =>
-        s"Remove it by sending '$secret' with an empty value through database/update: an " +
-          "update that leaves a secret key out keeps it."
-      case None =>
-        "Remove it by sending the database's metastore without it through database/update."
