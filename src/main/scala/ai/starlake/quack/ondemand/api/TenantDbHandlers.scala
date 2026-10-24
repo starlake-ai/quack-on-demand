@@ -45,17 +45,15 @@ final class TenantDbHandlers(
     TenantDb.objectStoreError(objectStore)
 
   /** `400 invalid_metastore_key` for a metastore holding a key outside
-    * [[TenantDb.KnownMetastoreKeys]], before anything is written. A metastore is tenant-admin
+    * [[TenantDb.KnownMetastoreKeys]] (`error`, from [[TenantDb.metastoreKeyError]] or, on update,
+    * [[TenantDb.metastoreUpdateKeyError]]), before anything is written. A metastore is tenant-admin
     * input, and its keys used to become environment variables of every node's launcher (`BASH_ENV`,
     * `PATH`, `QOD_NODE_BIN`...); the launchers now drop such a key, and the API refuses to store
-    * one. A row stored before keeps working, and an update that sends its key back is refused.
+    * one. A row stored before keeps working, and an update that sends its key back is refused; a
+    * secret-named one, which no response shows, is removed by sending it empty.
     */
-  private def metastoreKeyRefusal(
-      metastore: Map[String, String]
-  ): Option[(StatusCode, ErrorResponse)] =
-    TenantDb
-      .metastoreKeyError(metastore)
-      .map(msg => (StatusCode.BadRequest, ErrorResponse("invalid_metastore_key", msg)))
+  private def metastoreKeyRefusal(error: Option[String]): Option[(StatusCode, ErrorResponse)] =
+    error.map(msg => (StatusCode.BadRequest, ErrorResponse("invalid_metastore_key", msg)))
 
   /** The three `managedStorage` refusals, all 400 `invalid`: the deployment has managed storage
     * switched off, the caller mixed managed with a BYO location, or the kind cannot hold one. An
@@ -150,7 +148,7 @@ final class TenantDbHandlers(
             )
           )
         else
-          metastoreKeyRefusal(req.metastore).orElse(
+          metastoreKeyRefusal(TenantDb.metastoreKeyError(req.metastore)).orElse(
             validateObjectStore(req.objectStore)
               .orElse(validateManagedStorage(req))
               .orElse(validateEncryption(req))
@@ -317,7 +315,7 @@ final class TenantDbHandlers(
         IO.pure(Left(err))
       case None =>
         req.metastore
-          .flatMap(metastoreKeyRefusal)
+          .flatMap(m => metastoreKeyRefusal(TenantDb.metastoreUpdateKeyError(m)))
           .orElse(
             req.objectStore
               .flatMap(validateObjectStore)

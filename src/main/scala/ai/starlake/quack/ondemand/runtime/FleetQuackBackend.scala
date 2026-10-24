@@ -73,7 +73,7 @@ final class FleetQuackBackend(
   var nodeRowExists: String => Boolean = _ => true
 
   // Metastore keys that reach no fleet server, named once per pool and key.
-  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
+  private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
 
   private def assignmentFor(spec: NodeSpec, token: String): FleetAssignment =
     droppedKeys.report(spec.poolKey, spec.metastore)

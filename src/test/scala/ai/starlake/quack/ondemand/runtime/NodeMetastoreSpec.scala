@@ -1,17 +1,24 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{PoolKey, TenantDb}
+import ch.qos.logback.classic.{Level, Logger as LogbackLogger}
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import com.typesafe.scalalogging.Logger
+import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.slf4j.LoggerFactory
 
 import java.nio.file.{Files, Paths}
-import scala.collection.mutable.ListBuffer
+import java.util.UUID
+import scala.jdk.CollectionConverters.*
 
 /** SEC-1: a tenant-db's metastore is tenant-admin input, and only [[TenantDb.NodeEnvKeys]] of it
   * may become a launcher's environment, only its own secrets may become files, and every other key
   * reaches no node.
   */
-class NodeMetastoreSpec extends AnyFlatSpec with Matchers:
+class NodeMetastoreSpec extends AnyFlatSpec with Matchers with OptionValues:
 
   /** Every key the launcher reads from its environment, as the manager resolves them. */
   private val allowed = Map(
@@ -89,10 +96,23 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers:
     NodeMetastore.dropped(allowed + ("pgPassword" -> "p")) shouldBe Nil
   }
 
-  "NodeMetastore.DroppedKeys" should "warn once per pool and key, by name, never by value" in {
-    val lines = ListBuffer.empty[String]
-    val log   = new NodeMetastore.DroppedKeys(lines += _)
-    val m     = allowed ++ Map("BASH_ENV" -> "value-a", "PATH" -> "value-b")
+  /** A [[NodeMetastore.DroppedKeys]] over a fresh logger, and what that logger receives at every
+    * level (the level is part of what is pinned), kept off the console.
+    */
+  private def droppedKeys(): (NodeMetastore.DroppedKeys, () => List[ILoggingEvent]) =
+    val logger =
+      LoggerFactory.getLogger(s"NodeMetastoreSpec.${UUID.randomUUID}").asInstanceOf[LogbackLogger]
+    val appender = new ListAppender[ILoggingEvent]()
+    appender.start()
+    logger.addAppender(appender)
+    logger.setLevel(Level.TRACE)
+    logger.setAdditive(false)
+    (new NodeMetastore.DroppedKeys(Logger(logger)), () => appender.list.asScala.toList)
+
+  "NodeMetastore.DroppedKeys" should "log at ERROR once per pool and key, by name, never by value" in {
+    val (log, events) = droppedKeys()
+    def lines         = events().map(_.getFormattedMessage)
+    val m             = allowed ++ Map("BASH_ENV" -> "value-a", "PATH" -> "value-b")
     log.report(poolA, m)
     log.report(poolA, m)
     lines.size shouldBe 2
@@ -108,4 +128,27 @@ class NodeMetastoreSpec extends AnyFlatSpec with Matchers:
     log.report(poolA, Map("a\nb" -> "v"))
     lines.size shouldBe 6
     lines.last.exists(_.isControl) shouldBe false
+    // The default root level is ERROR (logback.xml): a WARN would reach no operator.
+    events().map(_.getLevel).distinct shouldBe List(Level.ERROR)
+  }
+
+  it should "say how to remove each key: a secret-named one by sending it empty" in {
+    val (log, events) = droppedKeys()
+    log.report(
+      poolA,
+      Map("applicationName" -> "v", "s3_secret_access_key" -> "v", "AZURE_ACCOUNT_KEY" -> "v")
+    )
+    def line(key: String) = events().map(_.getFormattedMessage).find(_.contains(s"'$key'")).value
+    // Shown in responses and not carried over: an update that leaves it out removes it.
+    line("applicationName") should include(
+      "sending the database's metastore without it through database/update"
+    )
+    // Hidden from responses and carried over by an update that leaves it out: sent empty, under
+    // the name the API accepts (any spelling of it is removed), is the one way to remove it.
+    line("s3_secret_access_key") should include(
+      "sending 's3_secret_access_key' with an empty value through database/update"
+    )
+    line("AZURE_ACCOUNT_KEY") should include(
+      "sending 'azure_account_key' with an empty value through database/update"
+    )
   }

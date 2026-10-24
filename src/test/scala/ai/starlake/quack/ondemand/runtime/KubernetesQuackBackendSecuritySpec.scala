@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role, TenantDb}
+import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
 import cats.effect.unsafe.implicits.global
 import io.fabric8.kubernetes.api.model.EnvVar
 import io.fabric8.kubernetes.client.server.mock.KubernetesServer
@@ -429,6 +429,3 @@ class KubernetesQuackBackendSecuritySpec
 
     val adopted = backend.discoverExisting().unsafeRunSync()
     adopted.map(_.nodeId) should contain("quack-nodeenv-orphan")
-
-  "NodeEnvSecretKeys" should "be exactly the model's list, so the strip and the Secret agree" in:
-    KubernetesQuackBackend.NodeEnvSecretKeys shouldBe TenantDb.NodeSecretEnvKeys

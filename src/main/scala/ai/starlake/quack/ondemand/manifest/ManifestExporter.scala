@@ -7,6 +7,7 @@ import ai.starlake.quack.ondemand.state.{
   ControlPlaneStore,
   FederatedSourceStore
 }
+import com.typesafe.scalalogging.LazyLogging
 
 import java.time.Instant
 
@@ -17,7 +18,7 @@ import java.time.Instant
   * authProvider clientSecrets are carried verbatim since those are operator-supplied and cannot be
   * recovered if lost.
   */
-object ManifestExporter:
+object ManifestExporter extends LazyLogging:
 
   private val Redacted = FederatedSecret.RedactedMarker
 
@@ -148,7 +149,7 @@ object ManifestExporter:
           // comment does not depend on that.) Unlike `pgPassword` (also a SecretKeys member but
           // carried verbatim here so a manifest replay can still connect), this key is minted or
           // caller-supplied per database and has no legitimate reason to travel with a backup.
-          metastore = d.metastore - TenantDb.EncryptionKeyName,
+          metastore = knownMetastore(t.id, d) - TenantDb.EncryptionKeyName,
           dataPath = d.dataPath,
           objectStore = d.objectStore,
           defaultDatabase = d.defaultDatabase,
@@ -345,6 +346,24 @@ object ManifestExporter:
       groups = tenants.flatMap(_._3),
       users = superusers ++ tenants.flatMap(_._4)
     )
+
+  /** `d`'s metastore without its keys outside [[TenantDb.KnownMetastoreKeys]], which a manifest
+    * import refuses as `database/create` does: one of them would make the whole manifest
+    * unimportable. A row holds one when it was stored before the API refused them (the admin UI
+    * once suggested `applicationName`); the row itself keeps it. Each key left out is logged by
+    * name, never by value, at ERROR: the default root level (logback.xml) drops a WARN.
+    */
+  private def knownMetastore(tenant: String, d: TenantDb): Map[String, String] =
+    val (known, other) =
+      d.metastore.partition { case (k, _) => TenantDb.KnownMetastoreKeys.contains(k) }
+    other.keys.toList.sorted.foreach { k =>
+      logger.error(
+        s"manifest export: tenant '$tenant' database '${d.name}': left out metastore key " +
+          s"'${TenantDb.printableKey(k)}', which a manifest import refuses (a metastore holds " +
+          s"only ${TenantDb.KnownMetastoreKeys.toList.sorted.mkString(", ")})"
+      )
+    }
+    known
 
   /** Resolve a single [[ai.starlake.quack.ondemand.state.PoolPermission]] into a
     * [[ManifestPoolGrant]]. `pool = None` when the permission has no pool id (a tenant-wide

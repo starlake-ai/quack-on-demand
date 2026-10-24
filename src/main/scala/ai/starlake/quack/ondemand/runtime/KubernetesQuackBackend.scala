@@ -23,9 +23,10 @@ import scala.jdk.CollectionConverters._
   *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
   *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
   *   - per-pool `qod-nodeenv-${tenant}-${tenantDb}-${pool}` holds the sensitive metastore values
-  *     ([[KubernetesQuackBackend.NodeEnvSecretKeys]]: `pgPassword`, `encryptionKey`) plus the
-  *     manager's own object-store credentials ([[NodeSecretFiles.CloudCredKeys]]); all pods of the
-  *     pool share it, since they all attach the same tenant-db with the same credentials.
+  *     ([[ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys]]: `pgPassword`, `encryptionKey`,
+  *     taken from the metastore by [[NodeMetastore.secrets]]) plus the manager's own object-store
+  *     credentials ([[NodeSecretFiles.CloudCredKeys]]); all pods of the pool share it, since they
+  *     all attach the same tenant-db with the same credentials.
   *   - per-pod `qod-token-${nodeId}` holds the bearer token the manager uses to call this specific
   *     pod's `/quack` endpoint. The token survives manager restart -- [[discoverExisting]] reads it
   *     back from the Secret to repopulate the in-memory cache, so adopted pods stop 401-ing after a
@@ -75,7 +76,7 @@ final class KubernetesQuackBackend(
   private val tokens = scala.collection.concurrent.TrieMap.empty[String, String]
 
   // Metastore keys that reach no pod, named once per pool and key.
-  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
+  private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
 
   override val supportsPlacement: Boolean = true
 
@@ -1040,13 +1041,6 @@ object KubernetesQuackBackend:
 
   /** File mode of the projected files: 0400 (owner read-only), as a decimal Integer for the API. */
   val SecretsFileMode: Int = Integer.parseInt("400", 8)
-
-  /** Metastore keys delivered through the per-pool node-env Secret rather than a plain pod EnvVar:
-    * the model's list, which [[NodeMetastore.secrets]] takes from a metastore for the Secret
-    * [[KubernetesQuackBackend.start]] creates. [[KubernetesQuackBackend.buildPod]]'s env takes only
-    * `TenantDb.NodeEnvKeys`, which holds none of them.
-    */
-  val NodeEnvSecretKeys: Set[String] = ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys
 
   /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
     * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.

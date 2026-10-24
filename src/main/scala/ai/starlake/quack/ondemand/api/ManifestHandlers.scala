@@ -58,19 +58,22 @@ final class ManifestHandlers(
           audit.rest(apiKey, "control-plane", AuditActions.ManifestImport, "denied")
           Left(err)
         case None =>
-          parser.parse(body).flatMap(_.as[ConfigManifest]) match
+          parser
+            .parse(body)
+            .flatMap(_.as[ConfigManifest])
+            .map(m => (m, ManifestImporter.metastoreKeyErrors(m))) match
             case Left(e) =>
               Left(StatusCode.BadRequest -> ErrorResponse("invalid-yaml", e.getMessage))
             // The refusal database/create answers, with its code, before anything is written
             // (apply's own validation refuses it too, for the importers that call it directly).
-            case Right(m) if ManifestImporter.metastoreKeyErrors(m).nonEmpty =>
+            case Right((_, keyErrors)) if keyErrors.nonEmpty =>
               Left(
                 StatusCode.BadRequest -> ErrorResponse(
                   "invalid_metastore_key",
-                  ManifestImporter.metastoreKeyErrors(m).mkString("; ")
+                  keyErrors.mkString("; ")
                 )
               )
-            case Right(m) =>
+            case Right((m, _)) =>
               ManifestImporter.apply(m, store, federatedStore, requireEncryption) match
                 case Left(errs) =>
                   Left(

@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.{PoolKey, TenantDb}
+import com.typesafe.scalalogging.Logger
 
 import scala.collection.concurrent.TrieMap
 
@@ -38,24 +39,34 @@ object NodeMetastore:
   private def isSecret(key: String): Boolean =
     TenantDb.NodeSecretEnvKeys.exists(_.equalsIgnoreCase(key))
 
-  /** Names each [[dropped]] key through `warn` (a backend's WARN), once per pool and key, never its
-    * value: a stored row keeps its keys until an update removes them, so every spawn of its pools
-    * would repeat it.
+  /** Names each [[dropped]] key through a backend's `logger`, once per pool and key, never its
+    * value, with how to remove it: a stored row keeps its keys until an update removes them, so
+    * every spawn of its pools would repeat it. At ERROR, not WARN: the default root level is ERROR
+    * (logback.xml), and a key that stops reaching its nodes (a per-database setting a pool relied
+    * on) must reach the operator.
     */
-  final class DroppedKeys(warn: String => Unit):
-    private val warned = TrieMap.empty[(PoolKey, String), Unit]
+  final class DroppedKeys(logger: Logger):
+    private val reported = TrieMap.empty[(PoolKey, String), Unit]
 
     def report(pool: PoolKey, metastore: Map[String, String]): Unit =
       dropped(metastore).foreach { k =>
-        if warned.putIfAbsent((pool, k), ()).isEmpty then
+        if reported.putIfAbsent((pool, k), ()).isEmpty then
           val known = TenantDb.KnownMetastoreKeys.toList.sorted.mkString(", ")
-          warn(
-            s"$pool: ignoring metastore key '${printable(k)}', which reaches no node: a " +
-              s"metastore holds only $known. Remove it from the database's metastore " +
-              "(database/update)."
+          logger.error(
+            s"$pool: ignoring metastore key '${TenantDb.printableKey(k)}', which reaches no " +
+              s"node: a metastore holds only $known. ${removal(k)}"
           )
       }
 
-  /** `key` with every control character escaped, so a stored key cannot forge a log line. */
-  private def printable(key: String): String =
-    key.flatMap(c => if c.isControl then f"\\u${c.toInt}%04x" else c.toString)
+  /** How `database/update` removes a dropped key. A secret-named one ([[TenantDb.SecretKeys]], in
+    * any spelling) is hidden from responses and kept by an update that leaves it out, so it goes by
+    * sending its own name empty ([[TenantDb.metastoreUpdateKeyError]] accepts that); any other by
+    * sending the metastore without it.
+    */
+  private def removal(key: String): String =
+    TenantDb.SecretKeys.find(_.equalsIgnoreCase(key)) match
+      case Some(secret) =>
+        s"Remove it by sending '$secret' with an empty value through database/update: an " +
+          "update that leaves a secret key out keeps it."
+      case None =>
+        "Remove it by sending the database's metastore without it through database/update."

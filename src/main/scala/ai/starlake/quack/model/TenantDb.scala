@@ -58,11 +58,11 @@ object TenantDb {
       EncryptionKeyName
     )
 
-  /** Metastore keys that must never reach a Kubernetes pod spec as a plain `EnvVar`. Read by both
-    * the strip in `KubernetesQuackBackend.buildPod` and the contents of the per-pool node-env
-    * Secret, so the two cannot drift. Deliberately distinct from [[SecretKeys]], which answers a
-    * different question (what must never round-trip through an API response) and spans the
-    * `objectStore` map as well.
+  /** The metastore's own secrets, which every launcher delivers as files and never as an
+    * environment variable (`NodeMetastore.secrets`: the spawn script's secrets directory, the
+    * Kubernetes per-pool node-env Secret, a fleet assignment). Deliberately distinct from
+    * [[SecretKeys]], which answers a different question (what must never round-trip through an API
+    * response) and spans the `objectStore` map as well.
     */
   val NodeSecretEnvKeys: Set[String] = Set("pgPassword", EncryptionKeyName)
 
@@ -130,6 +130,22 @@ object TenantDb {
           s"metastore $noun ${keys.map(k => s"'$k'").mkString(", ")} $verb not accepted: a " +
             s"metastore holds only ${KnownMetastoreKeys.toList.sorted.mkString(", ")}$hint"
         )
+
+  /** [[metastoreKeyError]] for `database/update`, which also takes a secret-named key outside
+    * [[KnownMetastoreKeys]] (a [[SecretKeys]] member: `s3_secret_access_key`, `azure_account_key`,
+    * `gcs_hmac_secret`) sent with an empty value. No response shows such a key and an update that
+    * leaves it out keeps it (`PoolSupervisor.mergeSecretKeys`), so sending it empty, which removes
+    * it in any spelling, is the one way to remove it from a row stored before the API refused it.
+    * Sent with a value, it is refused like any other key.
+    */
+  def metastoreUpdateKeyError(metastore: Map[String, String]): Option[String] =
+    metastoreKeyError(metastore.filterNot { case (k, v) => SecretKeys.contains(k) && v.isEmpty })
+
+  /** A metastore key fit for a log line: every control character escaped, so a stored key cannot
+    * forge a line.
+    */
+  def printableKey(key: String): String =
+    key.flatMap(c => if c.isControl then f"\\u${c.toInt}%04x" else c.toString)
 
   /** The DuckDB catalog alias for a resolved metastore: `catalogAlias` when set, else `dbName`,
     * else `fallback`. Every site that derives the alias from a metastore (USE prelude, author

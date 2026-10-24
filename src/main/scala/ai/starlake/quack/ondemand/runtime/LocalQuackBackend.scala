@@ -51,7 +51,7 @@ final class LocalQuackBackend(
   // The OS reported no start instant for a node: logged once, see start().
   private val startInstantMissingLogged = new java.util.concurrent.atomic.AtomicBoolean(false)
   // Metastore keys that reach no node, named once per pool and key.
-  private val droppedKeys = new NodeMetastore.DroppedKeys(msg => logger.warn(msg))
+  private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
 
   // A manager killed together with a node it was spawning can leave a secrets directory behind.
   NodeSecretFiles.sweepStale()

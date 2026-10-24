@@ -204,7 +204,10 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     val a = store.get("srv-1").get.assignment.get
     a.env shouldBe allowed + ("PgPassword" -> "pw")
     a.lockdownSql shouldBe "SET enable_external_access = false;"
-    a.extraSetupSql shouldBe ""
+    // Nor does any other field of the assignment (its SQL, kind, identity) carry a hostile value.
+    withClue("a metastore marker in the assignment: ")(
+      a.productIterator.exists(_.toString.contains("sec1-marker")) shouldBe false
+    )
   }
 
   it should "raise NoFreeServer with a reason" in {
