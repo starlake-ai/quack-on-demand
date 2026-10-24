@@ -367,8 +367,11 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     first.isDefined shouldBe true
     first.get should include("node n-1 refuses the manager's session handles")
     first.get should include("handle MAC does not verify")
-    first.get should include("QOD_NODE_KEY_SECRET")
-    first.get should include("restart the node")
+    // Restarting the node alone only moves the refusal when the replicas disagree, so the advice
+    // is one secret on every replica first.
+    first.get should include(
+      "make QOD_NODE_KEY_SECRET the same on every replica (or unset on all), then restart the node"
+    )
     // Once per refusal: not again on the next tick, nor after a tick that failed otherwise.
     warnings.warning("n-1", refused) shouldBe None
     warnings.warning("n-1", ProbeVerdict.Failed("down")) shouldBe None

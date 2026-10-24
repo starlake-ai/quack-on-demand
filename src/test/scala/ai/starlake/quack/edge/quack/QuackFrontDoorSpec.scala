@@ -78,6 +78,13 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     */
   private val StatementTransportError = "HTTP 503 from Quack node"
 
+  /** The answer to a statement lost that way on its client transaction's link, and the fence's
+    * until the client rolls back.
+    */
+  private val StatementLostAnswer =
+    "transaction aborted: a statement could not run on the transaction's node connection " +
+      s"($StatementTransportError); ROLLBACK to continue"
+
   /** A PREPARE a scripted node received: its SQL, the node (URI) it reached and the node connection
     * it rode.
     */
@@ -569,8 +576,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     val posted   = fx.transport.posted.size
     val prepared = fx.transport.prepared.size
     fx.transport.statementTransportFailures = 1
-    val answer = "transaction aborted: the transaction's node connection failed " +
-      s"($StatementTransportError); ROLLBACK to continue"
+    val answer = StatementLostAnswer
     errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) shouldBe answer
     // The handle and the write went out on the transaction's connection, and nothing went to
     // another node: a retry there would have run the write on a fresh link, outside the client's
@@ -595,6 +601,78 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.transport.shape.takeRight(4) shouldBe List(HandleMarker, "BEGIN", HandleMarker, "ROLLBACK")
     fx.sessions.get(connId).get.txAborted.get() shouldBe None
     prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+
+  "a COMMIT lost in transport" should "be answered as of unknown outcome, not as aborted" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    prepare(fx, connId, "INSERT INTO t VALUES (1)") shouldBe prepareResp(false)
+    val node     = txNode(fx, connId)
+    val posted   = fx.transport.posted.size
+    val prepared = fx.transport.prepared.size
+    fx.transport.statementTransportFailures = 1
+    // The COMMIT went out after its handle and its answer was lost: it may have run, so the client
+    // is told neither that the transaction aborted nor that nothing was committed.
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe
+      "the transaction's outcome is unknown: its node connection failed during COMMIT " +
+      s"($StatementTransportError); check the data before retrying"
+    val sent = fx.transport.prepared.toList.drop(prepared)
+    sent.map(p => (p.connectionId, p.label)) shouldBe
+      List(("NODE2", HandleMarker), ("NODE2", "COMMIT"))
+    // Nothing went to another node, and the transaction's link was DISCONNECTed.
+    postedSince(fx, posted) shouldBe List(
+      (Type.PrepareRequest, "NODE2"),
+      (Type.Disconnect, "NODE2")
+    )
+    // The COMMIT ended the transaction on the client's side whatever the node did: there is no
+    // fence to roll back from, nothing is booked against the node, and the session runs on.
+    fx.tracker.snapshot(node).healthy shouldBe true
+    fx.router.sessions.get(connId).get.txOpen shouldBe false
+    fx.sessions.get(connId).get.txLink.get() shouldBe None
+    fx.sessions.get(connId).get.txAborted.get() shouldBe None
+    prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+
+  it should "keep the aborted answer when its own session handle fails" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    prepare(fx, connId, "INSERT INTO t VALUES (1)") shouldBe prepareResp(false)
+    val prepared = fx.transport.prepared.size
+    fx.transport.preludeError = Some("qod-node: session handle refused: handle MAC does not verify")
+    fx.transport.preludeRefusals = 1
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe
+      "transaction aborted: the node refused the statement's session handle " +
+      "(qod-node: session handle refused: handle MAC does not verify); ROLLBACK to continue"
+    // The refused handle was the only PREPARE: the COMMIT never went out, so nothing was
+    // committed. The COMMIT ended the client's transaction, so no fence is left.
+    fx.transport.prepared.toList.drop(prepared).map(_.label) shouldBe List(HandleMarker)
+    fx.sessions.get(connId).get.txAborted.get() shouldBe None
+    prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+
+  it should "keep the aborted answer when it finds the fence up, sending nothing" in:
+    val fx     = setup()
+    val connId = connect(fx)
+    prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+    fx.transport.statementTransportFailures = 1
+    errorText(prepare(fx, connId, "INSERT INTO t VALUES (1)")) shouldBe StatementLostAnswer
+    // The statement before it had already lost the transaction: the COMMIT is never sent and gets
+    // the fence's answer, and it ends the transaction on the client's side too.
+    val fenced = fx.transport.prepared.size
+    errorText(prepare(fx, connId, "COMMIT")) shouldBe StatementLostAnswer
+    fx.transport.prepared.size shouldBe fenced
+    fx.sessions.get(connId).get.txAborted.get() shouldBe None
+    prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+
+  "QuackFrontDoor.txEndedMessage" should "word a lost statement and an unmintable handle alike" in:
+    val mintFailure = "requirement failed: no principal is bound to this statement"
+    for failure <- List(
+        LinkFailure.Transient(StatementTransportError),
+        LinkFailure.Permanent(mintFailure)
+      )
+    do
+      QuackFrontDoor.txEndedMessage(failure, commit = false) shouldBe
+        "transaction aborted: a statement could not run on the transaction's node connection " +
+        s"(${failure.message}); ROLLBACK to continue"
 
   // ---- DuckDB 2.0 aborts a transaction on a failed statement and then runs only ROLLBACK ----
 

@@ -1001,8 +1001,14 @@ object Main extends IOApp with LazyLogging:
           // exactly like the orphaned-node-port failure. Name the likely cause once per
           // healthy-to-unhealthy transition (not on every tick of a still-unhealthy node) so the
           // operator is not sent down the wrong path and a permanently key-mismatched node
-          // doesn't spam the log every healthCheckIntervalSec forever.
-          if !ok && wasHealthy && sup
+          // doesn't spam the log every healthCheckIntervalSec forever. Only a probe that failed on
+          // its own can be that: a node that refuses the manager's session handles (the warning
+          // above), or runs a statement without one (the canary's ERROR), is unhealthy for a
+          // reason of its own and is never blamed on the database key.
+          val probeFailed = verdict match
+            case ProbeVerdict.Failed(_) => true
+            case _                      => false
+          if probeFailed && wasHealthy && sup
               .get(n.poolKey)
               .exists(_.metastore.get("encrypted").contains("true"))
           then

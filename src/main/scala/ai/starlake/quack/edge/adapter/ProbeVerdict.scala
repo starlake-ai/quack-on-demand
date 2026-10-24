@@ -38,7 +38,8 @@ object ProbeVerdict:
       s"it and it stays unhealthy ($nodeText)"
     if nodeText.contains(NodeHandles.KeyMismatchRefusal) then
       s"$refusal: it holds a key derived from another node-key secret (QOD_NODE_KEY_SECRET " +
-        "changed since it started, or the manager replicas disagree on it); restart the node"
+        "changed since it started, or the manager replicas disagree on it); make " +
+        "QOD_NODE_KEY_SECRET the same on every replica (or unset on all), then restart the node"
     else if NodeHandles.ClockRefusals.exists(nodeText.contains) then
       s"$refusal: the manager's and the node's clocks disagree by about the handle lifetime " +
         s"(${NodeHandles.LifetimeMs / 1000} s) or more; check clock sync"

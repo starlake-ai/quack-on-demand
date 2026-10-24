@@ -46,10 +46,10 @@ final class QuackSession(
   val txLink: AtomicReference[Option[(String, QuackNodeLink)]] = new AtomicReference(None)
 
   /** The fence, with the answer it gives: raised when the client transaction on `txLink` ended on
-    * the node behind the client's back (an admin kill disconnected it, or a session handle failed
-    * on it). The client still believes it is inside a transaction, so every statement is refused
-    * with that answer until it rolls back (or its COMMIT fails, which also ends the transaction on
-    * the client side).
+    * the node behind the client's back (an admin kill disconnected it, or a statement or its
+    * session handle failed on its link). The client still believes it is inside a transaction, so
+    * every statement is refused with that answer until it rolls back (or its COMMIT fails, which
+    * also ends the transaction on the client side).
     */
   val txAborted: AtomicReference[Option[String]] = new AtomicReference(None)
 
