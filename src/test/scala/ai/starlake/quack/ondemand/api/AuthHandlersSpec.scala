@@ -105,7 +105,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authService = fakeSvc,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil, // unused in Db mode
+      grantsForIdentity = (_, _, _) => Nil, // unused in Db mode
       cookieSecureOverride = cookieSecureOverride,
       authModeResolver = new ManagementAuthModeResolver(
         id => Some(Tenant(id = id, authProvider = "db")),
@@ -541,7 +541,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
           password: String
       ): Either[AuthFailure, AuthenticatedProfile] = Right(profile)
 
-    val fakeDirectory: GrantsLookup = (identity, email) =>
+    val fakeDirectory: GrantsLookup = (_, identity, email) =>
       directory.getOrElse(
         identity,
         email.flatMap(directory.get).getOrElse(Nil)

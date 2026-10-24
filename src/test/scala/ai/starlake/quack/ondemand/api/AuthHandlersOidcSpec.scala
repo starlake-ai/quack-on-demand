@@ -27,6 +27,7 @@ import ai.starlake.quack.edge.config.{
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
+  LoginRealm,
   ManagementAuthMode,
   ManagementAuthModeResolver,
   ManagementIdentitySource,
@@ -34,6 +35,7 @@ import ai.starlake.quack.ondemand.auth.{
 }
 import ai.starlake.quack.ondemand.state.UserGrant
 import ai.starlake.quack.secrets.SecretRefResolver
+import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -182,14 +184,22 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       svc: Option[OidcSsoService] = None,
       tokens: SessionTokenStore = new SessionTokenStore
   ): AuthHandlers =
-    val directory: GrantsLookup = (_, _) => grants
+    makeHandlersWith((_, _, _) => grants, svc, tokens)
+
+  private def makeHandlersWith(
+      directory: GrantsLookup,
+      svc: Option[OidcSsoService],
+      tokens: SessionTokenStore = new SessionTokenStore,
+      events: ManagerEventSink = ManagerEventSink.noop
+  ): AuthHandlers =
     new AuthHandlers(
       authService = dummyAuthService,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = directory,
       authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
-      oidc = svc
+      oidc = svc,
+      events = events
     )
 
   // ---- helper: run a real startAuth + callback round-trip ----
@@ -206,6 +216,41 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     val started  = svc.startAuth(scope, returnTo, seed).toOption.get
     val handlers = makeHandlers(grants, Some(svc))
     (handlers, svc, started.stateParam, started.stateCookieValue)
+
+  /** A grants directory that answers `grants` to every lookup and records what it was asked (realm,
+    * identity, email claim), so a test sees both what the handler asked and what it kept.
+    */
+  private final class RecordingDirectory(grants: List[UserGrant]):
+    val asked: scala.collection.mutable.ListBuffer[(LoginRealm, String, Option[String])] =
+      scala.collection.mutable.ListBuffer.empty
+    val lookup: GrantsLookup = (realm, identity, email) =>
+      asked += ((realm, identity, email))
+      grants
+
+  /** One SSO round trip for `scope` against `directory`: the callback's status, location and
+    * session cookie value, plus the token store that minted the session.
+    */
+  private def callbackWith(
+      scope: OidcScope,
+      returnTo: String,
+      seed: String,
+      directory: GrantsLookup,
+      events: ManagerEventSink = ManagerEventSink.noop
+  ): (StatusCode, String, String, SessionTokenStore) =
+    val svc                            = buildSvc(seed)
+    val started                        = svc.startAuth(scope, returnTo, seed).toOption.get
+    val tokens                         = new SessionTokenStore
+    val handlers                       = makeHandlersWith(directory, Some(svc), tokens, events)
+    val (status, location, session, _) =
+      handlers
+        .oidcCallback(
+          Some(s"code-$seed"),
+          Some(started.stateParam),
+          Some(started.stateCookieValue),
+          None
+        )
+        .unsafeRunSync()
+    (status, location, session.value, tokens)
 
   // ================================================================
   // 1. oidcStart (system scope, no tenant) -> 302 + state cookie
@@ -346,12 +391,12 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
   }
 
   // ================================================================
-  // 9. oidcCallback tenant scope, identity NOT admin of that tenant -> admin_required
+  // 9. oidcCallback tenant scope, identity has rows only in another tenant -> not_provisioned
   // ================================================================
 
-  it should "302 to /ui/?error=admin_required when tenant scope but identity has no grant there" in {
+  it should "302 to /ui/?error=not_provisioned when tenant scope but identity has rows only in another tenant" in {
     val seed = "s9"
-    // Identity has a grant for a DIFFERENT tenant, not "acme"
+    // The identity's only row is in a DIFFERENT tenant: the acme realm holds no grant for it.
     val wrongGrants                        = List(UserGrant(Some("globex"), "admin"))
     val (handlers, _, state, stateCookieV) =
       roundTrip(OidcScope.Tenant("acme"), "/ui/?tenant=acme", seed, wrongGrants)
@@ -360,7 +405,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         .oidcCallback(Some("code-9"), Some(state), Some(stateCookieV), None)
         .unsafeRunSync()
     status shouldBe StatusCode.Found
-    location shouldBe "/ui/?error=admin_required"
+    location shouldBe "/ui/?error=not_provisioned"
     session.value shouldBe ""
   }
 
@@ -421,6 +466,76 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     tokens.revokedJtiCount shouldBe (before + 1)
   }
 
+  // ================================================================
+  // 13. oidcCallback reads grants in the realm the login was verified in
+  // ================================================================
+
+  "oidcCallback realm" should "look up grants in the tenant's realm on a tenant-scope login" in {
+    val directory = new RecordingDirectory(List(UserGrant(Some("acme"), "admin")))
+    callbackWith(OidcScope.Tenant("acme"), "/ui/?tenant=acme", "s13", directory.lookup)
+    directory.asked.toList shouldBe List(
+      (LoginRealm.Tenant("acme"), "alice", Some("alice@acme.io"))
+    )
+  }
+
+  it should "look up grants in the system realm on a system-scope login" in {
+    val directory = new RecordingDirectory(List(UserGrant(None, "admin")))
+    callbackWith(OidcScope.System, "/ui/", "s14", directory.lookup)
+    directory.asked.toList shouldBe List((LoginRealm.System, "alice", Some("alice@acme.io")))
+  }
+
+  it should "bind only the tenant's own row on a tenant-scope login: never superuser, never another tenant" in {
+    // The directory answers rows of every realm; the session keeps the tenant's row alone.
+    val directory = new RecordingDirectory(
+      List(
+        UserGrant(None, "admin"),
+        UserGrant(Some("acme"), "admin"),
+        UserGrant(Some("globex"), "admin")
+      )
+    )
+    val (status, location, session, tokens) =
+      callbackWith(OidcScope.Tenant("acme"), "/ui/?tenant=acme", "s15", directory.lookup)
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/?tenant=acme"
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+  }
+
+  it should "answer not_provisioned on a tenant-scope login whose only matching row is a superuser row" in {
+    val directory                      = new RecordingDirectory(List(UserGrant(None, "admin")))
+    val (status, location, session, _) =
+      callbackWith(OidcScope.Tenant("acme"), "/ui/?tenant=acme", "s16", directory.lookup)
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/?error=not_provisioned"
+    session shouldBe ""
+  }
+
+  it should "name the tenant on the session profile and the SessionOpened event of a tenant-scope login" in {
+    // PAT minting resolves the owning row by (profile.tenant, username): the profile must carry
+    // the realm the login was verified in.
+    val events                  = scala.collection.mutable.ListBuffer.empty[ManagerEvent]
+    val sink: ManagerEventSink  = e => { events += e; () }
+    val (_, _, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s17",
+      new RecordingDirectory(List(UserGrant(Some("acme"), "admin"))).lookup,
+      sink
+    )
+    tokens.get(session).map(_.profile.tenant) shouldBe Some(Some("acme"))
+    events.toList should contain(ManagerEvent.SessionOpened("acme", "alice", "oidc"))
+  }
+
+  it should "leave the session profile tenant empty on a system-scope login" in {
+    val (_, _, session, tokens) = callbackWith(
+      OidcScope.System,
+      "/ui/",
+      "s18",
+      new RecordingDirectory(List(UserGrant(None, "admin"))).lookup
+    )
+    tokens.get(session).map(_.profile.tenant) shouldBe Some(None)
+  }
+
   // ---- SQL-token flow (/api/auth/sql-token) ----
 
   private val sqlTokenConfig =
@@ -439,7 +554,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       authService = dummyAuthService,
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Oidc,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
       sqlToken = svc
     )

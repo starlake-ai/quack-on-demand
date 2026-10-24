@@ -770,7 +770,7 @@ object Main extends IOApp with LazyLogging:
       loadTenant = id => sup.getTenantById(id)
     )
     val grantsForIdentity: GrantsLookup =
-      (identity, email) => userStore.grantsForIdentity(identity, email)
+      (realm, identity, email) => userStore.grantsForIdentity(realm, identity, email)
     // Best-effort logout callback to Starlake, only wired when the SSO integration is on --
     // otherwise NoopStarlakeNotifier keeps logout free of any Starlake dependency.
     val starlakeNotifier: StarlakeNotifier =

@@ -33,8 +33,9 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
 
   /** The real store, the real row lookup, and the row-only `grantsFor` the class documents as the
     * required wiring (`mintSessionFor`'s `Db`-mode grant list). Deliberately NOT
-    * `UserStore.grantsForIdentity`: that one matches by username across tenants, and usernames are
-    * unique only per tenant, so it would let a PAT inherit a same-named foreign admin's tenants.
+    * `UserStore.grantsForIdentity`: in `LoginRealm.System` it matches by username across every
+    * realm, and usernames are unique only per tenant, so it would let a PAT inherit a same-named
+    * foreign admin's tenants.
     */
   private def authOf(users: UserStore, pats: PatStore): PatAuthenticator =
     new PatAuthenticator(

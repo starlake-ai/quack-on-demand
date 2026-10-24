@@ -226,7 +226,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     (handlers, sessions)
@@ -313,7 +313,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     (handlers, sessions)
@@ -329,7 +329,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     val loginResult = handlers
@@ -358,7 +358,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     val loginResult = handlers

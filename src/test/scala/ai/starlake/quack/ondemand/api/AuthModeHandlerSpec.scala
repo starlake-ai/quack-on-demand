@@ -105,7 +105,7 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       authConfig = Map("clientId" -> "x")
     )
 
-  private val noGrants: GrantsLookup = (_, _) => List.empty[UserGrant]
+  private val noGrants: GrantsLookup = (_, _, _) => List.empty[UserGrant]
 
   private def handlers(
       tenants: Map[String, Tenant],

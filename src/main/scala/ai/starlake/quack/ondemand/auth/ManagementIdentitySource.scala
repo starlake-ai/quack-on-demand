@@ -24,7 +24,7 @@ object ManagementIdentitySource:
           s"unknown auth.management.identitySource: '$other' (expected: db | oidc)"
         )
 
-/** Resolve a verified identity (+ optional email claim) to its `UserGrant`s. Bound to
-  * `UserStore.grantsForIdentity` at startup.
+/** Resolve a verified identity (+ optional email claim) to its `UserGrant`s within the realm the
+  * login was verified in ([[LoginRealm]]). Bound to `UserStore.grantsForIdentity` at startup.
   */
-type GrantsLookup = (String, Option[String]) => List[UserGrant]
+type GrantsLookup = (LoginRealm, String, Option[String]) => List[UserGrant]

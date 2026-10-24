@@ -11,6 +11,7 @@ import ai.starlake.quack.edge.auth.{
 }
 import ai.starlake.quack.ondemand.auth.{
   GrantsLookup,
+  LoginRealm,
   ManagementAuthMode,
   ManagementAuthModeResolver,
   ManagementIdentitySource,
@@ -32,7 +33,8 @@ import sttp.model.headers.{Cookie, CookieValueWithMeta}
   *     non-superuser tenant-admin must sign in through their tenant scope instead.
   *   - `Tenant(id)`: the caller presented a tenant. The principal must be superuser OR an admin of
   *     that specific tenant, or, for DB-mode logins only, any user with a grant on that tenant
-  *     (profile-only session).
+  *     (profile-only session). An OIDC-mode login reads its grants from that tenant's rows only
+  *     (`LoginRealm.Tenant`), so it never binds a superuser row.
   */
 enum RequiredScope:
   case System
@@ -45,7 +47,9 @@ enum RequiredScope:
   * Authorization (what you may do) depends on `identitySource`:
   *   - `Db`: the authenticating profile IS the grant. Single-tenant or superuser.
   *   - `Oidc`: the JWT's `role` and any tenant claim are discarded; `grantsForIdentity` is
-  *     consulted with the JWT's `preferred_username` (and `email` as fallback).
+  *     consulted with the JWT's `preferred_username` (and `email` as fallback), in the realm the
+  *     login was verified in: a tenant login reads only that tenant's rows, the system login the
+  *     rows of every realm ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
   *
   * Either path collapses to a [[ai.starlake.quack.ondemand.auth.SessionScope SessionScope]]
   * carrying `superuser` and `manageableTenants`. Empty grants => `403 not_provisioned`. The admin
@@ -235,11 +239,15 @@ final class AuthHandlers(
               clearStateCookie(forwardedProto)
             )
           case Right(result) =>
-            val required = result.scope match
-              case OidcScope.System    => RequiredScope.SystemStrict
-              case OidcScope.Tenant(t) => RequiredScope.Tenant(t)
+            // A tenant-scope login carries its tenant on the profile, as a DB login does, so the
+            // audit rows, the SessionOpened event and the session name the realm it was verified
+            // in (PAT minting resolves the owning row by (profile.tenant, username)).
+            val (required, profile) = result.scope match
+              case OidcScope.System    => (RequiredScope.SystemStrict, result.profile)
+              case OidcScope.Tenant(t) =>
+                (RequiredScope.Tenant(t), result.profile.copy(tenant = Some(t)))
             mintSessionFor(
-              result.profile,
+              profile,
               required,
               forwardedProto,
               ManagementAuthMode.Oidc,
@@ -490,6 +498,12 @@ final class AuthHandlers(
     * The grant computation and the not_provisioned / admin_required gates are shared by both entry
     * points, so they cannot drift.
     *
+    * Grants: in `Db` mode the grant is the row the authenticator verified. In `Oidc` mode they come
+    * from `grantsForIdentity` in the realm of `required` (`RequiredScope.Tenant(t)` reads
+    * `LoginRealm.Tenant(t)`, `System` and `SystemStrict` read `LoginRealm.System`), kept to that
+    * realm's rows by `LoginRealm.admits`: a tenant login never binds a superuser row or another
+    * tenant's row, so it never yields `superuser = true` and manages at most its own tenant.
+    *
     * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
     * `"rest"` from `login`, `"oidc"` from `oidcCallback`.
     */
@@ -505,8 +519,14 @@ final class AuthHandlers(
         // The DB authenticator already encoded the (tenant, role) from qodstate_user.
         List(UserGrant(profile.tenant, profile.role))
       case ManagementAuthMode.Oidc =>
-        // Identity from the IdP; qodstate_user is authoritative for role + tenants.
-        grantsForIdentity(profile.username, profile.claims.get("email"))
+        // Identity from the IdP; qodstate_user is authoritative for role + tenants, read in the
+        // realm the login was verified in and kept to that realm's rows: a tenant login never
+        // binds a superuser row or another tenant's row, whatever the lookup answers.
+        val loginRealm = required match
+          case RequiredScope.Tenant(t)                           => LoginRealm.Tenant(t)
+          case RequiredScope.System | RequiredScope.SystemStrict => LoginRealm.System
+        grantsForIdentity(loginRealm, profile.username, profile.claims.get("email"))
+          .filter(loginRealm.admits)
 
     val superuser = grants.exists(g => g.tenant.isEmpty && g.kind.equalsIgnoreCase("admin"))
     val manageableTenants: Set[String] = grants.collect {
@@ -622,8 +642,8 @@ final class AuthHandlers(
         tenant = profile.tenant,
         detail = Map("authMethod" -> profile.authMethod, "admin" -> isAdminPrincipal.toString)
       )
-      // profile.tenant already mirrors the requested AuthScope.tenantId (see
-      // DatabaseAuthenticator/OIDC providers): None for a system/superuser scope,
+      // profile.tenant already mirrors the requested scope (the password backends set
+      // it; oidcCallback sets it for a tenant-scope SSO login): None for a system scope,
       // Some(id) for a tenant-scoped login. SessionScope itself carries only a
       // superuser flag plus a set of manageable tenants (no single tenant id to
       // read here), so profile.tenant is the reliable source for tenantOrEmpty.

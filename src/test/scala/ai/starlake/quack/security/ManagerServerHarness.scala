@@ -332,7 +332,7 @@ object ManagerServerHarness:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       // Mirror Main: resolve per-tenant login mode from the registry so a db
       // tenant login resolves to Db instead of the no-op default's TenantNotFound.
       authModeResolver = new ai.starlake.quack.ondemand.auth.ManagementAuthModeResolver(

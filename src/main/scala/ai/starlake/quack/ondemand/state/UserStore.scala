@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.state
 
 import ai.starlake.quack.LockoutConfig
+import ai.starlake.quack.ondemand.auth.LoginRealm
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -468,9 +469,17 @@ final class UserStore(
       case None =>
         ps.setString(1, username)
 
-  /** All management-plane grants for an OIDC-verified identity. Matches `username = identity`
-    * first; if that yields nothing AND `email` is given, retries with `username = email` so
-    * operators can provision either form. tenant=NULL rows are superuser grants.
+  /** All management-plane grants for an OIDC-verified identity, read in the realm the login was
+    * verified in. Matches `username = identity` first; if that yields nothing AND `email` is given,
+    * retries with `username = email` so operators can provision either form. tenant=NULL rows are
+    * superuser grants.
+    *
+    * The realm bounds both lookups, the email fallback included:
+    *   - `LoginRealm.System` matches the rows of every realm (superuser rows and every tenant's
+    *     rows): the system login builds multi-tenant admin sessions from them.
+    *   - `LoginRealm.Tenant(id)` matches only rows with `tenant = id`, never a superuser row and
+    *     never another tenant's row. At most one row matches (`qodstate_user_scoped_unique` is
+    *     `(tenant, username)`).
     *
     * The disabled check is per-row, not per-username: the same username may exist once per tenant
     * plus once as global superuser, and a multi-tenant admin must keep every enabled row's grant
@@ -483,17 +492,24 @@ final class UserStore(
     *     and an enabled email-keyed row for the same person would silently restore access.
     *   - no rows: fall back to the email lookup (same per-row logic there).
     *
+    * Only rows of the realm count in these cases: in a tenant realm, a disabled row of another
+    * tenant neither denies nor stops the fallback.
+    *
     * Returns one `UserGrant` per enabled row. Order is unspecified.
     */
-  def grantsForIdentity(identity: String, email: Option[String]): List[UserGrant] =
+  def grantsForIdentity(
+      realm: LoginRealm,
+      identity: String,
+      email: Option[String]
+  ): List[UserGrant] =
     withConn { c =>
-      lookupByUsername(c, identity) match
+      lookupByUsername(c, realm, identity) match
         case Lookup.AllDisabled => Nil
         case Lookup.Found(gs)   => gs
         case Lookup.Missing     =>
           email
             .filter(e => e.nonEmpty && e != identity)
-            .map(lookupByUsername(c, _))
+            .map(lookupByUsername(c, realm, _))
             .map {
               case Lookup.AllDisabled => Nil
               case Lookup.Found(gs)   => gs
@@ -511,15 +527,25 @@ final class UserStore(
     case AllDisabled
     case Found(grants: List[UserGrant])
 
-  private def lookupByUsername(c: Connection, username: String): Lookup =
+  private def lookupByUsername(c: Connection, realm: LoginRealm, username: String): Lookup =
     // No `AND enabled` filter here: rows must be fetched regardless of
     // their enabled state so an all-disabled username can be distinguished
     // from a genuinely-missing one (see grantsForIdentity's doc).
-    val ps = c.prepareStatement(
-      "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ?"
-    )
+    val ps = realm match
+      case LoginRealm.System =>
+        val p = c.prepareStatement(
+          "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ?"
+        )
+        p.setString(1, username)
+        p
+      case LoginRealm.Tenant(id) =>
+        val p = c.prepareStatement(
+          "SELECT tenant, kind, enabled FROM qodstate_user WHERE username = ? AND tenant = ?"
+        )
+        p.setString(1, username)
+        p.setString(2, id)
+        p
     try
-      ps.setString(1, username)
       val rs        = ps.executeQuery()
       val buf       = scala.collection.mutable.ListBuffer.empty[UserGrant]
       var rowsFound = false
