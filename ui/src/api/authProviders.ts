@@ -28,13 +28,41 @@ export const ISSUER_KEY = 'issuerUrl';
 export const SECRET_REF_KEY = 'clientSecretRef';
 
 /** `authConfig` key under which Liquibase 0048 parked a reference saved
-  * before 0.10.2, until a superuser saves it again. Nothing reads it. */
+  * before 0.10.2. Nothing reads it. The server drops it once a save holds a
+  * secret source or moves the issuer, and keeps it only while a save carries
+  * it unchanged. */
 export const PARKED_SECRET_REF_KEY = 'clientSecretRefUnconfirmed';
 
 // The client secret value never travels in `authConfig` (`tenant/setAuth`
 // refuses the key with 400 invalid_auth_config): it is the write-only
 // `clientSecret` request field.
 const SECRET_KEY = 'clientSecret';
+
+// The prefixes of a secret reference (the vocabulary of the manager's
+// `SecretRefResolver`), as `ParkedSecretRefs.ReferencePrefixes` lists them.
+const SECRET_REF_PREFIXES = ['env:', 'aws-sm:', 'gcp-sm:', 'azure-kv:', 'vault:'];
+
+/** Shown in place of a parked value that is not a secret reference: it may be
+  * a literal secret typed into the wrong key, so it is never displayed (as
+  * `ParkedSecretRefs.NotAReference` does for the boot log). */
+export const NOT_A_REFERENCE = '<not a secret reference, not shown>';
+
+/** Whether `value` starts with a known secret reference prefix, checked on
+  * the raw value as the server does (case-sensitive, no trimming). */
+export function isSecretReference(value: string): boolean {
+  return SECRET_REF_PREFIXES.some(prefix => value.startsWith(prefix));
+}
+
+/** A parked value as the page shows it: a reference as stored, any other
+  * value masked. */
+export function parkedRefShown(value: string): string {
+  return isSecretReference(value) ? value : NOT_A_REFERENCE;
+}
+
+/** A config value as the server reads it: trimmed, empty meaning none. */
+function valueOf(config: Record<string, string>, key: string): string {
+  return (config[key] ?? '').trim();
+}
 
 // Two readers of these `qodstate_tenant.authConfig` keys
 // (src/main/scala/ai/starlake/quack/edge/auth/):
@@ -175,18 +203,100 @@ export function setAuthRequestFor(
   * A typed secret always does; a reference does only in a superuser's save,
   * since a superuser may pair a reference with a new issuer while a tenant
   * admin's carried reference is dropped. The server then removes the saved
-  * secret, which must be entered again for the new issuer. */
+  * secret, which must be entered again for the new issuer. Never while
+  * "Remove secret" is checked: the secret goes whatever the issuer does, and
+  * `consoleSignInComplete` says what is left. */
 export function issuerChangeDropsSecret(
   stored: TenantResponse,
   form: SignInForm,
   superuser: boolean,
 ): boolean {
-  const issuer = (config: Record<string, string>) => (config[ISSUER_KEY] ?? '').trim();
-  const storedRef = (stored.authConfig[SECRET_REF_KEY] ?? '').trim();
-  const formRef = (form.config[SECRET_REF_KEY] ?? '').trim();
-  const issuerChanged = issuer(stored.authConfig) !== issuer(form.config);
+  if (form.removeSecret) return false;
+  const storedRef = valueOf(stored.authConfig, SECRET_REF_KEY);
+  const issuerChanged = valueOf(stored.authConfig, ISSUER_KEY) !== valueOf(form.config, ISSUER_KEY);
   const secretSaved = stored.clientSecretSet || storedRef !== '';
   const secretSupplied =
-    (!form.removeSecret && form.secret !== '') || (superuser && formRef !== '');
+    form.secret !== '' || (superuser && valueOf(form.config, SECRET_REF_KEY) !== '');
   return issuerChanged && secretSaved && !secretSupplied;
+}
+
+/** The console sign-in `tenant/setAuth` stores for the request `form` makes,
+  * decided the way `TenantSignInWrite.apply` decides it. */
+interface SavedSignIn {
+  /** The trimmed `issuerUrl` and `clientId` stored, '' for none. */
+  issuer:      string;
+  clientId:    string;
+  /** The save changes the issuer (compared trimmed, empty meaning none). */
+  issuerMoved: boolean;
+  /** The trimmed `clientSecretRef` the save keeps, '' for none. */
+  reference:   string;
+  /** A stored client secret value survives the save. */
+  value:       boolean;
+}
+
+function savedSignIn(stored: TenantResponse, form: SignInForm, superuser: boolean): SavedSignIn {
+  const req = setAuthRequestFor(stored.name, stored, form, superuser);
+  const issuer = valueOf(req.authConfig, ISSUER_KEY);
+  const issuerMoved = issuer !== valueOf(stored.authConfig, ISSUER_KEY);
+  const requestedRef = valueOf(req.authConfig, SECRET_REF_KEY);
+  const storedRef = valueOf(stored.authConfig, SECRET_REF_KEY);
+  const refChanged = requestedRef !== '' && requestedRef !== storedRef;
+  const valueGiven = (req.clientSecret ?? '') !== '';
+  // A reference the request carries stays unless a value replaces it: a
+  // superuser's under any issuer, anyone else's only under the same one.
+  const keepsRef = requestedRef !== '' && !valueGiven && (superuser || !issuerMoved);
+  // A typed value is stored; an omitted one keeps the stored value only under
+  // the same issuer and with no reference added or changed; '' removes it.
+  const keepsValue = valueGiven ||
+    (req.clientSecret === undefined && stored.clientSecretSet && !issuerMoved && !refChanged);
+  return {
+    issuer,
+    clientId: valueOf(req.authConfig, 'clientId'),
+    issuerMoved,
+    reference: keepsRef ? requestedRef : '',
+    value: keepsValue,
+  };
+}
+
+/** Whether the tenant's console sign-in works once `form` is saved, the way
+  * the server decides it (`ManagementAuthModeResolver`): a `db` tenant signs
+  * in with its password; any other provider needs `issuerUrl`, `clientId` and
+  * a secret source that survives the save (a typed value, the stored value
+  * kept under the same issuer, or a reference kept). Without them a password
+  * login naming the tenant is still refused and only a superuser, through the
+  * system login, can open the tenant's console. */
+export function consoleSignInComplete(
+  stored: TenantResponse,
+  form: SignInForm,
+  superuser: boolean,
+): boolean {
+  if (form.provider === 'db') return true;
+  const saved = savedSignIn(stored, form, superuser);
+  return saved.issuer !== '' && saved.clientId !== '' && (saved.value || saved.reference !== '');
+}
+
+/** Whether saving `form` keeps a secret reference under a new issuer, which
+  * only a superuser's save does: the environment secret the reference names is
+  * then sent to the new issuer, so the superuser should confirm that it is the
+  * tenant's own identity provider. */
+export function referenceFollowsNewIssuer(
+  stored: TenantResponse,
+  form: SignInForm,
+  superuser: boolean,
+): boolean {
+  if (form.provider === 'db') return false;
+  const saved = savedSignIn(stored, form, superuser);
+  return saved.issuerMoved && saved.issuer !== '' && saved.reference !== '';
+}
+
+/** The tenant's only secret source is a reference: no stored value, a
+  * non-blank `clientSecretRef`. */
+export function secretComesFromReference(t: TenantResponse): boolean {
+  return !t.clientSecretSet && valueOf(t.authConfig, SECRET_REF_KEY) !== '';
+}
+
+/** The "Client secret" status line of the read table. */
+export function clientSecretStatus(t: TenantResponse): string {
+  if (t.clientSecretSet) return 'set';
+  return secretComesFromReference(t) ? 'not set (the secret reference supplies it)' : 'not set';
 }

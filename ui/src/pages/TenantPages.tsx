@@ -69,7 +69,14 @@ export function BranchesPage() {
 
 export function AuthProviderPage() {
   const tenant = useScopedTenant();
-  return <><TenantHeader title="Auth Provider" /><AuthProviderSection tenantName={tenant} /></>;
+  // Keyed on the tenant: the editor holds a typed client secret, which must never survive a
+  // change of tenant and be saved into another one.
+  return (
+    <>
+      <TenantHeader title="Auth Provider" />
+      <AuthProviderSection key={tenant} tenantName={tenant} />
+    </>
+  );
 }
 
 export function AccessControlPage() {

@@ -344,9 +344,11 @@ export interface SetTenantDisabledRequest {
 
 /** Replaces a tenant's sign-in configuration. `authConfig` is replaced whole and may not carry a
   * `clientSecret` key (400 invalid_auth_config). `clientSecret` is write-only: omitted keeps the
-  * stored secret while `authConfig.issuerUrl` is unchanged (a new issuer drops it), `""` removes
-  * it, a value replaces it. Adding or changing `authConfig.clientSecretRef` needs a superuser
-  * (403 superuser_required). */
+  * stored secret only while `authConfig.issuerUrl` is unchanged and `authConfig.clientSecretRef`
+  * is not added or changed (either one drops it), `""` removes it, a value replaces it. A tenant
+  * has one secret source: a value also drops the `clientSecretRef` the request carries, and a
+  * value sent with an added or changed reference is refused (400 secret_conflict). Adding or
+  * changing `authConfig.clientSecretRef` needs a superuser (403 superuser_required). */
 export interface SetTenantAuthRequest {
   name: string;
   authProvider: AuthProvider;

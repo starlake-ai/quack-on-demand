@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, SECRET_REF_KEY, issuerChangeDropsSecret,
-  setAuthRequestFor, signInFormFor,
+  NOT_A_REFERENCE, PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, SECRET_REF_KEY, clientSecretStatus,
+  consoleSignInComplete, isSecretReference, issuerChangeDropsSecret, parkedRefShown,
+  referenceFollowsNewIssuer, secretComesFromReference, setAuthRequestFor, signInFormFor,
 } from './authProviders';
 import type { AuthProvider, TenantResponse } from './types';
 
@@ -28,6 +29,15 @@ function tenant(over: Partial<TenantResponse> = {}): TenantResponse {
 function edited(t: TenantResponse, config: Record<string, string>) {
   const form = signInFormFor(t);
   return { ...form, config: { ...form.config, ...config } };
+}
+
+/** A keycloak tenant whose only secret source is a reference (no stored value). */
+function refTenant(over: Partial<TenantResponse> = {}): TenantResponse {
+  return tenant({
+    clientSecretSet: false,
+    authConfig: { issuerUrl: ISSUER, clientId: 'qod-console', clientSecretRef: 'env:ACME_CS' },
+    ...over,
+  });
 }
 
 describe('PROVIDER_FIELDS', () => {
@@ -177,5 +187,195 @@ describe('issuerChangeDropsSecret', () => {
   it('does not warn when no secret is saved', () => {
     const t = tenant({ clientSecretSet: false });
     expect(issuerChangeDropsSecret(t, edited(t, { issuerUrl: NEW_ISSUER }), false)).toBe(false);
+  });
+
+  it('does not warn when Remove secret is checked: the secret goes either way', () => {
+    const t = tenant();
+    const form = { ...edited(t, { issuerUrl: NEW_ISSUER }), removeSecret: true };
+    expect(issuerChangeDropsSecret(t, form, false)).toBe(false);
+    expect(issuerChangeDropsSecret(t, form, true)).toBe(false);
+  });
+});
+
+describe('consoleSignInComplete', () => {
+  const dbTenant = () => tenant({ authProvider: 'db', authConfig: {}, clientSecretSet: false });
+
+  it('is complete when the issuer, the client ID and the stored secret are all kept', () => {
+    const t = tenant();
+    expect(consoleSignInComplete(t, signInFormFor(t), false)).toBe(true);
+  });
+
+  it('needs the issuer URL', () => {
+    const t = tenant();
+    const form = { ...edited(t, { issuerUrl: '  ' }), secret: 's3cret' };
+    expect(consoleSignInComplete(t, form, false)).toBe(false);
+  });
+
+  it('needs the client ID', () => {
+    const t = tenant();
+    expect(consoleSignInComplete(t, edited(t, { clientId: '' }), false)).toBe(false);
+  });
+
+  it('needs a secret source: no stored secret and no reference is none', () => {
+    const t = tenant({ clientSecretSet: false });
+    expect(consoleSignInComplete(t, signInFormFor(t), false)).toBe(false);
+  });
+
+  it('counts a typed secret as the source', () => {
+    const t = tenant({ clientSecretSet: false });
+    expect(consoleSignInComplete(t, { ...signInFormFor(t), secret: 's3cret' }, false)).toBe(true);
+  });
+
+  it('leaves no source when Remove secret is checked', () => {
+    const t = tenant();
+    const form = { ...signInFormFor(t), removeSecret: true };
+    expect(consoleSignInComplete(t, form, false)).toBe(false);
+  });
+
+  it('does not keep the stored secret under a new issuer unless a new one is typed', () => {
+    const t = tenant();
+    const moved = edited(t, { issuerUrl: NEW_ISSUER });
+    expect(consoleSignInComplete(t, moved, false)).toBe(false);
+    expect(consoleSignInComplete(t, { ...moved, secret: 's3cret' }, false)).toBe(true);
+  });
+
+  it('keeps a stored reference under the same issuer', () => {
+    const t = refTenant();
+    expect(consoleSignInComplete(t, signInFormFor(t), false)).toBe(true);
+  });
+
+  it('drops a tenant admin reference under a new issuer, as the server does', () => {
+    const t = refTenant();
+    expect(consoleSignInComplete(t, edited(t, { issuerUrl: NEW_ISSUER }), false)).toBe(false);
+  });
+
+  it('keeps a superuser reference under a new issuer', () => {
+    const t = refTenant();
+    expect(consoleSignInComplete(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(true);
+  });
+
+  it('ignores a reference a tenant admin types, since it is never sent', () => {
+    const t = tenant({ clientSecretSet: false });
+    expect(consoleSignInComplete(t, edited(t, { clientSecretRef: 'env:ANY' }), false)).toBe(false);
+  });
+
+  it('counts a reference a superuser adds as the source, replacing the stored secret', () => {
+    const t = tenant();
+    const form = edited(t, { clientSecretRef: 'env:ACME_CS' });
+    expect(consoleSignInComplete(t, form, true)).toBe(true);
+    expect(consoleSignInComplete(t, { ...form, removeSecret: true }, true)).toBe(true);
+  });
+
+  it('does not count the parked reference as a source', () => {
+    const t = tenant({
+      clientSecretSet: false,
+      authConfig: {
+        issuerUrl: ISSUER, clientId: 'qod-console', [PARKED_SECRET_REF_KEY]: 'env:OLD',
+      },
+    });
+    expect(consoleSignInComplete(t, signInFormFor(t), true)).toBe(false);
+  });
+
+  it('treats a db tenant as complete: it signs in with its password', () => {
+    const t = dbTenant();
+    expect(consoleSignInComplete(t, signInFormFor(t), false)).toBe(true);
+  });
+
+  it('is incomplete when a db tenant is switched to an OIDC provider without the fields', () => {
+    const t = dbTenant();
+    const form = { ...signInFormFor(t), provider: 'keycloak' as const };
+    expect(consoleSignInComplete(t, form, false)).toBe(false);
+    expect(consoleSignInComplete(t, form, true)).toBe(false);
+  });
+});
+
+describe('clientSecretStatus', () => {
+  it('reads set when a client secret is stored', () => {
+    expect(clientSecretStatus(tenant())).toBe('set');
+    expect(secretComesFromReference(tenant())).toBe(false);
+  });
+
+  it('reads not set when there is neither a stored secret nor a reference', () => {
+    const t = tenant({ clientSecretSet: false });
+    expect(clientSecretStatus(t)).toBe('not set');
+    expect(secretComesFromReference(t)).toBe(false);
+  });
+
+  it('says the reference supplies the secret when only a reference is stored', () => {
+    const t = refTenant();
+    expect(clientSecretStatus(t)).toBe('not set (the secret reference supplies it)');
+    expect(secretComesFromReference(t)).toBe(true);
+  });
+
+  it('ignores a blank reference and the parked reference', () => {
+    const blank = tenant({
+      clientSecretSet: false,
+      authConfig: { issuerUrl: ISSUER, clientSecretRef: '   ' },
+    });
+    const parked = tenant({
+      clientSecretSet: false,
+      authConfig: { issuerUrl: ISSUER, [PARKED_SECRET_REF_KEY]: 'env:OLD' },
+    });
+    expect(clientSecretStatus(blank)).toBe('not set');
+    expect(clientSecretStatus(parked)).toBe('not set');
+  });
+});
+
+describe('parked reference display', () => {
+  it('shows a value with a known secret reference prefix as stored', () => {
+    for (const ref of ['env:A', 'aws-sm:a', 'gcp-sm:a', 'azure-kv:a', 'vault:a']) {
+      expect(isSecretReference(ref)).toBe(true);
+      expect(parkedRefShown(ref)).toBe(ref);
+    }
+  });
+
+  it('masks a value without a known prefix, since it may be a literal secret', () => {
+    for (const value of ['hunter2', 'ENV:A', ' env:A', 'https://idp.example/env:A']) {
+      expect(isSecretReference(value)).toBe(false);
+      expect(parkedRefShown(value)).toBe(NOT_A_REFERENCE);
+    }
+  });
+});
+
+describe('referenceFollowsNewIssuer', () => {
+  it('is true when a superuser keeps the stored reference under a new issuer', () => {
+    const t = refTenant();
+    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(true);
+  });
+
+  it('is true when a superuser enters a reference together with a new issuer', () => {
+    const t = tenant({ clientSecretSet: false });
+    const form = edited(t, { issuerUrl: NEW_ISSUER, clientSecretRef: 'env:ACME_CS' });
+    expect(referenceFollowsNewIssuer(t, form, true)).toBe(true);
+  });
+
+  it('is false while the issuer is unchanged, compared trimmed', () => {
+    const t = refTenant();
+    expect(referenceFollowsNewIssuer(t, signInFormFor(t), true)).toBe(false);
+    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: ` ${ISSUER} ` }), true)).toBe(false);
+  });
+
+  it('is false for a tenant admin: the server drops a carried reference under a new issuer', () => {
+    const t = refTenant();
+    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), false)).toBe(false);
+  });
+
+  it('is false when a typed secret replaces the reference', () => {
+    const t = refTenant();
+    const form = { ...edited(t, { issuerUrl: NEW_ISSUER }), secret: 's3cret' };
+    expect(referenceFollowsNewIssuer(t, form, true)).toBe(false);
+  });
+
+  it('is false without a reference, or when the new issuer is blank', () => {
+    const none = tenant();
+    const moved = edited(none, { issuerUrl: NEW_ISSUER });
+    expect(referenceFollowsNewIssuer(none, moved, true)).toBe(false);
+    const t = refTenant();
+    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: '  ' }), true)).toBe(false);
+  });
+
+  it('is false for a db tenant, which sends no secret to any issuer', () => {
+    const t = refTenant({ authProvider: 'db' });
+    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(false);
   });
 });

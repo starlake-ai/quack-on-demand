@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
 import {
-  PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, PROVIDER_LABELS, issuerChangeDropsSecret,
-  setAuthRequestFor, signInFormFor, type ProviderField, type SignInForm,
+  ISSUER_KEY, PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, PROVIDER_LABELS, SECRET_REF_KEY,
+  clientSecretStatus, consoleSignInComplete, isSecretReference, issuerChangeDropsSecret,
+  parkedRefShown, referenceFollowsNewIssuer, secretComesFromReference, setAuthRequestFor,
+  signInFormFor, type ProviderField, type SignInForm,
 } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
@@ -109,6 +111,20 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
   const storedParked = tenant.authConfig[PARKED_SECRET_REF_KEY];
   const formParked   = form.config[PARKED_SECRET_REF_KEY];
   const dropsSecret  = formFields.length > 0 && issuerChangeDropsSecret(tenant, form, superuser);
+  // Warned before the save, from what the server will keep (see consoleSignInComplete).
+  const incomplete   = !consoleSignInComplete(tenant, form, superuser);
+  const refMoves     = referenceFollowsNewIssuer(tenant, form, superuser);
+  const formIssuer   = (form.config[ISSUER_KEY] ?? '').trim();
+  const formRef      = (form.config[SECRET_REF_KEY] ?? '').trim();
+  // What to do about a parked value: a reference can be restored by a superuser, anything else
+  // is no reference, so a secret source has to be set instead.
+  const parkedAdvice = (parked: string) => isSecretReference(parked)
+    ? (superuser
+        ? "To restore it, first check that the issuer URL is the tenant's own identity provider (the secret is sent to it), then enter the reference again as the client secret ref."
+        : 'A superuser can restore it, or enter the client secret above.')
+    : (superuser
+        ? 'It is not a secret reference, so there is nothing to restore: set a client secret above or a client secret ref.'
+        : 'It is not a secret reference, so there is nothing to restore: enter the client secret above, or ask a superuser to set a reference.');
 
   return (
     <div className="card">
@@ -151,15 +167,20 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
               ))}
               <tr>
                 <th style={{ textAlign: 'left' }}>Client secret</th>
-                <td>{tenant.clientSecretSet ? 'set' : <span className="subtle">not set</span>}</td>
+                <td>
+                  {tenant.clientSecretSet ? clientSecretStatus(tenant)
+                    : <span className="subtle">{clientSecretStatus(tenant)}</span>}
+                </td>
               </tr>
               {storedParked && (
                 <tr>
                   <th style={{ textAlign: 'left' }}>Parked secret ref</th>
                   <td>
-                    <code>{storedParked}</code>{' '}
+                    <code>{parkedRefShown(storedParked)}</code>{' '}
                     <span className="subtle">
-                      (saved before 0.10.2; unused until a superuser saves it again.
+                      {isSecretReference(storedParked)
+                        ? '(saved before 0.10.2; unused until a superuser saves it again. '
+                        : '(saved before 0.10.2 and unused; it is not a secret reference, so set a client secret or a reference instead. '}
                       Entering a client secret or changing the issuer URL drops it)
                     </span>
                   </td>
@@ -193,15 +214,17 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
               ) : (
                 <>
                   <p className="subtle" style={{ marginTop: 0 }}>
-                    Console sign-in: once the issuer URL, the client ID and a
-                    client secret are set, this tenant's admins sign in through
-                    its identity provider at <code>/ui/?tenant={tenantName}</code>,
-                    and a password login naming the tenant is refused. SQL
-                    clients: bearer tokens are checked against this tenant's own
-                    client when every field its provider needs is filled in (the
-                    client ID, plus the base URL and realm, AD tenant ID, or
-                    region and user pool ID), and against the manager-wide config
-                    from <code>application.conf</code> otherwise.
+                    Console sign-in: with an OIDC provider a password login
+                    naming this tenant is always refused. Once the issuer URL,
+                    the client ID and a client secret (or a secret reference,
+                    which only a superuser can set) are all set, this tenant's
+                    admins sign in through its identity provider at <code>/ui/?tenant={tenantName}</code>;
+                    until then nobody but a superuser, through the system login,
+                    can open this tenant's console. SQL clients: bearer tokens
+                    are checked against this tenant's own client when every field
+                    its provider needs is filled in (the client ID, plus the base
+                    URL and realm, AD tenant ID, or region and user pool ID), and
+                    against the manager-wide config from <code>application.conf</code> otherwise.
                   </p>
                   {formFields.filter(f => fieldShown(f, form.config)).map(f => (
                     readOnlyField(f) ? (
@@ -209,8 +232,9 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                         {f.label}
                         <input value={form.config[f.key] ?? ''} readOnly disabled />
                         <span className="subtle">
-                          Set by an operator: only a superuser can change it, and a
-                          new issuer URL removes it.
+                          Set by an operator: only a superuser can change it, a new
+                          issuer URL removes it, and entering a client secret
+                          replaces it.
                         </span>
                       </label>
                     ) : (
@@ -222,6 +246,9 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                           placeholder={f.placeholder}
                           required={!f.optional}
                         />
+                        {f.key === SECRET_REF_KEY && formRef !== '' && (
+                          <span className="subtle">Entering a client secret replaces it.</span>
+                        )}
                       </label>
                     )
                   ))}
@@ -236,6 +263,12 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                       disabled={form.removeSecret}
                       autoComplete="new-password"
                     />
+                    {secretComesFromReference(tenant) && (
+                      <span className="subtle">
+                        The secret reference supplies it; entering a client secret
+                        replaces the reference.
+                      </span>
+                    )}
                   </label>
                   {tenant.clientSecretSet && (
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
@@ -249,11 +282,9 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                   )}
                   {formParked && (
                     <p className="subtle">
-                      A secret reference saved before 0.10.2 is parked and unused:{' '}
-                      <code>{formParked}</code>.{' '}
-                      {superuser
-                        ? "To restore it, first check that the issuer URL is the tenant's own identity provider (the secret is sent to it), then enter the reference again as the client secret ref."
-                        : 'A superuser can restore it, or enter the client secret above.'}{' '}
+                      The client secret ref saved before 0.10.2 is parked and unused:{' '}
+                      <code>{parkedRefShown(formParked)}</code>.{' '}
+                      {parkedAdvice(formParked)}{' '}
                       Entering a client secret, or changing the issuer URL, drops it.
                     </p>
                   )}
@@ -263,6 +294,22 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                       which belongs to the previous issuer, and it must be entered
                       again. Enter the new issuer's secret above to keep console
                       sign-in working.
+                    </p>
+                  )}
+                  {incomplete && (
+                    <p role="alert" style={{ color: 'var(--warn)' }}>
+                      Saving leaves console sign-in incomplete: until the issuer URL,
+                      the client ID and a client secret (or a secret reference) are
+                      all set, nobody but a superuser, through the system login, can
+                      open this tenant's console.
+                    </p>
+                  )}
+                  {refMoves && (
+                    <p role="alert" style={{ color: 'var(--warn)' }}>
+                      The secret reference <code>{formRef}</code> names a secret of the
+                      manager's environment, and with this issuer URL that secret is
+                      sent to <code>{formIssuer}</code>. Confirm that it is this
+                      tenant's own identity provider before saving.
                     </p>
                   )}
                 </>
