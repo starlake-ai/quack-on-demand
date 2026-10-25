@@ -11,16 +11,19 @@ posture comes from DemoConfig.overlay and lives only on that code path); the def
 `qod serve` path is persistent and keeps the normal secure posture: TLS on, DB auth
 on, ACL on, an admin password chosen at first boot instead of 'admin'.
 
-Provisioning runs in a thread beside the output relay because the manager has to
-be up before the REST calls can land, and `_run_supervised` owns the foreground
-for the JVM's lifetime. Every provisioning step is ensure-semantics, so a failed
-or interrupted run is resumed by simply re-running the command.
+The booting manager provisions itself: this command writes the three create
+bodies to a spec file named by QOD_SERVE_PROVISION, and the manager's add-only
+ServeProvisionHook creates what is missing at boot and writes an outcome file
+beside it. A thread beside the output relay waits for that outcome and prints
+the banner, because `_run_supervised` owns the foreground for the JVM's
+lifetime. Attach mode (a manager already running) provisions through REST
+instead, as the caller. Every step creates only what is missing, so a failed or
+interrupted run is resumed by simply re-running the command.
 """
 
 from __future__ import annotations
 
 import os
-import secrets
 import threading
 import time
 from pathlib import Path
@@ -33,12 +36,20 @@ from .. import admin_password, launcher, starflow
 from ..config import Settings, load_settings, load_start_env, save_profile
 from ..rest import ApiError, RestClient
 from ..serve_provision import (
+    ANOTHER_NAME,
+    SPEC_FILE,
     ProvisionError,
     ensure_database,
     ensure_pool,
     ensure_tenant,
+    finish_by_hand,
+    outcome_path,
+    provision_by_hand,
+    provision_spec,
     wait_node_routable,
+    wait_outcome,
     wait_ready,
+    write_spec,
 )
 from ..serve_target import TargetError, composed_db_name
 from ..serve_target import resolve as resolve_target
@@ -333,35 +344,107 @@ def _banner(
 def _failure_tail(attached: bool) -> str:
     if attached:
         return (
-            "  the gateway is still running; fix the credentials (qod login, or export "
-            "QOD_API_KEY) and re-run qod serve"
+            "  the gateway is still running; fix the credentials (run qod login, or set "
+            "QOD_TOKEN to a personal access token) and re-run qod serve"
         )
     return "  the manager is still running; re-run qod serve to resume, or Ctrl-C to stop."
+
+
+def _report_failure(exc: Exception, echo, attached: bool) -> None:
+    """Both provisioning paths' failure arm: the step and its hand-run commands (one
+    line each) when there are any, then where the manager stands."""
+    if isinstance(exc, ProvisionError):
+        echo(f"\nqod serve: {exc.step} failed: {exc.detail}")
+        for command in exc.manual.splitlines():
+            echo(f"  finish by hand: {command}")
+    elif isinstance(exc, ApiError):
+        echo(f"\nqod serve: provisioning failed: {exc}")
+    else:
+        echo(f"\nqod serve: provisioning failed unexpectedly: {exc!r}")
+    echo(_failure_tail(attached))
+
+
+def _finish(
+    *, client: RestClient, manager_url: str, tenant: str, target, pool: str, size: int,
+    profile: str, pg_port: int, pg_data_dir: str, echo, token: str, save_token: bool,
+    first_boot: bool, attached: bool, node_timeout: float, node_sleep, node_now,
+    admin_names: list[str] | None,
+) -> None:
+    """Both paths' tail once the tenant, database and pool exist: wait for a
+    routable node when TOKEN can list pools, save the profile (the session only
+    when SAVE_TOKEN), print the banner. CLIENT carries TOKEN."""
+    db_full = composed_db_name(tenant, target.name)
+    # On a RESTART the pool row exists but a respawned node may still be
+    # seconds from healthy; wait for one before printing connect strings
+    # that would otherwise briefly fail. Never fails provisioning over it, and
+    # without a credential (a later boot) there is no listing to wait on.
+    if not token or not wait_node_routable(
+        client, tenant, db_full, pool,
+        timeout_s=node_timeout, sleep=node_sleep, now=node_now,
+    ):
+        echo("note: node still warming; the first query may briefly fail")
+    edge = client.request("GET", "/api/config/client") or {}
+    edge_host = edge.get("flightSqlHost") or ""
+    if edge_host in ("", "0.0.0.0"):
+        edge_host = urlparse(manager_url).hostname or "localhost"
+    edge_port = int(edge.get("flightSqlPort", 31338))
+    # 0 when the manager predates the native Quack front door or has it disabled.
+    quack_port = int(edge.get("quackPort") or 0)
+    save_profile(
+        profile,
+        {
+            "manager_url": manager_url,
+            # save_profile skips None: a run that did not log in keeps the
+            # profile's stored session.
+            "token": token if save_token else None,
+            "sql_user": _ADMIN_USER,
+            # The seeded admin is a SUPERUSER row (tenant IS NULL): the FlightSQL
+            # handshake has no fallback between realms, so without this a `qod sql`
+            # reusing this profile would authenticate in the tenant realm instead -
+            # where no admin row exists - and fail with "Invalid password". tenant/pool
+            # stay as-is: they are routing headers, not the auth realm.
+            "superuser": True,
+            "tenant": tenant,
+            "pool": pool,
+            "edge_host": edge_host,
+            "edge_port": edge_port,
+            "edge_tls": edge.get("flightSqlTls", True),
+        },
+    )
+    echo(
+        _banner(
+            tenant=tenant, db=db_full, pool=pool, size=size,
+            first_boot=first_boot, edge_host=edge_host, edge_port=edge_port,
+            quack_port=quack_port,
+            manager_url=manager_url, pg_port=pg_port, pg_data_dir=pg_data_dir,
+            description=target.description, attached=attached,
+            admin_names=admin_names,
+        )
+    )
 
 
 def _provision(
     *, manager_url: str, tenant: str, target, pool: str, size: int, profile: str,
     ready_timeout: float, pg_port: int, pg_data_dir: str, echo,
-    api_key: str = "", token: str = "", password: str | None = None,
+    token: str = "", password: str | None = None,
     first_boot: bool = False, attached: bool = False, node_timeout: float = 60.0,
     node_sleep=time.sleep, node_now=time.monotonic, admin_names: list[str] | None = None,
 ) -> bool:
-    """Wait for the manager, authenticate, ensure tenant/database/pool, persist
-    the profile, print the banner. Returns True once the banner has printed,
-    False on any failure arm.
+    """Provision through REST: wait for the manager, authenticate, ensure
+    tenant/database/pool, persist the profile, print the banner. Returns True
+    once the banner has printed, False on any failure arm. This is attach mode's
+    path (B1, #100); a booting serve's manager provisions itself
+    (_provision_at_boot).
 
-    Authentication is whichever credential the caller has: API_KEY (the per-boot
-    key a booting serve hands its own manager, or a configured one), TOKEN (an
-    existing session, attach mode), or PASSWORD, which logs in as the seeded
-    admin and saves the resulting session to the profile. Without a password the
-    profile's stored token is left as it was.
+    Authentication is the caller's own: TOKEN (QOD_TOKEN, or the profile's live
+    session) or PASSWORD, which logs in as the seeded admin and saves the
+    resulting session to the profile. Without a password the profile's stored
+    token is left as it was.
 
-    Never raises: this runs on a background thread whose exception would be
-    invisible, and the manager must stay up either way so the user can read the
+    Never raises: the manager must stay up either way so the user can read the
     relayed log and re-run. Failures are reported with the equivalent manual
-    command. The background-thread caller (_spawn_provisioning) ignores the
-    return value; attach mode (B1, #100) runs this inline in the foreground and
-    needs it to decide its own exit code.
+    command. Attach mode runs this inline in the foreground and needs the return
+    value to decide its own exit code.
 
     `node_timeout`/`node_sleep`/`node_now` thread through to
     `wait_node_routable` (real `time.sleep`/`time.monotonic` by default, same
@@ -378,80 +461,101 @@ def _provision(
                 "POST", "/api/auth/login", body={"username": _ADMIN_USER, "password": password}
             )
             token = login["token"]
-        settings.api_key = api_key
         settings.token = token
         client = RestClient(settings)
         ensure_tenant(client, tenant)
         ensure_database(client, tenant, target)
-        db_full = composed_db_name(tenant, target.name)
-        ensure_pool(client, tenant, db_full, pool, size)
-        # On a RESTART the pool row exists but a respawned node may still be
-        # seconds from healthy; wait for one before printing connect strings
-        # that would otherwise briefly fail. Never fails provisioning over it.
-        if not wait_node_routable(
-            client, tenant, db_full, pool,
-            timeout_s=node_timeout, sleep=node_sleep, now=node_now,
-        ):
-            echo("note: node still warming; the first query may briefly fail")
-        edge = client.request("GET", "/api/config/client") or {}
-        edge_host = edge.get("flightSqlHost") or ""
-        if edge_host in ("", "0.0.0.0"):
-            edge_host = urlparse(manager_url).hostname or "localhost"
-        edge_port = int(edge.get("flightSqlPort", 31338))
-        # 0 when the manager predates the native Quack front door or has it disabled.
-        quack_port = int(edge.get("quackPort") or 0)
-        save_profile(
-            profile,
-            {
-                "manager_url": manager_url,
-                # save_profile skips None: a run that did not log in keeps the
-                # profile's stored session.
-                "token": token if password is not None else None,
-                "sql_user": _ADMIN_USER,
-                # The login just above authenticated in the SYSTEM realm (the seeded
-                # admin is a superuser row, tenant IS NULL): the FlightSQL handshake
-                # has no fallback between realms, so without this a `qod sql` reusing
-                # this profile would authenticate in the tenant realm instead - where
-                # no admin row exists - and fail with "Invalid password". tenant/pool
-                # stay as-is: they are routing headers, not the auth realm.
-                "superuser": True,
-                "tenant": tenant,
-                "pool": pool,
-                "edge_host": edge_host,
-                "edge_port": edge_port,
-                "edge_tls": edge.get("flightSqlTls", True),
-            },
-        )
-        echo(
-            _banner(
-                tenant=tenant, db=db_full, pool=pool, size=size,
-                first_boot=first_boot, edge_host=edge_host, edge_port=edge_port,
-                quack_port=quack_port,
-                manager_url=manager_url, pg_port=pg_port, pg_data_dir=pg_data_dir,
-                description=target.description, attached=attached,
-                admin_names=admin_names,
-            )
+        ensure_pool(client, tenant, composed_db_name(tenant, target.name), pool, size)
+        _finish(
+            client=client, manager_url=manager_url, tenant=tenant, target=target, pool=pool,
+            size=size, profile=profile, pg_port=pg_port, pg_data_dir=pg_data_dir, echo=echo,
+            token=token, save_token=password is not None, first_boot=first_boot,
+            attached=attached, node_timeout=node_timeout, node_sleep=node_sleep,
+            node_now=node_now, admin_names=admin_names,
         )
         return True
-    except ProvisionError as exc:
-        echo(f"\nqod serve: {exc.step} failed: {exc.detail}")
-        if exc.manual:
-            echo(f"  finish by hand: {exc.manual}")
-        echo(_failure_tail(attached))
-        return False
-    except ApiError as exc:
-        echo(f"\nqod serve: provisioning failed: {exc}")
-        echo(_failure_tail(attached))
-        return False
     except Exception as exc:  # noqa: BLE001 - never raises, see the docstring above.
-        echo(f"\nqod serve: provisioning failed unexpectedly: {exc!r}")
-        echo(_failure_tail(attached))
+        _report_failure(exc, echo, attached)
+        return False
+
+
+def _provision_at_boot(
+    *, manager_url: str, spec_path: Path, tenant: str, target, pool: str, size: int,
+    profile: str, ready_timeout: float, pg_port: int, pg_data_dir: str, echo,
+    password: str | None = None, first_boot: bool = False,
+    admin_names: list[str] | None = None, sleep=time.sleep, now=time.monotonic,
+    node_timeout: float = 60.0, node_sleep=time.sleep, node_now=time.monotonic,
+) -> bool:
+    """A booting serve's half of provisioning. The manager creates the tenant,
+    database and pool itself (ServeProvisionHook, from the spec at SPEC_PATH), so
+    this waits for /ready, then for the hook's outcome file, both within one
+    READY_TIMEOUT deadline, and prints the banner, or what was refused and how to
+    finish by hand. Returns True once the banner has printed.
+
+    On a first boot (PASSWORD given) it logs in as the seeded admin, saves the
+    session to the profile and uses it to wait for a routable node. A later boot
+    holds no credential: the banner carries the node-warming note instead.
+
+    Never raises, like _provision: it runs on a background thread whose
+    exception would be invisible, and the manager stays up either way."""
+    client = RestClient(Settings(manager_url=manager_url))
+    try:
+        deadline = now() + ready_timeout
+        wait_ready(client, timeout_s=ready_timeout, sleep=sleep, now=now)
+        outcome = wait_outcome(
+            outcome_path(spec_path), timeout_s=max(0.0, deadline - now()), sleep=sleep, now=now
+        )
+        if outcome is None:
+            raise ProvisionError(
+                "provisioning",
+                "the manager answers /ready but wrote no provisioning outcome within "
+                f"--ready-timeout ({ready_timeout:.0f}s): this manager release does not "
+                "provision at boot. Run a release matching this CLI (check qod serve "
+                "--version), or provision by hand after qod login",
+                provision_by_hand(tenant, target, pool, size),
+            )
+        # Consumed: the database body can carry object-store credentials, which
+        # need not stay on disk past the boot that read them.
+        spec_path.unlink(missing_ok=True)
+        if outcome["status"] != "ok":
+            step = str(outcome.get("step") or "")
+            reason = str(outcome.get("reason") or "the manager gave no reason")
+            if step == "spec":
+                raise ProvisionError(
+                    "provisioning",
+                    "the manager could not read the provisioning file the launcher wrote: "
+                    f"{reason} (a launcher/manager version mismatch: check qod serve --version)",
+                )
+            # A collision's reason already names its fix (another --name or --pool), and a
+            # create-by-hand command would collide again.
+            manual = (
+                "" if ANOTHER_NAME in reason
+                else finish_by_hand(step, tenant, target, pool, size)
+            )
+            raise ProvisionError(f"create {step}" if step else "provisioning", reason, manual)
+        token = ""
+        if password is not None:
+            login = client.request(
+                "POST", "/api/auth/login", body={"username": _ADMIN_USER, "password": password}
+            )
+            token = login["token"]
+        _finish(
+            client=RestClient(Settings(manager_url=manager_url, token=token)),
+            manager_url=manager_url, tenant=tenant, target=target, pool=pool, size=size,
+            profile=profile, pg_port=pg_port, pg_data_dir=pg_data_dir, echo=echo,
+            token=token, save_token=password is not None, first_boot=first_boot,
+            attached=False, node_timeout=node_timeout, node_sleep=node_sleep,
+            node_now=node_now, admin_names=admin_names,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - never raises, see the docstring above.
+        _report_failure(exc, echo, attached=False)
         return False
 
 
 def _spawn_provisioning(**kwargs) -> None:
     """Seam: tests replace this so no thread polls a manager that never boots."""
-    thread = threading.Thread(target=_provision, kwargs=kwargs, daemon=True)
+    thread = threading.Thread(target=_provision_at_boot, kwargs=kwargs, daemon=True)
     thread.start()
 
 
@@ -659,27 +763,22 @@ def serve(
             )
             raise typer.Exit(1)
         # Attach mode (B1, #100): a manager is already up, so provision into it
-        # in the foreground instead of booting a second JVM. The admin password is
-        # stored nowhere, so the credential is a configured API key, then the
-        # profile's session (QOD_TOKEN wins), then a prompt on a terminal.
+        # in the foreground instead of booting a second JVM, through REST and as
+        # the caller: the settings token (QOD_TOKEN, else the profile's session),
+        # else the admin password prompted on a terminal.
         start_env = {**load_start_env(), **os.environ}
-        api_key = start_env.get("QOD_API_KEY") or ""
         # An expired session JWT counts as absent, so a terminal still reaches
         # the prompt instead of provisioning with a token the manager will 401.
-        token = (
-            ""
-            if api_key
-            else admin_password.usable_session_token(load_settings(ctx.obj.profile).token)
-        )
+        token = admin_password.usable_session_token(load_settings(ctx.obj.profile).token)
         password = None
-        if not api_key and not token:
+        if not token:
             if admin_password.is_interactive():
                 password = typer.prompt("Admin password", hide_input=True)
             else:
                 typer.echo(
                     f"error: a manager is already running at {manager_url}, but no admin "
-                    "credential is available to attach with; export QOD_API_KEY, run qod "
-                    "login, or run qod serve in a terminal",
+                    "credential is available to attach with; run qod login, set QOD_TOKEN, "
+                    "or run qod serve in a terminal",
                     err=True,
                 )
                 raise typer.Exit(1)
@@ -695,7 +794,6 @@ def serve(
             pg_data_dir="",
             echo=lambda line: typer.echo(line, err=True),
             attached=True,
-            api_key=api_key,
             token=token,
             password=password,
             admin_names=admin_password.admin_usernames(start_env),
@@ -771,10 +869,14 @@ def serve(
         env[admin_password.KEY] = password
     if sf_plan is not None:
         env.update(starflow.manager_env(sf_plan.url, sf_plan.secret))
-    # Provisioning authenticates with a per-boot key held in memory only, so no
-    # admin password is needed after the first boot. A configured key wins.
-    if not env.get("QOD_API_KEY"):
-        env["QOD_API_KEY"] = secrets.token_urlsafe(32)
+    # The manager provisions the tenant, database and pool itself, at boot
+    # (ServeProvisionHook), from this spec: no credential is needed for it, so a
+    # later boot holds none. An outcome left by an earlier boot is deleted first,
+    # or the provisioning thread could read it as this boot's.
+    spec_path = state_dir / SPEC_FILE
+    write_spec(spec_path, provision_spec(tenant, resolved, pool, size))
+    outcome_path(spec_path).unlink(missing_ok=True)
+    env["QOD_SERVE_PROVISION"] = str(spec_path.absolute())
     # quack-on-demand.acl.enabled defaults to FALSE, so a persistent install has to
     # ask for it. TLS and DB auth are already on by default. A real env var or a
     # persisted `qod setup` value wins over this default.
@@ -792,6 +894,7 @@ def serve(
 
     _spawn_provisioning(
         manager_url=manager_url,
+        spec_path=spec_path,
         tenant=tenant,
         target=resolved,
         pool=pool,
@@ -801,7 +904,6 @@ def serve(
         pg_port=effective_pg_port,
         pg_data_dir=effective_pg_dir,
         echo=lambda line: typer.echo(line, err=True),
-        api_key=env["QOD_API_KEY"],
         password=password,
         first_boot=first_boot,
         admin_names=admin_password.admin_usernames(env),

@@ -1,3 +1,5 @@
+import itertools
+import json
 import pathlib
 import time
 
@@ -162,29 +164,45 @@ def test_serve_first_boot_prompts_on_a_terminal(runner, wired, tmp_path, monkeyp
     assert wired["env"]["QOD_ADMIN_PASSWORD"] == "pw1"
 
 
-def test_serve_later_boot_needs_no_password_and_provisions_with_an_api_key(
-    runner, wired, tmp_path
-):
+def test_serve_later_boot_needs_no_password_and_holds_no_credential(runner, wired, tmp_path):
     (tmp_path / "state" / "pg" / "pgdata").mkdir(parents=True, exist_ok=True)
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     result = _invoke(runner, wired, str(f))
     assert result.exit_code == 0, result.output
-    assert "QOD_ADMIN_PASSWORD" not in wired["env"]
-    key = wired["env"]["QOD_API_KEY"]
-    assert len(key) >= 32
-    assert wired["provision"]["api_key"] == key
+    # Booleans first: a failing assertion must never print the manager's environment.
+    has_password = "QOD_ADMIN_PASSWORD" in wired["env"]
+    has_key = "QOD_API_KEY" in wired["env"]
+    assert not has_password, "a later boot hands the manager an admin password"
+    assert not has_key, "the manager env carries QOD_API_KEY"
     assert wired["provision"]["password"] is None
-    assert "QOD_API_KEY" not in load_start_env()
+    assert "api_key" not in wired["provision"]
 
 
-def test_serve_keeps_a_configured_api_key(runner, wired, tmp_path, monkeypatch):
-    (tmp_path / "state" / "pg" / "pgdata").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("QOD_API_KEY", "mine")
+def test_serve_hands_the_manager_its_provision_spec(runner, wired, tmp_path):
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
-    _invoke(runner, wired, str(f))
-    assert wired["provision"]["api_key"] == "mine"
+    result = _invoke(runner, wired, str(f), "--size", "1")
+    assert result.exit_code == 0, result.output
+    spec_path = tmp_path / "state" / "serve-provision.json"
+    provision_var = wired["env"].get("QOD_SERVE_PROVISION")
+    assert provision_var == str(spec_path)
+    from qod_cli.serve_provision import provision_spec
+
+    assert wired["provision"]["spec_path"] == spec_path
+    target = wired["provision"]["target"]
+    assert json.loads(spec_path.read_text()) == provision_spec("default", target, "bi", 1)
+
+
+def test_serve_deletes_a_stale_outcome_before_launching(runner, wired, tmp_path):
+    stale = tmp_path / "state" / "serve-provision.outcome.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"status": "ok", "created": []}')
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert not stale.exists()
 
 
 def test_serve_hands_every_configured_admin_name_to_the_banner(
@@ -553,7 +571,7 @@ def test_provisioning_logs_in_and_ensures_everything(respx_mock, tmp_path):
     assert load_settings().superuser is True
 
 
-def test_provisioning_with_an_api_key_skips_login_and_keeps_the_profile_token(
+def test_provisioning_with_a_token_skips_login_and_keeps_the_profile_token(
     respx_mock, tmp_path
 ):
     from qod_cli.commands.serve import _provision
@@ -589,12 +607,12 @@ def test_provisioning_with_an_api_key_skips_login_and_keeps_the_profile_token(
     ok = _provision(
         manager_url=BASE, tenant="default", target=target,
         pool="bi", size=1, profile="default", ready_timeout=5, pg_port=25432,
-        pg_data_dir=str(tmp_path / "pg"), echo=lambda _l: None, api_key="k",
+        pg_data_dir=str(tmp_path / "pg"), echo=lambda _l: None, token="qod_pat_attach",
         node_timeout=10, node_sleep=lambda _s: None,
     )
     assert ok is True
     assert not login.called
-    assert tenants.calls[0].request.headers["X-API-Key"] == "k"
+    assert tenants.calls[0].request.headers["X-API-Key"] == "qod_pat_attach"
     assert load_settings().token == "old-jwt"
 
 
@@ -711,6 +729,264 @@ def test_provisioning_never_raises_on_a_tokenless_login(respx_mock, tmp_path):
     assert "still running" in out
 
 
+def _boot_spec(tmp_path, outcome):
+    """The spec file as serve writes it, plus the outcome the manager's hook wrote
+    beside it (None: not written yet)."""
+    from qod_cli.serve_provision import outcome_path, write_spec
+
+    spec = tmp_path / "serve-provision.json"
+    write_spec(spec, {"tenant": {}, "database": {}, "pool": {}})
+    if outcome is not None:
+        outcome_path(spec).write_text(json.dumps(outcome))
+    return spec
+
+
+def _ticks():
+    """A clock that moves one second per reading, so every deadline arrives."""
+    counter = itertools.count()
+    return lambda: float(next(counter))
+
+
+def test_boot_provisioning_waits_for_the_outcome_then_logs_in_and_prints_the_banner(
+    respx_mock, tmp_path
+):
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.serve_provision import outcome_path
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    login = respx_mock.post(f"{BASE}/api/auth/login").mock(
+        return_value=httpx.Response(200, json={"token": "jwt-1", "username": "admin"})
+    )
+    pools = respx_mock.get(f"{BASE}/api/pool/list").mock(
+        return_value=httpx.Response(200, json={"pools": [
+            {"tenant": "default", "tenantDb": "default_sales", "pool": "bi",
+             "nodes": [{"healthy": True}]}
+        ]})
+    )
+    respx_mock.get(f"{BASE}/api/config/client").mock(
+        return_value=httpx.Response(
+            200, json={"flightSqlHost": "0.0.0.0", "flightSqlPort": 31338, "flightSqlTls": True}
+        )
+    )
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    spec = _boot_spec(tmp_path, None)
+
+    def hook_writes_the_outcome(_s):
+        # The hook finishes after /ready went green: the first look finds no file.
+        created = [
+            "tenant default", "database default/default_sales", "pool default/default_sales/bi",
+        ]
+        outcome_path(spec).write_text(json.dumps({"status": "ok", "created": created}))
+
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        password="first-boot-pw", first_boot=True, sleep=hook_writes_the_outcome, now=_ticks(),
+        node_timeout=10, node_sleep=lambda _s: None, node_now=_ticks(),
+    )
+    assert ok is True
+    assert json.loads(login.calls[0].request.content) == {
+        "username": "admin", "password": "first-boot-pw",
+    }
+    assert pools.calls[0].request.headers["X-API-Key"] == "jwt-1"
+    banner = "\n".join(lines)
+    assert "jdbc:arrow-flight-sql://localhost:31338/" in banner
+    assert "first-boot-pw" not in banner
+    assert load_settings().token == "jwt-1"
+    assert load_settings().superuser is True
+    # Consumed: the object-store credentials it may carry do not stay on disk.
+    assert not spec.exists()
+
+
+def test_boot_provisioning_on_a_later_boot_holds_no_credential(respx_mock, tmp_path):
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.config import save_profile
+    from qod_cli.serve_target import resolve
+
+    save_profile("default", {"token": "old-jwt"})
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    login = respx_mock.post(f"{BASE}/api/auth/login")
+    pools = respx_mock.get(f"{BASE}/api/pool/list")
+    respx_mock.get(f"{BASE}/api/config/client").mock(
+        return_value=httpx.Response(200, json={"flightSqlPort": 31338})
+    )
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    spec = _boot_spec(tmp_path, {"status": "ok", "created": []})
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        sleep=lambda _s: None, now=_ticks(),
+        node_timeout=10, node_sleep=lambda _s: None, node_now=_ticks(),
+    )
+    assert ok is True
+    assert not login.called
+    assert not pools.called
+    out = unstyle("\n".join(lines))
+    assert "note: node still warming; the first query may briefly fail" in out
+    assert "qod admin reset-password" in out
+    assert load_settings().token == "old-jwt"
+
+
+def test_boot_provisioning_reports_the_refused_step_and_its_hand_run_command(
+    respx_mock, tmp_path
+):
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    login = respx_mock.post(f"{BASE}/api/auth/login")
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    spec = _boot_spec(
+        tmp_path, {"status": "failed", "step": "pool", "reason": "tenant quota reached: 4 pools"}
+    )
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        password="pw", first_boot=True, sleep=lambda _s: None, now=_ticks(),
+    )
+    assert ok is False
+    out = "\n".join(lines)
+    assert "qod serve: create pool failed: tenant quota reached: 4 pools" in out
+    assert (
+        "finish by hand: qod pool create --tenant default --db default_sales --pool bi "
+        "--size 1 --dual 1"
+    ) in out
+    assert "the manager is still running" in out
+    assert not login.called
+
+
+def test_boot_provisioning_prints_a_collision_as_is_without_a_create_command(
+    respx_mock, tmp_path
+):
+    # The reason already names the fix; `qod database create` with the same name would
+    # collide again.
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    reason = (
+        "database 'default_sales' already serves kind='duckdb-file' dataPath='/old/sales.duckdb', "
+        "not kind='duckdb-file' dataPath='/new/sales.duckdb'; serve it under another name: "
+        "qod serve <target> --name <other>"
+    )
+    spec = _boot_spec(tmp_path, {"status": "failed", "step": "database", "reason": reason})
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        sleep=lambda _s: None, now=_ticks(),
+    )
+    assert ok is False
+    out = "\n".join(lines)
+    assert f"qod serve: create database failed: {reason}" in out
+    assert "finish by hand" not in out
+
+
+def test_boot_provisioning_names_a_spec_file_the_manager_could_not_read(respx_mock, tmp_path):
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    spec = _boot_spec(
+        tmp_path, {"status": "failed", "step": "spec", "reason": "unknown field 'pools'"}
+    )
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        sleep=lambda _s: None, now=_ticks(),
+    )
+    assert ok is False
+    out = "\n".join(lines)
+    assert (
+        "the manager could not read the provisioning file the launcher wrote: "
+        "unknown field 'pools' (a launcher/manager version mismatch: check qod serve --version)"
+    ) in out
+    assert "finish by hand" not in out
+
+
+def test_boot_provisioning_names_a_manager_that_does_not_provision_at_boot(respx_mock, tmp_path):
+    from qod_cli.commands.serve import _provision_at_boot
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    spec = _boot_spec(tmp_path, None)
+    lines = []
+    ok = _provision_at_boot(
+        manager_url=BASE, spec_path=spec, tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=5, pg_port=25432, pg_data_dir=str(tmp_path / "pg"), echo=lines.append,
+        sleep=lambda _s: None, now=_ticks(),
+    )
+    assert ok is False
+    out = "\n".join(lines)
+    assert (
+        "the manager answers /ready but wrote no provisioning outcome within --ready-timeout "
+        "(5s): this manager release does not provision at boot"
+    ) in out
+    assert "finish by hand: qod tenant create default" in out
+    assert (
+        "finish by hand: qod database create --tenant default --name sales --kind duckdb-file "
+        "--data-path <path> --init-sql <sql>"
+    ) in out
+    assert (
+        "finish by hand: qod pool create --tenant default --db default_sales --pool bi "
+        "--size 1 --dual 1"
+    ) in out
+    assert spec.exists()  # not consumed: nothing read it
+
+
+def test_boot_provisioning_shares_one_deadline(respx_mock, tmp_path, monkeypatch):
+    # --ready-timeout bounds /ready and the outcome together: the outcome wait gets only
+    # what /ready left of it.
+    from qod_cli.commands import serve as serve_cmd
+    from qod_cli.serve_target import resolve
+
+    respx_mock.get(f"{BASE}/ready").mock(
+        side_effect=[httpx.Response(503), httpx.Response(503), httpx.Response(200, json={})]
+    )
+    respx_mock.get(f"{BASE}/api/config/client").mock(
+        return_value=httpx.Response(200, json={"flightSqlPort": 31338})
+    )
+    budgets = []
+
+    def outcome_after(path, timeout_s, sleep, now):
+        budgets.append(timeout_s)
+        return {"status": "ok", "created": []}
+
+    monkeypatch.setattr(serve_cmd, "wait_outcome", outcome_after)
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    ok = serve_cmd._provision_at_boot(
+        manager_url=BASE, spec_path=_boot_spec(tmp_path, None), tenant="default",
+        target=resolve(str(f), data_root=tmp_path), pool="bi", size=1, profile="default",
+        ready_timeout=30, pg_port=25432, pg_data_dir=str(tmp_path / "pg"),
+        echo=lambda _l: None, sleep=lambda _s: None, now=_ticks(),
+    )
+    assert ok is True
+    # Clock readings, one second each: 0 sets the deadline (30), wait_ready reads 1 to 4
+    # (two 503s, then 200), and the remaining budget is read at 5: 30 - 5 = 25.
+    assert budgets == [25.0]
+
+
 def test_serve_demo_delegates_to_the_demo_runner(runner, wired, monkeypatch):
     from qod_cli.commands import serve as serve_cmd
 
@@ -736,11 +1012,11 @@ def test_serve_demo_refuses_a_target(runner, wired):
 
 def test_serve_attaches_to_a_running_manager(runner, wired, respx_mock, tmp_path, monkeypatch):
     # B1: with a manager already answering /ready, serve must not boot a second
-    # JVM - it attaches and provisions inline instead.
+    # JVM - it attaches and provisions inline instead, as the caller.
     from qod_cli.commands import serve as serve_cmd
 
     respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
-    monkeypatch.setenv("QOD_API_KEY", "k")
+    monkeypatch.setenv("QOD_TOKEN", "qod_pat_attach")
     captured = {}
     monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: captured.update(kw) or True)
 
@@ -751,13 +1027,14 @@ def test_serve_attaches_to_a_running_manager(runner, wired, respx_mock, tmp_path
     assert "cmd" not in wired
     assert "provision" not in wired  # _spawn_provisioning (the thread path) never runs
     assert captured["attached"] is True
-    assert captured["api_key"] == "k"
+    assert captured["token"] == "qod_pat_attach"
+    assert "api_key" not in captured
     assert captured["manager_url"] == BASE
     assert captured["tenant"] == "default"
     assert captured["target"].name == "sales"
 
 
-def test_serve_attach_uses_the_api_key_then_token_then_errors(
+def test_serve_attach_uses_the_settings_token_else_refuses(
     runner, wired, respx_mock, tmp_path, monkeypatch
 ):
     from qod_cli.commands import serve as serve_cmd
@@ -771,18 +1048,34 @@ def test_serve_attach_uses_the_api_key_then_token_then_errors(
     result = _invoke(runner, wired, str(f))
     assert result.exit_code == 1
     assert "no admin credential" in result.output
-    assert "qod setup" not in result.output
+    assert "run qod login, set QOD_TOKEN, or run qod serve in a terminal" in result.output
+    assert "QOD_API_KEY" not in result.output
+    assert captured == {}
 
     live = _jwt(exp=time.time() + 3600)
     monkeypatch.setenv("QOD_TOKEN", live)
     result = _invoke(runner, wired, str(f))
     assert result.exit_code == 0, result.output
     assert captured["token"] == live
+    assert captured["password"] is None
 
-    monkeypatch.setenv("QOD_API_KEY", "k")
-    _invoke(runner, wired, str(f))
-    assert captured["api_key"] == "k"
-    assert captured["token"] == ""
+
+def test_serve_attach_uses_a_live_profile_session(
+    runner, wired, respx_mock, tmp_path, monkeypatch
+):
+    from qod_cli.commands import serve as serve_cmd
+    from qod_cli.config import save_profile
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    captured = {}
+    monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: captured.update(kw) or True)
+    live = _jwt(exp=time.time() + 3600)
+    save_profile("default", {"token": live})
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 0, result.output
+    assert captured["token"] == live
 
 
 def _jwt(**claims) -> str:
@@ -853,8 +1146,11 @@ def test_attach_provision_failure_tail_points_at_the_credentials(respx_mock, tmp
     )
     out = "\n".join(lines)
     assert ok is False
-    assert "the gateway is still running; fix the credentials (qod login, or export " in out
-    assert "QOD_API_KEY) and re-run qod serve" in out
+    assert (
+        "the gateway is still running; fix the credentials (run qod login, or set QOD_TOKEN "
+        "to a personal access token) and re-run qod serve"
+    ) in out
+    assert "QOD_API_KEY" not in out
     assert "Ctrl-C" not in out
 
 
@@ -887,7 +1183,7 @@ def test_serve_refuses_to_attach_to_a_non_loopback_manager(
     remote = "http://example.com:20900"
     monkeypatch.setenv("QOD_MANAGER_URL", remote)
     respx_mock.get(f"{remote}/ready").mock(return_value=httpx.Response(200, json={}))
-    monkeypatch.setenv("QOD_API_KEY", "k")
+    monkeypatch.setenv("QOD_TOKEN", "qod_pat_k")
     called = []
     monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: called.append(kw) or True)
 
