@@ -18,3 +18,13 @@ object SuperuserCheck:
       case Some(s) if !s.superuser =>
         Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", message))
       case _ => None
+
+  /** [[reject]] on an already-resolved scope, for the shared create paths: the REST adapter
+    * resolves the caller's scope, boot provisioning passes `SessionScope.Superuser`.
+    */
+  def forScope(
+      scope: SessionScope,
+      message: String = "this operation requires a superuser session"
+  ): Option[(StatusCode, ErrorResponse)] =
+    if scope.superuser then None
+    else Some(StatusCode.Forbidden -> ErrorResponse("superuser_required", message))

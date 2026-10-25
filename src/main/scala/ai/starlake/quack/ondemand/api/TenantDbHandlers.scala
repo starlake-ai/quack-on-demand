@@ -4,7 +4,7 @@ import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import sttp.model.StatusCode
@@ -130,15 +130,26 @@ final class TenantDbHandlers(
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantDbResponse] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+    createTenantDbAs(
+      req,
+      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      AuditActor.Bearer(apiKey)
+    )
+
+  /** The one database create path, shared by `POST /api/database/create` and the boot-time
+    * `ServeProvisionHook` (which passes `SessionScope.Superuser` and `AuditActor.System`): the
+    * tenant-scope gate on the caller's resolved scope, the name, metastore-key, object-store,
+    * managed-storage, encryption and kind checks, the create (quota-gated unless the scope is a
+    * superuser's), and its audit rows.
+    */
+  def createTenantDbAs(
+      req: TenantDbRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[TenantDbResponse] =
+    TenantScopeCheck.forScope(scope, req.tenant) match
       case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.DatabaseCreate,
-          "denied",
-          tenant = Some(req.tenant)
-        )
+        actor.controlPlane(audit, AuditActions.DatabaseCreate, "denied", tenant = Some(req.tenant))
         IO.pure(Left(err))
       case None =>
         if req.tenant.isEmpty || req.name.isEmpty then
@@ -161,7 +172,7 @@ final class TenantDbHandlers(
                 case Left(err) =>
                   IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_kind", err))))
                 case Right(kind) =>
-                  val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+                  val gateBypass = SuperuserCheck.forScope(scope).isEmpty
                   sup
                     .createTenantDb(
                       tenantName = req.tenant,
@@ -187,9 +198,8 @@ final class TenantDbHandlers(
                               "key. QoD will never return it: if it is lost the database cannot " +
                               "be opened."
                           )
-                        audit.rest(
-                          apiKey,
-                          "control-plane",
+                        actor.controlPlane(
+                          audit,
                           AuditActions.DatabaseCreate,
                           "ok",
                           tenant = Some(req.tenant),
@@ -208,9 +218,8 @@ final class TenantDbHandlers(
                           )
                         )
                       case Left(err: SupervisorError.QuotaExceeded) =>
-                        audit.rest(
-                          apiKey,
-                          "control-plane",
+                        actor.controlPlane(
+                          audit,
                           AuditActions.DatabaseCreate,
                           "denied",
                           tenant = Some(req.tenant),

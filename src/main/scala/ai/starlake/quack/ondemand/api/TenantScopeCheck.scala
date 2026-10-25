@@ -29,6 +29,17 @@ object TenantScopeCheck:
         )
       case _ => None
 
+  /** [[reject]] on an already-resolved scope, for the shared create paths. */
+  def forScope(scope: SessionScope, tenant: String): Option[(StatusCode, ErrorResponse)] =
+    if !scope.superuser && !scope.manageableTenants.contains(tenant) then
+      Some(
+        StatusCode.Forbidden -> ErrorResponse(
+          "tenant_forbidden",
+          s"session has no admin grant on tenant '$tenant'"
+        )
+      )
+    else None
+
   /** Variant for id-only endpoints (e.g. POST /role/delete `{id: "r-xxx"}`). Resolves the resource
     * to its owning tenant via `lookupTenant`, then runs the standard scope check.
     *

@@ -21,6 +21,7 @@ import ai.starlake.quack.boot.{
   BootPreflight,
   CatalogReaders,
   EdgeRewriters,
+  LeaderDuties,
   ManagementAuthWiring
 }
 import ai.starlake.quack.edge.sql.StatementValidator
@@ -37,7 +38,7 @@ import ai.starlake.quack.observability.metrics.{
 }
 import ai.starlake.quack.ondemand._
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.bootstrap.DemoBootstrapHook
+import ai.starlake.quack.ondemand.bootstrap.{DemoBootstrapHook, ServeProvisionHook}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditRecorder,
   EventJournal,
@@ -1847,14 +1848,15 @@ object Main extends IOApp with LazyLogging:
       val managedStoreClient =
         new ai.starlake.quack.ondemand.storage.S3ManagedStoreClient(mgrCfg.managedObjectStore)
 
-      // Leader-only boot duties. Ordering: the bootstrap hook runs BEFORE restore()
-      // so the supervisor cache reflects imported state and reconcile() can spawn
-      // those pools; inverting leaves the REST/UI on an empty cache after boot.
+      // Leader-only boot duties, in LeaderDuties' order: the bootstrap hook writes the store
+      // BEFORE restore() so the supervisor cache reflects imported state and reconcile() can spawn
+      // those pools (inverting leaves the REST/UI on an empty cache after boot); serve
+      // provisioning creates through the supervisor AFTER it, before DuckLake init and reconcile.
       // Extracted so they run either at boot or later on promotion (haRefreshFiber
       // tick); leaderDutiesDone guards against running twice.
       val leaderDutiesDone       = new java.util.concurrent.atomic.AtomicBoolean(false)
       def leaderDuties: IO[Unit] =
-        DemoBootstrapHook.run(
+        val bootstrap = DemoBootstrapHook.run(
           env = k => sys.env.get(k).orElse(sys.props.get(k)),
           readFile = path =>
             if path.startsWith("classpath:") then
@@ -1878,18 +1880,28 @@ object Main extends IOApp with LazyLogging:
           store = store,
           fedStore = manifestFedStore,
           requireEncryption = mgrCfg.requireEncryption
-        ) *>
-          IO.delay(sup.restore()) *>
-          sup.ensureDuckLakeInitialized() *>
+        )
+        LeaderDuties(
+          bootstrap = bootstrap,
+          restore = IO.delay(sup.restore()),
+          provision = ServeProvisionHook.run(
+            env = k => sys.env.get(k).orElse(sys.props.get(k)),
+            sup = sup,
+            tenants = tenants,
+            tenantDbs = tenantDbs,
+            pools = pools
+          ),
+          initDuckLake = sup.ensureDuckLakeInitialized(),
           // Repopulate the K8s per-pod token cache from the qod-token-* Secrets
           // before reconcile() adopts pods; no-op in local mode.
-          backend
+          discover = backend
             .discoverExisting()
             .flatMap(found =>
               IO.delay(logger.info(s"discovered ${found.size} pre-existing node(s)"))
-            ) *>
-          sup.reconcile() *>
-          IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+            ),
+          reconcile = sup.reconcile(),
+          seedRevoked = IO.delay(sessionTokens.seedRevoked(store.listRevokedJti()))
+        )
 
       IO.delay(coordinator.foreach(_.tickNow())) *>
         (if coordinator.forall(_.isLeader) then leaderDuties *> IO.delay(leaderDutiesDone.set(true))

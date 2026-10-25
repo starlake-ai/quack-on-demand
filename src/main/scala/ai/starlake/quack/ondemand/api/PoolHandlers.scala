@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import sttp.model.StatusCode
@@ -122,18 +122,29 @@ final class PoolHandlers(
   def createPool(req: CreatePoolRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[PoolResponse] =
-    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+    createPoolAs(
+      req,
+      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      AuditActor.Bearer(apiKey)
+    )
+
+  /** The one pool create path, shared by `POST /api/pool/create` and the boot-time
+    * `ServeProvisionHook` (which passes `SessionScope.Superuser` and `AuditActor.System`): the
+    * tenant-scope gate and the superuser-only lockdown and pod-template gates on the caller's
+    * resolved scope, the shape checks, the create (quota-gated unless the scope is a superuser's),
+    * and its audit rows.
+    */
+  def createPoolAs(
+      req: CreatePoolRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[PoolResponse] =
+    TenantScopeCheck.forScope(scope, req.tenant) match
       case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.PoolCreate,
-          "denied",
-          tenant = Some(req.tenant)
-        )
+        actor.controlPlane(audit, AuditActions.PoolCreate, "denied", tenant = Some(req.tenant))
         IO.pure(Left(err))
       case None =>
-        val gateBypass = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+        val gateBypass = SuperuserCheck.forScope(scope).isEmpty
         // Per-pool lockdown override is a superuser-only mutation (same rule as
         // POST /api/pool/setLockdown). Gate it at create time BEFORE any state
         // change so a tenant admin cannot slip "lockdown": "on"|"off" past the
@@ -144,24 +155,17 @@ final class PoolHandlers(
         // superuser_required rather than 400 invalid -- fail-closed on any
         // non-"inherit" string, not just the two valid overrides.
         val lockdownGate =
-          if req.lockdown != "inherit" then SuperuserCheck.reject(apiKey)(scopeOf) else None
+          if req.lockdown != "inherit" then SuperuserCheck.forScope(scope) else None
         lockdownGate match
           case Some(err) =>
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.PoolCreate,
-              "denied",
-              tenant = Some(req.tenant)
-            )
+            actor.controlPlane(audit, AuditActions.PoolCreate, "denied", tenant = Some(req.tenant))
             IO.pure(Left(err))
           case None =>
             if req.podTemplateYaml.nonEmpty then
-              SuperuserCheck.reject(apiKey)(scopeOf) match
+              SuperuserCheck.forScope(scope) match
                 case Some(err) =>
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
+                  actor.controlPlane(
+                    audit,
                     AuditActions.PoolCreate,
                     "denied",
                     tenant = Some(req.tenant)
@@ -186,12 +190,12 @@ final class PoolHandlers(
                         IO.pure(
                           Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
                         )
-                      case Right(()) => createPoolInner(req, apiKey, gateBypass)
-            else createPoolInner(req, apiKey, gateBypass)
+                      case Right(()) => createPoolInner(req, actor, gateBypass)
+            else createPoolInner(req, actor, gateBypass)
 
   private def createPoolInner(
       req: CreatePoolRequest,
-      apiKey: Option[String],
+      actor: AuditActor,
       gateBypass: Boolean
   ): Out[PoolResponse] =
     // Band shape (one-sided, min >= max, hardCap, write-capable floor, size inside
@@ -302,9 +306,8 @@ final class PoolHandlers(
                       gateBypass = gateBypass
                     )
                     .map(_ =>
-                      audit.rest(
-                        apiKey,
-                        "control-plane",
+                      actor.controlPlane(
+                        audit,
                         AuditActions.PoolCreate,
                         "ok",
                         tenant = Some(req.tenant),

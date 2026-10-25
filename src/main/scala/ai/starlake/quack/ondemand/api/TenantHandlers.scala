@@ -6,7 +6,7 @@ import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.{SessionScope, TenantSignInWrite}
-import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
 
@@ -52,9 +52,25 @@ final class TenantHandlers(
   def createTenant(req: TenantRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
-    SuperuserCheck.reject(apiKey)(scopeOf) match
+    createTenantAs(
+      req,
+      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      AuditActor.Bearer(apiKey)
+    )
+
+  /** The one tenant create path, shared by `POST /api/tenant/create` and the boot-time
+    * `ServeProvisionHook` (which passes `SessionScope.Superuser` and `AuditActor.System`): the
+    * superuser gate on the caller's resolved scope, the id, display-name, auth-provider and
+    * no-secret-in-authConfig checks, the create, and its audit rows.
+    */
+  def createTenantAs(
+      req: TenantRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[TenantResponse] =
+    SuperuserCheck.forScope(scope) match
       case Some(err) =>
-        audit.rest(apiKey, "control-plane", AuditActions.TenantCreate, "denied")
+        actor.controlPlane(audit, AuditActions.TenantCreate, "denied")
         IO.pure(Left(err))
       case None =>
         if req.id.isEmpty then
@@ -117,9 +133,8 @@ final class TenantHandlers(
             )
             .map {
               case Right(t) =>
-                audit.rest(
-                  apiKey,
-                  "control-plane",
+                actor.controlPlane(
+                  audit,
                   AuditActions.TenantCreate,
                   "ok",
                   tenant = Some(t.id),
