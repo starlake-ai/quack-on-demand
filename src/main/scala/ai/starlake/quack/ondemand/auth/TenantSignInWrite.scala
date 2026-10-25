@@ -22,9 +22,11 @@ import ai.starlake.quack.model.{FederatedSecret, Tenant}
   *
   * The key changeset 0048 parked old references under ([[ParkedSecretRefs.ParkedKey]]) goes with
   * the first result that holds a secret source (a value or a reference), so restoring through any
-  * client clears it and its boot report. Until then it is kept only as stored, when the request
-  * carries it (a form round trip): one a request adds or changes is dropped, because only the
-  * changeset writes it and its boot report tells a superuser which reference to restore.
+  * client clears it and its boot report. Until then it is kept only as stored: carried unchanged by
+  * a request that keeps the issuer (a form round trip). One a request adds or changes is dropped,
+  * and so is one carried to another issuer, for a superuser too: only the changeset writes it, and
+  * its boot report tells a superuser which reference to restore for the issuer it was parked under,
+  * so it must not outlive a tenant admin pointing the tenant at an identity provider of their own.
   */
 object TenantSignInWrite:
 
@@ -32,29 +34,37 @@ object TenantSignInWrite:
   val SecretRefKey: String = "clientSecretRef"
   val SecretKey: String    = "clientSecret"
 
+  /** How a client spells the write-only secret field. Every refusal that names the field names all
+    * three, because the one handler answers REST, MCP and CLI callers alike.
+    */
+  private val SecretField: String =
+    "clientSecret over REST, client_secret over MCP, --client-secret-stdin or " +
+      "--client-secret-prompt in the CLI"
+
   enum Refusal(val code: String, val message: String):
     case SuperuserRequired
         extends Refusal(
           "superuser_required",
           "only a superuser may add or change clientSecretRef, which names a secret of the " +
-            "manager's environment; send the tenant's own secret in clientSecret instead"
+            s"manager's environment; send the tenant's own secret instead ($SecretField)"
         )
     case InvalidClientSecret
         extends Refusal(
           "invalid_client_secret",
-          "clientSecret is blank: send the secret, or an empty string to remove the stored one"
+          "the client secret is blank: send the secret, or an empty string to remove the " +
+            s"stored one ($SecretField)"
         )
     case SecretConflict
         extends Refusal(
           "secret_conflict",
-          "a tenant has one client secret source: send clientSecret or a new clientSecretRef, " +
-            "not both"
+          "a tenant has one client secret source: send the client secret or a new " +
+            s"clientSecretRef, not both ($SecretField)"
         )
     case SecretInConfig
         extends Refusal(
           "invalid_auth_config",
           "authConfig may not carry clientSecret: a client secret only goes through the " +
-            "write-only clientSecret field of tenant/setAuth"
+            s"write-only field of tenant/setAuth ($SecretField)"
         )
 
   /** The complete sign-in state to store. `toString` redacts the secret. */
@@ -103,9 +113,10 @@ object TenantSignInWrite:
         case Some(s) => Some(s).filter(_.nonEmpty)
         case None    => if sameIssuer && !refChanged then current.authClientSecret else None
       // The parked key goes once the result holds a secret source; before that it stays only as
-      // stored (never added or changed by a request).
+      // stored (never added or changed by a request) and only under the issuer it was parked for.
+      // No superuser exception: it is a hint for the boot line, not a secret source.
       val parkedKey  = ParkedSecretRefs.ParkedKey
-      val keepParked = secret.isEmpty && !keepRef &&
+      val keepParked = secret.isEmpty && !keepRef && sameIssuer &&
         authConfig.get(parkedKey) == current.authConfig.get(parkedKey)
       val withRef = if keepRef then authConfig else authConfig - SecretRefKey
       Right(Result(if keepParked then withRef else withRef - parkedKey, secret))

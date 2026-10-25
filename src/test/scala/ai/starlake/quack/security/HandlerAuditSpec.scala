@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Tenant}
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.*
@@ -168,6 +168,69 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     rows.head.detail shouldBe Map("reason" -> "superuser_required")
     fix.store.listTenants().find(_.id == SecurityFixtures.TenantId).map(_.authProvider) shouldBe
       Some("db")
+  }
+
+  private val AcmeIssuer = "https://idp.example.com/realms/acme"
+  private val AcmeConfig = Map("issuerUrl" -> AcmeIssuer, "clientId" -> "qod")
+
+  /** The outcome and detail of the one `tenant.auth.update` row that a write by the static key (a
+    * superuser) leaves on a keycloak tenant `acme` holding `stored` as its client secret.
+    */
+  private def auditedWrite(
+      stored: Option[String],
+      config: Map[String, String],
+      clientSecret: Option[String]
+  ): (String, Map[String, String]) =
+    val store = new RecordingTelemetryStore
+    val fix   = SecurityFixtures.freshStore()
+    fix.store.upsertTenant(
+      Tenant(
+        SecurityFixtures.TenantId,
+        displayName = SecurityFixtures.TenantName,
+        authProvider = "keycloak",
+        authConfig = AcmeConfig,
+        authClientSecret = stored
+      )
+    )
+    val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+    sup.restore()
+    val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, _ => None))
+    val req     = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
+    tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+      true
+    val rows = store.events.filter(_.action == "tenant.auth.update")
+    rows.size shouldBe 1
+    (rows.head.outcome, rows.head.detail)
+
+  it should "audit ok without clientKey when the write leaves the stored secret as it was" in
+    Seq(
+      ("omits it under the same issuer", Some("kc-s3cr3t"), AcmeConfig + ("scopes" -> "x"), None),
+      ("sends the stored value again", Some("kc-s3cr3t"), AcmeConfig, Some("kc-s3cr3t")),
+      ("clears a secret that is not stored", None, AcmeConfig, Some(""))
+    ).foreach { (what, stored, config, sent) =>
+      withClue(what) {
+        auditedWrite(stored, config, sent) shouldBe ("ok", Map("authProvider" -> "keycloak"))
+      }
+    }
+
+  it should "audit ok with clientKey -> changed whenever a write changes the stored secret" in {
+    val moved = AcmeConfig.updated("issuerUrl", "https://other.example.com")
+    Seq(
+      ("an issuer change drops it", Some("kc-s3cr3t"), moved, None),
+      ("an empty value removes it", Some("kc-s3cr3t"), AcmeConfig, Some("")),
+      ("a different value replaces it", Some("kc-s3cr3t"), AcmeConfig, Some("n3w-s3cr3t")),
+      (
+        "a new reference replaces it",
+        Some("kc-s3cr3t"),
+        AcmeConfig + ("clientSecretRef" -> "env:ACME_OIDC_SECRET"),
+        None
+      )
+    ).foreach { (what, stored, config, sent) =>
+      withClue(what) {
+        auditedWrite(stored, config, sent) shouldBe
+          ("ok", Map("authProvider" -> "keycloak", "clientKey" -> "changed"))
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

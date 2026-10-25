@@ -213,8 +213,9 @@ final class TenantHandlers(
     * tenant; [[TenantSignInWrite]] owns the write rules (the secret is bound to its issuer, only a
     * superuser adds or changes a `clientSecretRef`, one secret source) and a refusal stores
     * nothing. The secret is write-only: responses carry only `clientSecretSet`, and the audit row
-    * records only that it changed. Static-key and no-key callers count as superusers, as in
-    * [[SuperuserCheck]].
+    * records only that the stored secret changed (`clientKey -> changed`, never the value), set,
+    * replaced or removed, a drop by an issuer change or a new reference included. Static-key and
+    * no-key callers count as superusers, as in [[SuperuserCheck]].
     */
   def setTenantAuth(req: SetTenantAuthRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
@@ -250,6 +251,10 @@ final class TenantHandlers(
                   case _                                           => StatusCode.BadRequest
                 IO.pure(Left((status, ErrorResponse(refusal.code, refusal.message))))
               case Right(next) =>
+                // The row says what the write did to the stored secret, not what the request
+                // sent: a drop by an issuer change or by a new reference is a change, a kept
+                // value, the same value sent again and a clear of nothing are not.
+                val secretChanged = next.authClientSecret != current.authClientSecret
                 sup
                   .setTenantAuth(req.name, req.authProvider, next.authConfig, next.authClientSecret)
                   .map {
@@ -266,7 +271,7 @@ final class TenantHandlers(
                         // containing password, secret, token, jwt or credential, and the row
                         // would be dropped.
                         detail = Map("authProvider" -> req.authProvider) ++
-                          req.clientSecret.map(_ => "clientKey" -> "changed")
+                          Option.when(secretChanged)("clientKey" -> "changed")
                       )
                       Right(toResponse(t))
                     case Left(err: SupervisorError.NotFound) =>

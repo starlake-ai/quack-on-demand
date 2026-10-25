@@ -55,6 +55,22 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
         "...): the save replaces the whole map"
     )
 
+  it should "ask to confirm the tenant's issuer before restoring, in every variant" in:
+    // The restored secret is sent to the tenant's issuerUrl, which a tenant admin may have pointed
+    // at an identity provider of their own before changeset 0048 parked the reference.
+    Seq("env:ACME_OIDC_SECRET", "env:A B", "hunter2-literal").foreach { stored =>
+      withClue(stored) {
+        val m = messageFor(stored)
+        m should include(
+          "Before restoring, confirm that the tenant's issuerUrl is the tenant's own identity " +
+            "provider: the secret is sent to it."
+        )
+        // Advice, so ahead of the restore command that ends the line.
+        m.indexOf("confirm that the tenant's issuerUrl") should
+          be < m.lastIndexOf("a superuser runs: ")
+      }
+    }
+
   it should "say nothing for a tenant without a parked reference, a live reference included" in:
     val live = Tenant(
       "initech",
@@ -97,11 +113,16 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
     m should include("type it by hand")
     m should not include "shown sanitized above"
     m should not include "the command below"
-    // The line shows the value cut and escaped, so the full stored value is read from the tenant.
+    // The line shows the value cut and escaped, so the full stored value is read from the tenant,
+    // as JSON: the table output crops long values.
     m should include(
       "one longer than 40 code points is cut, and each backslash and quote is escaped"
     )
-    m should include("read the full stored value in the tenant's auth config (qod tenant list)")
+    m should include(
+      "read the full stored value in the tenant's auth config (qod --json tenant list, " +
+        "because the table output crops long values)"
+    )
+    m should not include "(qod tenant list)"
 
   it should "never show a complete restore command carried by a stored value" in:
     val forged =

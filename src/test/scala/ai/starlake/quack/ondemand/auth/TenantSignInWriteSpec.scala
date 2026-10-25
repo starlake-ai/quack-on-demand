@@ -94,7 +94,10 @@ class TenantSignInWriteSpec extends AnyFlatSpec with Matchers:
     write(withRef, carried) shouldBe Right(Result(carried, None))
 
   it should "count a carried reference that differs only by surrounding spaces as unchanged" in:
-    write(withRef, cfg + ("clientSecretRef" -> s" $Ref ")).isRight shouldBe true
+    // Accepted AND kept: a result without the reference would be a silent removal, not "unchanged".
+    val result = write(withRef, cfg + ("clientSecretRef" -> s" $Ref "))
+    result.map(_.authConfig.get("clientSecretRef").map(_.trim)) shouldBe Right(Some(Ref))
+    result.map(_.authClientSecret) shouldBe Right(None)
 
   it should "keep a reference a superuser carries to a new issuer (re-pairing in one write)" in:
     val moved = Map("issuerUrl" -> Other, "clientId" -> "qod", "clientSecretRef" -> Ref)
@@ -124,9 +127,27 @@ class TenantSignInWriteSpec extends AnyFlatSpec with Matchers:
     write(parked, restored + (ParkedSecretRefs.ParkedKey -> "env:OLD"), superuser = true) shouldBe
       Right(Result(restored, None))
 
-  it should "keep a parked key carried unchanged while the result holds no secret source" in:
+  it should "keep a parked key carried unchanged under the same issuer, with no secret source" in:
     val roundTrip = cfg.updated("clientId", "qod2") + (ParkedSecretRefs.ParkedKey -> "env:OLD")
     write(parked, roundTrip) shouldBe Right(Result(roundTrip, None))
+    // The same issuer is compared trimmed, as everywhere else.
+    val padded = roundTrip.updated("issuerUrl", s"  $Issuer ")
+    write(parked, padded) shouldBe Right(Result(padded, None))
+
+  it should "drop a parked key carried unchanged to a new, removed or blank issuer" in:
+    // A reference parked for one issuer is no hint for another: a tenant admin must not keep the
+    // boot line's restore step alive while pointing the tenant at an identity provider of their
+    // own. No exception for a superuser: the key is a hint, not a secret source.
+    val carried = ParkedSecretRefs.ParkedKey -> "env:OLD"
+    val moved   = cfg.updated("issuerUrl", Other)
+    val removed = cfg - "issuerUrl"
+    val blank   = cfg.updated("issuerUrl", "  ")
+    Seq(moved, removed, blank).foreach { target =>
+      withClue(target) {
+        write(parked, target + carried).map(_.authConfig) shouldBe Right(target)
+        write(parked, target + carried, superuser = true).map(_.authConfig) shouldBe Right(target)
+      }
+    }
 
   it should "never keep a parked key the request adds, changes or leaves out" in:
     val forged = cfg + (ParkedSecretRefs.ParkedKey -> "env:AWS_SECRET_ACCESS_KEY")
@@ -140,6 +161,17 @@ class TenantSignInWriteSpec extends AnyFlatSpec with Matchers:
     Refusal.SecretConflict.code shouldBe "secret_conflict"
     Refusal.SecretInConfig.code shouldBe "invalid_auth_config"
     Refusal.SecretInConfig.message should include("clientSecret")
+
+  it should "name the REST, MCP and CLI spellings of the secret field in every refusal" in:
+    Refusal.values.foreach { refusal =>
+      withClue(refusal.code) {
+        refusal.message should include("clientSecret over REST")
+        refusal.message should include("client_secret over MCP")
+        refusal.message should include(
+          "--client-secret-stdin or --client-secret-prompt in the CLI"
+        )
+      }
+    }
 
   "TenantSignInWrite.Result" should "redact the secret in toString" in:
     Result(cfg, Some("s3cr3t")).toString should not include "s3cr3t"
