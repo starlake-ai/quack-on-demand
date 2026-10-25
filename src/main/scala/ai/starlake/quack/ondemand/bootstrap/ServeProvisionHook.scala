@@ -74,7 +74,14 @@ object ServeProvisionHook extends LazyLogging:
 
   /** One step: Right(Some(what it created)), Right(None) when it was already there, or the refusal.
     */
-  private type Step = IO[Either[Refusal, Option[String]]]
+  private[bootstrap] type Step = IO[Either[Refusal, Option[String]]]
+
+  /** A step whose own lookups throw stops the run at that step like a refusal, so the outcome is
+    * still written; named by the exception's class only.
+    */
+  private[bootstrap] def guarded(step: String)(io: => Step): Step =
+    IO.defer(io)
+      .handleError(t => Left(Refusal(step, s"failed unexpectedly: ${t.getClass.getSimpleName}")))
 
   def run(
       env: String => Option[String],
@@ -133,9 +140,9 @@ object ServeProvisionHook extends LazyLogging:
       pools: PoolHandlers
   ): IO[Outcome] =
     (for
-      t <- EitherT(tenantStep(spec.tenant, sup, tenants))
-      d <- EitherT(databaseStep(spec.database, sup, tenantDbs))
-      p <- EitherT(poolStep(spec.pool, sup, pools))
+      t <- EitherT(guarded("tenant")(tenantStep(spec.tenant, sup, tenants)))
+      d <- EitherT(guarded("database")(databaseStep(spec.database, sup, tenantDbs)))
+      p <- EitherT(guarded("pool")(poolStep(spec.pool, sup, pools)))
     yield List(t, d, p).flatten).value
 
   private def tenantStep(req: TenantRequest, sup: PoolSupervisor, tenants: TenantHandlers): Step =
@@ -222,9 +229,10 @@ object ServeProvisionHook extends LazyLogging:
   private def kept(name: String): Step =
     IO(logger.info(s"serve provision: $name already exists, left as is")).as(Right(None))
 
-  /** One create through the shared REST path; its refusal, or any failure, stops the run. A REST
-    * refusal's message names keys and objects, never values; an unexpected exception is named by
-    * its class only, since its message could quote a row.
+  /** One create through the shared REST path; its refusal, or any failure, stops the run. A 4xx
+    * refusal is reported by its message, which names keys and objects, never values. A 5xx (or an
+    * exception) can carry an exception's message, which could quote the spec or a row: it is
+    * reported by its error code (or class) only, the detail staying in the manager log.
     */
   private def created[A](
       step: String,
@@ -234,8 +242,12 @@ object ServeProvisionHook extends LazyLogging:
       case Right(Right(a)) =>
         val n = name(a)
         IO(logger.info(s"serve provision: created $n")).as(Right(Some(n)))
-      case Right(Left((_, err))) => IO.pure(Left(Refusal(step, err.message)))
-      case Left(t)               =>
+      case Right(Left((status, err))) =>
+        val reason =
+          if status.isClientError then err.message
+          else s"failed unexpectedly: ${err.error} (see the manager log)"
+        IO.pure(Left(Refusal(step, reason)))
+      case Left(t) =>
         IO.pure(Left(Refusal(step, s"failed unexpectedly: ${t.getClass.getSimpleName}")))
     }
 

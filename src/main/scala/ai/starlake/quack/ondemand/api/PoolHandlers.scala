@@ -326,6 +326,8 @@ final class PoolHandlers(
                           (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason))
                         )
                       case t =>
+                        // The supervisor logs nothing when the first node fails to start.
+                        logger.error(s"pool create for $key failed", t)
                         Left(
                           (
                             StatusCode.InternalServerError,

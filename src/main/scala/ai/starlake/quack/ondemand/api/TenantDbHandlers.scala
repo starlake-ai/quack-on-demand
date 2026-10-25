@@ -233,6 +233,14 @@ final class TenantDbHandlers(
                             )
                           )
                         )
+                      // Not a conflict: Postgres provisioning failed or the DuckLake pre-init
+                      // refused the catalog (already logged by the supervisor).
+                      case Left(err: SupervisorError.Internal) =>
+                        IO.pure(
+                          Left(
+                            (StatusCode.InternalServerError, ErrorResponse("internal", err.message))
+                          )
+                        )
                       case Left(err) =>
                         IO.pure(Left((StatusCode.Conflict, ErrorResponse("exists", err.message))))
                     }
