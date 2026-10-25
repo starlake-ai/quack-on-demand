@@ -6,9 +6,9 @@
   trusted.** A manager where tenant admins are not fully trusted, and where tenants could set their
   own sign-in configuration, should upgrade to this release promptly and then rotate every secret
   held in the manager's environment, in particular `QOD_SESSION_JWT_SECRET` (which also ends every
-  open session), `QOD_API_KEY`, `QOD_PG_PASSWORD`, the cloud credentials, and `QOD_NODE_KEY_SECRET`
-  when it is set (restart every node after changing it). Also review the personal access tokens
-  owned by superuser rows and the recent superuser sign-ins in the audit log.
+  open session), `QOD_API_KEY`, `QOD_PG_PASSWORD` and the cloud credentials. Also review the
+  personal access tokens owned by superuser rows and the recent superuser sign-ins in the audit
+  log.
 
 - **Security: BREAKING: a tenant's sign-in stays inside that tenant.** Management sign-in and the
   tenant sign-in settings now hold these rules:
@@ -20,8 +20,9 @@
     realm's rows.
   - A tenant that signs in with passwords takes no SSO: `/api/auth/oidc/start` answers `400
     oidc_not_configured` and the callback lands on `/ui/?error=oidc_not_configured` for a tenant
-    whose provider is `db`, whatever sign-in keys its auth config still holds. Only the tenant's
-    provider decides.
+    whose provider is `db`, whatever sign-in keys its auth config still holds: the provider
+    decides, not the leftover keys. An OIDC tenant whose sign-in is incomplete (no issuer, client
+    id or client secret), and an unknown tenant, take no SSO either.
   - BREAKING: the same rule now covers a password login answered by the manager-wide Keycloak or
     Azure password grant (`QOD_AUTH_KEYCLOAK_ENABLED`, `QOD_AUTH_AZURE_ENABLED`). The basic chain
     tries it after the database authenticator, so with one enabled a tenant's password form also
@@ -42,13 +43,15 @@
   - BREAKING: an identity-provider login counts an email address only when the IdP marks it
     verified (`email_verified` true), because an address the account holder typed could otherwise
     name another user's row, the superuser's included. Both IdP authenticators name the user by
-    the token's `preferred_username`, else its email claim, else its subject. A user name that came
-    from the email claim (a token without `preferred_username`) binds a row only when that address
-    is verified, else the login is refused `403 not_provisioned`; single sign-on also falls back to
-    the email claim, when the user name matches no row, only when it is verified. A provider that
-    does not emit `email_verified` no longer matches rows by email: name the rows by the IdP's user
-    name (`preferred_username`). Known limit: the FlightSQL data plane keeps the older naming (a
-    token without `preferred_username` is named by its email, verified or not).
+    the token's `preferred_username`, else its email claim, else its subject (a password-grant
+    token naming none of them is refused, never named by the text typed into the form). A user
+    name that came from the email claim (a token without `preferred_username`) binds a row only
+    when that address is verified, else the login is refused `403 not_provisioned`; single sign-on
+    also falls back to the email claim, when the user name matches no row, only when it is
+    verified. A provider that does not emit `email_verified` no longer matches rows by email: name
+    the rows by the IdP's user name (`preferred_username`). Known limit: the FlightSQL data plane
+    keeps the older naming (a token without `preferred_username` is named by its email, verified
+    or not).
   - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
     superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
     tenant, as the FlightSQL handshake already ruled.

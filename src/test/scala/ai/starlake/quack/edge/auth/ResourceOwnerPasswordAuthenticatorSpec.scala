@@ -8,20 +8,25 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** What the password-grant authenticator puts in the profile of the token its IdP answers with.
-  * The management login reads these claims to decide whether the profile's user name may name a
+/** What the password-grant authenticator puts in the profile of the token its IdP answers with. The
+  * management login reads these claims to decide whether the profile's user name may name a
   * `qodstate_user` row (`AuthHandlers`: a name that fell back to the email claim counts only when
   * `email_verified` is true), so a drift here silently changes who can sign in.
   */
-class ResourceOwnerPasswordAuthenticatorSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
+class ResourceOwnerPasswordAuthenticatorSpec
+    extends AnyFlatSpec
+    with Matchers
+    with BeforeAndAfterAll:
 
   private val idp = new WireMockServer(options().dynamicPort())
 
   override def beforeAll(): Unit = idp.start()
   override def afterAll(): Unit  = idp.stop()
 
-  /** The profile for the access token with `payload`, answered to a password-grant request. */
-  private def profileFor(payload: Map[String, Any]): AuthenticatedProfile =
+  /** The grant's outcome for the access token with `payload`, answered to a password-grant request
+    * for the typed name `typed-name`.
+    */
+  private def outcomeFor(payload: Map[String, Any]): Either[AuthFailure, AuthenticatedProfile] =
     val token = JwtTestSigner.mint(payload, issuer = "https://idp.example.test")
     idp.resetAll()
     idp.stubFor(
@@ -38,7 +43,11 @@ class ResourceOwnerPasswordAuthenticatorSpec extends AnyFlatSpec with Matchers w
       "qod-console-secret",
       "role"
     )
-    authenticator.authenticate(AuthScope.System, "typed-name", "pw") match
+    authenticator.authenticate(AuthScope.System, "typed-name", "pw")
+
+  /** The profile for the access token with `payload`, answered to a password-grant request. */
+  private def profileFor(payload: Map[String, Any]): AuthenticatedProfile =
+    outcomeFor(payload) match
       case Right(profile) => profile
       case Left(failure)  => fail(s"the grant should have answered: ${failure.message}")
 
@@ -56,7 +65,11 @@ class ResourceOwnerPasswordAuthenticatorSpec extends AnyFlatSpec with Matchers w
     cases.foreach { case (claim, expected) =>
       withClue(s"[email_verified=$claim] ") {
         val profile = profileFor(
-          Map("preferred_username" -> "alice", "email" -> "alice@acme.example", "email_verified" -> claim)
+          Map(
+            "preferred_username" -> "alice",
+            "email"              -> "alice@acme.example",
+            "email_verified"     -> claim
+          )
         )
 
         profile.claims.get("email_verified") shouldBe Some(expected)
@@ -91,4 +104,13 @@ class ResourceOwnerPasswordAuthenticatorSpec extends AnyFlatSpec with Matchers w
     profile.claims.get("role") shouldBe Some("admin")
     profile.claims.get("auth_method") shouldBe Some("keycloak-ropc")
     profile.authMethod shouldBe "keycloak-ropc"
+  }
+
+  it should "refuse a token that names no user (no preferred_username, email or sub), never naming the user by the typed text" in {
+    // An IdP that accepts a login by an unverified address would otherwise let the typed address
+    // name a row, past the email_verified rule.
+    outcomeFor(Map("role" -> "admin")) match
+      case Left(failure)  => failure shouldBe a[AuthFailure.InvalidCredentials]
+      case Right(profile) =>
+        fail(s"a token naming no user must be refused, got the name ${profile.username}")
   }

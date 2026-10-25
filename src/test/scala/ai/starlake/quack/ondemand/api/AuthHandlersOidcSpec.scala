@@ -449,6 +449,66 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
   }
 
   // ================================================================
+  // 4d. only a tenant whose sign-in is complete OIDC takes SSO: an OIDC tenant missing its
+  // client secret (parked) and a tenant the loader does not know are refused by the handler's
+  // own gate, even though the SSO service's resolver would still answer for "acme".
+  // ================================================================
+
+  /** An OIDC tenant whose client secret is gone (parked): its sign-in is incomplete. */
+  private def parkedOidcTenant(id: String): Option[Tenant] =
+    Some(
+      Tenant(
+        id = id,
+        displayName = id,
+        authProvider = "keycloak",
+        authConfig = Map("issuerUrl" -> "https://idp.example.com", "clientId" -> s"$id-app")
+      )
+    )
+
+  private val noTenant: String => Option[Tenant] = _ => None
+
+  for (label, loader) <- List(
+      "an OIDC tenant whose sign-in is incomplete" -> (parkedOidcTenant: String => Option[Tenant]),
+      "a tenant the manager does not know"         -> noTenant
+    )
+  do
+    it should s"refuse oidcStart with 400 oidc_not_configured for $label" in {
+      val handlers =
+        makeHandlersWith((_, _, _) => Nil, Some(buildSvc("s4e")), loadTenant = loader)
+      handlers.oidcStart(Some("acme"), None).unsafeRunSync() match
+        case Left((status, err)) =>
+          status shouldBe StatusCode.BadRequest
+          err.error shouldBe "oidc_not_configured"
+        case Right(r) => fail(s"expected 400 oidc_not_configured, got $r")
+    }
+
+    it should s"redirect the callback of $label to oidc_not_configured and mint nothing" in {
+      val seed     = "s4f"
+      val svc      = buildSvc(seed)
+      val started  = svc.startAuth(OidcScope.Tenant("acme"), "/ui/", seed).toOption.get
+      val tokens   = new SessionTokenStore
+      val handlers =
+        makeHandlersWith(
+          (_, _, _) => List(UserGrant(Some("acme"), "admin")),
+          Some(svc),
+          tokens,
+          loadTenant = loader
+        )
+      val (status, location, session, _) =
+        handlers
+          .oidcCallback(
+            Some(s"code-$seed"),
+            Some(started.stateParam),
+            Some(started.stateCookieValue),
+            None
+          )
+          .unsafeRunSync()
+      status shouldBe StatusCode.Found
+      location shouldBe "/ui/?error=oidc_not_configured"
+      session.value shouldBe ""
+    }
+
+  // ================================================================
   // 5. oidcCallback happy path: SUPERUSER + system scope -> success
   // ================================================================
 

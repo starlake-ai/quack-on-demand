@@ -1091,24 +1091,28 @@ class TenantSignInIsolationSpec
   // 7. A password login answered by the manager-wide password grant binds rows by user name
   // ---------------------------------------------------------------------------------------------
 
-  private val IdpCarolPassword   = "carol-idp-password"
-  private val IdpMalloryPassword = "mallory-idp-password"
-  private val IdpIvanPassword    = "ivan-idp-password"
-  private val IdpIvyPassword     = "ivy-idp-password"
+  private val IdpCarolPassword     = "carol-idp-password"
+  private val IdpMalloryPassword   = "mallory-idp-password"
+  private val IdpIvanPassword      = "ivan-idp-password"
+  private val IdpIvyPassword       = "ivy-idp-password"
+  private val IdpEmailUserPassword = "email-user-idp-password"
 
   /** A manager whose login runs the production chain walk: the database check first (the in-memory
     * control plane stands in for it and holds no password for the names below, so it fails), then
     * the real Keycloak password-grant authenticator against a stub token endpoint. The endpoint
-    * accepts `carol` (a token with no preferred_username, so the user name is the subject) and
-    * `mallory` (an account whose email claim is the name of an acme admin row), both with the IdP
-    * role claim `admin`.
+    * accepts `carol` (a token with no preferred_username, so the user name is the subject),
+    * `mallory` (an account whose email claim is the name of an acme admin row), `ivan` and `ivy`
+    * (tokens without preferred_username, named by the email claim) and `carol@acme.example` (a
+    * Keycloak realm with "email as username": preferred_username equals the email), all with the
+    * IdP role claim `admin`.
     */
   private def withPasswordGrant(body: World => Unit): Unit =
     val idp = MockOidcServer.boot(seededUser = "carol", seededPassword = IdpCarolPassword)
     try
       // The IdP answers `username` / `password` with an access token holding `claims`, every one
-      // with the IdP role claim admin.
+      // with the IdP role claim admin. The grant posts the typed name form-encoded.
       def stubAccount(username: String, password: String, claims: Map[String, Any]): Unit =
+        val typed = URLEncoder.encode(username, StandardCharsets.UTF_8)
         val token = JwtTestSigner.mint(
           payload = Map[String, Any]("role" -> "admin") ++ claims,
           issuer = idp.issuer
@@ -1117,7 +1121,7 @@ class TenantSignInIsolationSpec
           WireMock
             .post(WireMock.urlPathEqualTo("/token"))
             .withRequestBody(WireMock.containing("grant_type=password"))
-            .withRequestBody(WireMock.containing(s"username=$username"))
+            .withRequestBody(WireMock.containing(s"username=$typed"))
             .withRequestBody(WireMock.containing(s"password=$password"))
             .willReturn(
               WireMock.okJson(
@@ -1137,6 +1141,13 @@ class TenantSignInIsolationSpec
         "ivy",
         IdpIvyPassword,
         Map("email" -> "carol@acme.example", "email_verified" -> true)
+      )
+      // Keycloak's "email as username" realm: the account signs in with its address, and the
+      // token carries it as preferred_username and email, with no email_verified.
+      stubAccount(
+        "carol@acme.example",
+        IdpEmailUserPassword,
+        Map("preferred_username" -> "carol@acme.example", "email" -> "carol@acme.example")
       )
       withManager(authServiceOf =
         fix =>
@@ -1209,6 +1220,19 @@ class TenantSignInIsolationSpec
     withPasswordGrant { w =>
       // ivy: the same token plus email_verified true.
       val token = w.h.mintToken("ivy", IdpIvyPassword, Some(Acme))
+      val who   = whoami(w, token)
+      who.get[String]("username") shouldBe Right("carol@acme.example")
+      who.get[Boolean]("superuser") shouldBe Right(false)
+      who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
+      who.get[Option[String]]("tenant") shouldBe Right(Some(Acme))
+    }
+
+  it should "bind the tenant row of a Keycloak email-as-username account by its preferred_username, with no email_verified needed" in
+    withPasswordGrant { w =>
+      // The token's preferred_username is the IdP's own account name, which happens to be an
+      // address: the name did not fall back to the email claim, so no verification is asked for.
+      // Dropping the preferred_username carry in the grant would refuse this login.
+      val token = w.h.mintToken("carol@acme.example", IdpEmailUserPassword, Some(Acme))
       val who   = whoami(w, token)
       who.get[String]("username") shouldBe Right("carol@acme.example")
       who.get[Boolean]("superuser") shouldBe Right(false)

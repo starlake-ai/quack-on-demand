@@ -68,36 +68,45 @@ class ResourceOwnerPasswordAuthenticator(
             val claims    = signedJWT.getJWTClaimsSet
 
             val preferredUsername = Option(claims.getStringClaim("preferred_username"))
-            val extractedUsername = preferredUsername
+            // The token names the user, never the text typed into the form: an IdP that accepts a
+            // login by an unverified address would otherwise let that address name a row, past
+            // the email_verified rule below. A token naming no one is refused.
+            preferredUsername
               .orElse(Option(claims.getStringClaim("email")))
-              .orElse(Option(claims.getSubject))
-              .getOrElse(username)
+              .orElse(Option(claims.getSubject)) match
+              case None =>
+                Left(
+                  AuthFailure.InvalidCredentials(
+                    s"$name: token has no preferred_username, email or sub"
+                  )
+                )
+              case Some(extractedUsername) =>
+                val role   = RoleExtractor.extract(claims, roleClaim)
+                val groups = RoleExtractor.extractGroups(claims, "groups")
+                val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
+                // The management login (AuthHandlers.mintSessionFor) reads these two to tell a
+                // user name that fell back to the email claim, an address its holder may have
+                // typed, from the IdP's own account name: the name came from the email when the
+                // token has no preferred_username, and counts only when the IdP marks the address
+                // verified. A JSON boolean reads "true" / "false", as OidcBearerAuthenticator
+                // flattens it.
+                val emailVerified = Option(claims.getClaim("email_verified")).map(_.toString)
 
-            val role   = RoleExtractor.extract(claims, roleClaim)
-            val groups = RoleExtractor.extractGroups(claims, "groups")
-            val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
-            // The management login (AuthHandlers.mintSessionFor) reads these two to tell a user name
-            // that fell back to the email claim, an address its holder may have typed, from the
-            // IdP's own account name: the name came from the email when the token has no
-            // preferred_username, and counts only when the IdP marks the address verified. A JSON
-            // boolean reads "true" / "false", as OidcBearerAuthenticator flattens it.
-            val emailVerified = Option(claims.getClaim("email_verified")).map(_.toString)
-
-            Right(
-              AuthenticatedProfile(
-                username = extractedUsername,
-                role = role,
-                groups = groups + role,
-                claims = Map(
-                  "sub"         -> extractedUsername,
-                  "role"        -> role,
-                  "auth_method" -> name
-                ) ++ email.map("email" -> _) ++
-                  preferredUsername.map("preferred_username" -> _) ++
-                  emailVerified.map("email_verified" -> _),
-                authMethod = name
-              )
-            )
+                Right(
+                  AuthenticatedProfile(
+                    username = extractedUsername,
+                    role = role,
+                    groups = groups + role,
+                    claims = Map(
+                      "sub"         -> extractedUsername,
+                      "role"        -> role,
+                      "auth_method" -> name
+                    ) ++ email.map("email" -> _) ++
+                      preferredUsername.map("preferred_username" -> _) ++
+                      emailVerified.map("email_verified" -> _),
+                    authMethod = name
+                  )
+                )
     catch
       case e: Exception =>
         logger.debug(s"$name: ROPC authentication failed: ${e.getMessage}", e)
