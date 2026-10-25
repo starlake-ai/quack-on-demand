@@ -24,6 +24,9 @@ object ParkedSecretRefs extends LazyLogging:
   /** Printed in place of a parked value that is not a secret reference. */
   val NotAReference: String = "<not a secret reference, not shown>"
 
+  /** How many code points of a stored value outside [[CommandSafe]] the line shows. */
+  val ShownLimit: Int = 40
+
   /** The characters [[printable]] hides: ISO controls, Unicode format characters (the bidi
     * overrides and isolates among them) and the line and paragraph separators.
     */
@@ -51,9 +54,10 @@ object ParkedSecretRefs extends LazyLogging:
 
   /** The advice for a reference outside [[CommandSafe]]: the command shows `...` for it. */
   private val TypeByHandAdvice: String =
-    "The stored value, shown sanitized above (control and format characters print as ?), holds " +
-      "characters outside [A-Za-z0-9_:./=-], so the command below does not carry it: check that " +
-      s"it is meant for this tenant and type it by hand, and $ReplacesMap"
+    "The stored value, shown sanitized earlier in this line (control and format characters " +
+      "print as ?), holds characters outside [A-Za-z0-9_:./=-], so the command at the end of " +
+      "the line does not carry it: check that it is meant for this tenant and type it by hand, " +
+      s"and $ReplacesMap"
 
   /** The advice for a value that is not a reference: there is nothing to confirm or restore. */
   private val NotAReferenceAdvice: String =
@@ -63,19 +67,21 @@ object ParkedSecretRefs extends LazyLogging:
 
   /** One message per tenant holding [[ParkedKey]], in the order given: the tenant, the parked
     * reference, the advice and, last on the line, the restore command, so selecting from `qod` to
-    * the end yields only the command. A stored value cannot shape the log: it prints only with a
-    * [[ReferencePrefixes known prefix]] (else [[NotAReference]]) and its control, format and
-    * separator characters print as `?`. The command carries `clientSecretRef=<ref>` only when the
-    * whole stored value matches `[A-Za-z0-9_:./=-]+`, a word that needs no quoting in any shell;
-    * otherwise it shows `clientSecretRef=...` and the advice says to check the stored value and
-    * type it by hand.
+    * the end yields only the command. What a stored value can do to the line is bounded: it is
+    * shown only with a [[ReferencePrefixes known prefix]] (else [[NotAReference]]); its control,
+    * format and separator characters print as `?`; outside `[A-Za-z0-9_:./=-]+` it is cut to
+    * [[ShownLimit]] code points (then `...(+N more)`) with each backslash and quote escaped, so it
+    * can neither carry a complete restore command nor close its own quotes; and it goes into the
+    * command only when it matches `[A-Za-z0-9_:./=-]+` as a whole, a word that needs no quoting in
+    * any shell. Otherwise the command shows `clientSecretRef=...` and the advice says to check the
+    * stored value and type it by hand.
     */
   def messages(tenants: List[Tenant]): List[String] =
     tenants.flatMap { t =>
       t.authConfig.get(ParkedKey).map { raw =>
         val isReference = ReferencePrefixes.exists(p => raw.startsWith(p))
         val inCommand   = isReference && raw.matches(CommandSafe)
-        val shown       = if isReference then s"'${printable(raw)}'" else NotAReference
+        val shown       = if isReference then display(raw) else NotAReference
         val refArg      = if inCommand then s"clientSecretRef=$raw" else "clientSecretRef=..."
         val advice      =
           if inCommand then ConfirmAdvice
@@ -93,6 +99,22 @@ object ParkedSecretRefs extends LazyLogging:
     * and operator-facing misconfiguration is logged at ERROR so it survives that quiet default.
     */
   def report(tenants: List[Tenant]): Unit = messages(tenants).foreach(m => logger.error(m))
+
+  /** `raw` as the line shows it, in single quotes: sanitized by [[printable]]; a value outside
+    * [[CommandSafe]] is cut to [[ShownLimit]] code points (then `...(+N more)` for the N left out)
+    * and has each backslash and quote escaped (`\\` and `\'`), so it can neither close the quotes
+    * around it nor escape the closing one. The limit keeps a stored value from carrying a complete
+    * restore command into the line.
+    */
+  private def display(raw: String): String =
+    val clean = printable(raw)
+    if raw.matches(CommandSafe) then s"'$clean'"
+    else
+      val total   = clean.codePointCount(0, clean.length)
+      val head    = clean.substring(0, clean.offsetByCodePoints(0, math.min(total, ShownLimit)))
+      val more    = if total > ShownLimit then s"...(+${total - ShownLimit} more)" else ""
+      val escaped = head.replace("\\", "\\\\").replace("'", "\\'")
+      s"'$escaped$more'"
 
   /** `raw` with every [[Hidden]] character replaced by `?`, one `?` per code point. */
   private def printable(raw: String): String =
