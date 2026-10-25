@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.10.2
+
+- **Security: BREAKING: a tenant's sign-in stays inside that tenant.** Management sign-in and the
+  tenant sign-in settings now hold these rules:
+  - A tenant SSO login takes its grants from that tenant's `qodstate_user` rows only, the email
+    fallback included: an identity whose rows are all in other tenants, or whose only row is a
+    superuser's, is refused `403 not_provisioned` (the browser lands on
+    `/ui/?error=not_provisioned`), and superusers sign in through the bare `/ui/` login. Before,
+    the lookup matched the identity against every realm's rows. The system login is unchanged.
+  - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
+    superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
+    tenant, as the FlightSQL handshake already ruled.
+  - A tenant's OIDC client secret is a write-only stored value that its own admins may set:
+    `tenant/setAuth` field `clientSecret`, MCP `set_tenant_auth` argument `client_secret`, `qod
+    tenant set-auth --client-secret-prompt` or `--client-secret-stdin` (`--clear-client-secret`
+    removes it), and the admin UI's Auth Provider page. No response carries it
+    (`clientSecretSet` says whether one is stored), a manifest exports it as `***REDACTED***`,
+    and it is bound to the issuer it was saved with: a save that changes `issuerUrl` without a
+    new secret removes it, as the tenant OPA token never follows an OPA URL change. The admin UI
+    warns before a save that would remove it, or that would leave the tenant's OIDC sign-in
+    incomplete (an issuer URL, a client ID and a secret are all needed).
+  - A `clientSecretRef` (`env:NAME`) reads the manager's own environment, so only a superuser may
+    add or change one: anyone else gets `403 superuser_required` and nothing is written. Under a
+    new issuer a carried reference survives only in a superuser's write, which may pair a
+    reference with the new issuer; a tenant admin's carried reference is dropped. A tenant has one
+    secret source (`400 secret_conflict` for a value and a new reference in one write); a value
+    made only of whitespace is refused (`400 invalid_client_secret`), and so is a `clientSecret`
+    key inside `authConfig` (`400 invalid_auth_config`).
+  - BREAKING: a password login naming a tenant whose console sign-in is OIDC (`POST
+    /api/auth/login` with that `tenant`, `qod login --tenant`) answers `400 sso_required`: open
+    `/ui/?tenant=<tenant id>`, or use a personal access token. No password is checked and no
+    lockout counter moves. SQL clients keep their passwords: FlightSQL and the native front door
+    are unchanged. Tenant SSO now works under either `identitySource`: the admin-console SSO
+    service is wired whatever `QOD_MGMT_IDENTITY_SOURCE` says, which now picks only the bare
+    `/ui/` login mode (under `db` it stays a password form, even with `QOD_MGMT_OIDC_*` set).
+    Before, `/api/auth/oidc/start` answered `404 auth_mode_disabled` unless it was `oidc`, so
+    under the default `db` such a tenant's admins signed in with passwords; they now sign in
+    through the tenant's identity provider.
+  - BREAKING: secret references saved before this release are parked, since who saved them was
+    not recorded. Liquibase `0048` adds the `qodstate_tenant.auth_client_secret` column and moves
+    each tenant's `clientSecretRef` to `clientSecretRefUnconfirmed`, which nothing reads: that
+    tenant's console sign-in answers `tenant_oidc_misconfigured` until a superuser saves the
+    reference again (`qod tenant set-auth <tenant> --auth-provider <provider> --auth-config
+    issuerUrl=... --auth-config clientId=... --auth-config clientSecretRef=<reference>`; the
+    save replaces the whole auth config) or the tenant's admins store the secret itself. Every
+    boot logs an error line per parked tenant naming the reference and that command, and asking
+    the superuser to confirm that the tenant's `issuerUrl` is its own identity provider. A save
+    that carries a secret value or a reference drops the parked key, through any client (REST,
+    MCP, the CLI or the admin UI), which ends the error line; so does a save that changes
+    `issuerUrl` or leaves the key out, but the sign-in then stays unconfigured until a secret
+    source is set. A manifest exported before this release still carries active
+    `clientSecretRef` values, and importing it re-activates them without this review: check
+    those references first.
+  - Manifests: a tenant's `clientSecret` is exported as `***REDACTED***` and imports as the
+    tenant OPA token does: the marker keeps the stored value only while `issuerUrl` is unchanged
+    and is refused otherwise, a blank value is refused, and so is a tenant that carries a secret
+    and a `clientSecretRef`, or a `clientSecret` key inside `authConfig`. BREAKING: a tenant with
+    no `clientSecret` in the manifest ends up with none, so a hand-written manifest that leaves
+    it out removes a stored secret.
+  - The per-tenant FlightSQL bearer override no longer reads a `clientSecretRef`, which bearer
+    validation never used: a Google, Keycloak or Azure AD tenant that set its other per-tenant
+    fields without one now validates bearer tokens against its own client instead of the
+    manager-wide one, so its tokens must carry that client id as audience. Its own admins can
+    turn this on, since the override needs no superuser-only reference.
+
+- **Manager modules must be recompiled against this core** (`Tenant` gained a field, and
+  `AuthzRequest`, `ExecCaller` and `PoolSupervisor.authorizeHandshake` take
+  `superuserAdmissible` with no default: a module that builds one or calls it passes it).
+
 ## 0.10.1
 
 - **Fleet errors state the facts and suggest the fix.** A refused heartbeat or fleet admin call now
