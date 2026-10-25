@@ -1041,7 +1041,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   private val SeededSuperuser = "admin@localhost.local"
 
-  private def superuserRow = Map((LoginRealm.System, SeededSuperuser) -> List(UserGrant(None, "admin")))
+  private def superuserRow = Map(
+    (LoginRealm.System, SeededSuperuser) -> List(UserGrant(None, "admin"))
+  )
 
   it should "refuse a login without tenant whose user name is the email claim when the IdP does not mark it verified: the superuser row of that name stays unbound" in
     Seq(None, Some("false")).foreach { verified =>
@@ -1080,7 +1082,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = directory.lookup
     )
 
-    val resp = sessionOf(h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync())
+    val resp =
+      sessionOf(h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync())
 
     resp.superuser shouldBe true
     directory.asked.toList shouldBe List((LoginRealm.System, SeededSuperuser, None))
@@ -1155,12 +1158,15 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "admin")))
     )
     val h = makeHandlers(
-      Right(passwordGrantProfile(email = Some("alice@acme.example"), emailVerified = Some("false"))),
+      Right(
+        passwordGrantProfile(email = Some("alice@acme.example"), emailVerified = Some("false"))
+      ),
       noCalls(),
       grantsForIdentity = directory.lookup
     )
 
-    val resp = sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
 
     resp.manageableTenants shouldBe List(AcmeId)
   }
