@@ -35,29 +35,57 @@ object ParkedSecretRefs extends LazyLogging:
       Character.PARAGRAPH_SEPARATOR
     ).map(_.toInt)
 
-  /** The characters a shell word may hold without quoting. */
-  private val ShellSafe: String = "[A-Za-z0-9_:./=-]+"
+  /** What a stored reference must match, whole, to be put into the restore command: a word that
+    * needs no quoting in any shell. Nothing stored is ever quoted or escaped, because POSIX shells,
+    * fish, cmd.exe and PowerShell all parse quotes and escapes differently.
+    */
+  private val CommandSafe: String = "[A-Za-z0-9_:./=-]+"
+
+  private val ReplacesMap: String =
+    "repeat every other key of the tenant's auth config (scopes, baseUrl, realm, tenantId, " +
+      "...): the save replaces the whole map."
+
+  /** The advice for a reference the command carries. */
+  private val ConfirmAdvice: String =
+    s"Confirm the reference is meant for this tenant and $ReplacesMap"
+
+  /** The advice for a reference outside [[CommandSafe]]: the command shows `...` for it. */
+  private val TypeByHandAdvice: String =
+    "The stored value, shown sanitized above (control and format characters print as ?), holds " +
+      "characters outside [A-Za-z0-9_:./=-], so the command below does not carry it: check that " +
+      s"it is meant for this tenant and type it by hand, and $ReplacesMap"
+
+  /** The advice for a value that is not a reference: there is nothing to confirm or restore. */
+  private val NotAReferenceAdvice: String =
+    "The stored value is not a secret reference, so there is nothing to confirm: a superuser " +
+      "sets a secret source for the tenant (a client secret or a reference) and must " +
+      ReplacesMap
 
   /** One message per tenant holding [[ParkedKey]], in the order given: the tenant, the parked
-    * reference and the restore step. A stored value cannot shape the log or the command: it prints
-    * only with a [[ReferencePrefixes known prefix]] (else [[NotAReference]], and the restore step
-    * carries `...` for it), its control, format and separator characters print as `?`, and the
-    * `clientSecretRef=` argument of the restore command is POSIX-quoted unless it holds only
-    * `[A-Za-z0-9_:./=-]`.
+    * reference, the advice and, last on the line, the restore command, so selecting from `qod` to
+    * the end yields only the command. A stored value cannot shape the log: it prints only with a
+    * [[ReferencePrefixes known prefix]] (else [[NotAReference]]) and its control, format and
+    * separator characters print as `?`. The command carries `clientSecretRef=<ref>` only when the
+    * whole stored value matches `[A-Za-z0-9_:./=-]+`, a word that needs no quoting in any shell;
+    * otherwise it shows `clientSecretRef=...` and the advice says to check the stored value and
+    * type it by hand.
     */
   def messages(tenants: List[Tenant]): List[String] =
     tenants.flatMap { t =>
       t.authConfig.get(ParkedKey).map { raw =>
-        val ref    = Option.when(ReferencePrefixes.exists(p => raw.startsWith(p)))(printable(raw))
-        val shown  = ref.fold(NotAReference)(r => s"'$r'")
-        val refArg = ref.fold("clientSecretRef=...")(r => shellWord(s"clientSecretRef=$r"))
+        val isReference = ReferencePrefixes.exists(p => raw.startsWith(p))
+        val inCommand   = isReference && raw.matches(CommandSafe)
+        val shown       = if isReference then s"'${printable(raw)}'" else NotAReference
+        val refArg      = if inCommand then s"clientSecretRef=$raw" else "clientSecretRef=..."
+        val advice      =
+          if inCommand then ConfirmAdvice
+          else if isReference then TypeByHandAdvice
+          else NotAReferenceAdvice
         s"tenant '${t.id}': clientSecretRef $shown was stored before changeset 0048, which " +
           "parked it because its author is not recorded; nothing reads it, so the tenant's SSO " +
-          "gets no client secret from it. Confirm the reference is meant for this tenant, then " +
-          s"a superuser runs: qod tenant set-auth ${t.id} --auth-provider ${t.authProvider} " +
-          s"--auth-config issuerUrl=... --auth-config clientId=... --auth-config $refArg; " +
-          "repeat every other key of the tenant's auth config (scopes, baseUrl, realm, " +
-          "tenantId, ...): the save replaces the whole map"
+          s"gets no client secret from it. $advice Then a superuser runs: " +
+          s"qod tenant set-auth ${t.id} --auth-provider ${t.authProvider} " +
+          s"--auth-config issuerUrl=... --auth-config clientId=... --auth-config $refArg"
       }
     }
 
@@ -75,10 +103,3 @@ object ParkedSecretRefs extends LazyLogging:
         if Hidden.contains(Character.getType(cp)) then "?" else new String(Character.toChars(cp))
       }
       .mkString
-
-  /** `arg` as one POSIX shell word: unchanged when it holds only `[A-Za-z0-9_:./=-]`, otherwise in
-    * single quotes with each `'` written as `'\''`, so a stored value can add no command, expansion
-    * or redirection to a pasted line.
-    */
-  private def shellWord(arg: String): String =
-    if arg.matches(ShellSafe) then arg else "'" + arg.replace("'", "'\\''") + "'"

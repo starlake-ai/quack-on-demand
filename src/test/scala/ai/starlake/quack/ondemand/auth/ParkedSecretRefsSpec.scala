@@ -28,6 +28,11 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
       .messages(List(parked.copy(authConfig = Map(ParkedSecretRefs.ParkedKey -> value))))
       .head
 
+  /** What follows "a superuser runs: ": the part of the line an operator selects and runs. */
+  private def commandOf(message: String): String =
+    val marker = "a superuser runs: "
+    message.substring(message.indexOf(marker) + marker.length)
+
   "ParkedSecretRefs.messages" should
     "name the tenant, the parked reference and the superuser restore step" in {
       val msgs = ParkedSecretRefs.messages(List(parked))
@@ -63,19 +68,48 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
       .messages(List(parked, Tenant("globex"), other))
       .map(_.takeWhile(_ != ':')) shouldBe List("tenant 'acme'", "tenant 'umbrella'")
 
-  it should "quote a stored reference holding shell syntax so the printed command cannot run it" in:
+  it should "never put a stored reference outside [A-Za-z0-9_:./=-] into the restore command" in:
     Seq(
-      "env:X;id"   -> "'clientSecretRef=env:X;id'",
-      "env:X$(id)" -> "'clientSecretRef=env:X$(id)'",
-      "env:A B"    -> "'clientSecretRef=env:A B'",
-      "env:A'B"    -> "'clientSecretRef=env:A'\\''B'"
-    ).foreach { (ref, quoted) =>
+      "env:X;id",
+      "env:X$(id)",
+      "env:A B",
+      "env:X&calc&",
+      "env:A\\';id;#",
+      "env:A';calc;'"
+    ).foreach { ref =>
       withClue(ref) {
-        val m = messageFor(ref)
-        m should include(s"--auth-config $quoted")
-        m should not include s"--auth-config clientSecretRef=$ref"
+        val m       = messageFor(ref)
+        val command = commandOf(m)
+        command should startWith("qod tenant set-auth acme")
+        command should endWith("--auth-config clientId=... --auth-config clientSecretRef=...")
+        command should not include ref
+        // The value is still shown, sanitized, in the prose before the command.
+        m should include(s"clientSecretRef '$ref' was stored")
       }
     }
+
+  it should "ask for a reference the command cannot carry to be checked and typed by hand" in:
+    val m = messageFor("env:A B")
+    m should include("shown sanitized above")
+    m should include("so the command below does not carry it")
+    m should include("type it by hand")
+
+  it should "end the line with the restore command, after all the advice" in:
+    val m = messageFor("env:ACME_OIDC_SECRET")
+    commandOf(m) shouldBe
+      "qod tenant set-auth acme --auth-provider keycloak --auth-config issuerUrl=... " +
+      "--auth-config clientId=... --auth-config clientSecretRef=env:ACME_OIDC_SECRET"
+    val advice = m.take(m.indexOf("a superuser runs: "))
+    advice should include("Confirm the reference is meant for this tenant")
+    advice should include("the save replaces the whole map")
+
+  it should "say that a value without a prefix is not a reference and ask for a secret source" in:
+    val m = messageFor("hunter2-literal")
+    m should include("The stored value is not a secret reference")
+    m should include("a superuser sets a secret source for the tenant")
+    m should include("(a client secret or a reference)")
+    m should not include "Confirm the reference is meant for this tenant"
+    commandOf(m) should startWith("qod tenant set-auth acme")
 
   it should "leave bare a reference of only letters, digits and _ : . / = -" in:
     val ref = "aws-sm:arn:aws:secretsmanager:eu-west-1:123:secret:Name/x.y_z=1"
