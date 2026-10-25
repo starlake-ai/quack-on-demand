@@ -332,6 +332,9 @@ export interface TenantResponse {
   opaPolicyPath?: string | null;
   opaTokenSet?: boolean;
   opaSendStatementText?: boolean;
+  // The OIDC client secret of the tenant's console sign-in is write-only too: only whether one
+  // is stored is exposed, never the value.
+  clientSecretSet: boolean;
 }
 
 export interface SetTenantDisabledRequest {
@@ -339,10 +342,16 @@ export interface SetTenantDisabledRequest {
   disabled: boolean;
 }
 
+/** Replaces a tenant's sign-in configuration. `authConfig` is replaced whole and may not carry a
+  * `clientSecret` key (400 invalid_auth_config). `clientSecret` is write-only: omitted keeps the
+  * stored secret while `authConfig.issuerUrl` is unchanged (a new issuer drops it), `""` removes
+  * it, a value replaces it. Adding or changing `authConfig.clientSecretRef` needs a superuser
+  * (403 superuser_required). */
 export interface SetTenantAuthRequest {
   name: string;
   authProvider: AuthProvider;
   authConfig: Record<string, string>;
+  clientSecret?: string;
 }
 
 /** Patch of a tenant's data-access authorization. An omitted field keeps the stored value; `""`

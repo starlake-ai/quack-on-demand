@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '../api/client';
-import { PROVIDER_FIELDS, PROVIDER_LABELS } from '../api/authProviders';
+import {
+  PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, PROVIDER_LABELS, issuerChangeDropsSecret,
+  setAuthRequestFor, signInFormFor, type ProviderField, type SignInForm,
+} from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 import { EditIcon } from './Icons';
 import { Modal } from './Modal';
+
+const EMPTY_FORM: SignInForm = { provider: 'db', config: {}, secret: '', removeSecret: false };
 
 /** Auth-provider page for one tenant (`/t/:tenant/auth-provider`). Shows the tenant's
   * current provider + config and lets the admin swap it. Users / roles /
@@ -12,15 +18,22 @@ import { Modal } from './Modal';
   *
   * `db` config is intentionally empty: the username on `qodstate_user`
   * IS the identity, so there's nothing to capture beyond the provider
-  * choice. */
+  * choice.
+  *
+  * The client secret of the tenant's console sign-in is write-only: the
+  * server only reports whether one is stored (`clientSecretSet`), so this
+  * form never prefills or displays it. The secret reference
+  * (`clientSecretRef`) is operator-only: editable by a superuser, read-only
+  * for a tenant admin, whose save carries it back unchanged. */
 export default function AuthProviderSection({ tenantName }: { tenantName: string }) {
+  const { superuser } = useAuth();
   const [tenant, setTenant]   = useState<TenantResponse | null>(null);
   const [editing, setEditing] = useState(false);
   const [error, setError]     = useState<string | null>(null);
 
-  // Edit-form state. Initialized from the current tenant when "Edit" is clicked.
-  const [provider, setProvider] = useState<AuthProvider>('db');
-  const [config, setConfig]     = useState<Record<string, string>>({});
+  // Edit-form state. Initialized from the current tenant when "Edit" is clicked;
+  // the secret input starts empty every time.
+  const [form, setForm] = useState<SignInForm>(EMPTY_FORM);
 
   function reload() {
     setError(null);
@@ -37,30 +50,38 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
 
   function openEditor() {
     if (!tenant) return;
-    setProvider(tenant.authProvider);
-    setConfig({ ...tenant.authConfig });
+    setForm(signInFormFor(tenant));
     setEditing(true);
     setError(null);
   }
 
+  function closeEditor() {
+    setEditing(false);
+    setForm(EMPTY_FORM); // a typed secret goes with the form
+    setError(null);
+  }
+
   function setConfigField(key: string, value: string) {
-    setConfig(prev => ({ ...prev, [key]: value }));
+    setForm(prev => ({ ...prev, config: { ...prev.config, [key]: value } }));
   }
 
   function pickProvider(p: AuthProvider) {
-    setProvider(p);
-    setConfig({}); // discard prior provider's fields on switch
+    setForm({ ...EMPTY_FORM, provider: p }); // discard prior provider's fields on switch
+  }
+
+  function setRemoveSecret(remove: boolean) {
+    setForm(prev => ({ ...prev, removeSecret: remove, secret: remove ? '' : prev.secret }));
   }
 
   async function save(ev: React.FormEvent) {
     ev.preventDefault();
+    if (!tenant) return;
     setError(null);
     try {
-      const updated = await api.setTenantAuth({
-        name: tenantName, authProvider: provider, authConfig: config,
-      });
+      const updated = await api.setTenantAuth(setAuthRequestFor(tenantName, tenant, form, superuser));
       setTenant(updated);
       setEditing(false);
+      setForm(EMPTY_FORM);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -75,11 +96,19 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
     );
   }
 
-  const fields = PROVIDER_FIELDS[editing ? provider : tenant.authProvider];
-  const activeConfig = editing ? config : tenant.authConfig;
-  const formReady = fields.every(
-    f => f.optional || (config[f.key] ?? '').trim().length > 0
+  const storedFields = PROVIDER_FIELDS[tenant.authProvider];
+  const formFields   = PROVIDER_FIELDS[form.provider];
+  const formReady = formFields.every(
+    f => f.optional || (form.config[f.key] ?? '').trim().length > 0
   );
+  // A tenant admin sees an operator-only field only when it holds a value
+  // (read-only): they cannot add one.
+  const fieldShown = (f: ProviderField, config: Record<string, string>) =>
+    !f.operatorOnly || superuser || (config[f.key] ?? '').trim() !== '';
+  const readOnlyField = (f: ProviderField) => !!f.operatorOnly && !superuser;
+  const storedParked = tenant.authConfig[PARKED_SECRET_REF_KEY];
+  const formParked   = form.config[PARKED_SECRET_REF_KEY];
+  const dropsSecret  = formFields.length > 0 && issuerChangeDropsSecret(tenant, form, superuser);
 
   return (
     <div className="card">
@@ -93,9 +122,10 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
         Every user in this tenant authenticates through the chosen provider.
         Changing the provider does NOT delete the tenant's users, roles, or
         groups; for OIDC providers, future handshakes will be matched
-        against the new `iss` claim instead of the directory.
+        against the new `iss` claim instead of the directory. The client
+        secret is write-only: once saved, it is never shown again.
       </p>
-      {error && <div className="login-err">Error: {error}</div>}
+      {error && !editing && <div className="login-err">Error: {error}</div>}
 
       <table>
         <tbody>
@@ -103,30 +133,51 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
             <th style={{ textAlign: 'left', width: 160 }}>Provider</th>
             <td><code>{tenant.authProvider}</code> <span className="subtle">- {PROVIDER_LABELS[tenant.authProvider]}</span></td>
           </tr>
-          {fields.length === 0 ? (
+          {storedFields.length === 0 ? (
             <tr>
               <th style={{ textAlign: 'left' }}>Config</th>
               <td className="subtle">(none - the username on each user record IS the identity)</td>
             </tr>
           ) : (
-            fields.map(f => (
-              <tr key={f.key}>
-                <th style={{ textAlign: 'left' }}>{f.label}</th>
-                <td><code>{activeConfig[f.key] ?? <span className="subtle">(not set)</span>}</code></td>
+            <>
+              {storedFields.filter(f => fieldShown(f, tenant.authConfig)).map(f => (
+                <tr key={f.key}>
+                  <th style={{ textAlign: 'left' }}>{f.label}</th>
+                  <td>
+                    <code>{tenant.authConfig[f.key] ?? <span className="subtle">(not set)</span>}</code>
+                    {readOnlyField(f) && <span className="subtle"> (set by an operator)</span>}
+                  </td>
+                </tr>
+              ))}
+              <tr>
+                <th style={{ textAlign: 'left' }}>Client secret</th>
+                <td>{tenant.clientSecretSet ? 'set' : <span className="subtle">not set</span>}</td>
               </tr>
-            ))
+              {storedParked && (
+                <tr>
+                  <th style={{ textAlign: 'left' }}>Parked secret ref</th>
+                  <td>
+                    <code>{storedParked}</code>{' '}
+                    <span className="subtle">
+                      (saved before 0.10.2; unused until a superuser saves it again.
+                      Entering a client secret or changing the issuer URL drops it)
+                    </span>
+                  </td>
+                </tr>
+              )}
+            </>
           )}
         </tbody>
       </table>
 
       {editing && (
-        <Modal maxWidth={560} onClose={() => { setEditing(false); setError(null); }}>
+        <Modal maxWidth={560} scrollBackdrop onClose={closeEditor}>
             <div className="card-title">Edit auth provider</div>
             <form onSubmit={save}>
               <label>
                 Provider
                 <select
-                  value={provider}
+                  value={form.provider}
                   onChange={ev => pickProvider(ev.target.value as AuthProvider)}
                 >
                   {(Object.keys(PROVIDER_LABELS) as AuthProvider[]).map(k => (
@@ -134,7 +185,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                   ))}
                 </select>
               </label>
-              {fields.length === 0 ? (
+              {formFields.length === 0 ? (
                 <p className="subtle" style={{ marginTop: 0 }}>
                   <code>db</code> needs no extra config - the username on each
                   user record IS the identity.
@@ -142,27 +193,83 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
               ) : (
                 <>
                   <p className="subtle" style={{ marginTop: 0 }}>
-                    Leave every field blank to use the manager-wide OIDC
-                    config from <code>application.conf</code>. Fill them all
-                    in to override the global client for this tenant -- the
-                    override is all-or-nothing: a missing required field
-                    silently falls back to the global config.
+                    Console sign-in: once the issuer URL, the client ID and a
+                    client secret are set, this tenant's admins sign in through
+                    its identity provider at <code>/ui/?tenant={tenantName}</code>,
+                    and a password login naming the tenant is refused. SQL
+                    clients: bearer tokens are checked against this tenant's own
+                    client when every field its provider needs is filled in (the
+                    client ID, plus the base URL and realm, AD tenant ID, or
+                    region and user pool ID), and against the manager-wide config
+                    from <code>application.conf</code> otherwise.
                   </p>
-                  {fields.map(f => (
-                    <label key={f.key}>
-                      {f.label}
-                      <input
-                        value={config[f.key] ?? ''}
-                        onChange={ev => setConfigField(f.key, ev.target.value)}
-                        placeholder={f.placeholder}
-                        required={!f.optional}
-                      />
-                    </label>
+                  {formFields.filter(f => fieldShown(f, form.config)).map(f => (
+                    readOnlyField(f) ? (
+                      <label key={f.key}>
+                        {f.label}
+                        <input value={form.config[f.key] ?? ''} readOnly disabled />
+                        <span className="subtle">
+                          Set by an operator: only a superuser can change it, and a
+                          new issuer URL removes it.
+                        </span>
+                      </label>
+                    ) : (
+                      <label key={f.key}>
+                        {f.label}
+                        <input
+                          value={form.config[f.key] ?? ''}
+                          onChange={ev => setConfigField(f.key, ev.target.value)}
+                          placeholder={f.placeholder}
+                          required={!f.optional}
+                        />
+                      </label>
+                    )
                   ))}
+                  <label>
+                    Client secret{' '}
+                    <span className="subtle">({tenant.clientSecretSet ? 'set' : 'not set'})</span>
+                    <input
+                      type="password"
+                      value={form.secret}
+                      onChange={ev => setForm(prev => ({ ...prev, secret: ev.target.value }))}
+                      placeholder={tenant.clientSecretSet ? 'leave blank to keep' : 'enter the client secret'}
+                      disabled={form.removeSecret}
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  {tenant.clientSecretSet && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={form.removeSecret}
+                        onChange={ev => setRemoveSecret(ev.target.checked)}
+                      />
+                      <span>Remove secret</span>
+                    </label>
+                  )}
+                  {formParked && (
+                    <p className="subtle">
+                      A secret reference saved before 0.10.2 is parked and unused:{' '}
+                      <code>{formParked}</code>.{' '}
+                      {superuser
+                        ? "To restore it, first check that the issuer URL is the tenant's own identity provider (the secret is sent to it), then enter the reference again as the client secret ref."
+                        : 'A superuser can restore it, or enter the client secret above.'}{' '}
+                      Entering a client secret, or changing the issuer URL, drops it.
+                    </p>
+                  )}
+                  {dropsSecret && (
+                    <p role="alert" style={{ color: 'var(--warn)' }}>
+                      The issuer URL changed: saving removes the saved client secret,
+                      which belongs to the previous issuer, and it must be entered
+                      again. Enter the new issuer's secret above to keep console
+                      sign-in working.
+                    </p>
+                  )}
                 </>
               )}
+              {error && <div className="login-err">Error: {error}</div>}
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => { setEditing(false); setError(null); }}>Cancel</button>
+                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeEditor}>Cancel</button>
                 <button type="submit" style={{ minWidth: '7rem' }} disabled={!formReady}>Save</button>
               </div>
             </form>
