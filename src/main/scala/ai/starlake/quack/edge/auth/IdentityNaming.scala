@@ -34,10 +34,16 @@ object IdentityNaming:
   def verifiedEmail(profile: AuthenticatedProfile): Option[String] =
     profile.claims.get("email").filter(_ => emailVerified(profile))
 
-  /** Whether the profile's user name may name a `qodstate_user` row: false only for a name that
-    * came from the email claim of a token whose IdP does not mark the address verified.
+  /** Whether the profile's user name names no one: empty or only whitespace (a blank
+    * `preferred_username`, or a blank `email` claim standing in for it).
+    */
+  def namesNoUser(profile: AuthenticatedProfile): Boolean = profile.username.isBlank
+
+  /** Whether the profile's user name may name a `qodstate_user` row: false for a name that names no
+    * user, and for a name that came from the email claim of a token whose IdP does not mark the
+    * address verified.
     */
   def userNameMayBindRow(profile: AuthenticatedProfile): Boolean =
     val nameIsEmail = !profile.claims.contains("preferred_username") &&
       profile.claims.get("email").contains(profile.username)
-    !nameIsEmail || emailVerified(profile)
+    !namesNoUser(profile) && (!nameIsEmail || emailVerified(profile))

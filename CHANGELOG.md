@@ -38,7 +38,10 @@
     the user name picks the row, the IdP's user names must be assigned by an administrator, not
     chosen by the account holder: an IdP realm that lets people choose their own user name lets
     them sign in as any QoD user of that name, the seeded superusers `admin@localhost.local` and
-    `admin` included. Operators who relied on IdP `admin` claims create the rows first (`qod user
+    `admin` included. This holds on the data plane too: a FlightSQL or native Quack front door
+    handshake binds the row its token's `preferred_username` names, a superuser row on a
+    `superuser=true` handshake (a Keycloak realm with "email as username" and self-registration
+    lets a registrant choose `admin@localhost.local`). Operators who relied on IdP `admin` claims create the rows first (`qod user
     create`). Logins verified by the database authenticator are unchanged.
   - BREAKING: an identity-provider login counts an email address only when the IdP marks it
     verified (`email_verified` true), because an address the account holder typed could otherwise
@@ -48,19 +51,28 @@
     without `preferred_username`) binds a row only when that address is verified, else the login
     is refused `403 not_provisioned`; single sign-on also falls back to the email claim, when the
     user name matches no row, only when it is verified. A provider that does not emit
-    `email_verified` no longer matches rows by email: name the rows by the IdP's user name
-    (`preferred_username`). The rule holds on every plane: a FlightSQL or native Quack front door
+    `email_verified` no longer matches rows by email: have its tokens carry `preferred_username`
+    and name the rows by it, or have them carry `email_verified`. The rule holds on every plane: a FlightSQL or native Quack front door
     handshake whose user name came from an unverified email claim (the manager-wide password
     grant answering a basic handshake, a manager-wide bearer, a tenant's own bearer) is refused
     as unauthenticated, with a message naming the cause, and binds no row. Before, such a name
     bound any row it matched, the seeded superuser `admin@localhost.local` included on a
     superuser handshake. A token that names no user (no `preferred_username`, email or sub) is
     refused everywhere too: a password-grant token is never named by the text typed into the
-    form, and a bearer token is no longer named `unknown`; on the data plane an empty user name
+    form, and a bearer token is no longer named `unknown`; on the data plane a blank user name
     is refused rather than replaced by the token's subject.
-  - BREAKING: an IdP whose tokens carry no `preferred_username` and whose email addresses are not
-    verified can no longer sign in anywhere, on the management or the data plane, until it sends
-    `preferred_username` or verifies the addresses.
+  - BREAKING: a token that carries an `email` claim but no `preferred_username`, and whose
+    `email_verified` is not true, is now refused on the management and the data plane alike (a
+    token with neither claim is named by its subject, as before, and is unaffected). Remedy: have
+    the tokens carry `preferred_username`, or `email_verified: true`. The two setups most likely
+    to hit it:
+    - an operator-run external JWT signer (`JWT_SECRET_KEY` / `JWT_PUBLIC_KEY_PATH`, data plane
+      only, so its naming changes for the first time in this release) whose tokens name users by
+      `email`: add `preferred_username`, or `email_verified: true`, to the tokens it mints;
+    - Azure AD (Entra ID), which never sends `email_verified`: a v1 access token carries no
+      `preferred_username`, so one named by its `email` claim is always refused. Issue v2 tokens
+      (`accessTokenAcceptedVersion: 2` in the app registration's manifest), which carry
+      `preferred_username`.
   - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
     superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
     tenant, as the FlightSQL handshake already ruled.

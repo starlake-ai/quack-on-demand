@@ -5,10 +5,12 @@ import ai.starlake.quack.edge.{EdgeHandshake, HandshakeBound, HandshakeFailure}
 import ai.starlake.quack.edge.adapter.QuackTransport
 import ai.starlake.quack.edge.auth.{
   AuthenticationService,
+  JwtBearerAuthenticator,
   OidcBearerAuthenticator,
   ResourceOwnerPasswordAuthenticator,
   TenantOidcRegistry
 }
+import ai.starlake.quack.edge.config.JwtAuthConfig
 import ai.starlake.quack.edge.quack.{QuackFrontDoor, QuackSessionRegistry, QuackWire}
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -19,6 +21,9 @@ import at.favre.lib.crypto.bcrypt.BCrypt
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.github.tomakehurst.wiremock.client.WireMock
+import com.nimbusds.jose.crypto.MACSigner
+import com.nimbusds.jose.{JWSAlgorithm, JWSHeader}
+import com.nimbusds.jwt.{JWTClaimsSet, SignedJWT}
 import org.apache.arrow.flight.{
   FlightCallHeaders,
   FlightDescriptor,
@@ -65,6 +70,9 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
   private val TinaPassword  = "tina-idp-password"
   private val TomPassword   = "tom-idp-password"
   private val EmailPassword = "email-user-idp-password"
+
+  // The operator's own external JWT signer (HS256), tried before the OIDC bearer as in production.
+  private val JwtSecret = "operator-jwt-secret-0123456789abcdef"
 
   private def hash(pw: String): String = BCrypt.withDefaults().hashToString(10, pw.toCharArray)
 
@@ -166,6 +174,10 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
         )
       ),
       bearer = List(
+        new JwtBearerAuthenticator(
+          JwtAuthConfig(secretKey = JwtSecret, publicKeyPath = "", issuer = "", audience = ""),
+          "role"
+        ),
         new OidcBearerAuthenticator("keycloak", s"${idp.baseUrl}/jwks", idp.issuer, "", "role")
       ),
       tenantOidcRegistry = Some(
@@ -212,6 +224,14 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
     /** A token from the manager-wide issuer. */
     def systemToken(claims: Map[String, Any]): String =
       JwtTestSigner.mint(Map[String, Any]("role" -> "admin") ++ claims, idp.issuer)
+
+    /** A token from the operator's own external JWT signer. */
+    def externalJwt(claims: Map[String, Any]): String =
+      val b = new JWTClaimsSet.Builder().claim("role", "admin")
+      claims.foreach((k, v) => b.claim(k, v))
+      val jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), b.build())
+      jwt.sign(new MACSigner(JwtSecret))
+      jwt.serialize()
 
     /** A token from the acme tenant's own realm. */
     def tenantToken(claims: Map[String, Any]): String =
@@ -326,6 +346,39 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
       refusedForNoName(w.bearer(token, superuser = true))
       w.askedNames shouldBe empty
     }
+
+  it should "refuse a token whose preferred_username is only whitespace, never naming it by its subject" in
+    withWorld { w =>
+      val token = w.systemToken(Map("preferred_username" -> "   ", "sub" -> SeededSu))
+      refusedForNoName(w.bearer(token, superuser = true))
+      w.askedNames shouldBe empty
+    }
+
+  // ---------------------------------------------------------------------------------------------
+  // External JWT bearer (the operator's own signer), data plane only
+  // ---------------------------------------------------------------------------------------------
+
+  "An external JWT bearer" should
+    "refuse a token named by an email claim without email_verified, never binding the superuser row of that name" in
+    withWorld { w =>
+      refusedForUnverifiedEmail(w.bearer(w.externalJwt(Map("email" -> SeededSu)), superuser = true))
+      w.askedNames shouldBe empty
+    }
+
+  it should "refuse a token that names no user, never binding a row named unknown" in
+    withWorld { w =>
+      refusedForNoName(w.bearer(w.externalJwt(Map.empty), superuser = true))
+      w.askedNames shouldBe empty
+    }
+
+  it should "bind the superuser row once the token marks the address verified" in withWorld { w =>
+    val out = w.bearer(
+      w.externalJwt(Map("email" -> SeededSu, "email_verified" -> true)),
+      superuser = true
+    )
+    boundTo(out, SeededSu, None)
+    out.toOption.flatMap(_.profile).map(_.authMethod) shouldBe Some("jwt")
+  }
 
   // ---------------------------------------------------------------------------------------------
   // Tenant-scoped bearer, validated by the tenant's own IdP (TenantOidcRegistry)

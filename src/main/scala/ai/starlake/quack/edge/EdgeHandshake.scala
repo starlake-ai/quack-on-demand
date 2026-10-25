@@ -46,7 +46,7 @@ final case class HandshakeBound(
   *      `qodstate_user` row (a same-named user in two tenants is two principals);
   *   2. validate the credential against the configured chain (or trust the client when no provider
   *      is configured, the v1 local-dev posture), and refuse as unauthenticated a profile whose
-  *      user name names no one: an empty name, or one that came from an email claim the identity
+  *      user name names no one: a blank name, or one that came from an email claim the identity
   *      provider does not mark verified ([[ai.starlake.quack.edge.auth.IdentityNaming]], the rule
   *      the management login applies too);
   *   3. re-resolve the target with the validated username;
@@ -139,8 +139,8 @@ final class EdgeHandshake(
     // authenticator's profile carries no email claim, so it is never refused here.
     val named: Either[String, (Option[AuthenticatedProfile], Boolean)] =
       validation.flatMap {
-        case (Some(p), _) if p.username.isEmpty =>
-          Left("the token names no user: its user name claim is empty")
+        case (Some(p), _) if IdentityNaming.namesNoUser(p) =>
+          Left("the token names no user: its user name claim is blank")
         case (Some(p), _) if !IdentityNaming.userNameMayBindRow(p) =>
           logger.warn(
             s"handshake refused: ${p.authMethod} named the user '${p.username}' by an email " +
