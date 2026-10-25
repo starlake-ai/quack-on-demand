@@ -113,7 +113,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
   const dropsSecret  = formFields.length > 0 && issuerChangeDropsSecret(tenant, form, superuser);
   // Warned before the save, from what the server will keep (see consoleSignInComplete).
   const incomplete   = !consoleSignInComplete(tenant, form, superuser);
-  const refMoves     = referenceNeedsIssuerCheck(tenant, form, superuser);
+  const refNeedsCheck = referenceNeedsIssuerCheck(tenant, form, superuser);
   const formIssuer   = (form.config[ISSUER_KEY] ?? '').trim();
   const formRef      = (form.config[SECRET_REF_KEY] ?? '').trim();
   // What to do about a parked value: a reference can be restored by a superuser, anything else
@@ -304,7 +304,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
                       open this tenant's console.
                     </p>
                   )}
-                  {refMoves && (
+                  {refNeedsCheck && (
                     <p role="alert" style={{ color: 'var(--warn)' }}>
                       The secret reference <code>{formRef}</code> names a secret of the
                       manager's environment, and with this issuer URL that secret is

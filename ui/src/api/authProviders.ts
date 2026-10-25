@@ -278,10 +278,12 @@ export function consoleSignInComplete(
   return saved.issuer !== '' && saved.clientId !== '' && (saved.value || saved.reference !== '');
 }
 
-/** Whether saving `form` keeps a secret reference under a new issuer, which
-  * only a superuser's save does: the environment secret the reference names is
-  * then sent to the new issuer, so the superuser should confirm that it is the
-  * tenant's own identity provider. */
+/** Whether saving `form` keeps a secret reference that is new to the saved
+  * issuer: kept under a new issuer, or added or changed by this save
+  * (re-entering a parked reference included, since the parked key leaves the
+  * stored reference empty). Only a superuser may write such a reference. The
+  * environment secret it names is then sent to the saved issuer, so the
+  * superuser should confirm that it is the tenant's own identity provider. */
 export function referenceNeedsIssuerCheck(
   stored: TenantResponse,
   form: SignInForm,
