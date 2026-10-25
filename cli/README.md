@@ -172,7 +172,7 @@ for the full flag list of any command.
 | `create` | Create a tenant. |
 | `delete` | Delete a tenant (must have no pools). |
 | `set-disabled` | Enable or disable a tenant. |
-| `set-auth` | Change a tenant's auth provider/config. |
+| `set-auth` | Change a tenant's auth provider/config; the write-only OIDC client secret comes from `--client-secret-prompt` or `--client-secret-stdin` (never argv), `--clear-client-secret` removes it (at most one of the three), and adding or changing a `clientSecretRef` needs a superuser. |
 
 ### database - tenant databases (DuckLake catalogs)
 

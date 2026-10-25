@@ -2,7 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{FederatedSecret, FederatedSource}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Tenant}
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.*
@@ -121,6 +121,118 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     e.tenant shouldBe Some(tid)
   }
 
+  "TenantHandlers.setTenantAuth" should
+    "audit ok with clientKey -> changed when the write sends a client secret, never the value" in {
+      val store = new RecordingTelemetryStore
+      val audit = new AuditRecorder(store, _ => None)
+      val fix   = SecurityFixtures.freshStore()
+      val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+      sup.restore()
+      val tenants = new TenantHandlers(sup, audit = audit)
+      val req     = SetTenantAuthRequest(
+        SecurityFixtures.TenantId,
+        "keycloak",
+        Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
+        clientSecret = Some("kc-s3cr3t")
+      )
+      // Static-key token: scopeOf returns None (no session row), so the caller is a superuser.
+      tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+        true
+      val e = store.events.find(_.action == "tenant.auth.update").value
+      e.outcome shouldBe "ok"
+      e.tenant shouldBe Some(SecurityFixtures.TenantId)
+      e.detail shouldBe Map("authProvider" -> "keycloak", "clientKey" -> "changed")
+    }
+
+  it should "audit denied with the refusal code when a write rule refuses it, storing nothing" in {
+    val store = new RecordingTelemetryStore
+    val audit = new AuditRecorder(store, _ => None)
+    val fix   = SecurityFixtures.freshStore()
+    val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+    sup.restore()
+    val tenants = new TenantHandlers(sup, audit = audit)
+    val req     = SetTenantAuthRequest(
+      SecurityFixtures.TenantId,
+      "keycloak",
+      Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientSecretRef" -> "env:X"),
+      clientSecret = Some("kc-s3cr3t")
+    )
+    val tenantAdmin =
+      SessionScope(superuser = false, manageableTenants = Set(SecurityFixtures.TenantId))
+    val out = tenants.setTenantAuth(req, Some("alice-session"))(_ => Some(tenantAdmin))
+    out.unsafeRunSync().left.map(_._1.code) shouldBe Left(403)
+    val rows = store.events.filter(_.action == "tenant.auth.update")
+    rows.map(_.outcome) shouldBe List("denied")
+    rows.head.tenant shouldBe Some(SecurityFixtures.TenantId)
+    // The refusal code, never the request: no secret value, no reference in the row.
+    rows.head.detail shouldBe Map("reason" -> "superuser_required")
+    fix.store.listTenants().find(_.id == SecurityFixtures.TenantId).map(_.authProvider) shouldBe
+      Some("db")
+  }
+
+  private val AcmeIssuer = "https://idp.example.com/realms/acme"
+  private val AcmeConfig = Map("issuerUrl" -> AcmeIssuer, "clientId" -> "qod")
+
+  /** The outcome and detail of the one `tenant.auth.update` row that a write by the static key (a
+    * superuser) leaves on a keycloak tenant `acme` holding `stored` as its client secret.
+    */
+  private def auditedWrite(
+      stored: Option[String],
+      config: Map[String, String],
+      clientSecret: Option[String]
+  ): (String, Map[String, String]) =
+    val store = new RecordingTelemetryStore
+    val fix   = SecurityFixtures.freshStore()
+    fix.store.upsertTenant(
+      Tenant(
+        SecurityFixtures.TenantId,
+        displayName = SecurityFixtures.TenantName,
+        authProvider = "keycloak",
+        authConfig = AcmeConfig,
+        authClientSecret = stored
+      )
+    )
+    val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+    sup.restore()
+    val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, _ => None))
+    val req     = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
+    tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+      true
+    val rows = store.events.filter(_.action == "tenant.auth.update")
+    rows.size shouldBe 1
+    (rows.head.outcome, rows.head.detail)
+
+  it should "audit ok without clientKey when the write leaves the stored secret as it was" in
+    Seq(
+      ("omits it under the same issuer", Some("kc-s3cr3t"), AcmeConfig + ("scopes" -> "x"), None),
+      ("sends the stored value again", Some("kc-s3cr3t"), AcmeConfig, Some("kc-s3cr3t")),
+      ("clears a secret that is not stored", None, AcmeConfig, Some(""))
+    ).foreach { (what, stored, config, sent) =>
+      withClue(what) {
+        auditedWrite(stored, config, sent) shouldBe ("ok", Map("authProvider" -> "keycloak"))
+      }
+    }
+
+  it should "audit ok with clientKey -> changed whenever a write changes the stored secret" in {
+    val moved = AcmeConfig.updated("issuerUrl", "https://other.example.com")
+    Seq(
+      ("an issuer change drops it", Some("kc-s3cr3t"), moved, None),
+      ("an empty value removes it", Some("kc-s3cr3t"), AcmeConfig, Some("")),
+      ("a different value replaces it", Some("kc-s3cr3t"), AcmeConfig, Some("n3w-s3cr3t")),
+      (
+        "a new reference replaces it",
+        Some("kc-s3cr3t"),
+        AcmeConfig + ("clientSecretRef" -> "env:ACME_OIDC_SECRET"),
+        None
+      )
+    ).foreach { (what, stored, config, sent) =>
+      withClue(what) {
+        auditedWrite(stored, config, sent) shouldBe
+          ("ok", Map("authProvider" -> "keycloak", "clientKey" -> "changed"))
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // In-memory FederatedSourceOps stub for federation audit tests.
   // ---------------------------------------------------------------------------
@@ -226,7 +338,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     (handlers, sessions)
@@ -313,7 +425,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     (handlers, sessions)
@@ -329,7 +441,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     val loginResult = handlers
@@ -358,7 +470,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       audit = audit
     )
     val loginResult = handlers

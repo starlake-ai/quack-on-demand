@@ -27,8 +27,10 @@ export function usePrincipal(): Principal {
   // switch among exactly those; a DB-login tenant admin has just their own.
   const allowed = manageableTenants.length > 0 ? [...manageableTenants] : tenant ? [tenant] : [];
   if (tenant && !allowed.includes(tenant)) allowed.unshift(tenant);
-  // whoami's superuser flag covers a superuser signed in through a tenant URL (OIDC ?tenant=),
-  // whose session still carries that tenant.
+  // A tenant sign-in, through the database or the tenant's own SSO, is never superuser, so the
+  // case whoami's flag used to cover (a superuser signed in through a tenant URL) is gone.
+  // `tenant === null` is a looser test than the flag: a multi-tenant admin session from the
+  // system login has no tenant either.
   return {
     superuser: !authEnabled || superuser || tenant === null,
     ownTenant: tenant,

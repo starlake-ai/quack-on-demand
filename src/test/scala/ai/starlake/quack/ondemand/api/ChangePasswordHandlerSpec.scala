@@ -123,7 +123,7 @@ class ChangePasswordHandlerSpec extends AnyFlatSpec with Matchers:
       authService = fakeSvc,
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _) => Nil,
+      grantsForIdentity = (_, _, _) => Nil,
       authModeResolver = new ManagementAuthModeResolver(
         id => Some(Tenant(id = id, authProvider = "db")),
         ManagementAuthMode.Db

@@ -514,6 +514,9 @@ object Main extends IOApp with LazyLogging:
     // seeding). Must run before the supervisor below snapshots the RBAC graph; it NOTIFYs peers
     // (HA) when it changed anything, so replicas already running pick the new rows up.
     BuiltinRbacBackfill.run(store, publisher)
+    // A clientSecretRef stored before changeset 0048 is parked and unused until a write stores a
+    // secret source again: report it at ERROR, with the restore step, once per tenant per boot.
+    ai.starlake.quack.ondemand.auth.ParkedSecretRefs.report(store.listTenants())
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
     // Constructed before the supervisor so its teardown hook can clear a torn-down
@@ -559,11 +562,11 @@ object Main extends IOApp with LazyLogging:
         () => ai.starlake.quack.ondemand.api.FleetHandlers.livenessByName(store, fb)
     }
 
-    // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
-    // authenticator; others fall back to the manager-wide auth.google block.
+    // Tenants whose authConfig carries their provider's public client fields get a per-tenant
+    // bearer authenticator (no secret involved); the others fall back to the manager-wide
+    // quack-flightsql.auth.<provider> block.
     val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
       loadTenant = id => sup.getTenantById(id),
-      secrets = ai.starlake.quack.secrets.SecretRefResolver.default,
       roleClaim = authCfg.roleClaim
     )
     val authService = new AuthenticationService(
@@ -794,7 +797,7 @@ object Main extends IOApp with LazyLogging:
       loadTenant = id => sup.getTenantById(id)
     )
     val grantsForIdentity: GrantsLookup =
-      (identity, email) => userStore.grantsForIdentity(identity, email)
+      (realm, identity, email) => userStore.grantsForIdentity(realm, identity, email)
     // Best-effort logout callback to Starlake, only wired when the SSO integration is on --
     // otherwise NoopStarlakeNotifier keeps logout free of any Starlake dependency.
     val starlakeNotifier: StarlakeNotifier =

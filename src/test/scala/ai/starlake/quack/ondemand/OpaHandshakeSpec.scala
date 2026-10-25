@@ -76,7 +76,14 @@ class OpaHandshakeSpec extends AnyFlatSpec with Matchers:
   private val sup = freshSup()
 
   private def req(tenant: String, user: String): AuthzRequest =
-    AuthzRequest(tenant, "bi", user, Set.empty, Set.empty, Map("dept" -> "fin"), true, "flightsql")
+    AuthzRequest(
+      tenant,
+      "bi",
+      user,
+      jwtClaims = Map("dept" -> "fin"),
+      superuserAdmissible = true,
+      edge = "flightsql"
+    )
 
   private final class StubAccess(answer: Either[HandshakeDenial, Unit]) extends OpaPoolAccess:
     var seen: List[(String, Map[String, String], String)] = Nil
@@ -144,4 +151,4 @@ class OpaHandshakeSpec extends AnyFlatSpec with Matchers:
 
   "authorizeHandshake" should "keep its string-left contract through the delegate" in:
     sup.wireOpa(StubAccess(Left(HandshakeDenial.Denied("nope"))))
-    sup.authorizeHandshake("acme", "bi", "alice") shouldBe Left("nope")
+    sup.authorizeHandshake("acme", "bi", "alice", superuserAdmissible = true) shouldBe Left("nope")

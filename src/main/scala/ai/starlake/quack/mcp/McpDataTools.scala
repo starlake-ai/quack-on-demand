@@ -101,12 +101,20 @@ final class McpDataTools(
     * principal's own `TokenRestriction` (`Unrestricted` for the static key, the PAT's narrowed
     * scope otherwise) so the executor enforces the same ceiling the MCP layer already checked the
     * arguments against. `patId` carries the acting token's id for statement-history and audit
-    * attribution -- `None` for the static key, which is not a token at all.
+    * attribution -- `None` for the static key, which is not a token at all. `superuserAdmissible`
+    * is the owner's realm: true only for a PAT whose owning row is tenant-less (a superuser's
+    * token), so a tenant PAT never binds a superuser row at the executor's handshake gate.
     */
   private def callerFor(principal: McpPrincipal): ExecCaller = principal match
     case McpPrincipal.StaticKey => ExecCaller.system(connectionIdOf(principal))
     case McpPrincipal.Pat(p)    =>
-      ExecCaller(connectionIdOf(principal), p.user.username, p.restriction, Some(p.patId))
+      ExecCaller(
+        connectionIdOf(principal),
+        p.user.username,
+        p.restriction,
+        superuserAdmissible = p.user.tenant.isEmpty,
+        patId = Some(p.patId)
+      )
 
   /** Execute `sql` through the routed executor and decode at most `maxRows` rows. */
   private def execute(

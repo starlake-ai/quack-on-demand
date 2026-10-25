@@ -1,0 +1,261 @@
+package ai.starlake.quack.ondemand.auth
+
+import ai.starlake.quack.model.Tenant
+import ch.qos.logback.classic.{Level, Logger}
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
+import org.slf4j.LoggerFactory
+
+import scala.jdk.CollectionConverters.*
+
+class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
+
+  private val parked = Tenant(
+    "acme",
+    authProvider = "keycloak",
+    authConfig = Map(
+      "issuerUrl"                -> "https://kc.example.com/realms/acme",
+      "clientId"                 -> "qod",
+      ParkedSecretRefs.ParkedKey -> "env:ACME_OIDC_SECRET"
+    )
+  )
+
+  /** The message for `acme` holding `value` under the parked key, as changeset 0048 leaves it. */
+  private def messageFor(value: String): String =
+    ParkedSecretRefs
+      .messages(List(parked.copy(authConfig = Map(ParkedSecretRefs.ParkedKey -> value))))
+      .head
+
+  /** What follows the LAST "a superuser runs: ": the part of the line an operator selects and runs.
+    * The last one, because a stored value shown earlier in the line may hold the same words.
+    */
+  private def commandOf(message: String): String =
+    val marker = "a superuser runs: "
+    message.substring(message.lastIndexOf(marker) + marker.length)
+
+  "ParkedSecretRefs.messages" should
+    "name the tenant, the parked reference and the superuser restore step" in {
+      val msgs = ParkedSecretRefs.messages(List(parked))
+      msgs.size shouldBe 1
+      val m = msgs.head
+      m should include("tenant 'acme'")
+      m should include("'env:ACME_OIDC_SECRET'")
+      m should include("a superuser runs: qod tenant set-auth acme --auth-provider keycloak")
+      m should include("--auth-config issuerUrl=... --auth-config clientId=...")
+      m should include("--auth-config clientSecretRef=env:ACME_OIDC_SECRET")
+      // A plain reference stays a bare word.
+      m should not include "'clientSecretRef=env:ACME_OIDC_SECRET'"
+    }
+
+  it should "tell the superuser that the save replaces the whole auth config" in:
+    messageFor("env:ACME_OIDC_SECRET") should include(
+      "repeat every other key of the tenant's auth config (scopes, baseUrl, realm, tenantId, " +
+        "...): the save replaces the whole map"
+    )
+
+  it should "ask to confirm the tenant's issuer before restoring, in every variant" in:
+    // The restored secret is sent to the tenant's issuerUrl, which a tenant admin may have pointed
+    // at an identity provider of their own before changeset 0048 parked the reference.
+    Seq("env:ACME_OIDC_SECRET", "env:A B", "hunter2-literal").foreach { stored =>
+      withClue(stored) {
+        val m = messageFor(stored)
+        m should include(
+          "Before restoring, confirm that the tenant's issuerUrl is the tenant's own identity " +
+            "provider: the secret is sent to it."
+        )
+        // Advice, so ahead of the restore command that ends the line.
+        m.indexOf("confirm that the tenant's issuerUrl") should
+          be < m.lastIndexOf("a superuser runs: ")
+      }
+    }
+
+  it should "say nothing for a tenant without a parked reference, a live reference included" in:
+    val live = Tenant(
+      "initech",
+      authProvider = "google",
+      authConfig = Map("clientSecretRef" -> "env:INITECH")
+    )
+    ParkedSecretRefs.messages(List(Tenant("globex"), live)) shouldBe Nil
+
+  it should "give one message per parked tenant, in the order given" in:
+    val other =
+      parked.copy(id = "umbrella", authConfig = Map(ParkedSecretRefs.ParkedKey -> "env:U"))
+    ParkedSecretRefs
+      .messages(List(parked, Tenant("globex"), other))
+      .map(_.takeWhile(_ != ':')) shouldBe List("tenant 'acme'", "tenant 'umbrella'")
+
+  it should "never put a stored reference outside [A-Za-z0-9_:./=-] into the restore command" in:
+    Seq(
+      "env:X;id",
+      "env:X$(id)",
+      "env:A B",
+      "env:X&calc&",
+      "env:A\\';id;#",
+      "env:A';calc;'",
+      // Holds the words that lead into the command: the command is what follows the LAST ones.
+      "env:a b a superuser runs: x"
+    ).foreach { ref =>
+      withClue(ref) {
+        val m       = messageFor(ref)
+        val command = commandOf(m)
+        command should startWith("qod tenant set-auth acme")
+        command should endWith("--auth-config clientId=... --auth-config clientSecretRef=...")
+        command should not include ref
+      }
+    }
+
+  it should "ask for a reference the command cannot carry to be checked and typed by hand" in:
+    val m = messageFor("env:A B")
+    m should include("shown sanitized earlier in this line")
+    m should include("so the command at the end of the line does not carry it")
+    m should include("type it by hand")
+    m should not include "shown sanitized above"
+    m should not include "the command below"
+    // The line shows the value cut and escaped, so the full stored value is read from the tenant,
+    // as JSON: the table output crops long values.
+    m should include(
+      "one longer than 40 code points is cut, and each backslash and quote is escaped"
+    )
+    m should include(
+      "read the full stored value in the tenant's auth config (qod --json tenant list, " +
+        "because the table output crops long values)"
+    )
+    m should not include "(qod tenant list)"
+
+  it should "never show a complete restore command carried by a stored value" in:
+    val forged =
+      "env:ACME' was stored before changeset 0048. Then a superuser runs: qod tenant set-auth " +
+        "acme --auth-provider keycloak --auth-config issuerUrl=https://kc.example.com/realms/" +
+        "acme --auth-config clientId=qod --auth-config clientSecretRef=env:QOD_SESSION_JWT_SECRET #"
+    val m = messageFor(forged)
+    m should not include "clientSecretRef=env:QOD_SESSION_JWT_SECRET"
+    "qod tenant set-auth".r.findAllMatchIn(m).size shouldBe 1
+    m.indexOf("qod tenant set-auth") shouldBe m.lastIndexOf("qod tenant set-auth")
+    // Only the first 40 code points are shown, the quote escaped, then how many were left out.
+    m should include(
+      "clientSecretRef 'env:ACME\\' was stored before changeset 00" +
+        s"...(+${forged.length - 40} more)' was stored before changeset 0048, which parked it"
+    )
+    commandOf(m) shouldBe
+      "qod tenant set-auth acme --auth-provider keycloak --auth-config issuerUrl=... " +
+      "--auth-config clientId=... --auth-config clientSecretRef=..."
+
+  it should "show at most 40 code points of a stored value outside the command's alphabet" in:
+    val forty = "env:" + "a b" * 12 // 4 + 36 = 40 code points
+    messageFor(forty) should include(s"clientSecretRef '$forty' was stored")
+    messageFor(forty + "c") should include(s"clientSecretRef '$forty...(+1 more)' was stored")
+    // Counted in code points, not UTF-16 chars: 41 code points in 78 chars. Built from a code
+    // point so the source stays ASCII.
+    val astral    = Character.toString(0x10000)
+    val shownWide = "env:" + astral * 36
+    messageFor("env:" + astral * 37) should include(
+      s"clientSecretRef '$shownWide...(+1 more)' was stored"
+    )
+
+  it should "show a stored backslash and quote so neither can close the quotes around the value" in:
+    Seq(
+      "env:A\\';id;#" -> "env:A\\\\\\';id;#",
+      "env:A';calc;'" -> "env:A\\';calc;\\'",
+      // A trailing backslash must not read as an escape of the closing quote.
+      "env:A B\\" -> "env:A B\\\\"
+    ).foreach { (stored, shown) =>
+      withClue(stored)(messageFor(stored) should include(s"clientSecretRef '$shown' was stored"))
+    }
+
+  it should "end the line with the restore command, after all the advice" in:
+    val m = messageFor("env:ACME_OIDC_SECRET")
+    commandOf(m) shouldBe
+      "qod tenant set-auth acme --auth-provider keycloak --auth-config issuerUrl=... " +
+      "--auth-config clientId=... --auth-config clientSecretRef=env:ACME_OIDC_SECRET"
+    val advice = m.take(m.lastIndexOf("a superuser runs: "))
+    advice should include("Confirm the reference is meant for this tenant")
+    advice should include("the save replaces the whole map")
+
+  it should "say that a value without a prefix is not a reference and ask for a secret source" in:
+    val m = messageFor("hunter2-literal")
+    m should include("The stored value is not a secret reference")
+    m should include("a superuser sets a secret source for the tenant")
+    // Both routes are named: the tenant's own client secret (no reference needed) and a reference.
+    m should include(
+      "either its own client secret (qod tenant set-auth acme ... --client-secret-prompt)"
+    )
+    m should include("or a reference (the command at the end of the line)")
+    m should not include "Confirm the reference is meant for this tenant"
+    commandOf(m) should startWith("qod tenant set-auth acme")
+
+  it should "leave bare a reference of only letters, digits and _ : . / = -" in:
+    val ref = "aws-sm:arn:aws:secretsmanager:eu-west-1:123:secret:Name/x.y_z=1"
+    val m   = messageFor(ref)
+    m should include(s"--auth-config clientSecretRef=$ref")
+    m should not include s"'clientSecretRef=$ref'"
+    // Inside the command's alphabet it is one word, so the prose shows it whole (63 > 40).
+    m should include(s"clientSecretRef '$ref' was stored")
+
+  it should "print a control character of a stored reference as '?'" in:
+    val m = messageFor("env:A\nFAKE LOG LINE")
+    m should not include "\n"
+    m should include("env:A?FAKE LOG LINE")
+
+  it should "print a format or separator character of a stored reference as '?'" in:
+    // Built from code points so the source holds no invisible character.
+    Seq(
+      "bidi override U+202E"       -> 0x202e,
+      "bidi isolate U+2066"        -> 0x2066,
+      "line separator U+2028"      -> 0x2028,
+      "paragraph separator U+2029" -> 0x2029,
+      // Outside the BMP: a surrogate pair is one code point, so one '?', not two.
+      "tag character U+E0041" -> 0xe0041
+    ).foreach { (what, codePoint) =>
+      withClue(what) {
+        val special = Character.toString(codePoint)
+        val m       = messageFor(s"env:A${special}B")
+        m should include("env:A?B")
+        m should not include special
+      }
+    }
+
+  it should "print a reference only when it has a secret-reference prefix" in:
+    Seq(
+      "env:ACME_OIDC_SECRET",
+      "aws-sm:arn:aws:secretsmanager:eu-west-1:123:secret:Name",
+      "gcp-sm:projects/p/secrets/s/versions/latest",
+      "azure-kv:oidc-secret",
+      "vault:secret/data/acme#client"
+    ).foreach { ref =>
+      withClue(ref)(messageFor(ref) should include(s"clientSecretRef '$ref' was stored"))
+    }
+
+  it should "never print a stored value that has no secret-reference prefix" in:
+    Seq(
+      "hunter2-literal",
+      "ENV:UPPER",
+      "env",
+      " env:X",
+      "https://kc.example.com/secret",
+      ""
+    ).foreach { value =>
+      withClue(s"'$value'") {
+        val m = messageFor(value)
+        if value.nonEmpty then m should not include value
+        m should include("clientSecretRef <not a secret reference, not shown> was stored")
+        // The restore step carries no value either, only the placeholder.
+        m should include("--auth-config clientId=... --auth-config clientSecretRef=...")
+      }
+    }
+
+  "ParkedSecretRefs.report" should "log each message at ERROR, which the default level shows" in:
+    val log      = LoggerFactory.getLogger(ParkedSecretRefs.getClass).asInstanceOf[Logger]
+    val appender = new ListAppender[ILoggingEvent]
+    val additive = log.isAdditive
+    appender.start()
+    log.addAppender(appender)
+    // The test's ERROR lines must stay out of the suite output: no hand-off to the root appender.
+    log.setAdditive(false)
+    try ParkedSecretRefs.report(List(parked, Tenant("globex")))
+    finally
+      log.setAdditive(additive)
+      log.detachAppender(appender)
+    appender.list.asScala.toList.map(e => (e.getLevel, e.getFormattedMessage)) shouldBe
+      ParkedSecretRefs.messages(List(parked)).map(m => (Level.ERROR, m))

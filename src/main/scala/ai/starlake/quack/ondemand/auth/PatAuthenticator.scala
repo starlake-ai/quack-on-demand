@@ -52,9 +52,9 @@ final case class PatPrincipal(
   * @param grantsFor
   *   MUST be wired row-only: `u => List(UserGrant(u.tenant, u.kind))`, the grant list
   *   `AuthHandlers.mintSessionFor` builds in `Db` mode. A PAT is bound to one `qodstate_user` row,
-  *   so the principal is unambiguous; an identity-keyed lookup (`UserStore.grantsForIdentity`,
-  *   which matches by username across tenants) would fold in the grants of the SAME-NAMED but
-  *   DIFFERENT user in another tenant -- usernames are unique only per tenant
+  *   so the principal is unambiguous; an identity-keyed lookup (`UserStore.grantsForIdentity` in
+  *   `LoginRealm.System`, which matches by username across every realm) would fold in the grants of
+  *   the SAME-NAMED but DIFFERENT user in another tenant -- usernames are unique only per tenant
   *   (`qodstate_user_scoped_unique`) -- handing the PAT `manageableTenants` its owner's own login
   *   session does not have. The seam exists so tests can stub, not so callers can widen the
   *   principal.

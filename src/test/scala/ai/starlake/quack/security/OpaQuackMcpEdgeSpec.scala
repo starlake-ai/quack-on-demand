@@ -206,8 +206,13 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       h: FlightEdgeHarness.Harness,
       sql: String
   ): Either[RouterFailure, QueryResult] =
-    executor(h)(ExecCaller.unrestricted("mcp-acme", SecurityFixtures.BobUsername), poolKey, sql)
-      .unsafeRunSync()
+    // Bob is a tenant user: his session is not superuser-admissible.
+    val bob = ExecCaller.unrestricted(
+      "mcp-acme",
+      SecurityFixtures.BobUsername,
+      superuserAdmissible = false
+    )
+    executor(h)(bob, poolKey, sql).unsafeRunSync()
 
   "the MCP routed executor" should "run a statement OPA allows for a grant-less user" in:
     wm.resetAll()
@@ -263,7 +268,13 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       sql: String
   ): Either[RouterFailure, QueryResult] =
     executor(h)(
-      ExecCaller("mcp-acme", SecurityFixtures.BobUsername, restriction, patId = Some("pat-1")),
+      ExecCaller(
+        "mcp-acme",
+        SecurityFixtures.BobUsername,
+        restriction,
+        superuserAdmissible = false,
+        patId = Some("pat-1")
+      ),
       poolKey,
       sql
     ).unsafeRunSync()

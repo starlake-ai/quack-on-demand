@@ -66,7 +66,7 @@ class BuiltinHandshakeSpec extends AnyFlatSpec with Matchers:
     finally Try(TestPostgres.dropDatabase(dbName))
 
   private def req(user: String): AuthzRequest =
-    AuthzRequest("acme", "bi", user, Set.empty, Set.empty, Map.empty, true, "flightsql")
+    AuthzRequest("acme", "bi", user, superuserAdmissible = true, edge = "flightsql")
 
   "a default-created user" should "pass the handshake and hold *.*.* ALL" in withSup {
     (sup, users) =>

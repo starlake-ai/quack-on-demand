@@ -1,3 +1,5 @@
+import sys
+
 import typer
 
 from ..registry import covers
@@ -60,24 +62,65 @@ def set_disabled(
     call(ctx, "POST", "/api/tenant/setDisabled", body={"name": name, "disabled": disabled})
 
 
+def _read_client_secret(stdin: bool, prompt: bool, clear: bool) -> str | None:
+    """The tenant's OIDC client secret, read without it ever touching argv (shell history, `ps`).
+
+    None keeps the stored secret (the manager drops it when issuerUrl changes); "" removes it.
+    Mirrors federation's _read_password.
+    """
+    if sum((stdin, prompt, clear)) > 1:
+        raise typer.BadParameter(
+            "pass at most one of --client-secret-stdin / --client-secret-prompt / --clear-client-secret"
+        )
+    if clear:
+        return ""
+    if stdin:
+        value = sys.stdin.read().rstrip("\r\n")
+    elif prompt:
+        value = typer.prompt("Client secret", hide_input=True, confirmation_prompt=True)
+    else:
+        return None
+    if not value.strip():
+        raise typer.BadParameter("the client secret read is blank")
+    return value
+
+
 @app.command("set-auth")
 @covers(
     "POST",
     "/api/tenant/setAuth",
-    {"name": "NAME", "authProvider": "--auth-provider", "authConfig": "--auth-config"},
+    {
+        "name": "NAME",
+        "authProvider": "--auth-provider",
+        "authConfig": "--auth-config",
+        "clientSecret": "--client-secret-stdin/--client-secret-prompt/--clear-client-secret",
+    },
 )
 def set_auth(
     ctx: typer.Context,
     name: str = typer.Argument(...),
     auth_provider: str = typer.Option(..., "--auth-provider"),
-    auth_config: list[str] = typer.Option(None, "--auth-config", help="KEY=VALUE, repeatable."),
+    auth_config: list[str] = typer.Option(
+        None, "--auth-config",
+        help="KEY=VALUE, repeatable; replaces the stored config. Never put the client secret here.",
+    ),
+    client_secret_stdin: bool = typer.Option(
+        False, "--client-secret-stdin", help="Read the OIDC client secret from stdin (write-only).",
+    ),
+    client_secret_prompt: bool = typer.Option(
+        False, "--client-secret-prompt", help="Prompt for the OIDC client secret (hidden, confirmed).",
+    ),
+    clear_client_secret: bool = typer.Option(
+        False, "--clear-client-secret", help="Remove the stored OIDC client secret.",
+    ),
 ):
-    call(
-        ctx,
-        "POST",
-        "/api/tenant/setAuth",
-        body={"name": name, "authProvider": auth_provider, "authConfig": kv_pairs(auth_config)},
-    )
+    """Set the tenant's sign-in provider and config. Without a secret flag the stored client secret
+    is kept only while issuerUrl stays the same."""
+    secret = _read_client_secret(client_secret_stdin, client_secret_prompt, clear_client_secret)
+    body: dict = {"name": name, "authProvider": auth_provider, "authConfig": kv_pairs(auth_config)}
+    if secret is not None:
+        body["clientSecret"] = secret
+    call(ctx, "POST", "/api/tenant/setAuth", body=body)
 
 
 @app.command("set-acl")

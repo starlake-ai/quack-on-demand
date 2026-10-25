@@ -452,17 +452,30 @@ final case class TenantResponse(
     opaUrl: Option[String] = None,
     opaPolicyPath: Option[String] = None,
     opaTokenSet: Boolean = false,
-    opaSendStatementText: Boolean = false
+    opaSendStatementText: Boolean = false,
+    // The tenant's OIDC client secret is write-only: only whether one is stored is exposed.
+    clientSecretSet: Boolean = false
 )
 final case class TenantListResponse(tenants: List[TenantResponse])
 final case class TenantOpRequest(name: String)
 
 final case class SetTenantDisabledRequest(name: String, disabled: Boolean)
+
+/** A tenant's sign-in configuration. `authConfig` replaces the stored map whole. `clientSecret` is
+  * the write-only OIDC client secret: omitted keeps the stored one only while `issuerUrl` is
+  * unchanged, `""` removes it, a value replaces it (whitespace-only is refused). Every rule is in
+  * [[ai.starlake.quack.ondemand.auth.TenantSignInWrite]]; `toString` redacts the secret.
+  */
 final case class SetTenantAuthRequest(
     name: String,
     authProvider: String,
-    authConfig: Map[String, String] = Map.empty
-)
+    authConfig: Map[String, String] = Map.empty,
+    clientSecret: Option[String] = None
+):
+  override def toString: String =
+    val secret = clientSecret.map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)
+    s"SetTenantAuthRequest(name=$name,authProvider=$authProvider,authConfig=$authConfig," +
+      s"clientSecret=$secret)"
 
 /** Patch of a tenant's data-access authorization. An omitted field keeps the stored value; `""`
   * clears it (mode `""` = the manager default, opaToken `""` = no token). `mode` must be exactly

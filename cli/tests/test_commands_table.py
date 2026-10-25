@@ -44,6 +44,13 @@ CASES = [
         {},
         {"name": "acme", "authProvider": "google", "authConfig": {"hd": "acme.com"}},
     ),
+    (
+        ["tenant", "set-auth", "acme", "--auth-provider", "keycloak", "--auth-config", "issuerUrl=https://kc", "--clear-client-secret"],
+        "POST",
+        "/api/tenant/setAuth",
+        {},
+        {"name": "acme", "authProvider": "keycloak", "authConfig": {"issuerUrl": "https://kc"}, "clientSecret": ""},
+    ),
     (["database", "list", "--tenant", "acme"], "GET", "/api/database/list", {"tenant": "acme"}, None),
     (
         ["database", "create", "--tenant", "acme", "--name", "tpch1", "--metastore", "pgHost=pg", "--data-path", "/data"],
@@ -665,3 +672,66 @@ def test_pool_create_cohort_malformed(runner):
     assert result.exit_code != 0
     assert "cohort must be three integers: writeonly,readonly,dual" in result.output
     assert "1,x,0" in result.output
+
+
+SET_AUTH = [
+    "tenant", "set-auth", "acme", "--auth-provider", "keycloak",
+    "--auth-config", "issuerUrl=https://kc", "--auth-config", "clientId=qod",
+]
+
+
+def _set_auth_route():
+    return respx.route(method="POST", url=f"{BASE}/api/tenant/setAuth").mock(
+        return_value=httpx.Response(200, json={"name": "acme", "clientSecretSet": True})
+    )
+
+
+@respx.mock
+def test_tenant_set_auth_sends_the_client_secret_read_from_stdin(runner):
+    route = _set_auth_route()
+    result = runner.invoke(app, ["--json"] + SET_AUTH + ["--client-secret-stdin"], input="kc-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content) == {
+        "name": "acme",
+        "authProvider": "keycloak",
+        "authConfig": {"issuerUrl": "https://kc", "clientId": "qod"},
+        "clientSecret": "kc-s3cr3t",
+    }
+    assert "kc-s3cr3t" not in result.output
+
+
+@respx.mock
+def test_tenant_set_auth_sends_the_client_secret_read_from_a_confirmed_prompt(runner):
+    route = _set_auth_route()
+    result = runner.invoke(
+        app, ["--json"] + SET_AUTH + ["--client-secret-prompt"], input="kc-s3cr3t\nkc-s3cr3t\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["clientSecret"] == "kc-s3cr3t"
+    assert "kc-s3cr3t" not in result.output
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--client-secret-stdin", "--client-secret-prompt"],
+        ["--client-secret-stdin", "--clear-client-secret"],
+        ["--client-secret-prompt", "--clear-client-secret"],
+    ],
+)
+@respx.mock
+def test_tenant_set_auth_refuses_more_than_one_client_secret_flag(runner, flags):
+    route = _set_auth_route()
+    result = runner.invoke(app, SET_AUTH + flags, input="kc-s3cr3t\nkc-s3cr3t\n")
+    assert result.exit_code != 0
+    assert "at most one of" in result.output
+    assert not route.called
+
+
+@respx.mock
+def test_tenant_set_auth_refuses_a_blank_client_secret(runner):
+    route = _set_auth_route()
+    result = runner.invoke(app, SET_AUTH + ["--client-secret-stdin"], input="   \n")
+    assert result.exit_code != 0
+    assert "blank" in result.output
+    assert not route.called

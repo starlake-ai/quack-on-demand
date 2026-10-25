@@ -99,3 +99,5 @@ databaseChangeLog:
       file: db/changelog/0046-fleet-heartbeat-node-action.yaml
   - include:
       file: db/changelog/0047-node-authz-key-secret.yaml
+  - include:
+      file: db/changelog/0048-tenant-auth-client-secret.yaml

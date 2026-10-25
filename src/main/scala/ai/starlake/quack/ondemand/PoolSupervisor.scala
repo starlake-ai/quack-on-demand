@@ -1553,13 +1553,17 @@ final class PoolSupervisor(
       }
     }
 
-  /** Swap the tenant's auth provider + provider config. Existing users/roles/groups unchanged.
-    * Config-shape validation lives in the REST handler so the supervisor stays storage-only.
+  /** Store the tenant's sign-in state as given: provider, provider config and client secret, the
+    * complete state [[ai.starlake.quack.ondemand.auth.TenantSignInWrite]] computed in the REST
+    * handler, which owns the write rules so the supervisor stays storage-only (the provider is
+    * still checked here). Existing users/roles/groups unchanged. `authClientSecret` has no default:
+    * a caller that forgot it would silently clear a stored secret.
     */
   def setTenantAuth(
       name: String,
       authProvider: String,
-      authConfig: Map[String, String]
+      authConfig: Map[String, String],
+      authClientSecret: Option[String]
   ): IO[Either[SupervisorError, Tenant]] = IO.blocking {
     withCacheRecovery("setTenantAuth") {
       if !Tenant.ValidAuthProviders.contains(authProvider) then
@@ -1572,7 +1576,11 @@ final class PoolSupervisor(
         getTenant(name) match
           case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
           case Some(t) =>
-            val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
+            val updated = t.copy(
+              authProvider = authProvider,
+              authConfig = authConfig,
+              authClientSecret = authClientSecret
+            )
             store.upsertTenant(updated)
             tenants.put(updated.id, updated)
             publish.topologyChanged()
@@ -3785,14 +3793,17 @@ final class PoolSupervisor(
   def wireOpa(access: ai.starlake.quack.ondemand.rbac.OpaPoolAccess): Unit =
     opaAccess = Some(access)
 
-  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]]. */
+  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]].
+    * `superuserAdmissible` has no default: the caller states whether its credential may bind a
+    * superuser row (false for a credential validated in a tenant realm).
+    */
   def authorizeHandshake(
       tenantName: String,
       poolName: String,
       username: String,
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty,
-      superuserAdmissible: Boolean = true
+      superuserAdmissible: Boolean
   ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
     authorizeHandshakeDetailed(
       ai.starlake.quack.ondemand.rbac.AuthzRequest(
@@ -3802,8 +3813,8 @@ final class PoolSupervisor(
         jwtRoles,
         jwtGroups,
         Map.empty,
-        superuserAdmissible,
-        ""
+        superuserAdmissible = superuserAdmissible,
+        edge = ""
       )
     ).left.map(_.message)
 

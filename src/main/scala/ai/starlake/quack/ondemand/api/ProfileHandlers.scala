@@ -21,10 +21,10 @@ import java.time.temporal.ChronoUnit
   *     that [[StatementHistoryHandlers]] builds for tenant admins.
   *
   * The tenant scope is keyed off the session SCOPE, not `profile.tenant`: only a superuser matches
-  * on username alone across tenants. A non-superuser whose profile carries no tenant (an OIDC
-  * tenant-scoped login) falls back to its `manageableTenants`, and a non-superuser with neither
-  * gets an empty alias set that matches nothing -- fail closed, never an unfiltered window. A
-  * caller with no resolvable session -- the static API key, or open mode with no token at all --
+  * on username alone across tenants. A non-superuser whose profile carries no tenant (a
+  * system-realm login in OIDC mode) falls back to its `manageableTenants`, and a non-superuser with
+  * neither gets an empty alias set that matches nothing -- fail closed, never an unfiltered window.
+  * A caller with no resolvable session -- the static API key, or open mode with no token at all --
   * has no identity to scope by and gets `400 no_session_identity`.
   *
   * `tenantById` is a lookup seam (`PoolSupervisor.getTenantById` in production) and `now` is
@@ -133,7 +133,7 @@ final class ProfileHandlers(
   /** Tenant alias set the session may see, or None for an unrestricted (superuser) session.
     * Fail-closed: a non-superuser with no resolvable tenant yields an empty set (matches nothing)
     * rather than dropping the tenant predicate. Keyed on the session SCOPE, never on
-    * `profile.tenant` -- an OIDC tenant login mints `profile.tenant = None` with
+    * `profile.tenant` -- a system-realm login in OIDC mode mints `profile.tenant = None` with
     * `superuser = false`, and must still be tenant-confined.
     */
   private def visibleTenantAliases(s: SessionTokenStore.Session): Option[Set[String]] =

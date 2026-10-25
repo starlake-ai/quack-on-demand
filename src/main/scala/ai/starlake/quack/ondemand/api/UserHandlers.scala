@@ -178,11 +178,11 @@ final class UserHandlers(
   /** The caller's own `qodstate_user` row ids, resolved from the session identity.
     *
     * Identity is (scope, username), never `profile.tenant` alone: a superuser session's
-    * `profile.tenant` mirrors the REQUESTED login scope, and an OIDC session's is always None, so
-    * the row tenant must come from the scope. A non-superuser without a profile tenant may manage
-    * several tenants, and usernames are unique only per tenant, so the caller can be ambiguous
-    * across their scope: every candidate row counts as "self" here, because for a destructive guard
-    * refusing a possible-self is the safe direction.
+    * `profile.tenant` mirrors the REQUESTED login scope, and the profile of a system-realm session
+    * in OIDC mode carries no tenant, so the row tenant must come from the scope. A non-superuser
+    * without a profile tenant may manage several tenants, and usernames are unique only per tenant,
+    * so the caller can be ambiguous across their scope: every candidate row counts as "self" here,
+    * because for a destructive guard refusing a possible-self is the safe direction.
     */
   private def callerRowIds(apiKey: Option[String]): Set[String] =
     apiKey

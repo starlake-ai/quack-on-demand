@@ -82,20 +82,32 @@ final class PostgresControlPlaneStore(
 
   // ---------------- Tenant ----------------
 
+  /** Every tenant read selects these columns (the ones [[readTenant]] maps), so a new tenant column
+    * is added in one place.
+    */
+  private val SelectTenants: String =
+    "SELECT id, display_name, disabled, auth_provider, auth_config, " +
+      "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text, " +
+      "auth_client_secret FROM qodstate_tenant ORDER BY display_name"
+
   def upsertTenant(t: Tenant): Unit = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant
         |  (id, display_name, disabled, auth_provider, auth_config,
-        |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text)
-        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)
+        |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text,
+        |   auth_client_secret)
+        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  display_name            = EXCLUDED.display_name,
         |  disabled                = EXCLUDED.disabled,
         |  auth_provider           = EXCLUDED.auth_provider,
-        |  auth_config             = EXCLUDED.auth_config""".stripMargin
+        |  auth_config             = EXCLUDED.auth_config,
+        |  auth_client_secret      = EXCLUDED.auth_client_secret""".stripMargin
     )
     // The acl columns are bound for the INSERT arm only: the conflict arm deliberately leaves
     // them alone (see ControlPlaneStore.upsertTenant), so a stale full row cannot revert them.
+    // auth_client_secret is the opposite: written in both arms, with auth_config, because the
+    // secret is bound to the issuer it was saved with and never changes on its own.
     try
       ps.setString(1, t.id)
       ps.setString(2, if t.displayName.nonEmpty then t.displayName else t.id)
@@ -103,6 +115,7 @@ final class PostgresControlPlaneStore(
       ps.setString(4, t.authProvider)
       ps.setString(5, mapToJson(t.authConfig))
       bindAcl(ps, 6, t.acl)
+      ps.setString(11, t.authClientSecret.orNull)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -129,13 +142,7 @@ final class PostgresControlPlaneStore(
     ps.setBoolean(from + 4, acl.sendStatementText)
 
   def listTenants(): List[Tenant] = withConn { c =>
-    val rs = c
-      .createStatement()
-      .executeQuery(
-        "SELECT id, display_name, disabled, auth_provider, auth_config, " +
-          "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text " +
-          "FROM qodstate_tenant ORDER BY display_name"
-      )
+    val rs = c.createStatement().executeQuery(SelectTenants)
     try drain(rs)(readTenant)
     finally rs.close()
   }
@@ -151,8 +158,9 @@ final class PostgresControlPlaneStore(
       val tps = c.prepareStatement(
         """INSERT INTO qodstate_tenant
           |  (id, display_name, disabled, auth_provider, auth_config,
-          |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text)
-          |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?)""".stripMargin
+          |   acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text,
+          |   auth_client_secret)
+          |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)""".stripMargin
       )
       try
         tps.setString(1, tenant.id)
@@ -161,6 +169,7 @@ final class PostgresControlPlaneStore(
         tps.setString(4, tenant.authProvider)
         tps.setString(5, mapToJson(tenant.authConfig))
         bindAcl(tps, 6, tenant.acl)
+        tps.setString(11, tenant.authClientSecret.orNull)
         tps.executeUpdate()
       finally tps.close()
 
@@ -437,7 +446,8 @@ final class PostgresControlPlaneStore(
         opaPolicyPath = Option(rs.getString("opa_policy_path")),
         opaToken = Option(rs.getString("opa_token")),
         sendStatementText = rs.getBoolean("opa_send_statement_text")
-      )
+      ),
+      authClientSecret = Option(rs.getString("auth_client_secret"))
     )
 
   // ---------------- TenantDb ----------------
@@ -1769,13 +1779,7 @@ final class PostgresControlPlaneStore(
 
   def snapshot(): ControlPlaneSnapshot = withConn { c =>
     ControlPlaneSnapshot(
-      tenants = selectAll(
-        c,
-        "SELECT id, display_name, disabled, auth_provider, auth_config, " +
-          "acl_mode, opa_url, opa_policy_path, opa_token, opa_send_statement_text " +
-          "FROM qodstate_tenant ORDER BY display_name",
-        readTenant
-      ),
+      tenants = selectAll(c, SelectTenants, readTenant),
       tenantDbs = selectAll(
         c,
         "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of, encrypted FROM qodstate_tenant_db ORDER BY name",

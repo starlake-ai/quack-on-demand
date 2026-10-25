@@ -165,7 +165,8 @@ final case class ManagementAuthConfig(
       envVar = "QOD_MGMT_PUBLIC_BASE_URL",
       description = "Externally visible manager base URL (e.g. https://qod.example.com). " +
         "Used to build OIDC redirect_uri and post_logout_redirect_uri for admin-UI SSO. " +
-        "When empty, derived from X-Forwarded-Proto / X-Forwarded-Host / Host."
+        "When empty, falls back to http://localhost on the manager's REST port " +
+        "(http://localhost:20900 by default); set it for any non-localhost deploy."
     )
     publicBaseUrl: String = "",
     oidc: ManagementOidcConfig = ManagementOidcConfig(),

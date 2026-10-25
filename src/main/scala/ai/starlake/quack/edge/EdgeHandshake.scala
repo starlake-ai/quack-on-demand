@@ -1,6 +1,11 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.quack.edge.auth.{AuthScope, AuthenticatedProfile, AuthenticationService}
+import ai.starlake.quack.edge.auth.{
+  AuthScope,
+  AuthenticatedProfile,
+  AuthenticationService,
+  IdentityNaming
+}
 import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.rbac.{
   AuthorizedHandshake,
@@ -40,7 +45,10 @@ final case class HandshakeBound(
   *   1. pre-resolve the (tenant, pool) target so the Basic chain can look up the right
   *      `qodstate_user` row (a same-named user in two tenants is two principals);
   *   2. validate the credential against the configured chain (or trust the client when no provider
-  *      is configured, the v1 local-dev posture);
+  *      is configured, the v1 local-dev posture), and refuse as unauthenticated a profile whose
+  *      user name names no one: a blank name, or one that came from an email claim the identity
+  *      provider does not mark verified ([[ai.starlake.quack.edge.auth.IdentityNaming]], the rule
+  *      the management login applies too);
   *   3. re-resolve the target with the validated username;
   *   4. run the user-scope and pool-access gates and compute the EffectiveSet.
   *
@@ -126,7 +134,23 @@ final class EdgeHandshake(
           case _ =>
             Left("no credentials presented")
 
-    validation match
+    // The identity itself is refused, before any row is looked up or any JWT role or group is
+    // resolved: an address its holder may have typed could name a superuser's row. The database
+    // authenticator's profile carries no email claim, so it is never refused here.
+    val named: Either[String, (Option[AuthenticatedProfile], Boolean)] =
+      validation.flatMap {
+        case (Some(p), _) if IdentityNaming.namesNoUser(p) =>
+          Left("the token names no user: its user name claim is blank")
+        case (Some(p), _) if !IdentityNaming.userNameMayBindRow(p) =>
+          logger.warn(
+            s"handshake refused: ${p.authMethod} named the user '${p.username}' by an email " +
+              "claim the identity provider does not mark verified"
+          )
+          Left(IdentityNaming.UnverifiedEmailRefusal)
+        case v => Right(v)
+      }
+
+    named match
       case Left(err)                                => Left(HandshakeFailure.Unauthenticated(err))
       case Right((profileOpt, superuserAdmissible)) =>
         val resolvedUsername = profileOpt.map(_.username).orElse(basicUsername)
@@ -157,8 +181,8 @@ final class EdgeHandshake(
                   jwtRoles,
                   jwtGroups,
                   jwtClaims,
-                  superuserAdmissible,
-                  edge
+                  superuserAdmissible = superuserAdmissible,
+                  edge = edge
                 )
               ) match
                 case Left(HandshakeDenial.Denied(err)) =>

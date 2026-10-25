@@ -1,18 +1,70 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.ondemand.auth.TokenRestriction
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
+import ai.starlake.quack.ondemand.auth.{PatPrincipal, SessionScope, TokenRestriction}
+import ai.starlake.quack.ondemand.state.RbacUser
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import sttp.model.StatusCode
 
+import java.time.Instant
+
 /** The executor identity a REST catalog handler runs a statement under. Regression anchor: a PAT
-  * used to fall through the JWT-only lookup to the synthetic superuser.
+  * used to fall through the JWT-only lookup to the synthetic superuser. Each caller also carries
+  * its realm (`superuserAdmissible`): true only for a superuser's session or PAT, and for the
+  * static key.
   */
 class RestCallerSpec extends AnyFlatSpec with Matchers:
 
   import IdentityFixtures.*
 
   private val resolver = RestCaller(Some(StaticKey), sessionOf, patOf)
+
+  // A superuser (a tenant-less row) holding a session and two PATs: a plain one, and a `dropAdmin`
+  // one whose admin scope collapses to NoAccess while its owning row stays tenant-less.
+  private val RootSessionTok = "root-session"
+  private val RootPatTok     = "qod_pat_root"
+  private val RootDataPatTok = "qod_pat_root_data"
+  private val rootRow        =
+    RbacUser(id = "u-root", tenant = None, username = "root", kind = "admin")
+
+  private val realmResolver = RestCaller(
+    Some(StaticKey),
+    t =>
+      sessionOf(t).orElse(
+        Option.when(t == RootSessionTok)(
+          SessionTokenStore.Session(
+            AuthenticatedProfile("root", "admin", Set.empty, Map.empty, "db", None),
+            SessionScope.Superuser,
+            Instant.now()
+          )
+        )
+      ),
+    t =>
+      patOf(t)
+        .orElse(
+          Option.when(t == RootPatTok)(
+            PatPrincipal(
+              user = rootRow,
+              patId = "pat-root",
+              scope = SessionScope.Superuser,
+              isAdmin = true,
+              restriction = TokenRestriction.Unrestricted
+            )
+          )
+        )
+        .orElse(
+          Option.when(t == RootDataPatTok)(
+            PatPrincipal(
+              user = rootRow,
+              patId = "pat-root-data",
+              scope = SessionScope.NoAccess,
+              isAdmin = false,
+              restriction = TokenRestriction.Unrestricted.copy(dropAdmin = true)
+            )
+          )
+        )
+  )
 
   private def shape(r: Either[(StatusCode, ErrorResponse), ExecCaller]) =
     r.map(c => (c.connectionId, c.identity, c.restriction, c.patId))
@@ -70,10 +122,34 @@ class RestCallerSpec extends AnyFlatSpec with Matchers:
     resolver("conn", Some(PatTok)).map(_.system) shouldBe Right(false)
   }
 
-  it should "never flag a session or PAT whose user is named 'superuser' as a system caller" in {
+  it should "never make a session or PAT whose user is named 'superuser' a system or superuser-admissible caller" in {
     val r = RestCaller(Some(StaticKey), sentinelSessionOf, sentinelPatOf)
-    r("conn", Some(SentinelSessionTok)).map(c => (c.identity, c.system)) shouldBe
-      Right(("superuser", false))
-    r("conn", Some(SentinelPatTok)).map(c => (c.identity, c.system, c.patId)) shouldBe
-      Right(("superuser", false, Some("pat-sentinel")))
+    r("conn", Some(SentinelSessionTok))
+      .map(c => (c.identity, c.system, c.superuserAdmissible)) shouldBe
+      Right(("superuser", false, false))
+    r("conn", Some(SentinelPatTok))
+      .map(c => (c.identity, c.system, c.patId, c.superuserAdmissible)) shouldBe
+      Right(("superuser", false, Some("pat-sentinel"), false))
+  }
+
+  it should "take a session's superuserAdmissible from its scope: true only for a superuser session" in {
+    realmResolver("conn", Some(SessionTok)).map(c => (c.identity, c.superuserAdmissible)) shouldBe
+      Right(("alice", false))
+    realmResolver("conn", Some(RootSessionTok))
+      .map(c => (c.identity, c.superuserAdmissible)) shouldBe Right(("root", true))
+  }
+
+  it should "take a PAT's superuserAdmissible from its owning row's realm, not from the token's admin scope" in {
+    realmResolver("conn", Some(PatTok)).map(c => (c.identity, c.superuserAdmissible)) shouldBe
+      Right(("alice", false))
+    realmResolver("conn", Some(RootPatTok)).map(c => (c.identity, c.superuserAdmissible)) shouldBe
+      Right(("root", true))
+    realmResolver("conn", Some(RootDataPatTok))
+      .map(c => (c.identity, c.superuserAdmissible, c.system)) shouldBe Right(("root", true, false))
+  }
+
+  it should "make the static key and the absent credential superuser-admissible system callers" in {
+    resolver("conn", Some(StaticKey)).map(c => (c.system, c.superuserAdmissible)) shouldBe
+      Right((true, true))
+    resolver("conn", None).map(c => (c.system, c.superuserAdmissible)) shouldBe Right((true, true))
   }

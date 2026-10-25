@@ -6,7 +6,10 @@ import ai.starlake.quack.edge.auth.{
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
-  BasicAuthProvider
+  BasicAuthProvider,
+  BearerAuthProvider,
+  DatabaseAuthenticator,
+  TenantOidcRegistry
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -113,11 +116,41 @@ object InMemoryAuthService:
                     role = u.kind,
                     groups = Set.empty,
                     claims = Map.empty,
-                    authMethod = "in-memory",
+                    // Stands in for the database authenticator, so its profile is the
+                    // authenticator's own: the management login takes it as the verified
+                    // qodstate_user row (the (tenant, kind) it carries) and reads no directory.
+                    authMethod = DatabaseAuthenticator.AuthMethod,
                     tenant = u.tenant
                   )
                 )
           else Left(AuthFailure.InvalidCredentials("invalid credentials"))
+
+  /** A REAL [[AuthenticationService]] (its own `authenticateBasic`, first match wins, with the
+    * failure latches) whose basic chain is exactly `providers`. It is built from
+    * [[emptyAuthConfig]], so it opens no connection, and the private chain is then replaced: a spec
+    * can drive the production chain walk over stub providers, such as the in-memory database check
+    * followed by the real password-grant authenticator against a stub token endpoint.
+    */
+  def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
+    realServiceWithChains(providers, Nil, None)
+
+  /** A REAL [[AuthenticationService]] whose basic chain is `basic` and whose manager-wide bearer
+    * chain is `bearer`, with `tenantOidcRegistry` substituting a tenant's own OIDC authenticator
+    * into a tenant-scope bearer chain as in production. Built like [[realServiceWithBasicChain]].
+    */
+  def realServiceWithChains(
+      basic: List[BasicAuthProvider],
+      bearer: List[BearerAuthProvider],
+      tenantOidcRegistry: Option[TenantOidcRegistry]
+  ): AuthenticationService =
+    val svc = new AuthenticationService(emptyAuthConfig, "test-jwt-secret", tenantOidcRegistry):
+      override val hasProviders: Boolean = true
+    List("basicProviders" -> basic, "bearerProviders" -> bearer).foreach { (name, chain) =>
+      val field = classOf[AuthenticationService].getDeclaredField(name)
+      field.setAccessible(true)
+      field.set(svc, chain)
+    }
+    svc
 
   /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all
     * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the

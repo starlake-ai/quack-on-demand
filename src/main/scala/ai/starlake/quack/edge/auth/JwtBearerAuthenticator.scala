@@ -56,19 +56,23 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
       val exp = Option(claims.getExpirationTime)
       if exp.exists(_.before(new Date())) then return Left("JWT token has expired")
 
-      val username = extractUsername(claims)
-      val role     = RoleExtractor.extract(claims, roleClaim)
-      val groups   = RoleExtractor.extractGroups(claims, "groups")
+      // A token naming no one is refused rather than named "unknown", which a row could hold.
+      extractUsername(claims) match
+        case None =>
+          Left("JWT: the token names no user (no preferred_username, email or sub)")
+        case Some(username) =>
+          val role   = RoleExtractor.extract(claims, roleClaim)
+          val groups = RoleExtractor.extractGroups(claims, "groups")
 
-      Right(
-        AuthenticatedProfile(
-          username = username,
-          role = role,
-          groups = groups + role,
-          claims = flattenClaims(claims),
-          authMethod = "jwt"
-        )
-      )
+          Right(
+            AuthenticatedProfile(
+              username = username,
+              role = role,
+              groups = groups + role,
+              claims = flattenClaims(claims),
+              authMethod = "jwt"
+            )
+          )
     catch
       case e: Exception =>
         Left(s"JWT validation failed: ${e.getMessage}")
@@ -76,11 +80,10 @@ class JwtBearerAuthenticator(config: JwtAuthConfig, roleClaim: String)
   private def verifySignature(jwt: SignedJWT): Boolean =
     hmacVerifier.exists(jwt.verify) || rsaVerifier.exists(jwt.verify)
 
-  private def extractUsername(claims: JWTClaimsSet): String =
+  private def extractUsername(claims: JWTClaimsSet): Option[String] =
     Option(claims.getStringClaim("preferred_username"))
       .orElse(Option(claims.getStringClaim("email")))
       .orElse(Option(claims.getSubject))
-      .getOrElse("unknown")
 
   private def flattenClaims(claims: JWTClaimsSet): Map[String, String] =
     import scala.jdk.CollectionConverters.*

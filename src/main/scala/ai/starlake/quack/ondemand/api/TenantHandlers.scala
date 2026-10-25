@@ -5,7 +5,7 @@ import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
-import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.auth.{SessionScope, TenantSignInWrite}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
 import sttp.model.StatusCode
@@ -42,7 +42,8 @@ final class TenantHandlers(
       opaUrl = t.acl.opaUrl,
       opaPolicyPath = t.acl.opaPolicyPath,
       opaTokenSet = t.acl.opaToken.nonEmpty,
-      opaSendStatementText = t.acl.sendStatementText
+      opaSendStatementText = t.acl.sendStatementText,
+      clientSecretSet = t.authClientSecret.isDefined
     )
 
   /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope),
@@ -99,6 +100,11 @@ final class TenantHandlers(
               )
             )
           )
+        else if req.authConfig.contains(TenantSignInWrite.SecretKey) then
+          // The tenant/setAuth rule: a client secret only arrives through its write-only field,
+          // never inside authConfig, which every response echoes.
+          val refusal = TenantSignInWrite.Refusal.SecretInConfig
+          IO.pure(Left((StatusCode.BadRequest, ErrorResponse(refusal.code, refusal.message))))
         else
           sup
             .createTenant(
@@ -203,40 +209,80 @@ final class TenantHandlers(
             Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
         }
 
+  /** Set the tenant's sign-in provider, config and client secret. Tenant admins configure their own
+    * tenant; [[TenantSignInWrite]] owns the write rules (the secret is bound to its issuer, only a
+    * superuser adds or changes a `clientSecretRef`, one secret source) and a refusal stores
+    * nothing. The secret is write-only: responses carry only `clientSecretSet`, and the audit row
+    * records only that the stored secret changed (`clientKey -> changed`, never the value), set,
+    * replaced or removed, a drop by an issuer change or a new reference included. Static-key and
+    * no-key callers count as superusers, as in [[SuperuserCheck]].
+    */
   def setTenantAuth(req: SetTenantAuthRequest, apiKey: Option[String])(
       scopeOf: String => Option[SessionScope]
   ): Out[TenantResponse] =
+    def denied(detail: Map[String, String]): Unit =
+      audit.rest(
+        apiKey,
+        "control-plane",
+        AuditActions.TenantAuthUpdate,
+        "denied",
+        tenant = Some(req.name),
+        detail = detail
+      )
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.TenantAuthUpdate,
-          "denied",
-          tenant = Some(req.name)
-        )
+        denied(Map.empty)
         IO.pure(Left(err))
       case None =>
-        sup.setTenantAuth(req.name, req.authProvider, req.authConfig).map {
-          case Right(t) =>
-            onAuthChanged(t.id)
-            audit.rest(
-              apiKey,
-              "control-plane",
-              AuditActions.TenantAuthUpdate,
-              "ok",
-              tenant = Some(t.id),
-              target = Some(t.id),
-              detail = Map("authProvider" -> req.authProvider)
+        val callerIsSuperuser = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+        sup.getTenant(req.name) match
+          case None =>
+            IO.pure(
+              Left(
+                (StatusCode.NotFound, ErrorResponse("not_found", s"tenant not found: ${req.name}"))
+              )
             )
-            Right(toResponse(t))
-          case Left(err: SupervisorError.NotFound) =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
-          case Left(err: SupervisorError.InvalidArgument) =>
-            Left((StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", err.message)))
-          case Left(err) =>
-            Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
-        }
+          case Some(current) =>
+            TenantSignInWrite(current, req.authConfig, req.clientSecret, callerIsSuperuser) match
+              case Left(refusal) =>
+                denied(Map("reason" -> refusal.code))
+                val status = refusal match
+                  case TenantSignInWrite.Refusal.SuperuserRequired => StatusCode.Forbidden
+                  case _                                           => StatusCode.BadRequest
+                IO.pure(Left((status, ErrorResponse(refusal.code, refusal.message))))
+              case Right(next) =>
+                // The row says what the write did to the stored secret, not what the request
+                // sent: a drop by an issuer change or by a new reference is a change, a kept
+                // value, the same value sent again and a clear of nothing are not.
+                val secretChanged = next.authClientSecret != current.authClientSecret
+                sup
+                  .setTenantAuth(req.name, req.authProvider, next.authConfig, next.authClientSecret)
+                  .map {
+                    case Right(t) =>
+                      onAuthChanged(t.id)
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.TenantAuthUpdate,
+                        "ok",
+                        tenant = Some(t.id),
+                        target = Some(t.id),
+                        // `clientKey`, not `clientSecret`: AuditEvent refuses a detail key
+                        // containing password, secret, token, jwt or credential, and the row
+                        // would be dropped.
+                        detail = Map("authProvider" -> req.authProvider) ++
+                          Option.when(secretChanged)("clientKey" -> "changed")
+                      )
+                      Right(toResponse(t))
+                    case Left(err: SupervisorError.NotFound) =>
+                      Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                    case Left(err: SupervisorError.InvalidArgument) =>
+                      Left(
+                        (StatusCode.BadRequest, ErrorResponse("invalid_auth_provider", err.message))
+                      )
+                    case Left(err) =>
+                      Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
+                  }
 
   /** Patch the tenant's data-access authorization. The OPA token is write-only: never returned,
     * never logged, and the audit row only records that it changed.
