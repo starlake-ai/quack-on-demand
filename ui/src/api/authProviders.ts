@@ -228,6 +228,8 @@ interface SavedSignIn {
   clientId:    string;
   /** The save changes the issuer (compared trimmed, empty meaning none). */
   issuerMoved: boolean;
+  /** The request adds a reference or changes the stored one (compared trimmed). */
+  referenceChanged: boolean;
   /** The trimmed `clientSecretRef` the save keeps, '' for none. */
   reference:   string;
   /** A stored client secret value survives the save. */
@@ -253,6 +255,7 @@ function savedSignIn(stored: TenantResponse, form: SignInForm, superuser: boolea
     issuer,
     clientId: valueOf(req.authConfig, 'clientId'),
     issuerMoved,
+    referenceChanged: refChanged,
     reference: keepsRef ? requestedRef : '',
     value: keepsValue,
   };
@@ -279,14 +282,15 @@ export function consoleSignInComplete(
   * only a superuser's save does: the environment secret the reference names is
   * then sent to the new issuer, so the superuser should confirm that it is the
   * tenant's own identity provider. */
-export function referenceFollowsNewIssuer(
+export function referenceNeedsIssuerCheck(
   stored: TenantResponse,
   form: SignInForm,
   superuser: boolean,
 ): boolean {
   if (form.provider === 'db') return false;
   const saved = savedSignIn(stored, form, superuser);
-  return saved.issuerMoved && saved.issuer !== '' && saved.reference !== '';
+  return saved.issuer !== '' && saved.reference !== '' &&
+    (saved.issuerMoved || saved.referenceChanged);
 }
 
 /** The tenant's only secret source is a reference: no stored value, a

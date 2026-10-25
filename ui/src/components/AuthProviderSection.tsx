@@ -3,7 +3,7 @@ import { api, errorMessage } from '../api/client';
 import {
   ISSUER_KEY, PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, PROVIDER_LABELS, SECRET_REF_KEY,
   clientSecretStatus, consoleSignInComplete, isSecretReference, issuerChangeDropsSecret,
-  parkedRefShown, referenceFollowsNewIssuer, secretComesFromReference, setAuthRequestFor,
+  parkedRefShown, referenceNeedsIssuerCheck, secretComesFromReference, setAuthRequestFor,
   signInFormFor, type ProviderField, type SignInForm,
 } from '../api/authProviders';
 import type { AuthProvider, TenantResponse } from '../api/types';
@@ -113,7 +113,7 @@ export default function AuthProviderSection({ tenantName }: { tenantName: string
   const dropsSecret  = formFields.length > 0 && issuerChangeDropsSecret(tenant, form, superuser);
   // Warned before the save, from what the server will keep (see consoleSignInComplete).
   const incomplete   = !consoleSignInComplete(tenant, form, superuser);
-  const refMoves     = referenceFollowsNewIssuer(tenant, form, superuser);
+  const refMoves     = referenceNeedsIssuerCheck(tenant, form, superuser);
   const formIssuer   = (form.config[ISSUER_KEY] ?? '').trim();
   const formRef      = (form.config[SECRET_REF_KEY] ?? '').trim();
   // What to do about a parked value: a reference can be restored by a superuser, anything else

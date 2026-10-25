@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NOT_A_REFERENCE, PARKED_SECRET_REF_KEY, PROVIDER_FIELDS, SECRET_REF_KEY, clientSecretStatus,
   consoleSignInComplete, isSecretReference, issuerChangeDropsSecret, parkedRefShown,
-  referenceFollowsNewIssuer, secretComesFromReference, setAuthRequestFor, signInFormFor,
+  referenceNeedsIssuerCheck, secretComesFromReference, setAuthRequestFor, signInFormFor,
 } from './authProviders';
 import type { AuthProvider, TenantResponse } from './types';
 
@@ -337,45 +337,85 @@ describe('parked reference display', () => {
   });
 });
 
-describe('referenceFollowsNewIssuer', () => {
+describe('referenceNeedsIssuerCheck', () => {
   it('is true when a superuser keeps the stored reference under a new issuer', () => {
     const t = refTenant();
-    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(true);
+    expect(referenceNeedsIssuerCheck(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(true);
   });
 
   it('is true when a superuser enters a reference together with a new issuer', () => {
     const t = tenant({ clientSecretSet: false });
     const form = edited(t, { issuerUrl: NEW_ISSUER, clientSecretRef: 'env:ACME_CS' });
-    expect(referenceFollowsNewIssuer(t, form, true)).toBe(true);
+    expect(referenceNeedsIssuerCheck(t, form, true)).toBe(true);
   });
 
   it('is false while the issuer is unchanged, compared trimmed', () => {
     const t = refTenant();
-    expect(referenceFollowsNewIssuer(t, signInFormFor(t), true)).toBe(false);
-    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: ` ${ISSUER} ` }), true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, signInFormFor(t), true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, edited(t, { issuerUrl: ` ${ISSUER} ` }), true)).toBe(false);
   });
 
   it('is false for a tenant admin: the server drops a carried reference under a new issuer', () => {
     const t = refTenant();
-    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), false)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, edited(t, { issuerUrl: NEW_ISSUER }), false)).toBe(false);
   });
 
   it('is false when a typed secret replaces the reference', () => {
     const t = refTenant();
     const form = { ...edited(t, { issuerUrl: NEW_ISSUER }), secret: 's3cret' };
-    expect(referenceFollowsNewIssuer(t, form, true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, form, true)).toBe(false);
   });
 
   it('is false without a reference, or when the new issuer is blank', () => {
     const none = tenant();
     const moved = edited(none, { issuerUrl: NEW_ISSUER });
-    expect(referenceFollowsNewIssuer(none, moved, true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(none, moved, true)).toBe(false);
     const t = refTenant();
-    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: '  ' }), true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, edited(t, { issuerUrl: '  ' }), true)).toBe(false);
   });
 
   it('is false for a db tenant, which sends no secret to any issuer', () => {
     const t = refTenant({ authProvider: 'db' });
-    expect(referenceFollowsNewIssuer(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(false);
+    expect(referenceNeedsIssuerCheck(t, edited(t, { issuerUrl: NEW_ISSUER }), true)).toBe(false);
+  });
+
+  // The issuer is the tenant admins' choice: a reference a superuser adds or changes names a
+  // secret of the manager's environment that is then sent to it, whether or not the issuer moved.
+  it('is true when a superuser adds a reference under the unchanged issuer', () => {
+    const t = tenant({ clientSecretSet: false });
+    const form = edited(t, { clientSecretRef: 'env:ACME_CS' });
+    expect(referenceNeedsIssuerCheck(t, form, true)).toBe(true);
+  });
+
+  it('is true when a superuser adds a reference while a client secret is stored: the reference replaces it', () => {
+    const t = tenant();
+    expect(referenceNeedsIssuerCheck(t, edited(t, { clientSecretRef: 'env:ACME_CS' }), true)).toBe(true);
+  });
+
+  it('is true when a superuser changes the stored reference under the unchanged issuer', () => {
+    const t = refTenant();
+    expect(referenceNeedsIssuerCheck(t, edited(t, { clientSecretRef: 'env:OTHER' }), true)).toBe(true);
+  });
+
+  it('is false when a superuser keeps the stored reference, compared trimmed', () => {
+    const t = refTenant();
+    expect(referenceNeedsIssuerCheck(t, edited(t, { clientSecretRef: ' env:ACME_CS ' }), true)).toBe(false);
+  });
+
+  it('is false for a tenant admin who types a reference: it is never sent', () => {
+    const t = tenant({ clientSecretSet: false });
+    expect(referenceNeedsIssuerCheck(t, edited(t, { clientSecretRef: 'env:ANY' }), false)).toBe(false);
+  });
+
+  it('is false when a typed secret replaces the reference a superuser added', () => {
+    const t = tenant({ clientSecretSet: false });
+    const form = { ...edited(t, { clientSecretRef: 'env:ACME_CS' }), secret: 's3cret' };
+    expect(referenceNeedsIssuerCheck(t, form, true)).toBe(false);
+  });
+
+  it('is false while Remove secret is checked and no reference is saved', () => {
+    const t = tenant();
+    const form = { ...signInFormFor(t), removeSecret: true };
+    expect(referenceNeedsIssuerCheck(t, form, true)).toBe(false);
   });
 });
