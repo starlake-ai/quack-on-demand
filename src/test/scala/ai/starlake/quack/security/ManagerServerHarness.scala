@@ -308,10 +308,17 @@ object ManagerServerHarness:
       // UserStore.grantsForIdentity on the same store). None keeps a fresh, empty DuckDB
       // directory, so an SSO login finds no grant.
       users: Option[UserStore] = None,
-      // Admin-console SSO (AuthHandlers.oidc). Main wires it whatever identitySource is
-      // (identitySource only governs the bare /ui/ login), so the harness keeps Db. None leaves
-      // the /api/auth/oidc routes answering auth_mode_disabled.
-      oidc: Option[ai.starlake.quack.edge.auth.OidcSsoService] = None,
+      // Builds the admin-console SSO service (AuthHandlers.oidc) from this harness's own
+      // supervisor, the way Main builds it from the supervisor that serves REST (its tenant
+      // loader is sup.getTenantById). Main wires it whatever identitySource is (identitySource
+      // only governs the bare /ui/ login), so the harness keeps Db. None leaves the
+      // /api/auth/oidc routes answering auth_mode_disabled.
+      oidcOf: Option[PoolSupervisor => ai.starlake.quack.edge.auth.OidcSsoService] = None,
+      // Builds AuthHandlers.resolveTenant (the typed tenant of a login, an SSO start or a
+      // password change, resolved to a tenant id) from this harness's own supervisor, the way
+      // Main wires it. None keeps AuthHandlers' own default (`_ => None`, nothing resolved), so
+      // every other spec boots as before.
+      resolveTenantOf: Option[PoolSupervisor => String => Option[String]] = None,
       // Builds the statement executor from this harness's own supervisor, the way Main binds
       // RoutedExecutor to the supervisor that serves REST. When set it replaces previewExecutor
       // on every surface the harness wires (preview, undrop, restore, MCP, Iceberg).
@@ -359,7 +366,9 @@ object ManagerServerHarness:
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
       ),
-      oidc = oidc,
+      resolveTenant =
+        resolveTenantOf.fold[String => Option[String]](_ => None)(build => build(sup)),
+      oidc = oidcOf.map(build => build(sup)),
       audit = audit,
       events = events
     )

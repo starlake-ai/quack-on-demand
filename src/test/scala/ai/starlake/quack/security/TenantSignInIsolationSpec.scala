@@ -22,17 +22,11 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{ExecCaller, SessionTokenStore}
 import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{
-  InMemoryControlPlaneStore,
-  LiquibaseRunner,
-  PatStore,
-  RbacUser,
-  UserGrant,
-  UserStore
-}
+import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, RbacUser, UserGrant, UserStore}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, AuditRecorder}
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
@@ -71,12 +65,16 @@ import scala.util.Try
   *   6. a REST or MCP statement of a tenant caller never binds a superuser row; a superuser caller
   *      still binds its own.
   *
-  * Wired as Main wires it: the admin-console SSO service with only its network legs stubbed
-  * ([[StubIdp]]), the SSO grants read from a real [[UserStore]] directory, statements through the
-  * real [[RoutedExecutor]] on the harness's own supervisor with a recording router leg. Password
-  * logins and the statement gate read the in-memory control plane, which holds the same rows as the
+  * Wired as Main wires it, all from the harness's own supervisor: the admin-console SSO service
+  * with only its network legs stubbed ([[StubIdp]]) reading tenants through the supervisor, Main's
+  * resolution of a typed tenant at login, the SSO grants read from a real [[UserStore]] directory,
+  * and statements through the real [[RoutedExecutor]] with a recording router leg. Password logins
+  * and the statement gate read the in-memory control plane, which holds the same rows as the
   * directory for every name the SSO cases use (one `qodstate_user` table in production). The cases
   * that need personal access tokens use the local test Postgres and cancel without it.
+  *
+  * Failure clues name a response by its status and error code only: a body can hold a session token
+  * or a client secret.
   */
 class TenantSignInIsolationSpec
     extends AnyFlatSpec
@@ -303,13 +301,15 @@ class TenantSignInIsolationSpec
     )
     ()
 
-  /** The admin-console SSO service as ManagementAuthWiring builds it, its network legs stubbed:
-    * tenant scope reads the row the REST writes stored; references resolve from a fixed map.
+  /** The admin-console SSO service as ManagementAuthWiring builds it for Main, its network legs
+    * stubbed: tenant scope reads the supervisor's tenants, as Main's loader does
+    * (`sup.getTenantById`), so it sees what the REST writes stored; references resolve from a fixed
+    * map.
     */
-  private def ssoService(store: InMemoryControlPlaneStore, idp: StubIdp): OidcSsoService =
+  private def ssoService(sup: PoolSupervisor, idp: StubIdp): OidcSsoService =
     new OidcSsoService(
       resolver = new OidcEndpointResolver(
-        loadTenant = id => store.listTenants().find(_.id == id),
+        loadTenant = id => sup.getTenantById(id),
         secrets = SecretRefResolver.fromEnv(Map(OperatorEnvName -> OperatorSecret).get),
         discovery = idp.discovery
       ),
@@ -358,7 +358,11 @@ class TenantSignInIsolationSpec
       patAuth = Option.when(withPats)(patAuth),
       mcpEnabled = withPats,
       users = Some(if withPats then pgUsers else directory),
-      oidc = Some(ssoService(fix.store, idp)),
+      oidcOf = Some(sup => ssoService(sup, idp)),
+      // Main.scala wires AuthHandlers.resolveTenant exactly so: the typed text as an id, else its
+      // lowercase form.
+      resolveTenantOf =
+        Some(sup => raw => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)),
       executorOf = Some(sup =>
         RoutedExecutor(sup, StatementClassifier.default, route.run)(recordExecution = false)
       )
@@ -378,9 +382,14 @@ class TenantSignInIsolationSpec
 
   private def enc(s: String): String = URLEncoder.encode(s, StandardCharsets.UTF_8)
 
+  /** What a failure clue may say about a response: its status and error code, never its body, which
+    * can hold a session token or a client secret.
+    */
+  private def statusAndCode(resp: HttpResponse[String]): String =
+    s"${resp.statusCode()} ${errorCode(resp.body()).getOrElse("-")}"
+
   private def json(resp: HttpResponse[String]): HCursor =
-    parse(resp.body())
-      .fold(_ => fail(s"not JSON (${resp.statusCode()}): ${resp.body()}"), _.hcursor)
+    parse(resp.body()).fold(_ => fail(s"not JSON (${resp.statusCode()})"), _.hcursor)
 
   /** `POST /api/tenant/setAuth` for acme as `token`; `clientSecret = None` omits the field. */
   private def setAuth(
@@ -429,7 +438,7 @@ class TenantSignInIsolationSpec
     */
   private def ssoSignIn(w: World, tenant: String, username: String, email: String): SsoOutcome =
     val start = get(w.h.httpClient, w.url(s"/api/auth/oidc/start?tenant=$tenant&returnTo=/ui/"))
-    withClue(s"oidc start: ${start.body()}")(start.statusCode() shouldBe 302)
+    withClue(s"oidc start: ${statusAndCode(start)}")(start.statusCode() shouldBe 302)
     val authorize   = start.headers().firstValue("location").orElse("")
     val stateCookie = cookieOf(start, OidcSsoService.STATE_COOKIE)
       .getOrElse(fail("the start redirect set no state cookie"))
@@ -446,7 +455,7 @@ class TenantSignInIsolationSpec
         .build(),
       HttpResponse.BodyHandlers.ofString()
     )
-    withClue(s"oidc callback: ${callback.body()}")(callback.statusCode() shouldBe 302)
+    withClue(s"oidc callback: ${statusAndCode(callback)}")(callback.statusCode() shouldBe 302)
     SsoOutcome(
       authorize,
       callback.headers().firstValue("location").orElse(""),
@@ -477,7 +486,7 @@ class TenantSignInIsolationSpec
         .build(),
       HttpResponse.BodyHandlers.ofString()
     )
-    withClue(s"mcp run_sql: ${resp.body()}")(resp.statusCode() shouldBe 200)
+    withClue(s"mcp run_sql: ${statusAndCode(resp)}")(resp.statusCode() shouldBe 200)
     json(resp).downField("result")
 
   private def mintPat(tenant: Option[String], username: String): String =
@@ -519,18 +528,32 @@ class TenantSignInIsolationSpec
       console.foreach(a => root.addAppender(a))
       capture.stop()
 
+  /** Fails when `secret` appears in the text of a named response or of a captured log event (see
+    * [[capturingLogs]]). The failure names only the responses and the loggers, never their text.
+    */
+  private def assertNeverShown(
+      secret: String,
+      responses: List[(String, String)],
+      logEvents: List[(String, String)]
+  ): Unit =
+    responses.collect { case (name, text) if text.contains(secret) => name } shouldBe empty
+    val leaking = logEvents.collect { case (logger, text) if text.contains(secret) => logger }
+    withClue(s"loggers whose events carry the secret: ${leaking.distinct.mkString(", ")}") {
+      leaking.size shouldBe 0
+    }
+
   // ---------------------------------------------------------------------------------------------
   // 1. The client secret never leaves through a response, the manifest, the audit trail or the log
   // ---------------------------------------------------------------------------------------------
 
   "A tenant's client secret" should
-    "stay out of every response, the manifest export, the audit trail and the log once its tenant admin saves it" in
+    "stay out of the responses that follow its save (setAuth, tenant list, auth mode, manifest export, the SSO redirects), the audit trail and the log" in
     withManager() { w =>
       val alice                  = w.aliceToken()
       val root                   = w.rootToken()
       val (responses, logEvents) = capturingLogs {
         val saved = setAuth(w, alice, oidcConfig(IssuerA), clientSecret = Some(SecretA))
-        withClue(s"setAuth: ${saved.body()}") {
+        withClue(s"setAuth: ${statusAndCode(saved)}") {
           saved.statusCode() shouldBe 200
           json(saved).get[Boolean]("clientSecretSet") shouldBe Right(true)
         }
@@ -544,21 +567,24 @@ class TenantSignInIsolationSpec
           .linesIterator
           .exists(l => l.contains("clientSecret") && l.contains(FederatedSecret.RedactedMarker))
         marked shouldBe true
+        // The public mode endpoint answers anyone, for the tenant and for the system scope.
+        val tenantMode = get(w.h.httpClient, w.url(s"/api/auth/mode?tenant=$Acme"))
+        val systemMode = get(w.h.httpClient, w.url("/api/auth/mode"))
+        tenantMode.statusCode() shouldBe 200
+        systemMode.statusCode() shouldBe 200
         val signIn = ssoSignIn(w, Acme, SecurityFixtures.AliceUsername, "alice@acme.example")
         signIn.session should not be empty
         List(
           "tenant/setAuth"     -> saved.body(),
           "tenant/list"        -> listed.body(),
           "manifest/export"    -> exported.body(),
+          "auth/mode (tenant)" -> tenantMode.body(),
+          "auth/mode (system)" -> systemMode.body(),
           "authorize redirect" -> signIn.authorize,
           "callback redirect"  -> signIn.location
         )
       }
-      responses.collect { case (name, text) if text.contains(SecretA) => name } shouldBe empty
-      val leaking = logEvents.collect { case (logger, text) if text.contains(SecretA) => logger }
-      withClue(s"loggers whose events carry the secret: ${leaking.distinct.mkString(", ")}") {
-        leaking.size shouldBe 0
-      }
+      assertNeverShown(SecretA, responses, logEvents)
       w.auditRows.filter(_.toString.contains(SecretA)).map(_.action) shouldBe empty
       // The one successful write is audited, and its row says only that the stored secret changed.
       val updates = w.auditRows.filter(e =>
@@ -578,7 +604,7 @@ class TenantSignInIsolationSpec
       val root       = w.rootToken()
       val before     = w.acme
       val viaSetAuth = setAuth(w, alice, oidcConfig(IssuerA) + ("clientSecret" -> SecretA))
-      withClue(s"setAuth: ${viaSetAuth.body()}") {
+      withClue(s"setAuth: ${statusAndCode(viaSetAuth)}") {
         viaSetAuth.statusCode() shouldBe 400
         errorCode(viaSetAuth.body()) shouldBe Some("invalid_auth_config")
       }
@@ -591,12 +617,30 @@ class TenantSignInIsolationSpec
       )
       val viaCreate =
         post(w.h.httpClient, w.url("/api/tenant/create"), create.noSpaces, Some(root))
-      withClue(s"tenant/create: ${viaCreate.body()}") {
+      withClue(s"tenant/create: ${statusAndCode(viaCreate)}") {
         viaCreate.statusCode() shouldBe 400
         errorCode(viaCreate.body()) shouldBe Some("invalid_auth_config")
       }
       w.fix.store.listTenants().map(_.id) should not contain "initech"
       List(viaSetAuth.body(), viaCreate.body()).exists(_.contains(SecretA)) shouldBe false
+    }
+
+  it should "be audited as changed only when the stored value changes: not for the same value sent again, never as the value" in
+    withManager() { w =>
+      val alice = w.aliceToken()
+      // Set, the same value again, replaced, removed, removed again (nothing left to clear).
+      List(Some(SecretA), Some(SecretA), Some(SecretB), Some(""), Some("")).foreach { secret =>
+        val resp = setAuth(w, alice, oidcConfig(IssuerA), clientSecret = secret)
+        withClue(s"setAuth: ${statusAndCode(resp)}")(resp.statusCode() shouldBe 200)
+      }
+      w.auditRows
+        .filter(e => e.action == AuditActions.TenantAuthUpdate && e.outcome == "ok")
+        .map(_.detail.get("clientKey")) shouldBe
+        List(Some("changed"), None, Some("changed"), Some("changed"), None)
+      w.auditRows
+        .filter(e => List(SecretA, SecretB).exists(e.toString.contains))
+        .map(_.action) shouldBe empty
+      w.acme.authClientSecret shouldBe None
     }
 
   // ---------------------------------------------------------------------------------------------
@@ -609,7 +653,7 @@ class TenantSignInIsolationSpec
       val alice  = w.aliceToken()
       val before = w.acme
       val resp   = setAuth(w, alice, oidcConfig(IssuerA) + ("clientSecretRef" -> ManagerKeyRef))
-      withClue(s"setAuth: ${resp.body()}") {
+      withClue(s"setAuth: ${statusAndCode(resp)}") {
         resp.statusCode() shouldBe 403
         errorCode(resp.body()) shouldBe Some("superuser_required")
       }
@@ -629,7 +673,7 @@ class TenantSignInIsolationSpec
         .statusCode() shouldBe 200
       val before = w.acme
       val resp   = setAuth(w, alice, oidcConfig(IssuerA) + ("clientSecretRef" -> ManagerKeyRef))
-      withClue(s"setAuth: ${resp.body()}") {
+      withClue(s"setAuth: ${statusAndCode(resp)}") {
         resp.statusCode() shouldBe 403
         errorCode(resp.body()) shouldBe Some("superuser_required")
       }
@@ -639,25 +683,30 @@ class TenantSignInIsolationSpec
 
   it should "be saved when a superuser writes it, and resolve only into the token request to its issuer" in
     withManager() { w =>
-      val root = w.rootToken()
-      val resp = setAuth(w, root, oidcConfig(IssuerA) + ("clientSecretRef" -> OperatorRef))
-      withClue(s"setAuth: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        json(resp).get[Boolean]("clientSecretSet") shouldBe Right(false)
-        json(resp).downField("authConfig").get[String]("clientSecretRef") shouldBe Right(
-          OperatorRef
+      val root                   = w.rootToken()
+      val (responses, logEvents) = capturingLogs {
+        val resp = setAuth(w, root, oidcConfig(IssuerA) + ("clientSecretRef" -> OperatorRef))
+        withClue(s"setAuth: ${statusAndCode(resp)}") {
+          resp.statusCode() shouldBe 200
+          json(resp).get[Boolean]("clientSecretSet") shouldBe Right(false)
+          json(resp).downField("authConfig").get[String]("clientSecretRef") shouldBe Right(
+            OperatorRef
+          )
+        }
+        val signIn = ssoSignIn(w, Acme, SecurityFixtures.AliceUsername, "alice@acme.example")
+        signIn.session should not be empty
+        List(
+          "tenant/setAuth"     -> resp.body(),
+          "authorize redirect" -> signIn.authorize,
+          "callback redirect"  -> signIn.location
         )
       }
       w.acme.authConfig.get("clientSecretRef") shouldBe Some(OperatorRef)
       w.acme.authClientSecret shouldBe None
-      val signIn = ssoSignIn(w, Acme, SecurityFixtures.AliceUsername, "alice@acme.example")
-      signIn.session should not be empty
       w.idp.exchanges.map(_._1) shouldBe List(s"$IssuerA/token")
       w.idp.exchanges.exists(_._2.contains(s"client_secret=${enc(OperatorSecret)}")) shouldBe true
-      // The resolved value goes nowhere else: not the response, not either redirect.
-      List(resp.body(), signIn.authorize, signIn.location).exists(
-        _.contains(OperatorSecret)
-      ) shouldBe false
+      // The resolved value goes nowhere else: not a response, not a redirect, not the log.
+      assertNeverShown(OperatorSecret, responses, logEvents)
     }
 
   it should "stay when a tenant admin's write carries it unchanged under the same issuer" in
@@ -671,7 +720,7 @@ class TenantSignInIsolationSpec
         alice,
         oidcConfig(IssuerA) + ("clientSecretRef" -> OperatorRef) + ("scopes" -> "openid email")
       )
-      withClue(s"setAuth: ${resp.body()}")(resp.statusCode() shouldBe 200)
+      withClue(s"setAuth: ${statusAndCode(resp)}")(resp.statusCode() shouldBe 200)
       w.acme.authConfig.get("clientSecretRef") shouldBe Some(OperatorRef)
       w.acme.authConfig.get("scopes") shouldBe Some("openid email")
     }
@@ -689,7 +738,7 @@ class TenantSignInIsolationSpec
       json(sameIssuer).get[Boolean]("clientSecretSet") shouldBe Right(true)
       w.acme.authClientSecret shouldBe Some(SecretA)
       val moved = setAuth(w, alice, oidcConfig(IssuerB))
-      withClue(s"setAuth: ${moved.body()}") {
+      withClue(s"setAuth: ${statusAndCode(moved)}") {
         moved.statusCode() shouldBe 200
         json(moved).get[Boolean]("clientSecretSet") shouldBe Right(false)
       }
@@ -701,29 +750,70 @@ class TenantSignInIsolationSpec
         .map(_.detail.get("clientKey")) shouldBe List(Some("changed"), None, Some("changed"))
       // Nothing is left to send: the sign-in does not start and no token request leaves.
       val start = get(w.h.httpClient, w.url(s"/api/auth/oidc/start?tenant=$Acme&returnTo=/ui/"))
-      withClue(s"oidc start: ${start.body()}") {
+      withClue(s"oidc start: ${statusAndCode(start)}") {
         start.statusCode() shouldBe 400
         errorCode(start.body()) shouldBe Some("oidc_not_configured")
       }
       w.idp.exchanges.map(_._1) shouldBe empty
     }
 
-  it should "drop the stored reference even when the write carries it unchanged" in
+  it should "drop a stored reference a tenant admin carries unchanged to a new issuer" in
     withManager() { w =>
       val alice = w.aliceToken()
       val root  = w.rootToken()
       setAuth(w, root, oidcConfig(IssuerA) + ("clientSecretRef" -> OperatorRef))
         .statusCode() shouldBe 200
       val moved = setAuth(w, alice, oidcConfig(IssuerB) + ("clientSecretRef" -> OperatorRef))
-      withClue(s"setAuth: ${moved.body()}")(moved.statusCode() shouldBe 200)
+      withClue(s"setAuth: ${statusAndCode(moved)}")(moved.statusCode() shouldBe 200)
       w.acme.authConfig.get("issuerUrl") shouldBe Some(IssuerB)
       w.acme.authConfig.get("clientSecretRef") shouldBe None
       val start = get(w.h.httpClient, w.url(s"/api/auth/oidc/start?tenant=$Acme&returnTo=/ui/"))
-      withClue(s"oidc start: ${start.body()}") {
+      withClue(s"oidc start: ${statusAndCode(start)}") {
         start.statusCode() shouldBe 400
         errorCode(start.body()) shouldBe Some("oidc_not_configured")
       }
       w.idp.exchanges.map(_._1) shouldBe empty
+    }
+
+  it should "keep a stored reference a superuser carries unchanged to a new issuer, and resolve it into the token request to that issuer only" in
+    withManager() { w =>
+      val root                   = w.rootToken()
+      val (responses, logEvents) = capturingLogs {
+        val stored = setAuth(w, root, oidcConfig(IssuerA) + ("clientSecretRef" -> OperatorRef))
+        withClue(s"setAuth: ${statusAndCode(stored)}")(stored.statusCode() shouldBe 200)
+        // The superuser's own write carries the reference to the new issuer: unlike a tenant
+        // admin's, it stays (a superuser may pair a reference with any issuer).
+        val moved = setAuth(w, root, oidcConfig(IssuerB) + ("clientSecretRef" -> OperatorRef))
+        withClue(s"setAuth: ${statusAndCode(moved)}") {
+          moved.statusCode() shouldBe 200
+          json(moved).get[Boolean]("clientSecretSet") shouldBe Right(false)
+          json(moved).downField("authConfig").get[String]("clientSecretRef") shouldBe Right(
+            OperatorRef
+          )
+        }
+        val mode = get(w.h.httpClient, w.url(s"/api/auth/mode?tenant=$Acme"))
+        withClue(s"auth mode: ${statusAndCode(mode)}") {
+          mode.statusCode() shouldBe 200
+          json(mode).get[String]("mode") shouldBe Right("oidc")
+        }
+        val signIn = ssoSignIn(w, Acme, SecurityFixtures.AliceUsername, "alice@acme.example")
+        signIn.session should not be empty
+        signIn.authorize should startWith(s"$IssuerB/authorize?")
+        List(
+          "tenant/setAuth (first write)"  -> stored.body(),
+          "tenant/setAuth (issuer moved)" -> moved.body(),
+          "auth/mode"                     -> mode.body(),
+          "authorize redirect"            -> signIn.authorize,
+          "callback redirect"             -> signIn.location
+        )
+      }
+      w.acme.authConfig.get("issuerUrl") shouldBe Some(IssuerB)
+      w.acme.authConfig.get("clientSecretRef") shouldBe Some(OperatorRef)
+      w.acme.authClientSecret shouldBe None
+      // The reference resolves into the token request to the issuer it was carried to, only.
+      w.idp.exchanges.map(_._1) shouldBe List(s"$IssuerB/token")
+      w.idp.exchanges.exists(_._2.contains(s"client_secret=${enc(OperatorSecret)}")) shouldBe true
+      assertNeverShown(OperatorSecret, responses, logEvents)
     }
 
   it should "keep the secret the same write supplies and send it to the new issuer only" in
@@ -731,7 +821,7 @@ class TenantSignInIsolationSpec
       val alice = w.aliceToken()
       setAuth(w, alice, oidcConfig(IssuerA), clientSecret = Some(SecretA)).statusCode() shouldBe 200
       val moved = setAuth(w, alice, oidcConfig(IssuerB), clientSecret = Some(SecretB))
-      withClue(s"setAuth: ${moved.body()}") {
+      withClue(s"setAuth: ${statusAndCode(moved)}") {
         moved.statusCode() shouldBe 200
         json(moved).get[Boolean]("clientSecretSet") shouldBe Right(true)
       }
@@ -785,8 +875,8 @@ class TenantSignInIsolationSpec
         Json.obj("name" -> Json.fromString("carol-from-sso")).noSpaces,
         Some(session)
       )
-      // A successful body carries the raw token: the clue names only an error code.
-      withClue(s"pat/create error: ${errorCode(created.body())}") {
+      // A successful body carries the raw token: the clue names only a status and an error code.
+      withClue(s"pat/create: ${statusAndCode(created)}") {
         created.statusCode() shouldBe 200
       }
       val token = json(created).get[String]("token").getOrElse(fail("no token in the answer"))
@@ -799,33 +889,42 @@ class TenantSignInIsolationSpec
   // ---------------------------------------------------------------------------------------------
 
   "A password login naming an OIDC tenant" should
-    "be refused with 400 sso_required before any password check" in
+    "be refused with 400 sso_required before any password check, linking the tenant id however its name is typed" in
     withManager(seed = acmeSignsInThroughSso) { w =>
-      List(SecurityFixtures.AlicePassword, "not-alices-password").foreach { password =>
+      // (tenant as typed, password): the id itself; a padded upper-case spelling with the right
+      // password; a case variant with a wrong one. The login resolves each to the tenant id, as
+      // Main does, so every refusal names the same link and the same audit tenant.
+      val attempts = List(
+        (Acme, SecurityFixtures.AlicePassword),
+        (" ACME ", SecurityFixtures.AlicePassword),
+        ("Acme", "not-alices-password")
+      )
+      attempts.foreach { (typed, password) =>
         val resp = post(
           w.h.httpClient,
           w.url("/api/auth/login"),
-          loginBody(SecurityFixtures.AliceUsername, password, Some(Acme))
+          loginBody(SecurityFixtures.AliceUsername, password, Some(typed))
         )
-        withClue(s"password login into acme: ${resp.body()}") {
+        withClue(s"password login into '$typed': ${statusAndCode(resp)}") {
           resp.statusCode() shouldBe 400
           errorCode(resp.body()) shouldBe Some("sso_required")
           val message = json(resp).get[String]("message").getOrElse("")
           message should (include(s"/ui/?tenant=$Acme") and include("personal access token"))
         }
       }
-      // Both refusals are audited as denied logins under the tenant the login resolved, with the
-      // reason; neither is a password failure (no password was checked).
+      // Every refusal is audited as a denied login under the tenant id the login resolved, with
+      // the reason; none is a password failure (no password was checked).
       val refusals = w.auditRows.filter(e =>
         e.action == AuditActions.AuthLoginFailure && e.detail.get("reason").contains("sso_required")
       )
-      refusals.map(e => (e.outcome, e.tenant)) shouldBe List.fill(2)(("denied", Some(Acme)))
-      w.auditRows.count(_.action == AuditActions.AuthLoginFailure) shouldBe 2
+      refusals.map(e => (e.outcome, e.tenant)) shouldBe
+        List.fill(attempts.size)(("denied", Some(Acme)))
+      w.auditRows.count(_.action == AuditActions.AuthLoginFailure) shouldBe attempts.size
       // The page the message points to asks the public mode endpoint, which answers oidc for the
       // tenant however its name is typed (trimmed, any letter case).
       List(Acme, "%20ACME%20").foreach { typed =>
         val mode = get(w.h.httpClient, w.url(s"/api/auth/mode?tenant=$typed"))
-        withClue(s"auth mode for '$typed': ${mode.body()}") {
+        withClue(s"auth mode for '$typed': ${statusAndCode(mode)}") {
           mode.statusCode() shouldBe 200
           json(mode).get[String]("mode") shouldBe Right("oidc")
         }
@@ -838,7 +937,7 @@ class TenantSignInIsolationSpec
       w.h.mintToken("gina", "ginapw", Some(Globex)) should not be empty
       val unknown =
         post(w.h.httpClient, w.url("/api/auth/login"), loginBody("gina", "ginapw", Some("nope")))
-      withClue(s"login into an unknown tenant: ${unknown.body()}") {
+      withClue(s"login into an unknown tenant: ${statusAndCode(unknown)}") {
         unknown.statusCode() shouldBe 401
         errorCode(unknown.body()) shouldBe Some("invalid_credentials")
       }
@@ -859,7 +958,7 @@ class TenantSignInIsolationSpec
       who.get[String]("username") shouldBe Right(SecurityFixtures.RootUsername)
       who.get[Boolean]("superuser") shouldBe Right(false)
       val resp = get(w.h.httpClient, w.url(PreviewPath), Some(session))
-      withClue(s"preview: ${resp.body()}") {
+      withClue(s"preview: ${statusAndCode(resp)}") {
         resp.statusCode() shouldBe 403
         errorCode(resp.body()) shouldBe Some("acl_denied")
         resp.body() should include(s"is not registered in tenant '$Acme'")
@@ -869,7 +968,7 @@ class TenantSignInIsolationSpec
 
   it should "bind a superuser session to its own superuser row" in withManager() { w =>
     val resp = get(w.h.httpClient, w.url(PreviewPath), Some(w.rootToken()))
-    withClue(s"preview: ${resp.body()}") {
+    withClue(s"preview: ${statusAndCode(resp)}") {
       // The recording router leg answers Unavailable once it has seen the statement.
       resp.statusCode() shouldBe 502
       errorCode(resp.body()) shouldBe Some("preview_failed")
@@ -881,22 +980,42 @@ class TenantSignInIsolationSpec
   }
 
   "An MCP statement" should
-    "never bind a superuser row for a tenant PAT whose owner is named like the superuser" in
+    "never bind a superuser row for a tenant PAT whose owner is named like the superuser, nor the same PAT's REST preview" in
     withManager(withPats = true) { w =>
       // The PAT's owner is acme's own row named root (Postgres directory). The gate reads the
       // control plane, where acme holds no root row: the only row the name can bind there is the
       // superuser's, and the PAT's realm must refuse it.
-      val result = runSql(w, mintPat(Some(Acme), SecurityFixtures.RootUsername), tenant = None)
+      val pat    = mintPat(Some(Acme), SecurityFixtures.RootUsername)
+      val result = runSql(w, pat, tenant = None)
       result.get[Boolean]("isError") shouldBe Right(true)
       val text = result.downField("content").downN(0).get[String]("text").getOrElse("")
       text should include(s"is not registered in tenant '$Acme'")
+      // The same PAT over REST (RestCaller's PAT arm, not McpDataTools') is refused alike.
+      val preview = get(w.h.httpClient, w.url(PreviewPath), Some(pat))
+      withClue(s"preview: ${statusAndCode(preview)}") {
+        preview.statusCode() shouldBe 403
+        errorCode(preview.body()) shouldBe Some("acl_denied")
+        preview.body() should include(s"is not registered in tenant '$Acme'")
+      }
       w.route.calls shouldBe empty
     }
 
-  it should "bind a superuser PAT to its own superuser row" in withManager(withPats = true) { w =>
-    runSql(w, mintPat(None, SecurityFixtures.RootUsername), tenant = Some(Acme))
-    val bound = w.route.calls.map((caller, _, eff) =>
-      (caller.superuserAdmissible, caller.patId.isDefined, eff.map(e => (e.user.id, e.user.tenant)))
-    )
-    bound shouldBe List((true, true, Some((w.fix.rootUserId, None))))
-  }
+  it should "bind a superuser PAT to its own superuser row, over MCP and over the REST preview" in
+    withManager(withPats = true) { w =>
+      val pat = mintPat(None, SecurityFixtures.RootUsername)
+      runSql(w, pat, tenant = Some(Acme))
+      val preview = get(w.h.httpClient, w.url(PreviewPath), Some(pat))
+      withClue(s"preview: ${statusAndCode(preview)}") {
+        // The recording router leg answers Unavailable once it has seen the statement.
+        preview.statusCode() shouldBe 502
+        errorCode(preview.body()) shouldBe Some("preview_failed")
+      }
+      val bound = w.route.calls.map((caller, _, eff) =>
+        (
+          caller.superuserAdmissible,
+          caller.patId.isDefined,
+          eff.map(e => (e.user.id, e.user.tenant))
+        )
+      )
+      bound shouldBe List.fill(2)((true, true, Some((w.fix.rootUserId, None))))
+    }
