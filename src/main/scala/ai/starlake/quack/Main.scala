@@ -874,16 +874,6 @@ object Main extends IOApp with LazyLogging:
     val bearerSessionOf
         : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
       t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t))
-    // Self-service surface for non-admin sessions; scopes strictly to the
-    // session's own (tenant, username), so it takes no tenant/user input.
-    val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
-      // same self-scoped profile a login session would.
-      bearerSessionOf,
-      telemetryStore,
-      stmtHistory,
-      id => sup.getTenantById(id)
-    )
     val sessions       = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
     // The native client is the only client; the boot gate above already refused a platform
@@ -1552,6 +1542,21 @@ object Main extends IOApp with LazyLogging:
         staticKey = mgrCfg.apiKey,
         sessionOf = sessionTokens.get,
         patOf = patAuthenticator.resolve
+      )
+
+      // Self-service surface for non-admin sessions; scopes strictly to the
+      // session's own (tenant, username), so it takes no tenant/user input. Built after
+      // restCaller: the pool listing resolves its caller exactly as the executor-identity
+      // handlers above do.
+      val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+        // Composed bearer lookup, session JWT first then PAT: a PAT owner sees the
+        // same self-scoped profile a login session would.
+        bearerSessionOf,
+        telemetryStore,
+        stmtHistory,
+        id => sup.getTenantById(id),
+        sup,
+        restCaller
       )
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(

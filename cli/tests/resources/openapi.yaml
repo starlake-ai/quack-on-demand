@@ -3097,6 +3097,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/pools:
+    get:
+      operationId: getApiProfilePools
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfilePoolsResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/profile/statements:
     get:
       operationId: getApiProfileStatements
@@ -9504,6 +9538,31 @@ components:
           format: int64
         truncated:
           type: boolean
+    ProfilePool:
+      title: ProfilePool
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - status
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        status:
+          type: string
+    ProfilePoolsResponse:
+      title: ProfilePoolsResponse
+      type: object
+      properties:
+        pools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfilePool'
     RdbmsConfig:
       title: RdbmsConfig
       type: object

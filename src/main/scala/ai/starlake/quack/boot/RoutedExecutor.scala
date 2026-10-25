@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{CatalogPreviewHandlers, ExecCaller}
-import ai.starlake.quack.ondemand.rbac.{AuthzRequest, EffectiveSet, HandshakeDenial}
+import ai.starlake.quack.ondemand.rbac.{EffectiveSet, HandshakeDenial}
 import ai.starlake.quack.route.StatementClassifier
 import cats.effect.IO
 
@@ -127,20 +127,7 @@ object RoutedExecutor:
             )
           )
         else
-          IO.delay(
-            sup.authorizeHandshakeDetailed(
-              AuthzRequest(
-                poolKey.tenant,
-                poolKey.pool,
-                caller.identity,
-                // The caller's realm: only a superuser caller may bind a superuser row.
-                superuserAdmissible = caller.superuserAdmissible,
-                edge = "mcp",
-                // Attenuate before gate 4: an opa tenant's connect sees only the token's roles.
-                restriction = caller.restriction
-              )
-            )
-          ).map {
+          IO.delay(sup.authorizeHandshakeDetailed(caller.authzRequest(poolKey))).map {
             case Left(HandshakeDenial.Unavailable(reason)) =>
               Left(
                 ai.starlake.quack.edge.RouterFailure

@@ -166,6 +166,7 @@ final class ManagerServer(
   private def isProfileApi(path: String): Boolean =
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
       path == "/api/profile/usage" || path == "/api/profile/statements" ||
+      path == "/api/profile/pools" ||
       // Personal access tokens are self-service for every principal, admin or
       // not: the handlers scope every call to the session's own user id, so
       // there is nothing here a regular user could reach beyond its own tokens.
@@ -633,6 +634,7 @@ final class ManagerServer(
       ProfileEndpoints.statements.serverLogic { case (limit, token) =>
         profile.statements(limit, token)
       },
+      ProfileEndpoints.pools.serverLogic(token => profile.pools(token)),
       NodeEndpoints.statementHistory.serverLogic { case (limit, token) =>
         statementHistory.recent(limit, token)(scopeOfToken)
       },

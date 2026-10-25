@@ -158,7 +158,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       _ => None,
       NoopTelemetryStore,
       new StatementHistoryStore(),
-      _ => None
+      _ => None,
+      sup,
+      RestCaller()
     )
     new McpDataTools(cfg, executor, sup, catalog, history, tags, tenantDbs, profile, scopeOf)
 
@@ -354,7 +356,9 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       _ => None,
       NoopTelemetryStore,
       new StatementHistoryStore(),
-      _ => None
+      _ => None,
+      sup,
+      RestCaller()
     )
     new McpDataTools(
       McpConfig(),

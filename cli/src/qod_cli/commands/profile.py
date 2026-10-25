@@ -3,7 +3,7 @@ import typer
 from ..registry import covers
 from ._run import call
 
-app = typer.Typer(help="Your own profile: usage and recent statements (any session).")
+app = typer.Typer(help="Your own profile: usage, recent statements and the pools you may use (any session).")
 
 
 @app.command()
@@ -18,3 +18,10 @@ def usage(ctx: typer.Context, days: int = typer.Option(None, "--days", help="Win
 def statements(ctx: typer.Context, limit: int = typer.Option(None, "--limit", help="Max rows (default 50).")):
     """Your own most recent statements."""
     call(ctx, "GET", "/api/profile/statements", params={"limit": limit})
+
+
+@app.command()
+@covers("GET", "/api/profile/pools")
+def pools(ctx: typer.Context):
+    """The pools you may connect to."""
+    call(ctx, "GET", "/api/profile/pools")

@@ -410,13 +410,6 @@ object ManagerServerHarness:
     val auditHandlers      = new AuditHandlers(telemetryStore)
     val historyApiHandlers = new HistoryHandlers(telemetryStore)
     val usageHandlers      = new UsageHandlers(telemetryStore)
-    val profileHandlers    = new ai.starlake.quack.ondemand.api.ProfileHandlers(
-      // Mirror Main: session JWT first, then PAT.
-      bearerSessionOf,
-      telemetryStore,
-      statementStore,
-      id => sup.getTenantById(id)
-    )
     val activeRegistry     = new ActiveStatementRegistry()
     val activeStmtHandlers = new ai.starlake.quack.ondemand.api.ActiveStatementHandlers(
       activeRegistry,
@@ -513,6 +506,16 @@ object ManagerServerHarness:
       staticKey = staticApiKey,
       sessionOf = sessions.get,
       patOf = t => patAuth.flatMap(_.resolve(t))
+    )
+    // Mirror Main: built after the executor-identity resolver, which the pool listing shares.
+    val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
+      // Mirror Main: session JWT first, then PAT.
+      bearerSessionOf,
+      telemetryStore,
+      statementStore,
+      id => sup.getTenantById(id),
+      sup,
+      restCaller
     )
     val previewHandlers = new CatalogPreviewHandlers(
       sup,

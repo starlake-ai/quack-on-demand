@@ -1,9 +1,13 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.edge.{StatementHistoryStore, StatementRecord}
 import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
+import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import ai.starlake.quack.ondemand.telemetry._
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -83,7 +87,20 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
       telemetry: TelemetryStore = new StubTelemetry(Nil),
       history: StatementHistoryStore = new StatementHistoryStore()
   ): ProfileHandlers =
-    new ProfileHandlers(tokens.get, telemetry, history, tenantById, () => Now)
+    // usage and statements read neither the supervisor nor the caller resolver.
+    new ProfileHandlers(
+      tokens.get,
+      telemetry,
+      history,
+      tenantById,
+      new PoolSupervisor(
+        StubQuackBackend.noop(),
+        new NodeLoadTracker,
+        new InMemoryControlPlaneStore()
+      ),
+      RestCaller(sessionOf = tokens.get),
+      () => Now
+    )
 
   private def sessionFor(
       tokens: SessionTokenStore,

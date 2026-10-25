@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
-import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
+import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import cats.effect.IO
@@ -98,7 +98,7 @@ final class PoolHandlers(
             serverState = n.serverName.flatMap(liveness.get)
           )
         },
-        status = if p.disabled then "disabled" else "ready",
+        status = PoolHandlers.statusOf(p),
         metastore = redact(p.metastore),
         disabled = p.disabled,
         suspended = p.suspended,
@@ -889,3 +889,10 @@ final class PoolHandlers(
                       )
                     )
             }
+
+object PoolHandlers:
+
+  /** The `status` `/api/pool/list` reports for a pool, shared with `/api/profile/pools` so both
+    * routes speak the same values: `disabled` for a disabled pool, else `ready`.
+    */
+  def statusOf(p: PoolState): String = if p.disabled then "disabled" else "ready"

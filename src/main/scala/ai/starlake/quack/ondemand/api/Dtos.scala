@@ -232,6 +232,12 @@ final case class SuspendPoolRequest(tenant: String, tenantDb: String, pool: Stri
 final case class ResumePoolRequest(tenant: String, tenantDb: String, pool: String)
 
 final case class PoolListResponse(pools: List[PoolResponse])
+
+/** One pool of `GET /api/profile/pools`: the identifying fields and the `status` values of
+  * `/api/pool/list`, and nothing else (no nodes, sizes, settings or flags).
+  */
+final case class ProfilePool(tenant: String, tenantDb: String, pool: String, status: String)
+final case class ProfilePoolsResponse(pools: List[ProfilePool])
 final case class HealthResponse(status: String, poolsCount: Int, nodesCount: Int)
 
 final case class ClientConfigResponse(
@@ -1654,6 +1660,8 @@ object Dtos:
   given Codec[SetPoolLockdownRequest]   = deriveCodec
   given Codec[SetPoolAutoscaleRequest]  = ConfiguredCodec.derived
   given Codec[PoolListResponse]         = deriveCodec
+  given Codec[ProfilePool]              = deriveCodec
+  given Codec[ProfilePoolsResponse]     = deriveCodec
   given Codec[HealthResponse]           = deriveCodec
   given Codec[SetMaxConcurrentRequest]  = deriveCodec
   given Codec[NodeOpRequest]            = deriveCodec

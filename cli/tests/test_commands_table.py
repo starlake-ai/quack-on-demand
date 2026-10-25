@@ -608,6 +608,10 @@ CASES = [
         "GET", "/api/profile/statements", {"limit": "10"}, None,
     ),
     (
+        ["profile", "pools"],
+        "GET", "/api/profile/pools", {}, None,
+    ),
+    (
         ["tenant", "set-acl", "acme", "--mode", "opa", "--opa-url", "http://opa:8181", "--opa-token", "tok"],
         "POST",
         "/api/tenant/setAcl",

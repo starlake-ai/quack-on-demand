@@ -1,6 +1,8 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.ondemand.auth.TokenRestriction
+import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.ondemand.rbac.AuthzRequest
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -39,4 +41,24 @@ class ExecCallerSpec extends AnyFlatSpec with Matchers:
     ExecCaller
       .unrestricted("c", "u", superuserAdmissible = false)
       .effectiveMaxRows(500, 100) shouldBe 100
+  }
+
+  "authzRequest" should "ask the handshake as the caller, with its token restriction, on the mcp edge" in {
+    val restriction = TokenRestriction.Unrestricted.copy(roles = Some(Set("analyst")))
+    val caller      = ExecCaller(
+      "profile-pools",
+      "alice",
+      restriction,
+      superuserAdmissible = false,
+      patId = Some("pat-1")
+    )
+    caller.authzRequest(PoolKey("acme", "acme_tpch1", "bi")) shouldBe
+      AuthzRequest(
+        "acme",
+        "bi",
+        "alice",
+        superuserAdmissible = false,
+        edge = "mcp",
+        restriction = restriction
+      )
   }

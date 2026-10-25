@@ -1,6 +1,8 @@
 package ai.starlake.quack.ondemand.api
 
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.TokenRestriction
+import ai.starlake.quack.ondemand.rbac.AuthzRequest
 
 /** Who is running a statement through the routed executor.
   *
@@ -43,6 +45,24 @@ final case class ExecCaller(
     */
   def effectiveMaxRows(serverCap: Int, requested: Int): Int =
     (List(serverCap, requested) ++ restriction.maxRows.toList).min.max(1)
+
+  /** The handshake request this caller connects to `poolKey` with: what the routed executor asks
+    * `PoolSupervisor.authorizeHandshakeDetailed` before it runs a statement, and what
+    * `GET /api/profile/pools` asks for each pool it lists, so "may connect" is one decision on
+    * both. It carries the caller's realm (`superuserAdmissible`: only a superuser caller may bind a
+    * superuser row). Edge `mcp` lands in the OPA input's `client.edge`; the token restriction
+    * attenuates the effective set before gate 4, so an opa tenant's connect decision sees only the
+    * token's roles.
+    */
+  def authzRequest(poolKey: PoolKey): AuthzRequest =
+    AuthzRequest(
+      poolKey.tenant,
+      poolKey.pool,
+      identity,
+      superuserAdmissible = superuserAdmissible,
+      edge = "mcp",
+      restriction = restriction
+    )
 
 object ExecCaller:
 

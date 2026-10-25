@@ -59,23 +59,7 @@ final class RestCaller(
       connectionId: String,
       apiKey: Option[String]
   ): Either[(StatusCode, ErrorResponse), ExecCaller] =
-    resolve(apiKey).map {
-      case RestCaller.Principal.System     => ExecCaller.system(connectionId)
-      case RestCaller.Principal.Session(s) =>
-        ExecCaller.unrestricted(
-          connectionId,
-          s.profile.username,
-          superuserAdmissible = s.scope.superuser
-        )
-      case RestCaller.Principal.Pat(p) =>
-        ExecCaller(
-          connectionId,
-          p.user.username,
-          p.restriction,
-          superuserAdmissible = p.user.tenant.isEmpty,
-          patId = Some(p.patId)
-        )
-    }
+    resolve(apiKey).map(RestCaller.callerOf(connectionId, _))
 
 object RestCaller:
 
@@ -84,6 +68,27 @@ object RestCaller:
     case System
     case Session(session: SessionTokenStore.Session)
     case Pat(pat: PatPrincipal)
+
+  /** The executor caller a resolved principal runs as: what [[RestCaller.apply]] hands the routed
+    * executor, and the caller `GET /api/profile/pools` asks the handshake about, so both decide on
+    * the same request.
+    */
+  def callerOf(connectionId: String, principal: Principal): ExecCaller = principal match
+    case Principal.System     => ExecCaller.system(connectionId)
+    case Principal.Session(s) =>
+      ExecCaller.unrestricted(
+        connectionId,
+        s.profile.username,
+        superuserAdmissible = s.scope.superuser
+      )
+    case Principal.Pat(p) =>
+      ExecCaller(
+        connectionId,
+        p.user.username,
+        p.restriction,
+        superuserAdmissible = p.user.tenant.isEmpty,
+        patId = Some(p.patId)
+      )
 
   /** A resolver that knows no credential but the static key (`None`): every token is refused. */
   val staticOnly: RestCaller = new RestCaller(None, _ => None, _ => None)
