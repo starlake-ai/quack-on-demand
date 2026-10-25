@@ -5,9 +5,12 @@ import ai.starlake.quack.ondemand.state.UserGrant
 
 /** Source of truth for management-plane authorization.
   *
-  * `Db` uses `qodstate_user` as BOTH the identity directory (password) and the role/tenant source.
-  * `Oidc` splits the two: the IdP verifies identity, and `qodstate_user` is consulted for role +
-  * the set of tenants the principal manages.
+  * `Db` uses `qodstate_user` as BOTH the identity directory (password) and the role/tenant source:
+  * the row the database authenticator verified is the grant. `Oidc` splits the two: the IdP
+  * verifies identity, and `qodstate_user` is consulted for role + the set of tenants the principal
+  * manages. Under either value an identity an IdP proved (an SSO callback, the manager-wide
+  * Keycloak / Azure password grant) is read the second way (`AuthHandlers.mintSessionFor`): an
+  * IdP's role claim grants nothing.
   */
 sealed abstract class ManagementIdentitySource
 

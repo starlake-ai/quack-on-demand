@@ -6,7 +6,8 @@ import ai.starlake.quack.edge.auth.{
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
-  BasicAuthProvider
+  BasicAuthProvider,
+  DatabaseAuthenticator
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -113,7 +114,10 @@ object InMemoryAuthService:
                     role = u.kind,
                     groups = Set.empty,
                     claims = Map.empty,
-                    authMethod = "in-memory",
+                    // Stands in for the database authenticator, so its profile is the
+                    // authenticator's own: the management login takes it as the verified
+                    // qodstate_user row (the (tenant, kind) it carries) and reads no directory.
+                    authMethod = DatabaseAuthenticator.AuthMethod,
                     tenant = u.tenant
                   )
                 )

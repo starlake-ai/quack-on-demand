@@ -87,6 +87,28 @@ class UserEnabledAuthSpec extends AnyFlatSpec with Matchers:
       finally auth.close()
     }
 
+  it should "stamp the profile of a verified row with DatabaseAuthenticator.AuthMethod, the tag by which the management login takes it as its own grant" in
+    withFreshDb { (store, url) =>
+      import ai.starlake.quack.model.Tenant
+      store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
+      store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = true)
+      store.upsertUserWithHash(Some("acme"), "alice", hash("alicepw"), "user", enabled = true)
+      val auth = new DatabaseAuthenticator(authConfig(url), roleClaim = "role")
+      try
+        val system = auth.authenticate(AuthScope.System, "root", "rootpw").toOption.get
+        val tenant = auth.authenticate(AuthScope.Tenant("acme"), "alice", "alicepw").toOption.get
+        // AuthHandlers.mintSessionFor reads no directory for exactly this tag: were the
+        // authenticator to stamp another one, every database login would be not_provisioned.
+        system.authMethod shouldBe DatabaseAuthenticator.AuthMethod
+        system.tenant shouldBe None
+        system.role shouldBe "admin"
+        tenant.authMethod shouldBe DatabaseAuthenticator.AuthMethod
+        tenant.tenant shouldBe Some("acme")
+        tenant.role shouldBe "user"
+        auth.name shouldBe DatabaseAuthenticator.AuthMethod
+      finally auth.close()
+    }
+
   it should "reject a DISABLED user presenting the CORRECT password, with the same error as a wrong password" in
     withFreshDb { (store, url) =>
       store.upsertUserWithHash(None, "root", hash("rootpw"), "admin", enabled = false)
