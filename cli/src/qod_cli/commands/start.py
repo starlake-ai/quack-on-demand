@@ -213,8 +213,8 @@ def start(
         )
         raise typer.Exit(1)
     if sf_request is not None:
-        # qod cannot know, or inject, the running manager's API key and session
-        # secret, so the pair could never authenticate (same refusal as serve).
+        # qod cannot know, or inject, the running manager's session secret, so
+        # the pair could never authenticate (same refusal as serve).
         port = {**load_start_env(), **os.environ}.get("QOD_ON_DEMAND_PORT") or "20900"
         manager_url = f"http://localhost:{port}"
         if _manager_running(manager_url):
@@ -259,7 +259,7 @@ def start(
         base_env, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb, qod_node_bin=node_bin
     )
     if sf_plan is not None:
-        env.update(starflow.manager_env(sf_plan.url, sf_plan.api_key, sf_plan.secret))
+        env.update(starflow.manager_env(sf_plan.url, sf_plan.secret))
     # The manager's startup banner names the CLI config file it was launched with.
     env["QOD_CONFIG_FILE"] = str(config_path())
 

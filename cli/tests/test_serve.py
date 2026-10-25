@@ -1008,12 +1008,13 @@ def test_serve_with_starflow_uses_the_embedded_postgres(runner, starflow_wired):
     mgr = starflow_wired["env"]
     assert mgr["SL_ENABLED"] == "true"
     assert mgr["SL_URL"] == "http://localhost:9900"
-    assert mgr["QOD_API_KEY"] and mgr["QOD_SESSION_JWT_SECRET"] == mgr["JWT_SECRET_KEY"]
+    assert mgr["QOD_SESSION_JWT_SECRET"] == mgr["JWT_SECRET_KEY"]
     sf = starflow_wired["starflow"]
     assert sf["pg"].port == 25999
     assert (sf["pg"].user, sf["pg"].password) == ("postgres", "postgres")
     assert sf["env"]["SL_API_JDBC_URL"] == "jdbc:postgresql://localhost:25999/starlake"
-    assert sf["env"]["QOD_API_KEY"] == mgr["QOD_API_KEY"]
+    key_in_starflow = "QOD_API_KEY" in sf["env"]
+    assert not key_in_starflow
     assert "provision" in starflow_wired  # serve's own provisioning still runs
 
 

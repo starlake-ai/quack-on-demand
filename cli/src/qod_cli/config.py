@@ -45,6 +45,10 @@ ENV_VARS = {
     "superuser": "QOD_SUPERUSER",
 }
 
+# The static API key this release removes. Named once for the code that keeps a stale value
+# away from what the CLI launches.
+REMOVED_API_KEY = "QOD_API_KEY"
+
 
 @dataclass
 class Settings:

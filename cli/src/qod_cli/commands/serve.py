@@ -635,8 +635,8 @@ def serve(
 
     if _manager_running(manager_url):
         if sf_request is not None:
-            # qod cannot know, or inject, the running manager's API key and
-            # session secret, so the pair could never authenticate.
+            # qod cannot know, or inject, the running manager's session secret,
+            # so the pair could never authenticate.
             typer.echo(
                 f"error: a manager is already running at {manager_url}; --with-starflow "
                 "needs to launch it itself: stop it first (qod stop)",
@@ -770,7 +770,7 @@ def serve(
     if password is not None:
         env[admin_password.KEY] = password
     if sf_plan is not None:
-        env.update(starflow.manager_env(sf_plan.url, sf_plan.api_key, sf_plan.secret))
+        env.update(starflow.manager_env(sf_plan.url, sf_plan.secret))
     # Provisioning authenticates with a per-boot key held in memory only, so no
     # admin password is needed after the first boot. A configured key wins.
     if not env.get("QOD_API_KEY"):
