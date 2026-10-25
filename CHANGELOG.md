@@ -2,32 +2,53 @@
 
 ## 0.10.2
 
+- **Security: upgrade promptly, and rotate the manager's secrets if tenant admins are not fully
+  trusted.** A manager where tenant admins are not fully trusted, and where tenants could set their
+  own sign-in configuration, should upgrade to this release promptly and then rotate every secret
+  held in the manager's environment, in particular `QOD_SESSION_JWT_SECRET` (which also ends every
+  open session), `QOD_API_KEY`, `QOD_PG_PASSWORD`, the cloud credentials, and `QOD_NODE_KEY_SECRET`
+  when it is set (restart every node after changing it). Also review the personal access tokens
+  owned by superuser rows and the recent superuser sign-ins in the audit log.
+
 - **Security: BREAKING: a tenant's sign-in stays inside that tenant.** Management sign-in and the
   tenant sign-in settings now hold these rules:
   - A tenant SSO login takes its grants from that tenant's `qodstate_user` rows only, the email
     fallback included: an identity whose rows are all in other tenants, or whose only row is a
     superuser's, is refused `403 not_provisioned` (the browser lands on
-    `/ui/?error=not_provisioned`), and superusers sign in through the bare `/ui/` login. Before,
-    the lookup matched the identity against every realm's rows. The system login is unchanged.
+    `/ui/?error=not_provisioned`), and superusers sign in through the bare `/ui/` login or a
+    password login without a tenant. Before, the lookup matched the identity against every
+    realm's rows.
+  - A tenant that signs in with passwords takes no SSO: `/api/auth/oidc/start` answers `400
+    oidc_not_configured` and the callback lands on `/ui/?error=oidc_not_configured` for a tenant
+    whose provider is `db`, whatever sign-in keys its auth config still holds. Only the tenant's
+    provider decides.
   - BREAKING: the same rule now covers a password login answered by the manager-wide Keycloak or
     Azure password grant (`QOD_AUTH_KEYCLOAK_ENABLED`, `QOD_AUTH_AZURE_ENABLED`). The basic chain
     tries it after the database authenticator, so with one enabled a tenant's password form also
     accepts that IdP's passwords. Such a login took its rights from the IdP's role claim, so an
     `admin` claim opened a superuser session through any `db` tenant's login form, or without a
     tenant under `identitySource=db`, with no `qodstate_user` row at all. It now signs in as the
-    QoD user with the same user name as the IdP account (the IdP's username, never its email) and
-    gets that row's rights only: for a tenant login a row of that tenant (an admin row opens the
+    QoD user with the same user name as the IdP account, matched by the token's `preferred_username`
+    (see the next bullet for a token without one) and never retried with the email claim, and gets
+    that row's rights only: for a tenant login a row of that tenant (an admin row opens the
     console, a `user` row the Profile page), for a login without a tenant the rows the user name
     holds in any realm (a superuser row, or admin rows of one or more tenants). No row answers
     `403 not_provisioned`, and an IdP role claim no longer makes anyone admin or superuser. Since
     the user name picks the row, the IdP's user names must be assigned by an administrator, not
-    chosen by the account holder. Operators who relied on IdP `admin` claims create the rows first
-    (`qod user create`). Logins verified by the database authenticator are unchanged.
-  - BREAKING: a single sign-on login (a tenant's or the bare `/ui/`) falls back to the token's
-    email claim only when the IdP marks it verified (`email_verified` true); an address the
-    account holder typed could otherwise name the superuser's row. A provider that does not emit
-    the claim no longer matches rows named by email: name the rows by the IdP's user name
-    (`preferred_username`).
+    chosen by the account holder: an IdP realm that lets people choose their own user name lets
+    them sign in as any QoD user of that name, the seeded superusers `admin@localhost.local` and
+    `admin` included. Operators who relied on IdP `admin` claims create the rows first (`qod user
+    create`). Logins verified by the database authenticator are unchanged.
+  - BREAKING: an identity-provider login counts an email address only when the IdP marks it
+    verified (`email_verified` true), because an address the account holder typed could otherwise
+    name another user's row, the superuser's included. Both IdP authenticators name the user by
+    the token's `preferred_username`, else its email claim, else its subject. A user name that came
+    from the email claim (a token without `preferred_username`) binds a row only when that address
+    is verified, else the login is refused `403 not_provisioned`; single sign-on also falls back to
+    the email claim, when the user name matches no row, only when it is verified. A provider that
+    does not emit `email_verified` no longer matches rows by email: name the rows by the IdP's user
+    name (`preferred_username`). Known limit: the FlightSQL data plane keeps the older naming (a
+    token without `preferred_username` is named by its email, verified or not).
   - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
     superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
     tenant, as the FlightSQL handshake already ruled.
@@ -56,23 +77,35 @@
     `/ui/` login mode (under `db` it stays a password form, even with `QOD_MGMT_OIDC_*` set).
     Before, `/api/auth/oidc/start` answered `404 auth_mode_disabled` unless it was `oidc`, so
     under the default `db` such a tenant's admins signed in with passwords; they now sign in
-    through the tenant's identity provider.
+    through the tenant's identity provider. Upgrade step: a manager running `identitySource=db`
+    that serves tenant SSO must set `QOD_MGMT_PUBLIC_BASE_URL` and register
+    `${QOD_MGMT_PUBLIC_BASE_URL}/api/auth/oidc/callback` as a redirect URI on each tenant's IdP
+    client. Left unset, the redirect URI the manager sends is
+    `http://localhost:<manager port>/api/auth/oidc/callback`, and the boot warning about it only
+    appears under `identitySource=oidc`, at WARN, below the default ERROR level.
   - BREAKING: secret references saved before this release are parked, since who saved them was
     not recorded. Liquibase `0048` adds the `qodstate_tenant.auth_client_secret` column and moves
-    each tenant's `clientSecretRef` to `clientSecretRefUnconfirmed`, which nothing reads: that
-    tenant's console sign-in answers `tenant_oidc_misconfigured` until a superuser saves the
-    reference again (`qod tenant set-auth <tenant> --auth-provider <provider> --auth-config
-    issuerUrl=... --auth-config clientId=... --auth-config clientSecretRef=<reference>`; the
-    save replaces the whole auth config) or the tenant's admins store the secret itself. Every
-    boot logs an error line per parked tenant naming the reference and that command (a parked
-    value that is not a secret reference is not printed, and its line asks for a secret source
-    instead), and asking the superuser to confirm that the tenant's `issuerUrl` is its own
-    identity provider. A save that carries a secret value or a reference drops the parked key,
-    through any client (REST, MCP, the CLI or the admin UI), which ends the error line; so does a
-    save that changes `issuerUrl` or leaves the key out, but the sign-in then stays unconfigured
-    until a secret source is set. A manifest exported before this release still carries active
-    `clientSecretRef` values, and importing it re-activates them without this review: check
-    those references first.
+    each tenant's `clientSecretRef` to `clientSecretRefUnconfirmed`, which nothing reads. After
+    the upgrade every tenant whose sign-in used a reference is misconfigured until a superuser
+    restores it: its console sign-in answers `tenant_oidc_misconfigured` and its password login
+    is refused too, so only a superuser, through the bare `/ui/` login, can open its console. A
+    superuser restores it by saving the reference again (`qod tenant set-auth <tenant>
+    --auth-provider <provider> --auth-config issuerUrl=... --auth-config clientId=...
+    --auth-config clientSecretRef=<reference>`; the save replaces the whole auth config); the
+    tenant's admins can store the secret themselves instead, but only with a personal access
+    token or a session they already hold. Every boot logs an error line per parked tenant naming
+    the reference and that command (a parked value that is not a secret reference is not
+    printed, and its line asks for a secret source instead), and asking the superuser to confirm
+    that the tenant's `issuerUrl` is its own identity provider. A save that carries a secret
+    value or a reference drops the parked key, through any client (REST, MCP, the CLI or the
+    admin UI), which ends the error line; so does a save that changes `issuerUrl` or leaves the
+    key out, but the sign-in then stays unconfigured until a secret source is set. A manifest
+    exported before this release still carries active `clientSecretRef` values, and importing it
+    re-activates them without this review: check those references first. In an HA rolling
+    upgrade, finish the rollout before tenant admins edit sign-in settings: a 0.10.1 replica
+    still serving writes accepts a reference from a tenant admin without the superuser rule, and
+    what it writes after the migration ran is not parked, so otherwise review the tenants'
+    references afterwards (`qod --json tenant list`).
   - Manifests: a tenant's `clientSecret` is exported as `***REDACTED***` and imports as the
     tenant OPA token does: the marker keeps the stored value only while `issuerUrl` is unchanged
     and is refused otherwise, a whitespace-only value is refused (an empty string means no

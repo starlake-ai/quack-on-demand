@@ -12,8 +12,9 @@ import ai.starlake.quack.secrets.SecretRefResolver
   * `clientSecretRef` reference (which only a superuser may write), resolved through `secrets`. A
   * stored value wins when a tenant holds both, and the reference is then never resolved. The secret
   * is only sent to the token endpoint discovered from `issuerUrl`, the issuer it was saved with:
-  * `TenantSignInWrite` keeps neither source across an issuer change. A reference parked by
-  * changeset 0048 (`clientSecretRefUnconfirmed`) is never read. Provider-agnostic: any
+  * `TenantSignInWrite` keeps a stored value only for an unchanged issuer; a reference survives an
+  * issuer change only in a superuser's write, which may pair it with the new issuer. A reference
+  * parked by changeset 0048 (`clientSecretRefUnconfirmed`) is never read. Provider-agnostic: any
   * OIDC-compliant issuer works.
   */
 class OidcEndpointResolver(

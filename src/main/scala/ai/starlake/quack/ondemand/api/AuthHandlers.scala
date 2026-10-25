@@ -379,7 +379,7 @@ final class AuthHandlers(
     (html, clear)
   }
 
-  /** Password login. The tenant may be named by its id or its display name.
+  /** Password login. The tenant is named by its id, in any letter case (not by its display name).
     *
     * A tenant whose sign-in mode is OIDC takes no password: `400 sso_required`, answered before the
     * authentication service is asked, so no password is checked and no lockout counter moves. The
@@ -413,7 +413,7 @@ final class AuthHandlers(
       // The tenant as the caller typed it (trimmed): sso_required names it this way.
       val named            = req.tenant.map(_.trim).filter(_.nonEmpty)
       val scope: AuthScope = named match
-        // Accept either the tenant id or its display name; normalize to the id
+        // Accept the tenant id in any letter case; normalize to the id
         // the authenticator's tenant query matches. Unknown -> pass through so
         // auth fails as "user not found" rather than 500-ing.
         case Some(t) => AuthScope.Tenant(resolveTenant(t).getOrElse(t))
@@ -534,7 +534,7 @@ final class AuthHandlers(
             )
           )
         case Some(users) =>
-          // Same tenant resolution as login: id or display name; unknown values pass
+          // Same tenant resolution as login: the id, in any letter case; unknown values pass
           // through so the store answers invalid_credentials without a tenant oracle.
           val scopeTenant =
             req.tenant.map(_.trim).filter(_.nonEmpty).map(t => resolveTenant(t).getOrElse(t))
