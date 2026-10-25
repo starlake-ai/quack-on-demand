@@ -151,10 +151,12 @@ final class BranchService(
     }
 
   /** A non-admin may act on a parent iff it can connect to at least one of its pools: exactly the
-    * FlightSQL handshake gate, so "may query" and "may branch" are the same permission. Uses
-    * `authorizeHandshakeDetailed` (not the legacy string-left delegate) so an OPA outage on an
-    * opa-mode parent is distinguishable from an ordinary grant refusal: `Res` has its own error
-    * channel (`BranchFailure`), so `Unavailable` is surfaced as a retryable 503 rather than
+    * FlightSQL handshake gate, so "may query" and "may branch" are the same permission. Admins
+    * (tenant admins, superusers, the static key) never reach the gate, so it runs with
+    * `superuserAdmissible = false`: the actor binds a row of the parent's tenant, never a superuser
+    * row. Uses `authorizeHandshakeDetailed` (not the legacy string-left delegate) so an OPA outage
+    * on an opa-mode parent is distinguishable from an ordinary grant refusal: `Res` has its own
+    * error channel (`BranchFailure`), so `Unavailable` is surfaced as a retryable 503 rather than
     * collapsed into the same "acl_denied" a real policy Deny gets.
     */
   private def mayUse(tenant: String, parent: TenantDb, actor: BranchActor): Res[Unit] =
@@ -162,7 +164,9 @@ final class BranchService(
     else
       val pools = sup.list().map(_.key).filter(k => k.tenant == tenant && k.tenantDb == parent.name)
       val outcomes = pools.map { k =>
-        sup.authorizeHandshakeDetailed(AuthzRequest(tenant, k.pool, actor.identity, edge = "rest"))
+        sup.authorizeHandshakeDetailed(
+          AuthzRequest(tenant, k.pool, actor.identity, superuserAdmissible = false, edge = "rest")
+        )
       }
       if outcomes.exists(_.isRight) then Right(())
       else if outcomes.exists {

@@ -13,10 +13,13 @@ import java.security.MessageDigest
   *
   *   - the configured static key (constant-time compare, like `SessionScope.failClosed`): the
   *     synthetic superuser, unrestricted;
-  *   - a session JWT: its username, unrestricted (a login session carries no token restriction);
+  *   - a session JWT: its username, unrestricted (a login session carries no token restriction),
+  *     superuser-admissible exactly when the session is a superuser's (`scope.superuser`);
   *   - a personal access token: its owner's username, the PAT's own `TokenRestriction` and its id,
-  *     the same shape `McpDataTools.callerFor` builds, so per-table ACL, column masking, row
-  *     filtering and the token's pools / maxRows / branchOnly all apply;
+  *     superuser-admissible exactly when the owning row is tenant-less (the token speaks for its
+  *     owner's realm, whatever its admin scope), the same shape `McpDataTools.callerFor` builds, so
+  *     per-table ACL, column masking, row filtering and the token's pools / maxRows / branchOnly
+  *     all apply;
   *   - any other token (unknown, expired, revoked, a session that died between the guard and the
   *     handler): 401 `unauthorized`. Never the superuser: the executor must not be called.
   *
@@ -59,9 +62,19 @@ final class RestCaller(
     resolve(apiKey).map {
       case RestCaller.Principal.System     => ExecCaller.system(connectionId)
       case RestCaller.Principal.Session(s) =>
-        ExecCaller.unrestricted(connectionId, s.profile.username)
+        ExecCaller.unrestricted(
+          connectionId,
+          s.profile.username,
+          superuserAdmissible = s.scope.superuser
+        )
       case RestCaller.Principal.Pat(p) =>
-        ExecCaller(connectionId, p.user.username, p.restriction, Some(p.patId))
+        ExecCaller(
+          connectionId,
+          p.user.username,
+          p.restriction,
+          superuserAdmissible = p.user.tenant.isEmpty,
+          patId = Some(p.patId)
+        )
     }
 
 object RestCaller:

@@ -420,7 +420,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     // login gate; it must deny her with a 'disabled' reason before the
     // pool-access check even runs.
     val sup = buildSupervisor(dst)
-    val hs  = sup.authorizeHandshake("tpch", "sales", "alice")
+    val hs  = sup.authorizeHandshake("tpch", "sales", "alice", superuserAdmissible = true)
     hs.isLeft shouldBe true
     hs.left.toOption.get.toLowerCase should include("disabled")
   }

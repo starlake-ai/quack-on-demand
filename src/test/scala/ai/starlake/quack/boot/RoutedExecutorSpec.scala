@@ -19,6 +19,11 @@ import org.scalatest.matchers.should.Matchers
   * never from the caller's user name. Regression: user names are not reserved, so a tenant user
   * named "superuser" matched the old `identity == "superuser"` test and ran with the synthetic
   * superuser EffectiveSet: no ACL, no CLS/RLS, no protected-write guard.
+  *
+  * The caller's realm reaches the handshake gate as `AuthzRequest.superuserAdmissible`: a caller
+  * that is not itself a superuser never binds a superuser row. `PoolSupervisor` is final, so the
+  * request is observed through the real gate: the same identity over the same rows binds the
+  * superuser row only when the caller's flag is true.
   */
 class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
 
@@ -49,6 +54,10 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
     store.upsertUserIdentity(
       RbacUser(id = "u-sentinel", tenant = Some("acme"), username = "superuser", kind = "admin")
     )
+    // A superuser row; acme holds no row of that name.
+    store.upsertUserIdentity(
+      RbacUser(id = "u-root", tenant = None, username = "root", kind = "admin")
+    )
 
     var routed: List[(ExecCaller, Option[EffectiveSet])] = Nil
     val executor                                         = RoutedExecutor(
@@ -65,8 +74,10 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
       executor(caller, key, "SELECT * FROM main.region").unsafeRunSync()
 
   "the routed executor" should "evaluate a session of a tenant user named 'superuser' as that user" in {
-    val f   = new Fixture
-    val out = f.exec(ExecCaller.unrestricted("preview-acme", "superuser"))
+    val f = new Fixture
+    // A tenant session is never superuser-admissible: its scope is not a superuser's.
+    val out =
+      f.exec(ExecCaller.unrestricted("preview-acme", "superuser", superuserAdmissible = false))
     // Resolved through authorizeHandshake: the user has no grant on the pool, so it is denied
     // before the router, instead of running with the synthetic superuser set.
     out.left.toOption.collect { case RouterFailure.AccessDenied(r) => r }.getOrElse("") should
@@ -80,7 +91,8 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
       "preview-acme",
       "superuser",
       TokenRestriction.Unrestricted.copy(maxRows = Some(5)),
-      Some("pat-1")
+      superuserAdmissible = false,
+      patId = Some("pat-1")
     )
     f.exec(pat).left.toOption.map(_.getClass.getSimpleName) shouldBe Some("AccessDenied")
     f.routed shouldBe Nil
@@ -90,4 +102,20 @@ class RoutedExecutorSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.exec(ExecCaller.system("restore-dryrun-acme"))
     f.routed.map((c, eff) => (c.system, eff.map(_.user.tenant))) shouldBe List((true, Some(None)))
+  }
+
+  it should "bind no superuser row for a caller that is not superuser-admissible, and route nothing" in {
+    val f   = new Fixture
+    val out = f.exec(ExecCaller.unrestricted("preview-acme", "root", superuserAdmissible = false))
+    // The same answer as an unknown user, so the refusal is no existence oracle.
+    out.left.toOption.collect { case RouterFailure.AccessDenied(r) => r }.getOrElse("") should
+      include("user 'root' is not registered in tenant 'acme'")
+    f.routed shouldBe Nil
+  }
+
+  it should "bind the superuser row a superuser-admissible caller names, as a non-system caller" in {
+    val f = new Fixture
+    f.exec(ExecCaller.unrestricted("preview-acme", "root", superuserAdmissible = true))
+    f.routed.map((c, eff) => (c.system, eff.map(e => (e.user.id, e.user.tenant)))) shouldBe
+      List((false, Some(("u-root", None))))
   }

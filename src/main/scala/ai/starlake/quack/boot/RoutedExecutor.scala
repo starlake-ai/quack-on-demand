@@ -133,6 +133,8 @@ object RoutedExecutor:
                 poolKey.tenant,
                 poolKey.pool,
                 caller.identity,
+                // The caller's realm: only a superuser caller may bind a superuser row.
+                superuserAdmissible = caller.superuserAdmissible,
                 edge = "mcp",
                 // Attenuate before gate 4: an opa tenant's connect sees only the token's roles.
                 restriction = caller.restriction

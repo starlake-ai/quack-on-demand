@@ -157,8 +157,8 @@ final class EdgeHandshake(
                   jwtRoles,
                   jwtGroups,
                   jwtClaims,
-                  superuserAdmissible,
-                  edge
+                  superuserAdmissible = superuserAdmissible,
+                  edge = edge
                 )
               ) match
                 case Left(HandshakeDenial.Denied(err)) =>

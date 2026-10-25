@@ -529,6 +529,35 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     captured.map(_.patId).toList shouldBe List(None)
   }
 
+  it should "carry the PAT owner's realm as superuserAdmissible: true only for a tenant-less owner" in {
+    val captured = ListBuffer.empty[ExecCaller]
+    val tools    = fixture(capturingExecutor(captured))
+    List(
+      patFor(Some(Tenant), admin = false),
+      patFor(Some(Tenant), admin = true),
+      patFor(None, admin = true),
+      // A tenant-less owner whose token carries no superuser scope: the realm is the row's.
+      patFor(None, admin = false),
+      McpPrincipal.StaticKey
+    ).foreach { principal =>
+      call(
+        tools,
+        "run_sql",
+        principal,
+        "sql"      -> Json.fromString("SELECT 1"),
+        "database" -> Json.fromString(TenantDb),
+        "tenant"   -> Json.fromString(Tenant)
+      )
+    }
+    captured.toList.map(c => (c.identity, c.superuserAdmissible, c.system)) shouldBe List(
+      ("alice", false, false),
+      ("alice", false, false),
+      ("alice", true, false),
+      ("alice", true, false),
+      (CatalogPreviewHandlers.SuperuserIdentity, true, true)
+    )
+  }
+
   // ------------------------------------------------------------------
   // scope enforcement (Task 6): a restricted PAT can only narrow, never widen
   // ------------------------------------------------------------------

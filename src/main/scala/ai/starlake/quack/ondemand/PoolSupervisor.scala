@@ -3789,14 +3789,17 @@ final class PoolSupervisor(
   def wireOpa(access: ai.starlake.quack.ondemand.rbac.OpaPoolAccess): Unit =
     opaAccess = Some(access)
 
-  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]]. */
+  /** Handshake gate with the legacy string-left contract; see [[authorizeHandshakeDetailed]].
+    * `superuserAdmissible` has no default: the caller states whether its credential may bind a
+    * superuser row (false for a credential validated in a tenant realm).
+    */
   def authorizeHandshake(
       tenantName: String,
       poolName: String,
       username: String,
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty,
-      superuserAdmissible: Boolean = true
+      superuserAdmissible: Boolean
   ): Either[String, ai.starlake.quack.ondemand.rbac.AuthorizedHandshake] =
     authorizeHandshakeDetailed(
       ai.starlake.quack.ondemand.rbac.AuthzRequest(
@@ -3806,8 +3809,8 @@ final class PoolSupervisor(
         jwtRoles,
         jwtGroups,
         Map.empty,
-        superuserAdmissible,
-        ""
+        superuserAdmissible = superuserAdmissible,
+        edge = ""
       )
     ).left.map(_.message)
 
