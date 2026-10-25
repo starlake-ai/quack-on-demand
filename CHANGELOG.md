@@ -45,25 +45,28 @@
     reference again (`qod tenant set-auth <tenant> --auth-provider <provider> --auth-config
     issuerUrl=... --auth-config clientId=... --auth-config clientSecretRef=<reference>`; the
     save replaces the whole auth config) or the tenant's admins store the secret itself. Every
-    boot logs an error line per parked tenant naming the reference and that command, and asking
-    the superuser to confirm that the tenant's `issuerUrl` is its own identity provider. A save
-    that carries a secret value or a reference drops the parked key, through any client (REST,
-    MCP, the CLI or the admin UI), which ends the error line; so does a save that changes
-    `issuerUrl` or leaves the key out, but the sign-in then stays unconfigured until a secret
-    source is set. A manifest exported before this release still carries active
+    boot logs an error line per parked tenant naming the reference and that command (a parked
+    value that is not a secret reference is not printed, and its line asks for a secret source
+    instead), and asking the superuser to confirm that the tenant's `issuerUrl` is its own
+    identity provider. A save that carries a secret value or a reference drops the parked key,
+    through any client (REST, MCP, the CLI or the admin UI), which ends the error line; so does a
+    save that changes `issuerUrl` or leaves the key out, but the sign-in then stays unconfigured
+    until a secret source is set. A manifest exported before this release still carries active
     `clientSecretRef` values, and importing it re-activates them without this review: check
     those references first.
   - Manifests: a tenant's `clientSecret` is exported as `***REDACTED***` and imports as the
     tenant OPA token does: the marker keeps the stored value only while `issuerUrl` is unchanged
-    and is refused otherwise, a blank value is refused, and so is a tenant that carries a secret
-    and a `clientSecretRef`, or a `clientSecret` key inside `authConfig`. BREAKING: a tenant with
-    no `clientSecret` in the manifest ends up with none, so a hand-written manifest that leaves
-    it out removes a stored secret.
-  - The per-tenant FlightSQL bearer override no longer reads a `clientSecretRef`, which bearer
-    validation never used: a Google, Keycloak or Azure AD tenant that set its other per-tenant
-    fields without one now validates bearer tokens against its own client instead of the
-    manager-wide one, so its tokens must carry that client id as audience. Its own admins can
-    turn this on, since the override needs no superuser-only reference.
+    and is refused otherwise, a whitespace-only value is refused (an empty string means no
+    secret), and so is a tenant that carries a secret and a `clientSecretRef`, or a
+    `clientSecret` key inside `authConfig`. BREAKING: a tenant with no `clientSecret` in the
+    manifest ends up with none, so a hand-written manifest that leaves it out removes a stored
+    secret.
+  - BREAKING: the per-tenant FlightSQL bearer override no longer reads a `clientSecretRef`, which
+    bearer validation never used: a Google, Keycloak or Azure AD tenant that set its other
+    per-tenant fields without one now validates bearer tokens against its own client instead of
+    the manager-wide one, so its tokens must carry that client id as audience (existing tenants
+    in that state change behavior as soon as this release runs). Its own admins can turn this on,
+    since the override needs no superuser-only reference.
 
 - **Manager modules must be recompiled against this core** (`Tenant` gained a field, and
   `AuthzRequest`, `ExecCaller` and `PoolSupervisor.authorizeHandshake` take
