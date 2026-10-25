@@ -490,6 +490,9 @@ object Main extends IOApp with LazyLogging:
     // seeding). Must run before the supervisor below snapshots the RBAC graph; it NOTIFYs peers
     // (HA) when it changed anything, so replicas already running pick the new rows up.
     BuiltinRbacBackfill.run(store, publisher)
+    // A clientSecretRef stored before changeset 0048 is parked and unused until a write stores a
+    // secret source again: report it at ERROR, with the restore step, once per tenant per boot.
+    ai.starlake.quack.ondemand.auth.ParkedSecretRefs.report(store.listTenants())
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
     // Constructed before the supervisor so its teardown hook can clear a torn-down

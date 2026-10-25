@@ -34,7 +34,8 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   private val pools     = TrieMap.empty[String, Pool]
   private val nodes     = TrieMap.empty[String, RunningNode]
 
-  // Mirrors Postgres: an existing row's acl changes only through updateTenantAcl.
+  // Mirrors Postgres: an existing row's acl changes only through updateTenantAcl, while
+  // authClientSecret is written with authConfig (both taken from `t`).
   def upsertTenant(t: Tenant): Unit =
     tenants.updateWith(t.id) {
       case Some(old) => Some(t.copy(acl = old.acl))

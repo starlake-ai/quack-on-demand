@@ -51,8 +51,7 @@ class TenantAclSpec extends AnyFlatSpec with Matchers:
     withToken.toString should include(s"Some(${FederatedSecret.RedactedMarker})")
     TenantAcl().toString should include("opaToken=None")
     // A tenant-level toString (e.g. an exception message built from "$tenant") must not leak the
-    // token either -- Tenant has no toString override of its own, so this pins that TenantAcl's
-    // override is what protects it.
+    // token either: Tenant's own toString prints its acl through TenantAcl's override.
     Tenant("t", acl = withToken).toString should not include "s3cr3t-x"
 
   it should "not change case-class equality, hashCode, or copy" in:

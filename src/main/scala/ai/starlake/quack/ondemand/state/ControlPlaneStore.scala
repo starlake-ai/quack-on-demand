@@ -29,6 +29,11 @@ trait ControlPlaneStore:
     * on INSERT only: an existing row's acl changes ONLY through [[updateTenantAcl]], so a full-row
     * upsert built from a stale read (setTenantAuth, setTenantDisabled, manifest import) can never
     * revert a concurrent acl change.
+    *
+    * `authClientSecret` is the opposite: it is written in both arms, in the same statement as
+    * `auth_config`, and no method writes it on its own. The secret is bound to the `issuerUrl` it
+    * was saved with, so the two change together: a stale full row reverts both at once, and no
+    * reader ever sees a secret next to an issuer it was not saved for.
     */
   def upsertTenant(t: Tenant): Unit
 
