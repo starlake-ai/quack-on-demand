@@ -839,3 +839,178 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
     err.exists(e => e.contains("acme") && e.contains("opaPolicyPath")) shouldBe true
   }
+
+  // ------------------------------------------------------------------
+  // Tenant client secret (Tenant.authClientSecret): the opaToken rules, bound to issuerUrl.
+  // ------------------------------------------------------------------
+
+  private val Marker      = ai.starlake.quack.model.FederatedSecret.RedactedMarker
+  private val Issuer      = "https://idp.example/realms/acme"
+  private val OtherIssuer = "https://other-idp.example/realms/acme"
+
+  /** Tenant `acme` signing in to the admin console through `issuer`, holding `secret`. */
+  private def ssoTenant(secret: Option[String], issuer: String = Issuer): Tenant =
+    Tenant(
+      id = "acme",
+      displayName = "acme",
+      authProvider = "keycloak",
+      authConfig = Map("issuerUrl" -> issuer, "clientId" -> "qod-admin"),
+      authClientSecret = secret
+    )
+
+  /** The same tenant in manifest shape, carrying `clientSecret` as given. */
+  private def ssoManifestTenant(
+      clientSecret: Option[String],
+      issuer: String = Issuer
+  ): ManifestTenant =
+    ManifestTenant(
+      name = "acme",
+      authProvider = "keycloak",
+      authConfig = Map("issuerUrl" -> issuer, "clientId" -> "qod-admin"),
+      clientSecret = clientSecret
+    )
+
+  private def storedAcme(s: InMemoryControlPlaneStore): Tenant =
+    s.listTenants().find(_.id == "acme").get
+
+  "ManifestImporter.apply clientSecret" should "keep the stored client secret for the redaction marker and the same issuerUrl" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(ssoTenant(Some("cs-real")))
+    val m = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+    storedAcme(s).authClientSecret shouldBe Some("cs-real")
+  }
+
+  it should "refuse the redaction marker with a changed issuerUrl, leaving the tenant unchanged" in {
+    val s      = new InMemoryControlPlaneStore()
+    val before = ssoTenant(Some("cs-real"))
+    s.upsertTenant(before)
+    val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker), issuer = OtherIssuer)))
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e =>
+      e.contains("acme") && e.contains("clientSecret") && e.contains("issuerUrl")
+    ) shouldBe true
+    // Caught before any write: the stored secret never followed the new issuer.
+    storedAcme(s) shouldBe before
+  }
+
+  it should "refuse the redaction marker for a new tenant, creating nothing" in {
+    val s   = new InMemoryControlPlaneStore()
+    val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    s.listTenants().find(_.id == "acme") shouldBe None
+  }
+
+  it should "refuse the redaction marker for a tenant with no stored client secret, leaving it unchanged" in {
+    val s      = new InMemoryControlPlaneStore()
+    val before = ssoTenant(None)
+    s.upsertTenant(before)
+    val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    storedAcme(s) shouldBe before
+  }
+
+  it should "store a plain client secret value as given for a new tenant" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(tenants = List(ssoManifestTenant(Some("cs-fresh"))))
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+    storedAcme(s).authClientSecret shouldBe Some("cs-fresh")
+  }
+
+  it should "replace the stored client secret with a plain value, a changed issuerUrl included" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(ssoTenant(Some("cs-old")))
+    val m = base.copy(tenants = List(ssoManifestTenant(Some("cs-new"), issuer = OtherIssuer)))
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+    storedAcme(s).authClientSecret shouldBe Some("cs-new")
+    storedAcme(s).authConfig.get("issuerUrl") shouldBe Some(OtherIssuer)
+  }
+
+  it should "store no client secret when the manifest omits it or sends an empty value" in
+    List(None, Some("")).foreach { incoming =>
+      val s = new InMemoryControlPlaneStore()
+      s.upsertTenant(ssoTenant(Some("cs-real")))
+      val m = base.copy(tenants = List(ssoManifestTenant(incoming)))
+      ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+      storedAcme(s).authClientSecret shouldBe None
+    }
+
+  it should "refuse a whitespace-only client secret, leaving the tenant unchanged" in {
+    val s      = new InMemoryControlPlaneStore()
+    val before = ssoTenant(Some("cs-real"))
+    s.upsertTenant(before)
+    val m   = base.copy(tenants = List(ssoManifestTenant(Some("   "))))
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    storedAcme(s) shouldBe before
+  }
+
+  it should "refuse an authConfig carrying a clientSecret key without echoing its value" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          authProvider = "keycloak",
+          authConfig =
+            Map("issuerUrl" -> Issuer, "clientId" -> "qod-admin", "clientSecret" -> "cs-in-map")
+        )
+      )
+    )
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    err.exists(_.contains("cs-in-map")) shouldBe false
+    s.listTenants().find(_.id == "acme") shouldBe None
+  }
+
+  it should "refuse a client secret, plain or redacted, together with a clientSecretRef, leaving the tenant unchanged" in
+    // The stored value makes the marker case one that would otherwise be kept (same issuerUrl):
+    // the one-source rule refuses it first.
+    List(Some("cs-new"), Some(Marker)).foreach { incoming =>
+      val s      = new InMemoryControlPlaneStore()
+      val before = ssoTenant(Some("cs-real"))
+      s.upsertTenant(before)
+      val withRef = ssoManifestTenant(incoming).copy(authConfig =
+        Map("issuerUrl" -> Issuer, "clientId" -> "qod-admin", "clientSecretRef" -> "env:ACME_CS")
+      )
+      val err = ManifestImporter
+        .apply(base.copy(tenants = List(withRef)), s, requireEncryption = false)
+        .left
+        .toOption
+        .get
+      err.exists(e =>
+        e.contains("acme") && e.contains("a client secret or a clientSecretRef, not both")
+      ) shouldBe true
+      // Caught before any write: the stored row keeps its one source.
+      storedAcme(s) shouldBe before
+    }
+
+  it should "import a clientSecretRef as written, a changed issuerUrl included" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(
+      ssoTenant(None).copy(authConfig =
+        Map(
+          "issuerUrl"       -> Issuer,
+          "clientId"        -> "qod-admin",
+          "clientSecretRef" -> "env:ACME_CS_OLD"
+        )
+      )
+    )
+    val m = base.copy(tenants =
+      List(
+        ManifestTenant(
+          name = "acme",
+          authProvider = "keycloak",
+          authConfig = Map(
+            "issuerUrl"       -> OtherIssuer,
+            "clientId"        -> "qod-admin",
+            "clientSecretRef" -> "env:ACME_CS_NEW"
+          )
+        )
+      )
+    )
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+    storedAcme(s).authConfig.get("clientSecretRef") shouldBe Some("env:ACME_CS_NEW")
+  }

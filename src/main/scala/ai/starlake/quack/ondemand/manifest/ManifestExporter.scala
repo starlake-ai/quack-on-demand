@@ -13,9 +13,10 @@ import java.time.Instant
 /** Read-only snapshot of the qodstate_* control plane in YAML-manifest shape. The output never
   * carries a plaintext user password (`ManifestUser.password` stays `None` -- plaintext is never
   * available once a user is created, only the bcrypt hash is stored) but DOES carry the real bcrypt
-  * hash in `ManifestUser.passwordHash` so a round-trip preserves the SAME credential. Tenant
-  * authProvider clientSecrets are carried verbatim since those are operator-supplied and cannot be
-  * recovered if lost.
+  * hash in `ManifestUser.passwordHash` so a round-trip preserves the SAME credential. A tenant's
+  * `authConfig` is carried verbatim, its `clientSecretRef` included (the name of a secret, not its
+  * value); a tenant's stored client secret is exported as `FederatedSecret.RedactedMarker`, like
+  * `opaToken`, never in the clear.
   */
 object ManifestExporter:
 
@@ -292,6 +293,8 @@ object ManifestExporter:
           disabled = t.disabled,
           authProvider = t.authProvider,
           authConfig = t.authConfig,
+          // Never the value: the marker only says a secret is stored (see ManifestTenant).
+          clientSecret = t.authClientSecret.map(_ => Redacted),
           tenantDbs = manifestDbs,
           pools = manifestPools,
           acl = Option.when(t.acl != ai.starlake.quack.model.TenantAcl())(

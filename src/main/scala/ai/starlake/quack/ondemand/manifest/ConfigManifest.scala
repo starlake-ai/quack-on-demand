@@ -159,13 +159,27 @@ final case class ManifestTenant(
     disabled: Boolean = false,
     authProvider: String = "db",
     authConfig: Map[String, String] = Map.empty,
+    // Round-tripped from Tenant.authClientSecret. Exported as FederatedSecret.RedactedMarker when a
+    // secret is stored, never in the clear. On import the marker keeps the stored value only while
+    // authConfig.issuerUrl is unchanged, a plain value is stored, and an absent field stores none;
+    // a tenant carries this or authConfig.clientSecretRef, never both (see
+    // ManifestImporter.importClientSecret). Defaulted so a manifest without it decodes.
+    clientSecret: Option[String] = None,
     tenantDbs: List[ManifestTenantDb] = Nil,
     pools: List[ManifestPool] = Nil,
     // None means "not present in the manifest" and leaves an existing tenant's stored ACL
     // untouched on import (see ManifestImporter.importAcl); it is NOT the same as an explicit
     // default-valued ManifestTenantAcl, which would reset the ACL to manager defaults.
     acl: Option[ManifestTenantAcl] = None
-)
+):
+  /** Redact `clientSecret` the way [[ManifestTenantAcl.toString]] redacts `opaToken`, so a log line
+    * or exception message built from `s"$manifestTenant"` never prints an imported value.
+    */
+  override def toString: String =
+    s"ManifestTenant(name=$name,displayName=$displayName,disabled=$disabled," +
+      s"authProvider=$authProvider,authConfig=$authConfig,clientSecret=${clientSecret
+          .map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)}," +
+      s"tenantDbs=$tenantDbs,pools=$pools,acl=$acl)"
 
 final case class ManifestTablePermission(
     catalog: String,

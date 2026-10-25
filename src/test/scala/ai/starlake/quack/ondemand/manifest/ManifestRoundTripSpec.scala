@@ -1505,3 +1505,40 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       ),
       "reserved for QoD's typed sources"
     )
+
+  // ------------------------------------------------------------------
+  // A tenant's stored client secret survives export -> YAML -> import into the same store while
+  // issuerUrl is unchanged, and is refused once the YAML moves the issuer: the opaToken rule.
+  // ------------------------------------------------------------------
+
+  it should "round-trip a tenant client secret through YAML, keeping it only for the same issuerUrl" in {
+    val cp     = new InMemoryControlPlaneStore()
+    val stored = Tenant(
+      id = "acme",
+      displayName = "acme",
+      authProvider = "keycloak",
+      authConfig = Map("issuerUrl" -> "https://idp.example/realms/acme", "clientId" -> "qod-admin"),
+      authClientSecret = Some("cs-real")
+    )
+    cp.upsertTenant(stored)
+
+    val yaml =
+      Yaml.pretty(exportOk(ManifestExporter.build(cp, ExportedAt, AdminVersion, Hostname)).asJson)
+    yaml should not include "cs-real"
+    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+    parsed.tenants.find(_.name == "acme").get.clientSecret shouldBe
+      Some(FederatedSecret.RedactedMarker)
+
+    ManifestImporter.apply(parsed, cp, requireEncryption = false) shouldBe Right(())
+    cp.listTenants().find(_.id == "acme").get.authClientSecret shouldBe Some("cs-real")
+
+    val moved = parsed.copy(tenants = parsed.tenants.map { t =>
+      if t.name == "acme" then
+        t.copy(authConfig = t.authConfig + ("issuerUrl" -> "https://other-idp.example/realms/acme"))
+      else t
+    })
+    val err = ManifestImporter.apply(moved, cp, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("acme") && e.contains("issuerUrl")) shouldBe true
+    // Refused before any write: the row, secret included, is the one stored at the start.
+    cp.listTenants().find(_.id == "acme").get shouldBe stored
+  }

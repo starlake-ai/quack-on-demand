@@ -20,6 +20,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.EncryptionKeyGen
+import ai.starlake.quack.ondemand.auth.TenantSignInWrite
 import ai.starlake.quack.ondemand.federation.FederatedSourceRules
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
@@ -74,6 +75,16 @@ object ManifestImporter extends LazyLogging:
             .getOrElse(TenantAcl())
         importAcl(t.name, Some(incoming), existingAcl).left.foreach(err => errs += err)
       }
+    }
+
+    // Sign-in secret: pure checks too, for the same reason. A client secret together with a
+    // clientSecretRef, a redacted clientSecret with no stored value to keep or with an issuerUrl the
+    // stored value was not saved with, and an authConfig carrying a clientSecret key all fail the
+    // import before apply() writes a single row.
+    m.tenants.foreach { t =>
+      val existing = storedTenants.find(x => x.id == t.name || x.displayName == t.name)
+      clientSecretInConfigError(t).foreach(err => errs += err)
+      importClientSecret(t, existing).left.foreach(err => errs += err)
     }
 
     // Dup detection
@@ -334,12 +345,15 @@ object ManifestImporter extends LazyLogging:
         // resetting it to TenantAcl() defaults. validate() has already rejected every invalid or
         // unreusable acl before this loop runs at all, so the Left branch here is unreachable in
         // practice; existingAcl is the safe fallback rather than failing a second time.
-        val existingAcl: TenantAcl =
-          snap.tenants
-            .find(t => t.id == mt.name || t.displayName == mt.name)
-            .map(_.acl)
-            .getOrElse(TenantAcl())
+        val existingTenant: Option[Tenant] =
+          snap.tenants.find(t => t.id == mt.name || t.displayName == mt.name)
+        val existingAcl: TenantAcl = existingTenant.map(_.acl).getOrElse(TenantAcl())
         val resolvedAcl: TenantAcl = importAcl(mt.name, mt.acl, existingAcl).getOrElse(existingAcl)
+        // Same snapshot and same rules as validate(), which refused every unusable clientSecret
+        // before this loop runs. Should one still fail here, the tenant is written without a
+        // secret: a stored secret is never carried to an issuer it was not saved with.
+        val resolvedSecret: Option[String] =
+          importClientSecret(mt, existingTenant).toOption.flatten
 
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
           // The tenant id IS the slug name; no opaque surrogate. displayName
@@ -352,7 +366,8 @@ object ManifestImporter extends LazyLogging:
               disabled = mt.disabled,
               authProvider = mt.authProvider,
               authConfig = mt.authConfig,
-              acl = resolvedAcl
+              acl = resolvedAcl,
+              authClientSecret = resolvedSecret
             ),
             BuiltinRbac.rowsFor(newId)
           )
@@ -363,7 +378,9 @@ object ManifestImporter extends LazyLogging:
 
         // Existing tenant: refresh top-level fields. upsertTenant never touches an existing
         // row's acl, so a manifest that carries one writes it explicitly (column-scoped); an
-        // absent acl leaves the stored one as it is.
+        // absent acl leaves the stored one as it is. The client secret, by contrast, is written
+        // together with authConfig in the same statement (see ControlPlaneStore.upsertTenant), so
+        // the secret resolved against this manifest's issuerUrl lands with that issuerUrl.
         if tenantIdFor(store, mt.name).contains(tenantId) then
           store.upsertTenant(
             Tenant(
@@ -372,7 +389,8 @@ object ManifestImporter extends LazyLogging:
               disabled = mt.disabled,
               authProvider = mt.authProvider,
               authConfig = mt.authConfig,
-              acl = resolvedAcl
+              acl = resolvedAcl,
+              authClientSecret = resolvedSecret
             )
           )
           if mt.acl.isDefined then store.updateTenantAcl(tenantId, resolvedAcl)
@@ -861,6 +879,75 @@ object ManifestImporter extends LazyLogging:
             Left(s"tenant '$tenantName': invalid opaPolicyPath '${acl.opaPolicyPath.get}'")
           else Right(acl)
         }
+
+  /** Resolve a manifest tenant's `clientSecret` against the tenant's stored row (`existing`, None
+    * for a tenant the store does not hold yet). Pure (no store access), so it runs unchanged from
+    * `validate()` (before any write) and `apply()` (to compute the row to persist).
+    *
+    * One secret source per tenant, as on `tenant/setAuth` (`secret_conflict`): a client secret (a
+    * value or the marker) together with a non-blank `clientSecretRef` in `authConfig` is refused.
+    * Otherwise, since the exporter writes a stored secret as `FederatedSecret.RedactedMarker`, the
+    * import follows the `opaToken` rules of `importAcl`:
+    *   - the marker + a stored value + the same issuer -> keep the stored value (the
+    *     re-import-without-editing case). Issuers compare through `TenantSignInWrite.issuerOf`, the
+    *     comparison `tenant/setAuth` makes.
+    *   - the marker + a stored value + a changed issuer -> refused: a stored secret is only ever
+    *     sent to the issuer it was saved with, so it never follows an issuer change.
+    *   - the marker + no stored value -> refused: there is nothing to restore.
+    *   - `""` -> no secret, as `""` clears it on `tenant/setAuth`; a whitespace-only value ->
+    *     refused, as `tenant/setAuth` refuses it.
+    *   - any other value -> stored as given; an absent field -> no secret.
+    *
+    * A `clientSecretRef` alone imports as written, whatever the issuer: manifest import is
+    * superuser-only, and on `tenant/setAuth` only a superuser may set a reference too. No message
+    * echoes a value.
+    */
+  private def importClientSecret(
+      mt: ManifestTenant,
+      existing: Option[Tenant]
+  ): Either[String, Option[String]] =
+    val carriesSecret = mt.clientSecret.exists(_.trim.nonEmpty)
+    val carriesRef    = mt.authConfig.get(TenantSignInWrite.SecretRefKey).exists(_.trim.nonEmpty)
+    if carriesSecret && carriesRef then
+      Left(
+        s"tenant '${mt.name}': a tenant holds a client secret or a clientSecretRef, not both; " +
+          "drop clientSecret or authConfig.clientSecretRef"
+      )
+    else
+      (mt.clientSecret, existing) match
+        case (Some(FederatedSecret.RedactedMarker), Some(t)) if t.authClientSecret.isDefined =>
+          val sameIssuer =
+            TenantSignInWrite.issuerOf(t.authConfig) == TenantSignInWrite.issuerOf(mt.authConfig)
+          if sameIssuer then Right(t.authClientSecret)
+          else
+            Left(
+              s"tenant '${mt.name}': clientSecret is redacted in the manifest but issuerUrl " +
+                "changed; the stored secret is not carried to a new issuer: provide the secret " +
+                "for the new issuerUrl, or omit clientSecret"
+            )
+        case (Some(FederatedSecret.RedactedMarker), _) =>
+          Left(
+            s"tenant '${mt.name}': clientSecret is redacted in the manifest and no existing " +
+              "secret to reuse; provide the value, or import without clientSecret and set it " +
+              "later with qod tenant set-auth --client-secret-prompt"
+          )
+        case (Some(v), _) if v.isEmpty      => Right(None)
+        case (Some(v), _) if v.trim.isEmpty =>
+          Left(
+            s"tenant '${mt.name}': clientSecret is blank; provide the value, or omit clientSecret"
+          )
+        case (other, _) => Right(other)
+
+  /** `authConfig` may not carry a `clientSecret` key, the rule `tenant/setAuth` applies: a secret
+    * value only ever arrives through the write-only `clientSecret` field, while `authConfig` is
+    * returned by every tenant response and exported in the clear. The message never echoes the
+    * value.
+    */
+  private def clientSecretInConfigError(mt: ManifestTenant): Option[String] =
+    Option.when(mt.authConfig.contains(TenantSignInWrite.SecretKey))(
+      s"tenant '${mt.name}': authConfig may not carry a ${TenantSignInWrite.SecretKey} key; " +
+        s"move the value to the tenant's ${TenantSignInWrite.SecretKey} field"
+    )
 
   /** Apply federated sources from a manifest tenant-db into the federated source store.
     * Replace-by-alias semantics, but only when the manifest declares at least one source: a
