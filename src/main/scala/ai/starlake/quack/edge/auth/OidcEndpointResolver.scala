@@ -2,12 +2,19 @@ package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.ManagementOidcConfig
 import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.ondemand.auth.TenantSignInWrite
 import ai.starlake.quack.secrets.SecretRefResolver
 
 /** Resolves authorize/token/end-session/jwks endpoints for an admin-UI SSO login via OIDC
-  * Discovery. System scope uses the manager-wide `auth.management.oidc`; tenant scope reads generic
-  * keys (`issuerUrl`, `clientId`, `clientSecretRef`, `scopes`) from `qodstate_tenant.authConfig`.
-  * Provider-agnostic: any OIDC-compliant issuer works.
+  * Discovery. System scope uses the manager-wide `auth.management.oidc`. Tenant scope reads
+  * `issuerUrl`, `clientId` and `scopes` from `qodstate_tenant.authConfig`, and takes its client
+  * secret from the tenant's stored value (`Tenant.authClientSecret`), else from its
+  * `clientSecretRef` reference (which only a superuser may write), resolved through `secrets`. A
+  * stored value wins when a tenant holds both, and the reference is then never resolved. The secret
+  * is only sent to the token endpoint discovered from `issuerUrl`, the issuer it was saved with:
+  * `TenantSignInWrite` keeps neither source across an issuer change. A reference parked by
+  * changeset 0048 (`clientSecretRefUnconfirmed`) is never read. Provider-agnostic: any
+  * OIDC-compliant issuer works.
   */
 class OidcEndpointResolver(
     loadTenant: String => Option[Tenant],
@@ -56,17 +63,29 @@ class OidcEndpointResolver(
           case None    => Left(OidcSsoError.ScopeNotConfigured)
           case Some(t) =>
             val cfg = t.authConfig
-            (need(cfg, "issuerUrl"), need(cfg, "clientId"), need(cfg, "clientSecretRef")) match
-              case (Some(issuer), Some(cid), Some(ref)) =>
-                secrets.resolve(ref) match
-                  case Right(secret) =>
-                    Right(ScopeOidc(issuer, cid, secret, scopesOr(cfg.getOrElse("scopes", ""))))
-                  case Left(err) =>
-                    logger.warn(
-                      s"OIDC SSO: tenant '$tenantId' clientSecretRef did not resolve ($err)"
-                    )
-                    Left(OidcSsoError.ScopeNotConfigured)
+            (need(cfg, TenantSignInWrite.IssuerKey), need(cfg, "clientId")) match
+              case (Some(issuer), Some(cid)) =>
+                tenantSecret(tenantId, t).map(secret =>
+                  ScopeOidc(issuer, cid, secret, scopesOr(cfg.getOrElse("scopes", "")))
+                )
               case _ => Left(OidcSsoError.ScopeNotConfigured)
+
+  /** The tenant's client secret: its stored value when set (no reference is consulted then), else
+    * its resolved `clientSecretRef`. Neither, or a reference that does not resolve, leaves the
+    * scope not configured.
+    */
+  private def tenantSecret(tenantId: String, t: Tenant): Either[OidcSsoError, String] =
+    t.authClientSecret match
+      case Some(value) => Right(value)
+      case None        =>
+        need(t.authConfig, TenantSignInWrite.SecretRefKey) match
+          case None      => Left(OidcSsoError.ScopeNotConfigured)
+          case Some(ref) =>
+            secrets.resolve(ref) match
+              case Right(secret) => Right(secret)
+              case Left(err)     =>
+                logger.warn(s"OIDC SSO: tenant '$tenantId' clientSecretRef did not resolve ($err)")
+                Left(OidcSsoError.ScopeNotConfigured)
 
   private def need(cfg: Map[String, String], key: String): Option[String] =
     cfg.get(key).map(_.trim).filter(_.nonEmpty)

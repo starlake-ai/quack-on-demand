@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.auth
 
 import ai.starlake.quack.ManagementOidcConfig
 import ai.starlake.quack.model.Tenant
+import ai.starlake.quack.ondemand.auth.ParkedSecretRefs
 import ai.starlake.quack.secrets.SecretRefResolver
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -69,7 +70,7 @@ class OidcEndpointResolverSpec extends AnyFlatSpec with Matchers:
     ep.clientSecret shouldBe "sys-secret"
   }
 
-  it should "resolve Tenant endpoints via discovery + resolved secret" in {
+  it should "send the resolved clientSecretRef when the tenant has no stored client secret" in {
     val ep = resolver.endpointsFor(OidcScope.Tenant("acme"), mgmt).toOption.get
     ep.clientId shouldBe "acme-app"
     ep.clientSecret shouldBe "resolved-ACME"
@@ -105,4 +106,54 @@ class OidcEndpointResolverSpec extends AnyFlatSpec with Matchers:
       .toOption
       .get
       .endSessionUrl shouldBe ""
+  }
+
+  /** Records every reference it is asked to resolve, so a test shows which secret source the
+    * resolver consulted.
+    */
+  private final class RecordingSecrets extends SecretRefResolver:
+    val asked: scala.collection.mutable.ListBuffer[String] =
+      scala.collection.mutable.ListBuffer.empty
+    def resolve(ref: String): Either[String, String] =
+      asked += ref
+      Right(s"resolved-${ref.stripPrefix("env:")}")
+
+  private val acmeSso = Map("issuerUrl" -> "https://idp.example.com", "clientId" -> "acme-app")
+
+  private def resolverFor(t: Tenant, recording: RecordingSecrets): OidcEndpointResolver =
+    new OidcEndpointResolver(
+      loadTenant = id => Option.when(id == "acme")(t),
+      secrets = recording,
+      discovery = discovery
+    )
+
+  it should "send the tenant's stored client secret when no reference is set" in {
+    val recording = new RecordingSecrets
+    val t         = tenant(acmeSso).copy(authClientSecret = Some("stored-value"))
+    val ep = resolverFor(t, recording).endpointsFor(OidcScope.Tenant("acme"), mgmt).toOption.get
+    ep.clientId shouldBe "acme-app"
+    ep.clientSecret shouldBe "stored-value"
+    recording.asked.toList shouldBe Nil
+  }
+
+  it should "send the stored client secret, never the reference, when a tenant holds both" in {
+    val recording = new RecordingSecrets
+    val t         = tenant(acmeSso + ("clientSecretRef" -> "env:ACME"))
+      .copy(authClientSecret = Some("stored-value"))
+    val ep = resolverFor(t, recording).endpointsFor(OidcScope.Tenant("acme"), mgmt).toOption.get
+    ep.clientSecret shouldBe "stored-value"
+    recording.asked.toList shouldBe Nil
+  }
+
+  it should "refuse a tenant scope holding neither a stored client secret nor a reference" in {
+    resolverFor(tenant(acmeSso), new RecordingSecrets)
+      .endpointsFor(OidcScope.Tenant("acme"), mgmt) shouldBe Left(OidcSsoError.ScopeNotConfigured)
+  }
+
+  it should "never resolve a reference parked by changeset 0048" in {
+    val recording = new RecordingSecrets
+    val t         = tenant(acmeSso + (ParkedSecretRefs.ParkedKey -> "env:ACME"))
+    resolverFor(t, recording).endpointsFor(OidcScope.Tenant("acme"), mgmt) shouldBe
+      Left(OidcSsoError.ScopeNotConfigured)
+    recording.asked.toList shouldBe Nil
   }

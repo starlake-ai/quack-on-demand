@@ -16,11 +16,14 @@ package ai.starlake.quack.model
   *   - `authProvider` : one of {db, keycloak, google, azure, aws}. Defaults to `db` -- the username
   *     on `qodstate_user` IS the identity, no extra configuration needed.
   *   - `authConfig` : provider-specific config. Empty for `db`. For OIDC providers, the keys read
-  *     by [[ai.starlake.quack.edge.auth.TenantOidcRegistry]] are: `keycloak` -> baseUrl + realm +
-  *     clientId + clientSecretRef; `google` -> clientId + clientSecretRef; `azure` -> tenantId +
-  *     clientId + clientSecretRef; `aws` -> region + userPoolId + clientId. The override is
+  *     by [[ai.starlake.quack.edge.auth.TenantOidcRegistry]] (FlightSQL bearer validation: public
+  *     fields only, no secret) are: `keycloak` -> baseUrl + realm + clientId; `google` -> clientId;
+  *     `azure` -> tenantId + clientId; `aws` -> region + userPoolId + clientId. The override is
   *     all-or-nothing per provider: missing required keys fall back to the manager-wide
-  *     `quack-flightsql.auth.<provider>.*` config.
+  *     `quack-flightsql.auth.<provider>.*` config. The admin-console SSO
+  *     ([[ai.starlake.quack.edge.auth.OidcEndpointResolver]]) reads issuerUrl + clientId + scopes
+  *     (optional) and takes its client secret from `authClientSecret`, else from the
+  *     `clientSecretRef` reference (`env:NAME`, which only a superuser may write).
   *   - `authClientSecret` : the tenant's own OIDC client secret for admin-console SSO
   *     (`qodstate_tenant.auth_client_secret`, Liquibase 0048). Write-only: responses expose only
   *     whether it is set, and `toString` redacts it. It is bound to the `issuerUrl` of `authConfig`

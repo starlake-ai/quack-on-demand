@@ -7,7 +7,6 @@ import ai.starlake.quack.edge.config.{
   KeycloakAuthConfig
 }
 import ai.starlake.quack.model.Tenant
-import ai.starlake.quack.secrets.SecretRefResolver
 import com.typesafe.scalalogging.LazyLogging
 
 import java.util.concurrent.ConcurrentHashMap
@@ -28,15 +27,16 @@ import java.util.concurrent.ConcurrentHashMap
   *     `authConfig`. The `setTenantAuth` REST handler MUST call this when it mutates a tenant's
   *     auth.
   *
-  * Per-tenant secrets are never stored as literals: `authConfig.clientSecretRef` must be a prefixed
-  * reference (e.g. `env:GOOGLE_CS_TPCH`) that the
-  * [[ai.starlake.quack.secrets.SecretRefResolver SecretRefResolver]] turns into the plaintext value
-  * at registry-build time. AWS Cognito JWT validation doesn't need a client secret, so the AWS
-  * builder skips the secret-ref lookup entirely.
+  * Bearer validation needs public fields only: where the provider publishes its signing keys, and
+  * the issuer and client id (the audience) a token must carry. Every builder therefore reads public
+  * `authConfig` keys alone (`keycloak`: baseUrl + realm + clientId; `google`: clientId; `azure`:
+  * tenantId + clientId; `aws`: region + userPoolId + clientId) and resolves no secret. A tenant's
+  * stored client secret and its `clientSecretRef` serve the admin-console SSO code exchange only
+  * ([[OidcEndpointResolver]]); the provider configs built here carry `clientSecret = ""`, a field
+  * [[OidcProviderFactory]] never reads.
   */
 final class TenantOidcRegistry(
     loadTenant: String => Option[Tenant],
-    secrets: SecretRefResolver,
     roleClaim: String
 ) extends LazyLogging:
 
@@ -46,8 +46,8 @@ final class TenantOidcRegistry(
 
   /** Look up the per-tenant authenticator for `tenantId`. The provider is determined by the
     * tenant's `authProvider` field. Returns `None` when the tenant doesn't exist, when the provider
-    * is unsupported, or when the required per-tenant fields are absent / unresolvable -- the caller
-    * falls back to the global chain.
+    * is unsupported, or when the provider's required per-tenant fields are absent: the caller falls
+    * back to the global chain.
     */
   def forTenant(tenantId: String): Option[OidcBearerAuthenticator] =
     cache.computeIfAbsent(tenantId, build)
@@ -77,30 +77,13 @@ final class TenantOidcRegistry(
   private def need(cfg: Map[String, String], key: String): Option[String] =
     cfg.get(key).map(_.trim).filter(_.nonEmpty)
 
-  private def resolveSecret(
-      tenantId: String,
-      provider: String,
-      ref: String
-  ): Option[String] =
-    secrets.resolve(ref) match
-      case Right(v)  => Some(v)
-      case Left(err) =>
-        logger.warn(
-          s"TenantOidcRegistry: tenant '$tenantId' $provider clientSecretRef did not resolve " +
-            s"($err); skipping per-tenant client and falling back to global"
-        )
-        None
-
   private def buildGoogle(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
-    for
-      cid    <- need(t.authConfig, "clientId")
-      ref    <- need(t.authConfig, "clientSecretRef")
-      secret <- resolveSecret(tenantId, "google", ref)
+    for cid <- need(t.authConfig, "clientId")
     yield
       val cfg = GoogleAuthConfig(
         enabled = true,
         clientId = cid,
-        clientSecret = secret,
+        clientSecret = "",
         groupsLookup = false,
         serviceAccountKeyPath = "",
         groupsCacheTtlSeconds = 300L
@@ -116,15 +99,13 @@ final class TenantOidcRegistry(
       baseUrl <- need(t.authConfig, "baseUrl")
       realm   <- need(t.authConfig, "realm")
       cid     <- need(t.authConfig, "clientId")
-      ref     <- need(t.authConfig, "clientSecretRef")
-      secret  <- resolveSecret(tenantId, "keycloak", ref)
     yield
       val cfg = KeycloakAuthConfig(
         enabled = true,
         baseUrl = baseUrl,
         realm = realm,
         clientId = cid,
-        clientSecret = secret
+        clientSecret = ""
       )
       logger.info(
         s"TenantOidcRegistry: built per-tenant Keycloak authenticator for tenant '$tenantId' " +
@@ -136,14 +117,12 @@ final class TenantOidcRegistry(
     for
       aadTenant <- need(t.authConfig, "tenantId")
       cid       <- need(t.authConfig, "clientId")
-      ref       <- need(t.authConfig, "clientSecretRef")
-      secret    <- resolveSecret(tenantId, "azure", ref)
     yield
       val cfg = AzureAuthConfig(
         enabled = true,
         tenantId = aadTenant,
         clientId = cid,
-        clientSecret = secret
+        clientSecret = ""
       )
       logger.info(
         s"TenantOidcRegistry: built per-tenant Azure authenticator for tenant '$tenantId' " +
@@ -151,8 +130,8 @@ final class TenantOidcRegistry(
       )
       OidcProviderFactory.createAzure(cfg, roleClaim)
 
-  // AWS Cognito JWT validation needs only the JWKS URL (region + userPoolId) and the app client
-  // ID; no client secret is required. So no SecretRefResolver round-trip for AWS.
+  // AWS Cognito: the JWKS URL and the issuer come from region + userPoolId, the audience is the
+  // app client id.
   private def buildAws(tenantId: String, t: Tenant): Option[OidcBearerAuthenticator] =
     for
       region <- need(t.authConfig, "region")

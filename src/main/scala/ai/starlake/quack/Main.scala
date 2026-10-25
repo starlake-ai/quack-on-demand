@@ -538,11 +538,11 @@ object Main extends IOApp with LazyLogging:
         () => ai.starlake.quack.ondemand.api.FleetHandlers.livenessByName(store, fb)
     }
 
-    // Tenants with their own OIDC clientId/clientSecretRef get a per-tenant
-    // authenticator; others fall back to the manager-wide auth.google block.
+    // Tenants whose authConfig carries their provider's public client fields get a per-tenant
+    // bearer authenticator (no secret involved); the others fall back to the manager-wide
+    // quack-flightsql.auth.<provider> block.
     val tenantOidcRegistry = new ai.starlake.quack.edge.auth.TenantOidcRegistry(
       loadTenant = id => sup.getTenantById(id),
-      secrets = ai.starlake.quack.secrets.SecretRefResolver.default,
       roleClaim = authCfg.roleClaim
     )
     val authService = new AuthenticationService(
