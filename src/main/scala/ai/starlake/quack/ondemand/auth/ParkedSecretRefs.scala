@@ -39,8 +39,9 @@ object ParkedSecretRefs extends LazyLogging:
     ).map(_.toInt)
 
   /** What a stored reference must match, whole, to be put into the restore command: a word that
-    * needs no quoting in any shell. Nothing stored is ever quoted or escaped, because POSIX shells,
-    * fish, cmd.exe and PowerShell all parse quotes and escapes differently.
+    * needs no quoting in any shell. Nothing stored is ever quoted or escaped in the command,
+    * because POSIX shells, fish, cmd.exe and PowerShell all parse quotes and escapes differently
+    * (the prose display of a stored value does escape it, see [[display]]; it is not a command).
     */
   private val CommandSafe: String = "[A-Za-z0-9_:./=-]+"
 
@@ -52,18 +53,28 @@ object ParkedSecretRefs extends LazyLogging:
   private val ConfirmAdvice: String =
     s"Confirm the reference is meant for this tenant and $ReplacesMap"
 
-  /** The advice for a reference outside [[CommandSafe]]: the command shows `...` for it. */
+  /** The advice for a reference outside [[CommandSafe]]: the command shows `...` for it. The value
+    * shown earlier in the line is sanitized, cut at [[ShownLimit]] code points and escaped (see
+    * [[display]]), so the advice sends the operator to the full stored value, which the tenant's
+    * auth config holds under [[ParkedKey]] and `qod tenant list` prints.
+    */
   private val TypeByHandAdvice: String =
     "The stored value, shown sanitized earlier in this line (control and format characters " +
-      "print as ?), holds characters outside [A-Za-z0-9_:./=-], so the command at the end of " +
-      "the line does not carry it: check that it is meant for this tenant and type it by hand, " +
+      s"print as ?, one longer than $ShownLimit code points is cut, and each backslash and " +
+      "quote is escaped), holds characters outside [A-Za-z0-9_:./=-], so the command at the " +
+      "end of the line does not carry it: read the full stored value in the tenant's auth " +
+      "config (qod tenant list), check that it is meant for this tenant and type it by hand, " +
       s"and $ReplacesMap"
 
-  /** The advice for a value that is not a reference: there is nothing to confirm or restore. */
-  private val NotAReferenceAdvice: String =
+  /** The advice for a value that is not a reference: there is nothing to confirm or restore, so it
+    * names both routes to a secret source, the tenant's own client secret (no reference involved)
+    * and a reference.
+    */
+  private def notAReferenceAdvice(id: String): String =
     "The stored value is not a secret reference, so there is nothing to confirm: a superuser " +
-      "sets a secret source for the tenant (a client secret or a reference) and must " +
-      ReplacesMap
+      "sets a secret source for the tenant, either its own client secret (qod tenant set-auth " +
+      s"$id ... --client-secret-prompt) or a reference (the command at the end of the line), " +
+      s"and must $ReplacesMap"
 
   /** One message per tenant holding [[ParkedKey]], in the order given: the tenant, the parked
     * reference, the advice and, last on the line, the restore command, so selecting from `qod` to
@@ -86,7 +97,7 @@ object ParkedSecretRefs extends LazyLogging:
         val advice      =
           if inCommand then ConfirmAdvice
           else if isReference then TypeByHandAdvice
-          else NotAReferenceAdvice
+          else notAReferenceAdvice(t.id)
         s"tenant '${t.id}': clientSecretRef $shown was stored before changeset 0048, which " +
           "parked it because its author is not recorded; nothing reads it, so the tenant's SSO " +
           s"gets no client secret from it. $advice Then a superuser runs: " +

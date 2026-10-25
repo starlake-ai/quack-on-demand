@@ -97,6 +97,11 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
     m should include("type it by hand")
     m should not include "shown sanitized above"
     m should not include "the command below"
+    // The line shows the value cut and escaped, so the full stored value is read from the tenant.
+    m should include(
+      "one longer than 40 code points is cut, and each backslash and quote is escaped"
+    )
+    m should include("read the full stored value in the tenant's auth config (qod tenant list)")
 
   it should "never show a complete restore command carried by a stored value" in:
     val forged =
@@ -151,7 +156,11 @@ class ParkedSecretRefsSpec extends AnyFlatSpec with Matchers:
     val m = messageFor("hunter2-literal")
     m should include("The stored value is not a secret reference")
     m should include("a superuser sets a secret source for the tenant")
-    m should include("(a client secret or a reference)")
+    // Both routes are named: the tenant's own client secret (no reference needed) and a reference.
+    m should include(
+      "either its own client secret (qod tenant set-auth acme ... --client-secret-prompt)"
+    )
+    m should include("or a reference (the command at the end of the line)")
     m should not include "Confirm the reference is meant for this tenant"
     commandOf(m) should startWith("qod tenant set-auth acme")
 

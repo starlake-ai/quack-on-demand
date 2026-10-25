@@ -130,8 +130,9 @@ final class McpIdentityTools(
   )
 
   /** `str` trims and drops a blank string to None, so it cannot express "clear this field" for an
-    * Option[String] patch field where "" is meaningful (see [[SetTenantAclRequest]]). Read the raw
-    * JSON value instead: absent -> None (keep), "" -> Some("") (clear), non-empty -> Some(value).
+    * Option[String] patch field where "" is meaningful (see [[SetTenantAclRequest]] and
+    * `SetTenantAuthRequest.clientSecret`). Read the raw JSON value instead: absent -> None (keep),
+    * "" -> Some("") (clear), non-empty -> Some(value).
     */
   private def rawStr(args: JsonObject, name: String): Option[String] =
     args(name).flatMap(_.asString)
@@ -172,12 +173,19 @@ final class McpIdentityTools(
 
   private val setTenantAuthTool = McpToolDef(
     name = "set_tenant_auth",
-    description = "Set a tenant's auth provider and provider config.",
+    description = "Set a tenant's auth provider, provider config and OIDC client secret. " +
+      "auth_config replaces the stored config. client_secret is write-only: omitted keeps the " +
+      "stored secret while issuerUrl is unchanged, empty string removes it. Adding or changing " +
+      "clientSecretRef (a secret of the manager's environment) needs a superuser credential.",
     inputSchema = objectSchema(
       required = List("name", "auth_provider"),
       props = "name" -> strProp("Tenant id."),
       "auth_provider" -> strProp("One of db|keycloak|google|azure|aws."),
-      "auth_config"   -> objProp("Provider config object.")
+      "auth_config"   -> objProp("Provider config object; replaces the stored one."),
+      "client_secret" -> strProp(
+        "OIDC client secret (write-only). Omit to keep the stored one (dropped when issuerUrl " +
+          "changes); empty string removes it."
+      )
     ),
     adminOnly = true,
     run = (principal, args) =>
@@ -189,7 +197,12 @@ final class McpIdentityTools(
         case Right((name, provider)) =>
           tenants
             .setTenantAuth(
-              SetTenantAuthRequest(name, provider, mapArg(args, "auth_config")),
+              SetTenantAuthRequest(
+                name,
+                provider,
+                mapArg(args, "auth_config"),
+                rawStr(args, "client_secret")
+              ),
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))

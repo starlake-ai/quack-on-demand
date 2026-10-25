@@ -1553,13 +1553,17 @@ final class PoolSupervisor(
       }
     }
 
-  /** Swap the tenant's auth provider + provider config. Existing users/roles/groups unchanged.
-    * Config-shape validation lives in the REST handler so the supervisor stays storage-only.
+  /** Store the tenant's sign-in state as given: provider, provider config and client secret, the
+    * complete state [[ai.starlake.quack.ondemand.auth.TenantSignInWrite]] computed in the REST
+    * handler, which owns the write rules so the supervisor stays storage-only (the provider is
+    * still checked here). Existing users/roles/groups unchanged. `authClientSecret` has no default:
+    * a caller that forgot it would silently clear a stored secret.
     */
   def setTenantAuth(
       name: String,
       authProvider: String,
-      authConfig: Map[String, String]
+      authConfig: Map[String, String],
+      authClientSecret: Option[String]
   ): IO[Either[SupervisorError, Tenant]] = IO.blocking {
     withCacheRecovery("setTenantAuth") {
       if !Tenant.ValidAuthProviders.contains(authProvider) then
@@ -1572,7 +1576,11 @@ final class PoolSupervisor(
         getTenant(name) match
           case None    => Left(SupervisorError.NotFound(s"tenant not found: $name"))
           case Some(t) =>
-            val updated = t.copy(authProvider = authProvider, authConfig = authConfig)
+            val updated = t.copy(
+              authProvider = authProvider,
+              authConfig = authConfig,
+              authClientSecret = authClientSecret
+            )
             store.upsertTenant(updated)
             tenants.put(updated.id, updated)
             publish.topologyChanged()

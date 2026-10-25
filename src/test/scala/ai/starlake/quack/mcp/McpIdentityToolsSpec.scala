@@ -169,6 +169,54 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     out.toOption.get.noSpaces should not include "tok"
   }
 
+  "set_tenant_auth" should "store client_secret write-only and report clientSecretSet" in {
+    val f = new Fixture
+    f.call("create_tenant", McpPrincipal.StaticKey, "id" -> Json.fromString("acme"))
+    f.tools.tools
+      .find(_.name == "set_tenant_auth")
+      .get
+      .inputSchema
+      .hcursor
+      .downField("properties")
+      .downField("client_secret")
+      .get[String]("type") shouldBe Right("string")
+    val config = Json.obj(
+      "issuerUrl" -> Json.fromString("https://idp.example.com/realms/acme"),
+      "clientId"  -> Json.fromString("qod")
+    )
+    def setAuth(secret: String) = f.call(
+      "set_tenant_auth",
+      adminPat(),
+      "name"          -> Json.fromString("acme"),
+      "auth_provider" -> Json.fromString("keycloak"),
+      "auth_config"   -> config,
+      "client_secret" -> Json.fromString(secret)
+    )
+    val set = setAuth("kc-s3cr3t")
+    set.isRight shouldBe true
+    set.toOption.get.hcursor.get[Boolean]("clientSecretSet") shouldBe Right(true)
+    set.toOption.get.noSpaces should not include "kc-s3cr3t"
+    f.store.listTenants().find(_.id == "acme").flatMap(_.authClientSecret) shouldBe
+      Some("kc-s3cr3t")
+    setAuth("").toOption.get.hcursor.get[Boolean]("clientSecretSet") shouldBe Right(false)
+  }
+
+  it should "refuse a tenant admin PAT adding clientSecretRef, storing nothing" in {
+    val f   = new Fixture
+    f.call("create_tenant", McpPrincipal.StaticKey, "id" -> Json.fromString("acme"))
+    val out = f.call(
+      "set_tenant_auth",
+      adminPat(),
+      "name"          -> Json.fromString("acme"),
+      "auth_provider" -> Json.fromString("keycloak"),
+      "auth_config"   -> Json.obj(
+        "clientSecretRef" -> Json.fromString("env:AWS_SECRET_ACCESS_KEY")
+      )
+    )
+    out.left.toOption.get should startWith("superuser_required")
+    f.store.listTenants().find(_.id == "acme").map(_.authProvider) shouldBe Some("db")
+  }
+
   "create_user" should "create a tenant user and list it" in {
     val f       = new Fixture
     f.call("create_tenant", McpPrincipal.StaticKey, "id" -> Json.fromString("acme"))

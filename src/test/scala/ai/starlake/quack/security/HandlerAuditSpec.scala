@@ -121,6 +121,55 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     e.tenant shouldBe Some(tid)
   }
 
+  "TenantHandlers.setTenantAuth" should
+    "audit ok with clientKey -> changed when the write sends a client secret, never the value" in {
+      val store = new RecordingTelemetryStore
+      val audit = new AuditRecorder(store, _ => None)
+      val fix   = SecurityFixtures.freshStore()
+      val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+      sup.restore()
+      val tenants = new TenantHandlers(sup, audit = audit)
+      val req     = SetTenantAuthRequest(
+        SecurityFixtures.TenantId,
+        "keycloak",
+        Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
+        clientSecret = Some("kc-s3cr3t")
+      )
+      // Static-key token: scopeOf returns None (no session row), so the caller is a superuser.
+      tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+        true
+      val e = store.events.find(_.action == "tenant.auth.update").value
+      e.outcome shouldBe "ok"
+      e.tenant shouldBe Some(SecurityFixtures.TenantId)
+      e.detail shouldBe Map("authProvider" -> "keycloak", "clientKey" -> "changed")
+    }
+
+  it should "audit denied with the refusal code when a write rule refuses it, storing nothing" in {
+    val store = new RecordingTelemetryStore
+    val audit = new AuditRecorder(store, _ => None)
+    val fix   = SecurityFixtures.freshStore()
+    val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+    sup.restore()
+    val tenants = new TenantHandlers(sup, audit = audit)
+    val req     = SetTenantAuthRequest(
+      SecurityFixtures.TenantId,
+      "keycloak",
+      Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientSecretRef" -> "env:X"),
+      clientSecret = Some("kc-s3cr3t")
+    )
+    val tenantAdmin =
+      SessionScope(superuser = false, manageableTenants = Set(SecurityFixtures.TenantId))
+    val out = tenants.setTenantAuth(req, Some("alice-session"))(_ => Some(tenantAdmin))
+    out.unsafeRunSync().left.map(_._1.code) shouldBe Left(403)
+    val rows = store.events.filter(_.action == "tenant.auth.update")
+    rows.map(_.outcome) shouldBe List("denied")
+    rows.head.tenant shouldBe Some(SecurityFixtures.TenantId)
+    // The refusal code, never the request: no secret value, no reference in the row.
+    rows.head.detail shouldBe Map("reason" -> "superuser_required")
+    fix.store.listTenants().find(_.id == SecurityFixtures.TenantId).map(_.authProvider) shouldBe
+      Some("db")
+  }
+
   // ---------------------------------------------------------------------------
   // In-memory FederatedSourceOps stub for federation audit tests.
   // ---------------------------------------------------------------------------

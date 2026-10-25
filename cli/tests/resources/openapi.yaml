@@ -10020,6 +10020,8 @@ components:
           type: string
         authConfig:
           $ref: '#/components/schemas/Map_String'
+        clientSecret:
+          type: string
     SetTenantDisabledRequest:
       title: SetTenantDisabledRequest
       type: object
@@ -10396,6 +10398,7 @@ components:
       - authConfig
       - opaTokenSet
       - opaSendStatementText
+      - clientSecretSet
       properties:
         name:
           type: string
@@ -10422,6 +10425,8 @@ components:
         opaTokenSet:
           type: boolean
         opaSendStatementText:
+          type: boolean
+        clientSecretSet:
           type: boolean
     TrendBucketEntry:
       title: TrendBucketEntry
