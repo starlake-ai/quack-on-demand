@@ -58,10 +58,12 @@ enum RequiredScope:
   *     answered by the manager-wide Keycloak or Azure password grant, and under
   *     `identitySource=oidc` every system login (the database authenticator's too). The IdP's
   *     `role` and any tenant claim are discarded; `grantsForIdentity` is consulted with the
-  *     profile's username (the JWT's `preferred_username`; the `email` as fallback for an SSO token
-  *     whose IdP marks it verified, never for a password login), in the realm the login was
-  *     verified in: a tenant login reads only that tenant's rows, the system login the rows of
-  *     every realm ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
+  *     profile's username (the JWT's `preferred_username`, else its `email` claim, else its
+  *     subject; a name that came from the email claim binds a row only when the IdP marks the
+  *     address verified; the `email` also as fallback for an SSO token whose IdP marks it verified,
+  *     never for a password login), in the realm the login was verified in: a tenant login reads
+  *     only that tenant's rows, the system login the rows of every realm
+  *     ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
   *
   * Either way the grants collapse to a
   * [[ai.starlake.quack.ondemand.auth.SessionScope SessionScope]] carrying `superuser` and
@@ -206,6 +208,13 @@ final class AuthHandlers(
   private def clearStateCookie(forwardedProto: Option[String]): CookieValueWithMeta =
     cookie("", 0L, forwardedProto)
 
+  /** A tenant's SSO is served only while the tenant itself signs in through its IdP. A tenant
+    * switched to `db` without clearing its auth config (or one whose sign-in is incomplete) keeps
+    * no SSO, so the leftover issuer and client are not a way in.
+    */
+  private def tenantSsoEnabled(tenantId: String): Boolean =
+    authModeResolver.modeFor(Some(tenantId)) == Right(ManagementAuthMode.Oidc)
+
   def oidcStart(
       tenant: Option[String],
       returnTo: Option[String],
@@ -218,18 +227,29 @@ final class AuthHandlers(
         val scope = tenant.map(_.trim).filter(_.nonEmpty) match
           case Some(t) => OidcScope.Tenant(resolveTenant(t).getOrElse(t))
           case None    => OidcScope.System
-        val seed = java.util.UUID.randomUUID().toString
-        svc.startAuth(scope, returnTo.getOrElse("/ui/"), seed) match
-          case Left(err) =>
-            Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
-          case Right(req) =>
-            Right(
-              (
-                StatusCode.Found,
-                req.redirectLocation,
-                stateCookie(req.stateCookieValue, forwardedProto)
-              )
+        val allowed = scope match
+          case OidcScope.System    => true
+          case OidcScope.Tenant(t) => tenantSsoEnabled(t)
+        if !allowed then
+          Left(
+            (
+              StatusCode.BadRequest,
+              ErrorResponse("oidc_not_configured", "OIDC start failed")
             )
+          )
+        else
+          val seed = java.util.UUID.randomUUID().toString
+          svc.startAuth(scope, returnTo.getOrElse("/ui/"), seed) match
+            case Left(err) =>
+              Left((StatusCode.BadRequest, ErrorResponse(err.code, "OIDC start failed")))
+            case Right(req) =>
+              Right(
+                (
+                  StatusCode.Found,
+                  req.redirectLocation,
+                  stateCookie(req.stateCookieValue, forwardedProto)
+                )
+              )
   }
 
   def oidcCallback(
@@ -257,6 +277,16 @@ final class AuthHandlers(
             (
               StatusCode.Found,
               s"/ui/?error=${err.code}",
+              clearCookie(forwardedProto),
+              clearStateCookie(forwardedProto)
+            )
+          case Right(result) if result.scope match
+                case OidcScope.System    => false
+                case OidcScope.Tenant(t) => !tenantSsoEnabled(t)
+              =>
+            (
+              StatusCode.Found,
+              "/ui/?error=oidc_not_configured",
               clearCookie(forwardedProto),
               clearStateCookie(forwardedProto)
             )
@@ -558,13 +588,34 @@ final class AuthHandlers(
               Right(())
   }
 
-  /** The email claim of an SSO token, only when the IdP marks it verified (`email_verified` true;
-    * the flattened claims hold the string "true" for a JSON boolean or a string alike). An address
-    * the IdP does not vouch for is whatever its account holder typed, so it must not name a
-    * `qodstate_user` row: an unverified address equal to the superuser's user name would bind it.
+  /** Whether the IdP marks the token's email address verified: `email_verified` is true (the
+    * flattened claims hold the string "true" for a JSON boolean or a string alike). Anything else,
+    * `True` included, is not verified, so a doubtful value fails closed.
+    */
+  private def emailVerified(profile: AuthenticatedProfile): Boolean =
+    profile.claims.get("email_verified").contains("true")
+
+  /** The email claim of an SSO token, only when the IdP marks it verified. An address the IdP does
+    * not vouch for is whatever its account holder typed, so it must not name a `qodstate_user` row:
+    * an unverified address equal to the superuser's user name would bind it.
     */
   private def verifiedEmail(profile: AuthenticatedProfile): Option[String] =
-    profile.claims.get("email").filter(_ => profile.claims.get("email_verified").contains("true"))
+    profile.claims.get("email").filter(_ => emailVerified(profile))
+
+  /** Whether the user name of a profile whose identity an identity provider proved may name a
+    * `qodstate_user` row. Both IdP authenticators (`OidcBearerAuthenticator`,
+    * `ResourceOwnerPasswordAuthenticator`) name the user by the token's `preferred_username`, else
+    * its `email` claim, else its subject. A name that came from the email claim (the claims carry
+    * no `preferred_username` and the `email` claim equals the user name) is an address its account
+    * holder may have typed, which could be the name of the superuser's row (the seeded
+    * `admin@localhost.local`): it counts only when the IdP marks the address verified. Any other
+    * name (a `preferred_username`, a subject) counts as it is. A name that does not count binds
+    * nothing: the login is `403 not_provisioned`.
+    */
+  private def userNameMayBindRow(profile: AuthenticatedProfile): Boolean =
+    val nameIsEmail = !profile.claims.contains("preferred_username") &&
+      profile.claims.get("email").contains(profile.username)
+    !nameIsEmail || emailVerified(profile)
 
   /** Shared authorization + session minting for both the password login and the OIDC callback.
     *
@@ -593,6 +644,11 @@ final class AuthHandlers(
     * the issuer host, which a tenant admin picks), so the audit rows, the `SessionOpened` event,
     * the token and a personal access token minted from the session all name the tenant the login
     * was verified for. A database-authenticator profile already carries the verified row's.
+    *
+    * The user name of such a profile binds a row only when `userNameMayBindRow` allows it: a name
+    * that fell back to the token's email claim (no `preferred_username`, the email equals the user
+    * name) counts only when the IdP marks the address verified, else nothing binds and the login is
+    * `403 not_provisioned`, with no lookup.
     *
     * `lookupEmail` is the email the lookup may fall back to when the user name matches no row. The
     * entry point decides it, never this method: an email is whatever its account holder typed
@@ -628,6 +684,7 @@ final class AuthHandlers(
     val verifiedRow  = mode == ManagementAuthMode.Db && fromDatabase
     val grants       =
       if verifiedRow then List(UserGrant(authenticated.tenant, authenticated.role))
+      else if !userNameMayBindRow(authenticated) then Nil
       else
         grantsForIdentity(loginRealm, authenticated.username, lookupEmail)
           .filter(loginRealm.admits)

@@ -609,20 +609,24 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
   private val AcmeId = "t-acme"
 
   /** The profile of a manager-wide password-grant backend: no tenant, the IdP's role claim (admin
-    * unless a test says otherwise), and the email claim when the IdP issued one.
+    * unless a test says otherwise), and the claims `ResourceOwnerPasswordAuthenticator` carries
+    * when the token has them: the email, the `preferred_username` and `email_verified`.
     */
   private def passwordGrantProfile(
       username: String = "alice",
       authMethod: String = "keycloak-ropc",
       role: String = "admin",
-      email: Option[String] = None
+      email: Option[String] = None,
+      preferredUsername: Option[String] = None,
+      emailVerified: Option[String] = None
   ): AuthenticatedProfile =
     AuthenticatedProfile(
       username = username,
       role = role,
       groups = Set(role),
       claims = Map("sub" -> username, "role" -> role, "auth_method" -> authMethod) ++
-        email.map("email" -> _),
+        email.map("email" -> _) ++ preferredUsername.map("preferred_username" -> _) ++
+        emailVerified.map("email_verified" -> _),
       authMethod = authMethod,
       tenant = None
     )
@@ -1028,6 +1032,139 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     tokens.get(resp.token).map(_.profile.tenant) shouldBe Some(None)
   }
 
+  // ----- a user name that is the email claim -----
+  //
+  // Both IdP authenticators name the user preferred_username, else the email claim, else the
+  // subject. A token without preferred_username is therefore named by its email, which its account
+  // holder may have typed: that name binds a row only when the IdP marks the address verified
+  // (email_verified true). The seeded superuser admin@localhost.local is the row to protect.
+
+  private val SeededSuperuser = "admin@localhost.local"
+
+  private def superuserRow = Map((LoginRealm.System, SeededSuperuser) -> List(UserGrant(None, "admin")))
+
+  it should "refuse a login without tenant whose user name is the email claim when the IdP does not mark it verified: the superuser row of that name stays unbound" in
+    Seq(None, Some("false")).foreach { verified =>
+      withClue(s"[email_verified=$verified] ") {
+        val directory = new RecordingDirectory(superuserRow)
+        val h         = makeHandlers(
+          Right(
+            passwordGrantProfile(
+              username = SeededSuperuser,
+              email = Some(SeededSuperuser),
+              emailVerified = verified
+            )
+          ),
+          noCalls(),
+          grantsForIdentity = directory.lookup
+        )
+
+        val out = h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync()
+
+        refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+        directory.asked shouldBe empty
+      }
+    }
+
+  it should "bind the superuser row of a user name that is the email claim once the IdP marks the address verified (email_verified true)" in {
+    val directory = new RecordingDirectory(superuserRow)
+    val h         = makeHandlers(
+      Right(
+        passwordGrantProfile(
+          username = SeededSuperuser,
+          email = Some(SeededSuperuser),
+          emailVerified = Some("true")
+        )
+      ),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync())
+
+    resp.superuser shouldBe true
+    directory.asked.toList shouldBe List((LoginRealm.System, SeededSuperuser, None))
+  }
+
+  it should "refuse a tenant login whose user name is an unverified email claim, and bind the tenant's row once the address is verified" in {
+    val boss      = "boss@acme.example"
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), boss) -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    def login(verified: Option[String]): LoginOutcome =
+      makeHandlers(
+        Right(passwordGrantProfile(username = boss, email = Some(boss), emailVerified = verified)),
+        noCalls(),
+        grantsForIdentity = directory.lookup
+      ).login(LoginRequest(boss, "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(login(None)) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    refusalOf(login(Some("false"))) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked shouldBe empty
+    sessionOf(login(Some("true"))).manageableTenants shouldBe List(AcmeId)
+  }
+
+  it should "count only the exact string true as verified: True, 1 and yes are not" in
+    Seq("True", "TRUE", "1", "yes", "").foreach { verified =>
+      withClue(s"[email_verified=$verified] ") {
+        val h = makeHandlers(
+          Right(
+            passwordGrantProfile(
+              username = SeededSuperuser,
+              email = Some(SeededSuperuser),
+              emailVerified = Some(verified)
+            )
+          ),
+          noCalls(),
+          grantsForIdentity = new RecordingDirectory(superuserRow).lookup
+        )
+
+        val out = h.login(LoginRequest(SeededSuperuser, "pw", tenant = None)).unsafeRunSync()
+
+        refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+      }
+    }
+
+  it should "leave a user name the IdP supplied as preferred_username alone, whatever its email claim says" in {
+    // preferred_username is the IdP account's name, assigned by an administrator: only a name that
+    // fell back to the email claim is a value its holder may have typed.
+    val boss      = "boss@acme.example"
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), boss) -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(
+        passwordGrantProfile(
+          username = boss,
+          email = Some(boss),
+          preferredUsername = Some(boss),
+          emailVerified = Some("false")
+        )
+      ),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest(boss, "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.manageableTenants shouldBe List(AcmeId)
+  }
+
+  it should "leave a user name that is not the email claim alone: an email claim of another address does not matter" in {
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(email = Some("alice@acme.example"), emailVerified = Some("false"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val resp = sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+
+    resp.manageableTenants shouldBe List(AcmeId)
+  }
+
   "whoami" should "surface the tenant and scope from the stored session" in {
     val profile = AuthenticatedProfile(
       username = "alice",
@@ -1178,7 +1315,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         username = "alice@corp",
         role = "user", // claim role MUST be ignored
         groups = Set.empty,
-        claims = Map("email" -> "alice@corp"),
+        // The IdP names the account alice@corp (preferred_username), as Keycloak's tokens do.
+        claims = Map("preferred_username" -> "alice@corp", "email" -> "alice@corp"),
         authMethod = "keycloak-ropc",
         tenant = None
       ),
@@ -1281,7 +1419,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       username = "imposter",
       role = "admin",
       groups = Set("admin"),
-      claims = Map("email" -> "imposter"),
+      claims = Map("preferred_username" -> "imposter", "email" -> "imposter"),
       authMethod = "keycloak-ropc",
       tenant = None
     )
@@ -1323,7 +1461,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       username = "alice@corp",
       role = "user", // IdP claim, no authority
       groups = Set.empty,
-      claims = Map("email" -> "alice@corp"),
+      claims = Map("preferred_username" -> "alice@corp", "email" -> "alice@corp"),
       authMethod = "keycloak-ropc",
       tenant = None
     )
@@ -1355,4 +1493,29 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
     r.superuser shouldBe false
     r.manageableTenants shouldBe List("t-a", "t-b")
+  }
+
+  it should "keep the email-shaped name of a database-authenticator profile: the seeded admin@localhost.local still signs in under identitySource=oidc" in {
+    // The name was verified by QoD's own password check, not read from a token's email claim, so the
+    // verified-email rule of the IdP logins does not touch it (its claims carry no email).
+    val profile = AuthenticatedProfile(
+      username = "admin@localhost.local",
+      role = "admin",
+      groups = Set("admin"),
+      claims = Map(
+        "sub"         -> "admin@localhost.local",
+        "role"        -> "admin",
+        "auth_method" -> DbAuthMethod
+      ),
+      authMethod = DbAuthMethod,
+      tenant = None
+    )
+    val h = oidcHandlers(
+      directory = Map("admin@localhost.local" -> List(UserGrant(None, "admin"))),
+      profile = profile
+    )
+
+    val (_, r) = h.login(LoginRequest("admin@localhost.local", "p")).unsafeRunSync().toOption.get
+
+    r.superuser shouldBe true
   }

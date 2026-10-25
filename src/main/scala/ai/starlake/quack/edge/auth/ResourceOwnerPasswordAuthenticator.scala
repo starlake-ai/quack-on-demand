@@ -67,7 +67,8 @@ class ResourceOwnerPasswordAuthenticator(
             val signedJWT = SignedJWT.parse(accessToken)
             val claims    = signedJWT.getJWTClaimsSet
 
-            val extractedUsername = Option(claims.getStringClaim("preferred_username"))
+            val preferredUsername = Option(claims.getStringClaim("preferred_username"))
+            val extractedUsername = preferredUsername
               .orElse(Option(claims.getStringClaim("email")))
               .orElse(Option(claims.getSubject))
               .getOrElse(username)
@@ -75,6 +76,12 @@ class ResourceOwnerPasswordAuthenticator(
             val role   = RoleExtractor.extract(claims, roleClaim)
             val groups = RoleExtractor.extractGroups(claims, "groups")
             val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
+            // The management login (AuthHandlers.mintSessionFor) reads these two to tell a user name
+            // that fell back to the email claim, an address its holder may have typed, from the
+            // IdP's own account name: the name came from the email when the token has no
+            // preferred_username, and counts only when the IdP marks the address verified. A JSON
+            // boolean reads "true" / "false", as OidcBearerAuthenticator flattens it.
+            val emailVerified = Option(claims.getClaim("email_verified")).map(_.toString)
 
             Right(
               AuthenticatedProfile(
@@ -85,7 +92,9 @@ class ResourceOwnerPasswordAuthenticator(
                   "sub"         -> extractedUsername,
                   "role"        -> role,
                   "auth_method" -> name
-                ) ++ email.map("email" -> _),
+                ) ++ email.map("email" -> _) ++
+                  preferredUsername.map("preferred_username" -> _) ++
+                  emailVerified.map("email_verified" -> _),
                 authMethod = name
               )
             )

@@ -201,18 +201,48 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
   ): AuthHandlers =
     makeHandlersWith((_, _, _) => grants, svc, tokens)
 
+  /** Every tenant id is a tenant whose sign-in is OIDC, unless a test hands another loader. */
+  private def oidcTenant(id: String): Option[Tenant] =
+    Some(
+      Tenant(
+        id = id,
+        displayName = id,
+        authProvider = "keycloak",
+        authConfig = Map(
+          "issuerUrl"       -> "https://idp.example.com",
+          "clientId"        -> s"$id-app",
+          "clientSecretRef" -> "env:SECRET"
+        )
+      )
+    )
+
+  private def dbTenant(id: String): Option[Tenant] =
+    Some(
+      Tenant(
+        id = id,
+        displayName = id,
+        authProvider = "db",
+        authConfig = Map(
+          "issuerUrl"       -> "https://idp.example.com",
+          "clientId"        -> s"$id-app",
+          "clientSecretRef" -> "env:SECRET"
+        )
+      )
+    )
+
   private def makeHandlersWith(
       directory: GrantsLookup,
       svc: Option[OidcSsoService],
       tokens: SessionTokenStore = new SessionTokenStore,
-      events: ManagerEventSink = ManagerEventSink.noop
+      events: ManagerEventSink = ManagerEventSink.noop,
+      loadTenant: String => Option[Tenant] = oidcTenant
   ): AuthHandlers =
     new AuthHandlers(
       authService = dummyAuthService,
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = directory,
-      authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       oidc = svc,
       events = events
     )
@@ -376,6 +406,46 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
         location should startWith("https://idp.example.com/authorize?")
         location should include("client_id=acme-app")
       case Left(e) => fail(s"expected a redirect to the tenant issuer, got $e")
+  }
+
+  // ================================================================
+  // 4c. a tenant switched to db keeps no SSO even with its auth config still filled in
+  // ================================================================
+
+  it should "refuse oidcStart for a tenant whose sign-in is db, whatever its auth config holds" in {
+    val svc      = buildSvc("s4c")
+    val handlers = makeHandlersWith((_, _, _) => Nil, Some(svc), loadTenant = dbTenant)
+    handlers.oidcStart(Some("acme"), None).unsafeRunSync() match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "oidc_not_configured"
+      case Right(r) => fail(s"expected 400 oidc_not_configured, got $r")
+  }
+
+  it should "redirect the callback of a db tenant to oidc_not_configured and mint nothing" in {
+    val seed     = "s4d"
+    val svc      = buildSvc(seed)
+    val started  = svc.startAuth(OidcScope.Tenant("acme"), "/ui/", seed).toOption.get
+    val tokens   = new SessionTokenStore
+    val handlers =
+      makeHandlersWith(
+        (_, _, _) => List(UserGrant(Some("acme"), "admin")),
+        Some(svc),
+        tokens,
+        loadTenant = dbTenant
+      )
+    val (status, location, session, _) =
+      handlers
+        .oidcCallback(
+          Some(s"code-$seed"),
+          Some(started.stateParam),
+          Some(started.stateCookieValue),
+          None
+        )
+        .unsafeRunSync()
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/?error=oidc_not_configured"
+    session.value shouldBe ""
   }
 
   // ================================================================
@@ -717,6 +787,115 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       "s25",
       directory.lookup,
       identity = mallory("boss@acme.example", Some("true"))
+    )
+    location shouldBe "/ui/?tenant=acme"
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+  }
+
+  // ================================================================
+  // 15. oidcCallback: a user name that is the email claim
+  // ================================================================
+
+  // OidcBearerAuthenticator names the user preferred_username, else the email claim, else the
+  // subject: a token without preferred_username is named by its email, which its account holder
+  // may have typed. That name binds a row only when the IdP marks the address verified.
+  private val SeededSuperuser = "admin@localhost.local"
+  private val AcmeBoss        = "boss@acme.example"
+
+  private def emailNamed(email: String, claims: Map[String, String] = Map.empty): StubIdentity =
+    StubIdentity(username = email, claims = Map("email" -> email) ++ claims)
+
+  "oidcCallback email-named user" should "not bind the superuser row of its name on the system login when the IdP does not mark the address verified" in
+    List(Map.empty[String, String], Map("email_verified" -> "false")).foreach { verified =>
+      withClue(s"[$verified] ") {
+        val directory = new NamedDirectory(
+          Map(SeededSuperuser -> List(UserGrant(None, "admin")))
+        )
+        val (_, location, session, _) = callbackWith(
+          OidcScope.System,
+          "/ui/",
+          "s26",
+          directory.lookup,
+          identity = emailNamed(SeededSuperuser, verified)
+        )
+        location shouldBe "/ui/?error=not_provisioned"
+        session shouldBe ""
+        directory.asked shouldBe empty
+      }
+    }
+
+  it should "bind the superuser row of its name on the system login once the IdP marks the address verified" in {
+    val directory = new NamedDirectory(Map(SeededSuperuser -> List(UserGrant(None, "admin"))))
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.System,
+      "/ui/",
+      "s27",
+      directory.lookup,
+      identity = emailNamed(SeededSuperuser, Map("email_verified" -> "true"))
+    )
+    location shouldBe "/ui/"
+    tokens.get(session).map(_.scope) shouldBe Some(SessionScope.Superuser)
+  }
+
+  it should "not bind the tenant row of its name on a tenant-scope login when the IdP does not mark the address verified" in
+    List(Map.empty[String, String], Map("email_verified" -> "false")).foreach { verified =>
+      withClue(s"[$verified] ") {
+        val directory = new NamedDirectory(
+          Map(AcmeBoss -> List(UserGrant(Some("acme"), "admin")))
+        )
+        val (_, location, session, _) = callbackWith(
+          OidcScope.Tenant("acme"),
+          "/ui/?tenant=acme",
+          "s28",
+          directory.lookup,
+          identity = emailNamed(AcmeBoss, verified)
+        )
+        location shouldBe "/ui/?error=not_provisioned"
+        session shouldBe ""
+        directory.asked shouldBe empty
+      }
+    }
+
+  it should "bind the tenant row of its name on a tenant-scope login once the IdP marks the address verified" in {
+    val directory = new NamedDirectory(Map(AcmeBoss -> List(UserGrant(Some("acme"), "admin"))))
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s29",
+      directory.lookup,
+      identity = emailNamed(AcmeBoss, Map("email_verified" -> "true"))
+    )
+    location shouldBe "/ui/?tenant=acme"
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+  }
+
+  it should "leave a user name the token supplies as preferred_username alone, whatever its email claim says" in {
+    val directory = new NamedDirectory(Map(AcmeBoss -> List(UserGrant(Some("acme"), "admin"))))
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s30",
+      directory.lookup,
+      identity = emailNamed(
+        AcmeBoss,
+        Map("preferred_username" -> AcmeBoss, "email_verified" -> "false")
+      )
+    )
+    location shouldBe "/ui/?tenant=acme"
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+  }
+
+  it should "leave a user name that is a subject alone: a token with no email claim at all" in {
+    val directory = new NamedDirectory(Map("sub-1234" -> List(UserGrant(Some("acme"), "admin"))))
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s31",
+      directory.lookup,
+      identity = StubIdentity(username = "sub-1234", claims = Map("sub" -> "sub-1234"))
     )
     location shouldBe "/ui/?tenant=acme"
     tokens.get(session).map(_.scope) shouldBe

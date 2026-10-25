@@ -909,6 +909,28 @@ class TenantSignInIsolationSpec
       who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
     }
 
+  it should "bind the tenant row of an email-named user (a token without preferred_username) only when the IdP marks the address verified" in
+    withManager(seed = acmeSignsInThroughSso) { w =>
+      // The token carries no preferred_username, so the IdP user name IS the email claim, here the
+      // name of an acme admin row (SharedRows): an address its holder may have typed.
+      val unverified = ssoSignIn(
+        w,
+        Acme,
+        "carol@acme.example",
+        "carol@acme.example",
+        emailVerified = false
+      )
+      unverified.location shouldBe "/ui/?error=not_provisioned"
+      unverified.session shouldBe None
+
+      val verified = ssoSignIn(w, Acme, "carol@acme.example", "carol@acme.example")
+      val session  = verified.session.getOrElse(fail(s"no session: ${verified.location}"))
+      val who      = whoami(w, session)
+      who.get[String]("username") shouldBe Right("carol@acme.example")
+      who.get[Boolean]("superuser") shouldBe Right(false)
+      who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
+    }
+
   "A personal access token minted from a tenant SSO session" should
     "be owned by the tenant's own row, never a same-named superuser or other-tenant row" in
     withManager(seed = acmeSignsInThroughSso, withPats = true) { w =>
@@ -1071,6 +1093,8 @@ class TenantSignInIsolationSpec
 
   private val IdpCarolPassword   = "carol-idp-password"
   private val IdpMalloryPassword = "mallory-idp-password"
+  private val IdpIvanPassword    = "ivan-idp-password"
+  private val IdpIvyPassword     = "ivy-idp-password"
 
   /** A manager whose login runs the production chain walk: the database check first (the in-memory
     * control plane stands in for it and holds no password for the names below, so it fails), then
@@ -1082,25 +1106,37 @@ class TenantSignInIsolationSpec
   private def withPasswordGrant(body: World => Unit): Unit =
     val idp = MockOidcServer.boot(seededUser = "carol", seededPassword = IdpCarolPassword)
     try
-      val malloryToken = JwtTestSigner.mint(
-        payload = Map(
-          "preferred_username" -> "mallory",
-          "email"              -> "carol@acme.example",
-          "role"               -> "admin"
-        ),
-        issuer = idp.issuer
-      )
-      idp.wireMockServer.stubFor(
-        WireMock
-          .post(WireMock.urlPathEqualTo("/token"))
-          .withRequestBody(WireMock.containing("grant_type=password"))
-          .withRequestBody(WireMock.containing("username=mallory"))
-          .withRequestBody(WireMock.containing(s"password=$IdpMalloryPassword"))
-          .willReturn(
-            WireMock.okJson(
-              s"""{"access_token":"$malloryToken","token_type":"Bearer","expires_in":300}"""
+      // The IdP answers `username` / `password` with an access token holding `claims`, every one
+      // with the IdP role claim admin.
+      def stubAccount(username: String, password: String, claims: Map[String, Any]): Unit =
+        val token = JwtTestSigner.mint(
+          payload = Map[String, Any]("role" -> "admin") ++ claims,
+          issuer = idp.issuer
+        )
+        idp.wireMockServer.stubFor(
+          WireMock
+            .post(WireMock.urlPathEqualTo("/token"))
+            .withRequestBody(WireMock.containing("grant_type=password"))
+            .withRequestBody(WireMock.containing(s"username=$username"))
+            .withRequestBody(WireMock.containing(s"password=$password"))
+            .willReturn(
+              WireMock.okJson(
+                s"""{"access_token":"$token","token_type":"Bearer","expires_in":300}"""
+              )
             )
-          )
+        )
+      stubAccount(
+        "mallory",
+        IdpMalloryPassword,
+        Map("preferred_username" -> "mallory", "email" -> "carol@acme.example")
+      )
+      // ivan and ivy: tokens without preferred_username, so the grant names them by the email
+      // claim, which is the name of an acme admin row. ivy's IdP marks the address verified.
+      stubAccount("ivan", IdpIvanPassword, Map("email" -> "carol@acme.example"))
+      stubAccount(
+        "ivy",
+        IdpIvyPassword,
+        Map("email" -> "carol@acme.example", "email_verified" -> true)
       )
       withManager(authServiceOf =
         fix =>
@@ -1149,4 +1185,33 @@ class TenantSignInIsolationSpec
           errorCode(resp.body()) shouldBe Some("not_provisioned")
         }
       }
+    }
+
+  it should "refuse an account whose token has no preferred_username when the email claim that names it is not marked verified" in
+    withPasswordGrant { w =>
+      // ivan: the grant names him by the email claim carol@acme.example, the name of an acme admin
+      // row, and his IdP does not vouch for the address. Nothing binds: not the acme row, not the
+      // rows a login without tenant would read.
+      List(Some(Acme), None).foreach { tenant =>
+        val resp = post(
+          w.h.httpClient,
+          w.url("/api/auth/login"),
+          loginBody("ivan", IdpIvanPassword, tenant)
+        )
+        withClue(s"login into ${tenant.getOrElse("the system realm")}: ${statusAndCode(resp)}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) shouldBe Some("not_provisioned")
+        }
+      }
+    }
+
+  it should "bind the row an email-named account's address names once the IdP marks it verified, with that row's rights only" in
+    withPasswordGrant { w =>
+      // ivy: the same token plus email_verified true.
+      val token = w.h.mintToken("ivy", IdpIvyPassword, Some(Acme))
+      val who   = whoami(w, token)
+      who.get[String]("username") shouldBe Right("carol@acme.example")
+      who.get[Boolean]("superuser") shouldBe Right(false)
+      who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
+      who.get[Option[String]]("tenant") shouldBe Right(Some(Acme))
     }
