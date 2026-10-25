@@ -3,6 +3,7 @@ package ai.starlake.quack.security
 
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.policy.ProtectedWriteGuard
 import ai.starlake.quack.edge.sql.StatementValidator
@@ -144,12 +145,16 @@ object FlightEdgeHarness:
     *   When `true`, a self-signed cert is auto-generated into a unique per-invocation tempdir via
     *   [[FlightEdgeServer.ensureCertFiles]]. When `false` (default), the server listens on plain
     *   gRPC.
+    * @param authService
+    *   the authentication service the edge validates credentials with, in place of the in-memory
+    *   one `enableProviders` configures (e.g. a real chain over a stub identity provider).
     */
   def boot(
       store: InMemoryControlPlaneStore,
       enableProviders: Boolean = true,
       tls: Boolean = false,
-      wiring: RouterWiring = RouterWiring()
+      wiring: RouterWiring = RouterWiring(),
+      authService: Option[AuthenticationService] = None
   ): Harness =
     val port = ephemeralPort()
     val host = "127.0.0.1"
@@ -197,7 +202,9 @@ object FlightEdgeHarness:
       metadataFilterRewriter = wiring.metadataFilterRewriter
     )
 
-    val authSvc = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    val authSvc = authService.getOrElse(
+      new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    )
 
     val lookupPool: (String, String) => Either[String, String] =
       (tenant, pool) =>

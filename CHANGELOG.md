@@ -42,16 +42,25 @@
     create`). Logins verified by the database authenticator are unchanged.
   - BREAKING: an identity-provider login counts an email address only when the IdP marks it
     verified (`email_verified` true), because an address the account holder typed could otherwise
-    name another user's row, the superuser's included. Both IdP authenticators name the user by
-    the token's `preferred_username`, else its email claim, else its subject (a password-grant
-    token naming none of them is refused, never named by the text typed into the form). A user
-    name that came from the email claim (a token without `preferred_username`) binds a row only
-    when that address is verified, else the login is refused `403 not_provisioned`; single sign-on
-    also falls back to the email claim, when the user name matches no row, only when it is
-    verified. A provider that does not emit `email_verified` no longer matches rows by email: name
-    the rows by the IdP's user name (`preferred_username`). Known limit: the FlightSQL data plane
-    keeps the older naming (a token without `preferred_username` is named by its email, verified
-    or not).
+    name another user's row, the superuser's included. The IdP authenticators (the OIDC and
+    external JWT bearers, the password grant) name the user by the token's `preferred_username`,
+    else its email claim, else its subject. A user name that came from the email claim (a token
+    without `preferred_username`) binds a row only when that address is verified, else the login
+    is refused `403 not_provisioned`; single sign-on also falls back to the email claim, when the
+    user name matches no row, only when it is verified. A provider that does not emit
+    `email_verified` no longer matches rows by email: name the rows by the IdP's user name
+    (`preferred_username`). The rule holds on every plane: a FlightSQL or native Quack front door
+    handshake whose user name came from an unverified email claim (the manager-wide password
+    grant answering a basic handshake, a manager-wide bearer, a tenant's own bearer) is refused
+    as unauthenticated, with a message naming the cause, and binds no row. Before, such a name
+    bound any row it matched, the seeded superuser `admin@localhost.local` included on a
+    superuser handshake. A token that names no user (no `preferred_username`, email or sub) is
+    refused everywhere too: a password-grant token is never named by the text typed into the
+    form, and a bearer token is no longer named `unknown`; on the data plane an empty user name
+    is refused rather than replaced by the token's subject.
+  - BREAKING: an IdP whose tokens carry no `preferred_username` and whose email addresses are not
+    verified can no longer sign in anywhere, on the management or the data plane, until it sends
+    `preferred_username` or verifies the addresses.
   - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
     superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
     tenant, as the FlightSQL handshake already ruled.

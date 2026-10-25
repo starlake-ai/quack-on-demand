@@ -84,12 +84,12 @@ class ResourceOwnerPasswordAuthenticator(
                 val role   = RoleExtractor.extract(claims, roleClaim)
                 val groups = RoleExtractor.extractGroups(claims, "groups")
                 val email  = Option(claims.getStringClaim("email")).filter(_.nonEmpty)
-                // The management login (AuthHandlers.mintSessionFor) reads these two to tell a
-                // user name that fell back to the email claim, an address its holder may have
-                // typed, from the IdP's own account name: the name came from the email when the
-                // token has no preferred_username, and counts only when the IdP marks the address
-                // verified. A JSON boolean reads "true" / "false", as OidcBearerAuthenticator
-                // flattens it.
+                // IdentityNaming (the management login and the data-plane handshake) reads these
+                // two to tell a user name that fell back to the email claim, an address its holder
+                // may have typed, from the IdP's own account name: the name came from the email
+                // when the token has no preferred_username, and counts only when the IdP marks the
+                // address verified. A JSON boolean reads "true" / "false", as
+                // OidcBearerAuthenticator flattens it.
                 val emailVerified = Option(claims.getClaim("email_verified")).map(_.toString)
 
                 Right(

@@ -7,7 +7,9 @@ import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
   BasicAuthProvider,
-  DatabaseAuthenticator
+  BearerAuthProvider,
+  DatabaseAuthenticator,
+  TenantOidcRegistry
 }
 import ai.starlake.quack.edge.config.{
   AuthenticationConfig,
@@ -130,11 +132,24 @@ object InMemoryAuthService:
     * followed by the real password-grant authenticator against a stub token endpoint.
     */
   def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
-    val svc = new AuthenticationService(emptyAuthConfig, "test-jwt-secret"):
+    realServiceWithChains(providers, Nil, None)
+
+  /** A REAL [[AuthenticationService]] whose basic chain is `basic` and whose manager-wide bearer
+    * chain is `bearer`, with `tenantOidcRegistry` substituting a tenant's own OIDC authenticator
+    * into a tenant-scope bearer chain as in production. Built like [[realServiceWithBasicChain]].
+    */
+  def realServiceWithChains(
+      basic: List[BasicAuthProvider],
+      bearer: List[BearerAuthProvider],
+      tenantOidcRegistry: Option[TenantOidcRegistry]
+  ): AuthenticationService =
+    val svc = new AuthenticationService(emptyAuthConfig, "test-jwt-secret", tenantOidcRegistry):
       override val hasProviders: Boolean = true
-    val field = classOf[AuthenticationService].getDeclaredField("basicProviders")
-    field.setAccessible(true)
-    field.set(svc, providers)
+    List("basicProviders" -> basic, "bearerProviders" -> bearer).foreach { (name, chain) =>
+      val field = classOf[AuthenticationService].getDeclaredField(name)
+      field.setAccessible(true)
+      field.set(svc, chain)
+    }
     svc
 
   /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all

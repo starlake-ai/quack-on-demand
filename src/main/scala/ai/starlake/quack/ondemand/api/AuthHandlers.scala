@@ -7,6 +7,7 @@ import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
   AuthenticationService,
   DatabaseAuthenticator,
+  IdentityNaming,
   OidcScope,
   OidcSsoService,
   SqlTokenOidcService
@@ -301,7 +302,7 @@ final class AuthHandlers(
               forwardedProto,
               ManagementAuthMode.Oidc,
               "oidc",
-              lookupEmail = verifiedEmail(result.profile)
+              lookupEmail = IdentityNaming.verifiedEmail(result.profile)
             ) match
               case Left((_, err)) =>
                 (
@@ -588,35 +589,6 @@ final class AuthHandlers(
               Right(())
   }
 
-  /** Whether the IdP marks the token's email address verified: `email_verified` is true (the
-    * flattened claims hold the string "true" for a JSON boolean or a string alike). Anything else,
-    * `True` included, is not verified, so a doubtful value fails closed.
-    */
-  private def emailVerified(profile: AuthenticatedProfile): Boolean =
-    profile.claims.get("email_verified").contains("true")
-
-  /** The email claim of an SSO token, only when the IdP marks it verified. An address the IdP does
-    * not vouch for is whatever its account holder typed, so it must not name a `qodstate_user` row:
-    * an unverified address equal to the superuser's user name would bind it.
-    */
-  private def verifiedEmail(profile: AuthenticatedProfile): Option[String] =
-    profile.claims.get("email").filter(_ => emailVerified(profile))
-
-  /** Whether the user name of a profile whose identity an identity provider proved may name a
-    * `qodstate_user` row. Both IdP authenticators (`OidcBearerAuthenticator`,
-    * `ResourceOwnerPasswordAuthenticator`) name the user by the token's `preferred_username`, else
-    * its `email` claim, else its subject. A name that came from the email claim (the claims carry
-    * no `preferred_username` and the `email` claim equals the user name) is an address its account
-    * holder may have typed, which could be the name of the superuser's row (the seeded
-    * `admin@localhost.local`): it counts only when the IdP marks the address verified. Any other
-    * name (a `preferred_username`, a subject) counts as it is. A name that does not count binds
-    * nothing: the login is `403 not_provisioned`.
-    */
-  private def userNameMayBindRow(profile: AuthenticatedProfile): Boolean =
-    val nameIsEmail = !profile.claims.contains("preferred_username") &&
-      profile.claims.get("email").contains(profile.username)
-    !nameIsEmail || emailVerified(profile)
-
   /** Shared authorization + session minting for both the password login and the OIDC callback.
     *
     * `required` expresses what the chosen login URL demands:
@@ -645,17 +617,18 @@ final class AuthHandlers(
     * the token and a personal access token minted from the session all name the tenant the login
     * was verified for. A database-authenticator profile already carries the verified row's.
     *
-    * The user name of such a profile binds a row only when `userNameMayBindRow` allows it: a name
-    * that fell back to the token's email claim (no `preferred_username`, the email equals the user
-    * name) counts only when the IdP marks the address verified, else nothing binds and the login is
-    * `403 not_provisioned`, with no lookup.
+    * The user name of such a profile binds a row only when `IdentityNaming.userNameMayBindRow`
+    * allows it (the rule the data-plane handshake applies too): a name that fell back to the
+    * token's email claim (no `preferred_username`, the email equals the user name) counts only when
+    * the IdP marks the address verified, else nothing binds and the login is `403 not_provisioned`,
+    * with no lookup.
     *
     * `lookupEmail` is the email the lookup may fall back to when the user name matches no row. The
     * entry point decides it, never this method: an email is whatever its account holder typed
     * unless the IdP vouches for it. `login` hands none (a password login, answered by the
     * manager-wide password grant, matches the authenticated user name alone, as the FlightSQL data
     * plane does); `oidcCallback` hands the token's email only when the IdP marks it verified
-    * (`verifiedEmail`). It has no default, so a new entry point has to choose.
+    * (`IdentityNaming.verifiedEmail`). It has no default, so a new entry point has to choose.
     *
     * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
     * `"rest"` from `login`, `"oidc"` from `oidcCallback`. `login` refuses a tenant whose mode is
@@ -684,7 +657,7 @@ final class AuthHandlers(
     val verifiedRow  = mode == ManagementAuthMode.Db && fromDatabase
     val grants       =
       if verifiedRow then List(UserGrant(authenticated.tenant, authenticated.role))
-      else if !userNameMayBindRow(authenticated) then Nil
+      else if !IdentityNaming.userNameMayBindRow(authenticated) then Nil
       else
         grantsForIdentity(loginRealm, authenticated.username, lookupEmail)
           .filter(loginRealm.admits)
