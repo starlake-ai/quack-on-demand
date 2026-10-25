@@ -354,6 +354,18 @@ object ManifestImporter extends LazyLogging:
         // secret: a stored secret is never carried to an issuer it was not saved with.
         val resolvedSecret: Option[String] =
           importClientSecret(mt, existingTenant).toOption.flatten
+        // The auth config is stored as written, except the key changeset 0048 parked, which
+        // follows the rule of tenant/setAuth (one function, TenantSignInWrite.settleParkedKey):
+        // dropped once the tenant holds a secret source, when the manifest moves issuerUrl, and
+        // when the manifest adds or changes it; kept only by an unchanged round trip of a tenant
+        // that is still parked. A tenant the store does not hold yet has no stored key, so a key
+        // the manifest brings is an added one.
+        val storedAuthConfig: Map[String, String] =
+          TenantSignInWrite.settleParkedKey(
+            existingTenant.map(_.authConfig).getOrElse(Map.empty),
+            mt.authConfig,
+            resolvedSecret
+          )
 
         val tenantId = tenantIdFor(store, mt.name).getOrElse {
           // The tenant id IS the slug name; no opaque surrogate. displayName
@@ -365,7 +377,7 @@ object ManifestImporter extends LazyLogging:
               displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else newId,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
-              authConfig = mt.authConfig,
+              authConfig = storedAuthConfig,
               acl = resolvedAcl,
               authClientSecret = resolvedSecret
             ),
@@ -388,7 +400,7 @@ object ManifestImporter extends LazyLogging:
               displayName = if mt.displayName.trim.nonEmpty then mt.displayName.trim else mt.name,
               disabled = mt.disabled,
               authProvider = mt.authProvider,
-              authConfig = mt.authConfig,
+              authConfig = storedAuthConfig,
               acl = resolvedAcl,
               authClientSecret = resolvedSecret
             )
@@ -880,14 +892,26 @@ object ManifestImporter extends LazyLogging:
           else Right(acl)
         }
 
+  /** The command that stores a tenant's own client secret after an import left it out. `set-auth`
+    * replaces the tenant's whole auth config map, so the advice says every other key is repeated.
+    * Placeholders stand for the tenant and its provider: the manifest's own values are untrusted
+    * text, and this is a command line to paste.
+    */
+  private val SetSecretCommand: String =
+    "qod tenant set-auth <tenant> --auth-provider <provider> --auth-config ... " +
+      "--client-secret-prompt (the save replaces the whole auth config map, so repeat every " +
+      "other key of the tenant's authConfig, such as issuerUrl and clientId, with one " +
+      "--auth-config key=value each)"
+
   /** Resolve a manifest tenant's `clientSecret` against the tenant's stored row (`existing`, None
     * for a tenant the store does not hold yet). Pure (no store access), so it runs unchanged from
     * `validate()` (before any write) and `apply()` (to compute the row to persist).
     *
     * One secret source per tenant, as on `tenant/setAuth` (`secret_conflict`): a client secret (a
-    * value or the marker) together with a non-blank `clientSecretRef` in `authConfig` is refused.
-    * Otherwise, since the exporter writes a stored secret as `FederatedSecret.RedactedMarker`, the
-    * import follows the `opaToken` rules of `importAcl`:
+    * value or the marker) together with a `clientSecretRef` in `authConfig` is refused. What counts
+    * as a reference is `TenantSignInWrite.refOf`'s answer: trimmed, a blank one is none. Otherwise,
+    * since the exporter writes a stored secret as `FederatedSecret.RedactedMarker`, the import
+    * follows the `opaToken` rules of `importAcl`:
     *   - the marker + a stored value + the same issuer -> keep the stored value (the
     *     re-import-without-editing case). Issuers compare through `TenantSignInWrite.issuerOf`, the
     *     comparison `tenant/setAuth` makes.
@@ -907,8 +931,7 @@ object ManifestImporter extends LazyLogging:
       existing: Option[Tenant]
   ): Either[String, Option[String]] =
     val carriesSecret = mt.clientSecret.exists(_.trim.nonEmpty)
-    val carriesRef    = mt.authConfig.get(TenantSignInWrite.SecretRefKey).exists(_.trim.nonEmpty)
-    if carriesSecret && carriesRef then
+    if carriesSecret && TenantSignInWrite.refOf(mt.authConfig).isDefined then
       Left(
         s"tenant '${mt.name}': a tenant holds a client secret or a clientSecretRef, not both; " +
           "drop clientSecret or authConfig.clientSecretRef"
@@ -928,8 +951,8 @@ object ManifestImporter extends LazyLogging:
         case (Some(FederatedSecret.RedactedMarker), _) =>
           Left(
             s"tenant '${mt.name}': clientSecret is redacted in the manifest and no existing " +
-              "secret to reuse; provide the value, or import without clientSecret and set it " +
-              "later with qod tenant set-auth --client-secret-prompt"
+              "secret to reuse; provide the value, or import without clientSecret and set the " +
+              s"secret afterwards with: $SetSecretCommand"
           )
         case (Some(v), _) if v.isEmpty      => Right(None)
         case (Some(v), _) if v.trim.isEmpty =>

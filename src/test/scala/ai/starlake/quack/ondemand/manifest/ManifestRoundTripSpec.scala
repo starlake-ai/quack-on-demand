@@ -1538,7 +1538,7 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       else t
     })
     val err = ManifestImporter.apply(moved, cp, requireEncryption = false).left.toOption.get
-    err.exists(e => e.contains("acme") && e.contains("issuerUrl")) shouldBe true
+    err.exists(e => e.contains("acme") && e.contains("issuerUrl changed")) shouldBe true
     // Refused before any write: the row, secret included, is the one stored at the start.
     cp.listTenants().find(_.id == "acme").get shouldBe stored
   }

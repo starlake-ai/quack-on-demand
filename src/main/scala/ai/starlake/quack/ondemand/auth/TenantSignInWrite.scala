@@ -27,6 +27,7 @@ import ai.starlake.quack.model.{FederatedSecret, Tenant}
   * and so is one carried to another issuer, for a superuser too: only the changeset writes it, and
   * its boot report tells a superuser which reference to restore for the issuer it was parked under,
   * so it must not outlive a tenant admin pointing the tenant at an identity provider of their own.
+  * [[settleParkedKey]] is that rule in one place, shared with the manifest import.
   */
 object TenantSignInWrite:
 
@@ -80,9 +81,36 @@ object TenantSignInWrite:
   def issuerOf(authConfig: Map[String, String]): Option[String] =
     authConfig.get(IssuerKey).map(_.trim).filter(_.nonEmpty)
 
-  /** Read as the resolvers read it: trimmed, a blank reference is no reference. */
-  private def refOf(cfg: Map[String, String]): Option[String] =
+  /** What counts as a secret reference in an `authConfig`, read as the resolvers read it: the
+    * trimmed [[SecretRefKey]], a blank one being none. The one definition: this write and the
+    * manifest import both ask it.
+    */
+  def refOf(cfg: Map[String, String]): Option[String] =
     cfg.get(SecretRefKey).map(_.trim).filter(_.nonEmpty)
+
+  /** `next`, the `authConfig` about to be stored, with the key changeset 0048 parked
+    * ([[ParkedSecretRefs.ParkedKey]]) settled against `current`, the one stored. The key stays only
+    * while all three hold: the result holds no secret source (`secret` is none and `next` carries
+    * no `refOf` reference), the issuer is unchanged (`issuerOf`), and `next` carries the key
+    * exactly as `current` stores it. Otherwise it is dropped: a secret source ends the boot report
+    * the key feeds, a moved or removed issuer makes it a hint for an identity provider the tenant
+    * no longer has, and a key a request adds, changes or leaves out was not written by the
+    * changeset. No exception for a superuser: the key is a hint for the boot line, not a secret
+    * source.
+    *
+    * Pure, and the one place the rule lives: `tenant/setAuth` ([[apply]]) and the manifest import
+    * both store the map it returns.
+    */
+  def settleParkedKey(
+      current: Map[String, String],
+      next: Map[String, String],
+      secret: Option[String]
+  ): Map[String, String] =
+    val parkedKey   = ParkedSecretRefs.ParkedKey
+    val holdsSource = secret.isDefined || refOf(next).isDefined
+    val keep        = !holdsSource && issuerOf(current) == issuerOf(next) &&
+      next.get(parkedKey) == current.get(parkedKey)
+    if keep then next else next - parkedKey
 
   /** `clientSecret`: None keeps the stored value (same issuer only), `Some("")` clears it, any
     * other value replaces it. `authConfig` replaces the stored map whole. Refusals, in order: a
@@ -112,11 +140,6 @@ object TenantSignInWrite:
       val secret  = clientSecret match
         case Some(s) => Some(s).filter(_.nonEmpty)
         case None    => if sameIssuer && !refChanged then current.authClientSecret else None
-      // The parked key goes once the result holds a secret source; before that it stays only as
-      // stored (never added or changed by a request) and only under the issuer it was parked for.
-      // No superuser exception: it is a hint for the boot line, not a secret source.
-      val parkedKey  = ParkedSecretRefs.ParkedKey
-      val keepParked = secret.isEmpty && !keepRef && sameIssuer &&
-        authConfig.get(parkedKey) == current.authConfig.get(parkedKey)
+      // The parked key follows settleParkedKey's rule against the map that is about to be stored.
       val withRef = if keepRef then authConfig else authConfig - SecretRefKey
-      Right(Result(if keepParked then withRef else withRef - parkedKey, secret))
+      Right(Result(settleParkedKey(current.authConfig, withRef, secret), secret))

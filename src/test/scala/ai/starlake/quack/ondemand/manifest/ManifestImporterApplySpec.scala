@@ -2,6 +2,7 @@
 package ai.starlake.quack.ondemand.manifest
 
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode, Tenant, TenantDb, TenantDbKind}
+import ai.starlake.quack.ondemand.auth.ParkedSecretRefs
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import at.favre.lib.crypto.bcrypt.BCrypt
 import org.scalatest.flatspec.AnyFlatSpec
@@ -870,6 +871,21 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
       clientSecret = clientSecret
     )
 
+  /** `acme`'s sign-in config as changeset 0048 leaves it: the old reference parked, no source. */
+  private def parkedConfig(issuer: String = Issuer): Map[String, String] =
+    Map(
+      "issuerUrl"                -> issuer,
+      "clientId"                 -> "qod-admin",
+      ParkedSecretRefs.ParkedKey -> "env:ACME_CS"
+    )
+
+  /** `acme` in manifest shape carrying the parked key, as an export of a parked tenant does. */
+  private def parkedManifestTenant(
+      clientSecret: Option[String],
+      issuer: String = Issuer
+  ): ManifestTenant =
+    ssoManifestTenant(clientSecret, issuer).copy(authConfig = parkedConfig(issuer))
+
   private def storedAcme(s: InMemoryControlPlaneStore): Tenant =
     s.listTenants().find(_.id == "acme").get
 
@@ -887,9 +903,10 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.upsertTenant(before)
     val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker), issuer = OtherIssuer)))
     val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
-    err.exists(e =>
-      e.contains("acme") && e.contains("clientSecret") && e.contains("issuerUrl")
-    ) shouldBe true
+    err.exists(e => e.contains("acme") && e.contains("issuerUrl changed")) shouldBe true
+    // The issuer refusal, not the missing-value one: the tenant holds a secret, which just is not
+    // carried to the new issuer.
+    err.exists(_.contains("no existing secret to reuse")) shouldBe false
     // Caught before any write: the stored secret never followed the new issuer.
     storedAcme(s) shouldBe before
   }
@@ -898,7 +915,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     val s   = new InMemoryControlPlaneStore()
     val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
     val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
-    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    err.exists(e => e.contains("acme") && e.contains("no existing secret to reuse")) shouldBe true
     s.listTenants().find(_.id == "acme") shouldBe None
   }
 
@@ -908,7 +925,9 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.upsertTenant(before)
     val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
     val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
-    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    err.exists(e => e.contains("acme") && e.contains("no existing secret to reuse")) shouldBe true
+    // The missing-value refusal, not the issuer one: the issuerUrl is the stored one.
+    err.exists(_.contains("issuerUrl changed")) shouldBe false
     storedAcme(s) shouldBe before
   }
 
@@ -943,7 +962,7 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     s.upsertTenant(before)
     val m   = base.copy(tenants = List(ssoManifestTenant(Some("   "))))
     val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
-    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    err.exists(e => e.contains("acme") && e.contains("clientSecret is blank")) shouldBe true
     storedAcme(s) shouldBe before
   }
 
@@ -959,8 +978,9 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
-    err.exists(e => e.contains("acme") && e.contains("clientSecret")) shouldBe true
+    val err     = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    val refusal = "authConfig may not carry a clientSecret key"
+    err.exists(e => e.contains("acme") && e.contains(refusal)) shouldBe true
     err.exists(_.contains("cs-in-map")) shouldBe false
     s.listTenants().find(_.id == "acme") shouldBe None
   }
@@ -1013,4 +1033,114 @@ class ManifestImporterApplySpec extends AnyFlatSpec with Matchers:
     )
     ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
     storedAcme(s).authConfig.get("clientSecretRef") shouldBe Some("env:ACME_CS_NEW")
+  }
+
+  it should "compare issuerUrl trimmed, so a padded issuerUrl keeps the stored client secret" in
+    // TenantSignInWrite.issuerOf is the one comparison, as on tenant/setAuth; the padded value
+    // itself is stored as written. Padding on either side: the manifest's or the stored row's.
+    List(
+      (Issuer, s"  $Issuer  "),
+      (s" $Issuer", Issuer)
+    ).foreach { (stored, incoming) =>
+      val s = new InMemoryControlPlaneStore()
+      s.upsertTenant(ssoTenant(Some("cs-real"), issuer = stored))
+      val m = base.copy(tenants = List(ssoManifestTenant(Some(Marker), issuer = incoming)))
+      ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+      storedAcme(s).authClientSecret shouldBe Some("cs-real")
+    }
+
+  it should "write neither tenant when one of two is refused for its client secret" in {
+    val s = new InMemoryControlPlaneStore()
+    val m = base.copy(tenants =
+      List(
+        // Valid on its own and listed first: an import that wrote as it went would store it.
+        ssoManifestTenant(Some("cs-fresh")).copy(
+          tenantDbs = List(ManifestTenantDb(name = "acme_default", kind = "memory")),
+          pools = List(
+            ManifestPool(
+              name = "sales",
+              tenantDb = "acme_default",
+              roleDistribution = ManifestRoleDistribution(0, 0, 1)
+            )
+          )
+        ),
+        // Refused: the redaction marker for a tenant the store does not hold.
+        ManifestTenant(name = "globex", clientSecret = Some(Marker))
+      )
+    )
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(e => e.contains("globex") && e.contains("no existing secret to reuse")) shouldBe true
+    err.exists(_.contains("acme")) shouldBe false
+    // Nothing from tenant "acme" was written either: the whole import fails before any write.
+    s.listTenants() shouldBe empty
+    s.snapshot().tenantDbs shouldBe empty
+    s.snapshot().pools shouldBe empty
+  }
+
+  it should "name a complete set-auth command when a redacted secret has none to reuse" in {
+    val s   = new InMemoryControlPlaneStore()
+    val m   = base.copy(tenants = List(ssoManifestTenant(Some(Marker))))
+    val err = ManifestImporter.apply(m, s, requireEncryption = false).left.toOption.get
+    err.exists(
+      _.contains(
+        "qod tenant set-auth <tenant> --auth-provider <provider> --auth-config ... " +
+          "--client-secret-prompt"
+      )
+    ) shouldBe true
+    // set-auth replaces the whole auth config, so the advice says every other key is repeated.
+    err.exists(e =>
+      e.contains("replaces the whole auth config map") && e.contains("repeat every other key")
+    ) shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // The key changeset 0048 parked (ParkedSecretRefs.ParkedKey): the rule of tenant/setAuth.
+  // ------------------------------------------------------------------
+
+  it should "drop the parked key once the manifest supplies a secret source, a value or a clientSecretRef" in {
+    val withValue = parkedManifestTenant(Some("cs-new"))
+    val withRef   = parkedManifestTenant(None).copy(authConfig =
+      parkedConfig() + ("clientSecretRef" -> "env:ACME_CS")
+    )
+    List(withValue, withRef).foreach { incoming =>
+      val s = new InMemoryControlPlaneStore()
+      s.upsertTenant(ssoTenant(None).copy(authConfig = parkedConfig()))
+      val m = base.copy(tenants = List(incoming))
+      ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+      // Everything else is stored as written, the secret source included.
+      storedAcme(s).authConfig shouldBe incoming.authConfig - ParkedSecretRefs.ParkedKey
+      storedAcme(s).authClientSecret shouldBe incoming.clientSecret
+    }
+  }
+
+  it should "drop the parked key when the manifest moves issuerUrl, with no secret source" in {
+    val s = new InMemoryControlPlaneStore()
+    s.upsertTenant(ssoTenant(None).copy(authConfig = parkedConfig()))
+    val m = base.copy(tenants = List(parkedManifestTenant(None, issuer = OtherIssuer)))
+    ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+    // The reference was parked for the old issuer: it is no hint for the new one.
+    storedAcme(s).authConfig shouldBe parkedConfig(OtherIssuer) - ParkedSecretRefs.ParkedKey
+    storedAcme(s).authClientSecret shouldBe None
+  }
+
+  it should "drop a parked key the manifest adds, for a stored tenant and for a new one" in
+    // Only changeset 0048 writes the key, so a manifest cannot park a reference on a tenant.
+    List(Some(ssoTenant(None)), None).foreach { stored =>
+      val s = new InMemoryControlPlaneStore()
+      stored.foreach(s.upsertTenant)
+      val m = base.copy(tenants = List(parkedManifestTenant(None)))
+      ManifestImporter.apply(m, s, requireEncryption = false) shouldBe Right(())
+      storedAcme(s).authConfig shouldBe parkedConfig() - ParkedSecretRefs.ParkedKey
+    }
+
+  it should "keep the parked key through an unchanged export and import of a still-parked tenant" in {
+    val s      = new InMemoryControlPlaneStore()
+    val before = ssoTenant(None).copy(authConfig = parkedConfig())
+    s.upsertTenant(before)
+    val exported = ManifestExporter
+      .build(s, Instant.EPOCH, "0.2.0", "test")
+      .fold(e => fail(e.message), identity)
+    exported.tenants.find(_.name == "acme").get.authConfig shouldBe parkedConfig()
+    ManifestImporter.apply(exported, s, requireEncryption = false) shouldBe Right(())
+    storedAcme(s) shouldBe before
   }

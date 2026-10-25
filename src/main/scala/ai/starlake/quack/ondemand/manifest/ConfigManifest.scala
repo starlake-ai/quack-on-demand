@@ -1,6 +1,8 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ConfigManifest.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.model.FederatedSecret
+import ai.starlake.quack.ondemand.auth.TenantSignInWrite
 import io.circe.{Codec, Decoder, DecodingFailure}
 import io.circe.derivation.{Configuration, ConfiguredCodec}
 
@@ -158,6 +160,10 @@ final case class ManifestTenant(
     displayName: String = "",
     disabled: Boolean = false,
     authProvider: String = "db",
+    // Stored as written, except the key changeset 0048 parked (ParkedSecretRefs.ParkedKey), which
+    // follows the rule of tenant/setAuth (TenantSignInWrite.settleParkedKey): a manifest never adds
+    // or changes it, and it survives only while the tenant holds no secret source and keeps its
+    // issuerUrl.
     authConfig: Map[String, String] = Map.empty,
     // Round-tripped from Tenant.authClientSecret. Exported as FederatedSecret.RedactedMarker when a
     // secret is stored, never in the clear. On import the marker keeps the stored value only while
@@ -172,13 +178,19 @@ final case class ManifestTenant(
     // default-valued ManifestTenantAcl, which would reset the ACL to manager defaults.
     acl: Option[ManifestTenantAcl] = None
 ):
-  /** Redact `clientSecret` the way [[ManifestTenantAcl.toString]] redacts `opaToken`, so a log line
-    * or exception message built from `s"$manifestTenant"` never prints an imported value.
+  /** Prints `clientSecret`, and the value of a `clientSecret` key inside `authConfig` (which the
+    * importer refuses), as [[FederatedSecret.RedactedMarker]], the way
+    * [[ManifestTenantAcl.toString]] redacts `opaToken` (`acl` prints through it). Nothing else is
+    * redacted: `tenantDbs` and `pools` print as their own case classes do.
     */
   override def toString: String =
+    val shownAuthConfig = authConfig.map {
+      case (key, _) if key == TenantSignInWrite.SecretKey => key -> FederatedSecret.RedactedMarker
+      case entry                                          => entry
+    }
     s"ManifestTenant(name=$name,displayName=$displayName,disabled=$disabled," +
-      s"authProvider=$authProvider,authConfig=$authConfig,clientSecret=${clientSecret
-          .map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)}," +
+      s"authProvider=$authProvider,authConfig=$shownAuthConfig," +
+      s"clientSecret=${clientSecret.map(_ => FederatedSecret.RedactedMarker)}," +
       s"tenantDbs=$tenantDbs,pools=$pools,acl=$acl)"
 
 final case class ManifestTablePermission(

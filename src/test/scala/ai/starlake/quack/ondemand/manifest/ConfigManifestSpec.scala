@@ -148,3 +148,17 @@ class ConfigManifestSpec extends AnyFlatSpec with Matchers:
     )
     ManifestTenant(name = "acme").toString should include("clientSecret=None")
   }
+
+  it should "mask a clientSecret key inside authConfig too, leaving the other keys readable" in {
+    // The importer refuses such a manifest, but only after it has been decoded and may have been
+    // logged: the value must not print before then.
+    val tenant = ManifestTenant(
+      name = "acme",
+      authConfig = Map("clientId" -> "qod-admin", "clientSecret" -> "cs-in-map")
+    )
+    tenant.toString should not include "cs-in-map"
+    tenant.toString should include(
+      s"clientSecret -> ${ai.starlake.quack.model.FederatedSecret.RedactedMarker}"
+    )
+    tenant.toString should include("clientId -> qod-admin")
+  }
