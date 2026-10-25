@@ -138,7 +138,8 @@ object ManagerServerHarness:
   // back.  DuckDB supports ON CONFLICT and NOW() so UserStore.upsertUser
   // compiles without changes.
   // ------------------------------------------------------------------
-  private def makeDuckDbUserStore(): UserStore =
+  // private[security]: TenantSignInIsolationSpec builds the SSO user directory it hands to boot.
+  private[security] def makeDuckDbUserStore(): UserStore =
     Class.forName("org.duckdb.DuckDBDriver")
     // Open a persistent in-memory connection (the shared DB lives as
     // long as this connection is open).  We create the table then hand
@@ -301,7 +302,20 @@ object ManagerServerHarness:
       icebergSourcesOf: Option[String => List[ai.starlake.quack.model.FederatedSource]] = None,
       // The OPA authorizer behind POST /api/tenant/opaTest. Defaults to a real one with a short
       // timeout and no decision cache, so a dry run against an unreachable OPA fails fast.
-      opa: Option[ai.starlake.quack.edge.opa.OpaAuthorizer] = Some(defaultOpaAuthorizer)
+      opa: Option[ai.starlake.quack.edge.opa.OpaAuthorizer] = Some(defaultOpaAuthorizer),
+      // The management user directory behind the REST user handlers, password reset, SCIM and the
+      // grants of an admin-console SSO login (Main binds AuthHandlers.grantsForIdentity to
+      // UserStore.grantsForIdentity on the same store). None keeps a fresh, empty DuckDB
+      // directory, so an SSO login finds no grant.
+      users: Option[UserStore] = None,
+      // Admin-console SSO (AuthHandlers.oidc). Main wires it whatever identitySource is
+      // (identitySource only governs the bare /ui/ login), so the harness keeps Db. None leaves
+      // the /api/auth/oidc routes answering auth_mode_disabled.
+      oidc: Option[ai.starlake.quack.edge.auth.OidcSsoService] = None,
+      // Builds the statement executor from this harness's own supervisor, the way Main binds
+      // RoutedExecutor to the supervisor that serves REST. When set it replaces previewExecutor
+      // on every surface the harness wires (preview, undrop, restore, MCP, Iceberg).
+      executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -313,7 +327,11 @@ object ManagerServerHarness:
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
 
-    val userStore = makeDuckDbUserStore()
+    // The executor every statement surface below shares (see `executorOf`).
+    val statementExecutor: CatalogPreviewHandlers.PreviewExecutor =
+      executorOf.fold(previewExecutor)(build => build(sup))
+
+    val userStore = users.getOrElse(makeDuckDbUserStore())
     // Composed bearer lookup (session JWT first, then PAT), mirroring Main's
     // wiring; needed by UserHandlers for the self-lock guard.
     val bearerSessionOf
@@ -332,13 +350,16 @@ object ManagerServerHarness:
       authService = authSvc,
       tokens = sessions,
       identitySource = ai.starlake.quack.ondemand.auth.ManagementIdentitySource.Db,
-      grantsForIdentity = (_, _, _) => Nil,
+      // Mirror Main: an SSO login's grants come from the user directory, in its login realm.
+      grantsForIdentity = (realm, identity, email) =>
+        userStore.grantsForIdentity(realm, identity, email),
       // Mirror Main: resolve per-tenant login mode from the registry so a db
       // tenant login resolves to Db instead of the no-op default's TenantNotFound.
       authModeResolver = new ai.starlake.quack.ondemand.auth.ManagementAuthModeResolver(
         id => sup.getTenantById(id),
         ai.starlake.quack.ondemand.auth.ManagementAuthMode.Db
       ),
+      oidc = oidc,
       audit = audit,
       events = events
     )
@@ -391,7 +412,9 @@ object ManagerServerHarness:
     val pools = new PoolHandlers(sup, tracker)
     val nodes =
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
-    val tenants   = new TenantHandlers(sup, opa = opa)
+    // audit: tenant/setAuth's refusal and success rows (and every other tenant action) reach the
+    // spec's recorder; the default noop recorder keeps every other spec's boot unchanged.
+    val tenants   = new TenantHandlers(sup, audit = audit, opa = opa)
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val health = new HealthHandler(sup)
@@ -479,14 +502,14 @@ object ManagerServerHarness:
       sup,
       store,
       restCaller,
-      previewExecutor,
+      statementExecutor,
       previewReader,
       CatalogConfig(),
       audit = audit
     )
     val undropHandlers = new CatalogUndropHandlers(
       sup,
-      previewExecutor,
+      statementExecutor,
       previewReader,
       CatalogConfig(),
       restCaller,
@@ -495,8 +518,8 @@ object ManagerServerHarness:
     val restoreHandlers = new CatalogRestoreHandlers(
       sup,
       store,
-      previewExecutor,
-      previewExecutor,
+      statementExecutor,
+      statementExecutor,
       (_, _) => restoreReader,
       CatalogConfig(),
       restCaller,
@@ -536,7 +559,7 @@ object ManagerServerHarness:
         )
         val dataTools = new ai.starlake.quack.mcp.McpDataTools(
           ai.starlake.quack.McpConfig(),
-          previewExecutor,
+          statementExecutor,
           sup,
           mcpCatalog,
           mcpHistory,
@@ -667,7 +690,7 @@ object ManagerServerHarness:
             timeoutSec = 5,
             maxRows = 100
           ),
-          executor = previewExecutor,
+          executor = statementExecutor,
           callerOf = restCaller,
           cfg = CatalogConfig(),
           audit = audit
