@@ -123,6 +123,20 @@ object InMemoryAuthService:
                 )
           else Left(AuthFailure.InvalidCredentials("invalid credentials"))
 
+  /** A REAL [[AuthenticationService]] (its own `authenticateBasic`, first match wins, with the
+    * failure latches) whose basic chain is exactly `providers`. It is built from
+    * [[emptyAuthConfig]], so it opens no connection, and the private chain is then replaced: a spec
+    * can drive the production chain walk over stub providers, such as the in-memory database check
+    * followed by the real password-grant authenticator against a stub token endpoint.
+    */
+  def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
+    val svc = new AuthenticationService(emptyAuthConfig, "test-jwt-secret"):
+      override val hasProviders: Boolean = true
+    val field = classOf[AuthenticationService].getDeclaredField("basicProviders")
+    field.setAccessible(true)
+    field.set(svc, providers)
+    svc
+
   /** [[AuthenticationService]] subclass whose parent constructor opens no external connections (all
     * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the
     * in-memory provider.

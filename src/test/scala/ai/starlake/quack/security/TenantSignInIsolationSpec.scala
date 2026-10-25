@@ -6,12 +6,14 @@ import ai.starlake.quack.boot.RoutedExecutor
 import ai.starlake.quack.edge.RouterFailure
 import ai.starlake.quack.edge.auth.{
   AuthenticatedProfile,
+  AuthenticationService,
   OidcBearerAuthenticator,
   OidcDiscovery,
   OidcEndpointResolver,
   OidcEndpoints,
   OidcSsoService,
-  OidcStateCodec
+  OidcStateCodec,
+  ResourceOwnerPasswordAuthenticator
 }
 import ai.starlake.quack.model.{
   FederatedSecret,
@@ -37,6 +39,7 @@ import cats.effect.IO
 import ch.qos.logback.classic.{Level, Logger as LogbackLogger}
 import ch.qos.logback.classic.spi.{ILoggingEvent, ThrowableProxyUtil}
 import ch.qos.logback.core.read.ListAppender
+import com.github.tomakehurst.wiremock.client.WireMock
 import io.circe.{ACursor, HCursor, Json}
 import io.circe.parser.parse
 import org.scalatest.BeforeAndAfterAll
@@ -59,11 +62,15 @@ import scala.util.Try
   *      unchanged); a superuser can;
   *   3. an issuer change drops the stored secret, value or reference, unless the same write
   *      supplies one;
-  *   4. a tenant SSO login binds only that tenant's `qodstate_user` rows, and so does a personal
-  *      access token minted from its session;
+  *   4. a tenant SSO login binds only that tenant's `qodstate_user` rows (by the email claim only
+  *      when the IdP marks it verified), and so does a personal access token minted from its
+  *      session;
   *   5. a password login naming an OIDC tenant answers `400 sso_required`;
   *   6. a REST or MCP statement of a tenant caller never binds a superuser row; a superuser caller
-  *      still binds its own.
+  *      still binds its own;
+  *   7. a password login answered by the manager-wide password grant binds the tenant row named
+  *      like the IdP user, never a same-named superuser or other-tenant row, and never a row the
+  *      account's email claim names.
   *
   * Wired as Main wires it, all from the harness's own supervisor: the admin-console SSO service
   * with only its network legs stubbed ([[StubIdp]]) reading tenants through the supervisor, Main's
@@ -71,7 +78,9 @@ import scala.util.Try
   * and statements through the real [[RoutedExecutor]] with a recording router leg. Password logins
   * and the statement gate read the in-memory control plane, which holds the same rows as the
   * directory for every name the SSO cases use (one `qodstate_user` table in production). The cases
-  * that need personal access tokens use the local test Postgres and cancel without it.
+  * of rule 7 run the real `AuthenticationService.authenticateBasic` over the in-memory database
+  * check and the real password-grant authenticator against a stub token endpoint. The cases that
+  * need personal access tokens use the local test Postgres and cancel without it.
   *
   * Failure clues name a response by its status and error code only: a body can hold a session token
   * or a client secret.
@@ -179,14 +188,19 @@ class TenantSignInIsolationSpec
 
     def exchanges: List[(String, String)] = recorded.asScala.toList
 
-    def stage(username: String, email: String, nonce: String): Unit =
+    def stage(username: String, email: String, emailVerified: Boolean, nonce: String): Unit =
       staged = Some(
         AuthenticatedProfile(
           username = username,
           // The IdP's own role claim: authority comes from qodstate_user rows, never from it.
           role = "admin",
           groups = Set.empty,
-          claims = Map("nonce" -> nonce, "email" -> email),
+          // The flattened claims of the id_token: a boolean email_verified reads "true" / "false".
+          claims = Map(
+            "nonce"          -> nonce,
+            "email"          -> email,
+            "email_verified" -> emailVerified.toString
+          ),
           authMethod = "oidc"
         )
       )
@@ -325,10 +339,12 @@ class TenantSignInIsolationSpec
   /** One manager over HTTP: the SecurityFixtures control plane plus globex, acme's DuckLake pool
     * and [[SharedRows]], `seed` applied before boot. `withPats` swaps in the Postgres directory and
     * PAT store and mounts /mcp; it cancels the case when the test Postgres is unreachable.
+    * `authServiceOf` swaps the in-memory login chain for a real one built over the control plane.
     */
   private def withManager(
       seed: SecurityFixtures.Fixture => Unit = _ => (),
-      withPats: Boolean = false
+      withPats: Boolean = false,
+      authServiceOf: SecurityFixtures.Fixture => Option[AuthenticationService] = _ => None
   )(body: World => Unit): Unit =
     if withPats then
       TestPostgres.ensureReachable()
@@ -365,7 +381,8 @@ class TenantSignInIsolationSpec
         Some(sup => raw => sup.getTenantById(raw).orElse(sup.getTenant(raw)).map(_.id)),
       executorOf = Some(sup =>
         RoutedExecutor(sup, StatementClassifier.default, route.run)(recordExecution = false)
-      )
+      ),
+      authService = authServiceOf(fix)
     )
     try body(World(h, fix, idp, telemetry, route))
     finally h.shutdown()
@@ -434,15 +451,27 @@ class TenantSignInIsolationSpec
   private final case class SsoOutcome(authorize: String, location: String, session: Option[String])
 
   /** One admin-console SSO sign-in into `tenant` over HTTP: the start redirect to the tenant's IdP
-    * (with the signed state cookie), the IdP answering `username` / `email`, then the callback.
+    * (with the signed state cookie), the IdP answering `username` / `email` (marked verified unless
+    * `emailVerified` is false), then the callback.
     */
-  private def ssoSignIn(w: World, tenant: String, username: String, email: String): SsoOutcome =
+  private def ssoSignIn(
+      w: World,
+      tenant: String,
+      username: String,
+      email: String,
+      emailVerified: Boolean = true
+  ): SsoOutcome =
     val start = get(w.h.httpClient, w.url(s"/api/auth/oidc/start?tenant=$tenant&returnTo=/ui/"))
     withClue(s"oidc start: ${statusAndCode(start)}")(start.statusCode() shouldBe 302)
     val authorize   = start.headers().firstValue("location").orElse("")
     val stateCookie = cookieOf(start, OidcSsoService.STATE_COOKIE)
       .getOrElse(fail("the start redirect set no state cookie"))
-    w.idp.stage(username, email, queryParam(authorize, "nonce").getOrElse(fail("no nonce")))
+    w.idp.stage(
+      username,
+      email,
+      emailVerified,
+      queryParam(authorize, "nonce").getOrElse(fail("no nonce"))
+    )
     val state    = stateCookie.split("::", 2).head
     val callback = w.h.httpClient.send(
       HttpRequest
@@ -864,6 +893,22 @@ class TenantSignInIsolationSpec
       signIn.session shouldBe None
     }
 
+  it should "match the tenant row an email claim names only when the IdP marks that email verified" in
+    withManager(seed = acmeSignsInThroughSso) { w =>
+      // The IdP vouches for the user name 'mallory', who has no row. Her email claim is the name
+      // of an acme admin row (SharedRows): the address is whatever she typed, unless the IdP says
+      // it verified it.
+      val unverified = ssoSignIn(w, Acme, "mallory", "carol@acme.example", emailVerified = false)
+      unverified.location shouldBe "/ui/?error=not_provisioned"
+      unverified.session shouldBe None
+
+      val verified = ssoSignIn(w, Acme, "mallory", "carol@acme.example")
+      val session  = verified.session.getOrElse(fail(s"no session: ${verified.location}"))
+      val who      = whoami(w, session)
+      who.get[Boolean]("superuser") shouldBe Right(false)
+      who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
+    }
+
   "A personal access token minted from a tenant SSO session" should
     "be owned by the tenant's own row, never a same-named superuser or other-tenant row" in
     withManager(seed = acmeSignsInThroughSso, withPats = true) { w =>
@@ -1018,4 +1063,90 @@ class TenantSignInIsolationSpec
         )
       )
       bound shouldBe List.fill(2)((true, true, Some((w.fix.rootUserId, None))))
+    }
+
+  // ---------------------------------------------------------------------------------------------
+  // 7. A password login answered by the manager-wide password grant binds rows by user name
+  // ---------------------------------------------------------------------------------------------
+
+  private val IdpCarolPassword   = "carol-idp-password"
+  private val IdpMalloryPassword = "mallory-idp-password"
+
+  /** A manager whose login runs the production chain walk: the database check first (the in-memory
+    * control plane stands in for it and holds no password for the names below, so it fails), then
+    * the real Keycloak password-grant authenticator against a stub token endpoint. The endpoint
+    * accepts `carol` (a token with no preferred_username, so the user name is the subject) and
+    * `mallory` (an account whose email claim is the name of an acme admin row), both with the IdP
+    * role claim `admin`.
+    */
+  private def withPasswordGrant(body: World => Unit): Unit =
+    val idp = MockOidcServer.boot(seededUser = "carol", seededPassword = IdpCarolPassword)
+    try
+      val malloryToken = JwtTestSigner.mint(
+        payload = Map(
+          "preferred_username" -> "mallory",
+          "email"              -> "carol@acme.example",
+          "role"               -> "admin"
+        ),
+        issuer = idp.issuer
+      )
+      idp.wireMockServer.stubFor(
+        WireMock
+          .post(WireMock.urlPathEqualTo("/token"))
+          .withRequestBody(WireMock.containing("grant_type=password"))
+          .withRequestBody(WireMock.containing("username=mallory"))
+          .withRequestBody(WireMock.containing(s"password=$IdpMalloryPassword"))
+          .willReturn(
+            WireMock.okJson(
+              s"""{"access_token":"$malloryToken","token_type":"Bearer","expires_in":300}"""
+            )
+          )
+      )
+      withManager(authServiceOf =
+        fix =>
+          Some(
+            InMemoryAuthService.realServiceWithBasicChain(
+              List(
+                new InMemoryAuthService.InMemoryBasicAuthProvider(fix.store),
+                new ResourceOwnerPasswordAuthenticator(
+                  "keycloak",
+                  s"${idp.baseUrl}/token",
+                  "qod-console",
+                  "qod-console-secret",
+                  "role"
+                )
+              )
+            )
+          )
+      )(body)
+    finally idp.shutdown()
+
+  "A password login answered by the manager-wide password grant" should
+    "bind the tenant row named like the IdP user, never the same-named superuser row or another tenant's" in
+    withPasswordGrant { w =>
+      // The database check fails (the control plane holds no password for carol), the grant answers
+      // and the IdP says admin. carol holds a superuser row, a globex row and an acme row.
+      val token = w.h.mintToken("carol", IdpCarolPassword, Some(Acme))
+      val who   = whoami(w, token)
+      who.get[String]("username") shouldBe Right("carol")
+      who.get[Boolean]("superuser") shouldBe Right(false)
+      who.get[List[String]]("manageableTenants") shouldBe Right(List(Acme))
+      who.get[Option[String]]("tenant") shouldBe Right(Some(Acme))
+    }
+
+  it should "refuse an account that has no row, whatever its role claim and its email claim say" in
+    withPasswordGrant { w =>
+      // mallory: the IdP says admin and her email claim is the name of an acme admin row, which a
+      // password login does not match; no row is named mallory, in acme or anywhere.
+      List(Some(Acme), None).foreach { tenant =>
+        val resp = post(
+          w.h.httpClient,
+          w.url("/api/auth/login"),
+          loginBody("mallory", IdpMalloryPassword, tenant)
+        )
+        withClue(s"login into ${tenant.getOrElse("the system realm")}: ${statusAndCode(resp)}") {
+          resp.statusCode() shouldBe 403
+          errorCode(resp.body()) shouldBe Some("not_provisioned")
+        }
+      }
     }

@@ -469,10 +469,11 @@ final class UserStore(
       case None =>
         ps.setString(1, username)
 
-  /** All management-plane grants for an OIDC-verified identity, read in the realm the login was
+  /** All management-plane grants for an IdP-verified identity, read in the realm the login was
     * verified in. Matches `username = identity` first; if that yields nothing AND `email` is given,
-    * retries with `username = email` so operators can provision either form. tenant=NULL rows are
-    * superuser grants.
+    * retries with `username = email` so operators can provision either form. The caller decides
+    * whether to hand an email over (`AuthHandlers`: only an SSO token's email the IdP marks
+    * verified, never a password login's). tenant=NULL rows are superuser grants.
     *
     * The realm bounds both lookups, the email fallback included:
     *   - `LoginRealm.System` matches the rows of every realm (superuser rows and every tenant's

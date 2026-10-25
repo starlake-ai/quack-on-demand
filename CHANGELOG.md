@@ -10,16 +10,24 @@
     `/ui/?error=not_provisioned`), and superusers sign in through the bare `/ui/` login. Before,
     the lookup matched the identity against every realm's rows. The system login is unchanged.
   - BREAKING: the same rule now covers a password login answered by the manager-wide Keycloak or
-    Azure password grant (`QOD_AUTH_KEYCLOAK_ENABLED`, `QOD_AUTH_AZURE_ENABLED`; the basic chain
-    tries them after the database authenticator). Such a login took its rights from the IdP's role
-    claim, so an `admin` claim opened a superuser session through any `db` tenant's login form, or
-    without a tenant under `identitySource=db`, with no `qodstate_user` row at all. It now needs a
-    row in the realm it names: for a tenant login a row of that tenant (an admin row opens the
-    console, a `user` row the Profile page), for a login without a tenant the rows the identity
+    Azure password grant (`QOD_AUTH_KEYCLOAK_ENABLED`, `QOD_AUTH_AZURE_ENABLED`). The basic chain
+    tries it after the database authenticator, so with one enabled a tenant's password form also
+    accepts that IdP's passwords. Such a login took its rights from the IdP's role claim, so an
+    `admin` claim opened a superuser session through any `db` tenant's login form, or without a
+    tenant under `identitySource=db`, with no `qodstate_user` row at all. It now signs in as the
+    QoD user with the same user name as the IdP account (the IdP's username, never its email) and
+    gets that row's rights only: for a tenant login a row of that tenant (an admin row opens the
+    console, a `user` row the Profile page), for a login without a tenant the rows the user name
     holds in any realm (a superuser row, or admin rows of one or more tenants). No row answers
-    `403 not_provisioned`, and an IdP role claim no longer makes anyone admin or superuser.
-    Operators who relied on IdP `admin` claims create the rows first (`qod user create`). Logins
-    verified by the database authenticator are unchanged.
+    `403 not_provisioned`, and an IdP role claim no longer makes anyone admin or superuser. Since
+    the user name picks the row, the IdP's user names must be assigned by an administrator, not
+    chosen by the account holder. Operators who relied on IdP `admin` claims create the rows first
+    (`qod user create`). Logins verified by the database authenticator are unchanged.
+  - BREAKING: a single sign-on login (a tenant's or the bare `/ui/`) falls back to the token's
+    email claim only when the IdP marks it verified (`email_verified` true); an address the
+    account holder typed could otherwise name the superuser's row. A provider that does not emit
+    the claim no longer matches rows named by email: name the rows by the IdP's user name
+    (`preferred_username`).
   - A REST or MCP statement binds a superuser row only when its caller is a superuser (a
     superuser session, or a PAT owned by a superuser); any other caller binds a row of its own
     tenant, as the FlightSQL handshake already ruled.

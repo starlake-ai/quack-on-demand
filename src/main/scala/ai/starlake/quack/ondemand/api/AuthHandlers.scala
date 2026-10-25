@@ -58,9 +58,10 @@ enum RequiredScope:
   *     answered by the manager-wide Keycloak or Azure password grant, and under
   *     `identitySource=oidc` every system login (the database authenticator's too). The IdP's
   *     `role` and any tenant claim are discarded; `grantsForIdentity` is consulted with the
-  *     profile's username (the JWT's `preferred_username`; `email` as fallback), in the realm the
-  *     login was verified in: a tenant login reads only that tenant's rows, the system login the
-  *     rows of every realm ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
+  *     profile's username (the JWT's `preferred_username`; the `email` as fallback for an SSO token
+  *     whose IdP marks it verified, never for a password login), in the realm the login was
+  *     verified in: a tenant login reads only that tenant's rows, the system login the rows of
+  *     every realm ([[ai.starlake.quack.ondemand.auth.LoginRealm LoginRealm]]).
   *
   * Either way the grants collapse to a
   * [[ai.starlake.quack.ondemand.auth.SessionScope SessionScope]] carrying `superuser` and
@@ -269,7 +270,8 @@ final class AuthHandlers(
               required,
               forwardedProto,
               ManagementAuthMode.Oidc,
-              "oidc"
+              "oidc",
+              lookupEmail = verifiedEmail(result.profile)
             ) match
               case Left((_, err)) =>
                 (
@@ -420,7 +422,9 @@ final class AuthHandlers(
                     (StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved"))
                   )
                 case Right(m) =>
-                  mintSessionFor(profile, required, forwardedProto, m, "rest")
+                  // A password login matches the authenticated user name alone: an IdP account's
+                  // email is whatever its holder typed, so it must not name a qodstate_user row.
+                  mintSessionFor(profile, required, forwardedProto, m, "rest", lookupEmail = None)
   }
 
   /** The answer to a password login naming a tenant that signs in through its identity provider:
@@ -554,6 +558,14 @@ final class AuthHandlers(
               Right(())
   }
 
+  /** The email claim of an SSO token, only when the IdP marks it verified (`email_verified` true;
+    * the flattened claims hold the string "true" for a JSON boolean or a string alike). An address
+    * the IdP does not vouch for is whatever its account holder typed, so it must not name a
+    * `qodstate_user` row: an unverified address equal to the superuser's user name would bind it.
+    */
+  private def verifiedEmail(profile: AuthenticatedProfile): Option[String] =
+    profile.claims.get("email").filter(_ => profile.claims.get("email_verified").contains("true"))
+
   /** Shared authorization + session minting for both the password login and the OIDC callback.
     *
     * `required` expresses what the chosen login URL demands:
@@ -577,9 +589,17 @@ final class AuthHandlers(
     * realm's rows by `LoginRealm.admits`: a tenant login never binds a superuser row or another
     * tenant's row, so it never yields `superuser = true` and manages at most its own tenant, and
     * the IdP's role claim grants nothing. The minted profile of such a tenant login also carries
-    * the realm's tenant (a database-authenticator profile already carries the verified row's), so
-    * the audit rows, the `SessionOpened` event, the token and a personal access token minted from
-    * the session all name the tenant the login was verified for.
+    * the realm's tenant (the decision, not a tag on the profile: an SSO profile's `authMethod` is
+    * the issuer host, which a tenant admin picks), so the audit rows, the `SessionOpened` event,
+    * the token and a personal access token minted from the session all name the tenant the login
+    * was verified for. A database-authenticator profile already carries the verified row's.
+    *
+    * `lookupEmail` is the email the lookup may fall back to when the user name matches no row. The
+    * entry point decides it, never this method: an email is whatever its account holder typed
+    * unless the IdP vouches for it. `login` hands none (a password login, answered by the
+    * manager-wide password grant, matches the authenticated user name alone, as the FlightSQL data
+    * plane does); `oidcCallback` hands the token's email only when the IdP marks it verified
+    * (`verifiedEmail`). It has no default, so a new entry point has to choose.
     *
     * `via` identifies the calling entry point for the [[ManagerEvent.SessionOpened]] emission:
     * `"rest"` from `login`, `"oidc"` from `oidcCallback`. `login` refuses a tenant whose mode is
@@ -591,7 +611,8 @@ final class AuthHandlers(
       required: RequiredScope,
       forwardedProto: Option[String],
       mode: ManagementAuthMode,
-      via: String
+      via: String,
+      lookupEmail: Option[String]
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
     // The realm the login was verified in: it bounds the qodstate_user rows its rights may come
     // from.
@@ -608,14 +629,17 @@ final class AuthHandlers(
     val grants       =
       if verifiedRow then List(UserGrant(authenticated.tenant, authenticated.role))
       else
-        grantsForIdentity(loginRealm, authenticated.username, authenticated.claims.get("email"))
+        grantsForIdentity(loginRealm, authenticated.username, lookupEmail)
           .filter(loginRealm.admits)
     // The profile everything below names (audit rows, SessionOpened, the token). A tenant login
     // whose rights were read from the realm's rows carries that realm's tenant, as a database login
-    // does: PAT minting resolves the owning row by (profile.tenant, username).
+    // does: PAT minting resolves the owning row by (profile.tenant, username). Keyed on the
+    // decision (!verifiedRow), not on the profile's authMethod: an SSO profile's authMethod is the
+    // issuer host, which a tenant admin controls through issuerUrl, so a host called "database"
+    // must not leave the profile without its tenant (the PAT would then bind a superuser row).
     val profile = loginRealm match
-      case LoginRealm.Tenant(t) if !fromDatabase => authenticated.copy(tenant = Some(t))
-      case _                                     => authenticated
+      case LoginRealm.Tenant(t) if !verifiedRow => authenticated.copy(tenant = Some(t))
+      case _                                    => authenticated
 
     val superuser = grants.exists(g => g.tenant.isEmpty && g.kind.equalsIgnoreCase("admin"))
     val manageableTenants: Set[String] = grants.collect {
@@ -631,14 +655,14 @@ final class AuthHandlers(
     // superuser or tenant-admin. This preserves the original `login` behavior
     // where the absence of a tenant did not restrict which admins could proceed.
     // `SystemStrict` (OIDC bare /ui/ login) further restricts to superuser only.
-    // `Tenant(t)` scope admits an admin of that specific tenant (a superuser too, should a grant
-    // ever carry one: a tenant login's grants are that tenant's rows) or a regular user holding a
-    // row on it (profile-only session).
+    // `Tenant(t)` scope admits an admin of that specific tenant or a regular user holding a row on
+    // it (profile-only session), and nothing else: a tenant login's grants are that tenant's rows,
+    // so a superuser grant never opens a tenant (it fails closed if a profile ever carried one).
     val scopeOk = required match
       case RequiredScope.System       => isAdminPrincipal
       case RequiredScope.SystemStrict => superuser
       case RequiredScope.Tenant(t)    =>
-        superuser || manageableTenants.contains(t) ||
+        manageableTenants.contains(t) ||
         // Profile-only sessions belong to the password logins: in Db mode every grant is a
         // qodstate_user row (the one whose password the database authenticator verified, or the
         // tenant's own row for a password answered by an IdP), so a "user" row is a real grant,

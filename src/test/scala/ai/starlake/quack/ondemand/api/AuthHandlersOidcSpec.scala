@@ -6,6 +6,7 @@ import ai.starlake.quack.edge.auth.{
   AuthScope,
   AuthenticatedProfile,
   AuthenticationService,
+  DatabaseAuthenticator,
   OidcBearerAuthenticator,
   OidcDiscovery,
   OidcEndpointResolver,
@@ -93,23 +94,37 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
 
   private val codec = new OidcStateCodec("test-secret", 600_000L)
 
+  /** The identity the stub IdP vouches for: the user name, the provider name the profile carries
+    * (`authMethod`: the issuer host in production, which a tenant admin picks through issuerUrl)
+    * and the other flattened token claims. By default the IdP marks the email verified, as Keycloak
+    * and Google do.
+    */
+  private final case class StubIdentity(
+      username: String = "alice",
+      authMethod: String = "oidc",
+      claims: Map[String, String] = Map("email" -> "alice@acme.io", "email_verified" -> "true")
+  )
+
   // Stub validator: echoes `nonce` in the returned profile claims so that
   // OidcSsoService.completeAuth's nonce check succeeds.
-  private def stubValidator(nonce: String): OidcEndpoints => OidcBearerAuthenticator =
+  private def stubValidator(
+      nonce: String,
+      identity: StubIdentity
+  ): OidcEndpoints => OidcBearerAuthenticator =
     _ =>
       new OidcBearerAuthenticator("oidc", "https://idp.example.com/jwks", "", "", "role"):
         override def authenticate(token: String) =
           Right(
             AuthenticatedProfile(
-              username = "alice",
+              username = identity.username,
               role = "admin",
               groups = Set("admin"),
-              claims = Map("nonce" -> nonce, "email" -> "alice@acme.io"),
-              authMethod = "oidc"
+              claims = identity.claims + ("nonce" -> nonce),
+              authMethod = identity.authMethod
             )
           )
 
-  private def buildSvc(seed: String): OidcSsoService =
+  private def buildSvc(seed: String, identity: StubIdentity = StubIdentity()): OidcSsoService =
     val nonce = codec.genNonce(seed)
     new OidcSsoService(
       resolver = resolver,
@@ -118,7 +133,7 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       roleClaim = "role",
       publicBaseUrlOf = () => "https://qod.example.com",
       httpExchange = (_, _) => Right("""{"id_token":"x"}"""),
-      buildValidator = stubValidator(nonce),
+      buildValidator = stubValidator(nonce, identity),
       nowMillis = () => System.currentTimeMillis()
     )
 
@@ -227,17 +242,33 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       asked += ((realm, identity, email))
       grants
 
+  /** A directory holding `rows` by user name, with the store's email fallback
+    * (`UserStore.grantsForIdentity`): the identity is matched first, the email claim only when the
+    * identity matches no row. It records every lookup (realm, identity, email claim handed over).
+    */
+  private final class NamedDirectory(rows: Map[String, List[UserGrant]]):
+    val asked: scala.collection.mutable.ListBuffer[(LoginRealm, String, Option[String])] =
+      scala.collection.mutable.ListBuffer.empty
+    val lookup: GrantsLookup = (realm, identity, email) =>
+      asked += ((realm, identity, email))
+      rows.getOrElse(
+        identity,
+        email.filter(_ != identity).flatMap(rows.get).getOrElse(Nil)
+      )
+
   /** One SSO round trip for `scope` against `directory`: the callback's status, location and
-    * session cookie value, plus the token store that minted the session.
+    * session cookie value, plus the token store that minted the session. `identity` is what the
+    * stub IdP vouches for.
     */
   private def callbackWith(
       scope: OidcScope,
       returnTo: String,
       seed: String,
       directory: GrantsLookup,
-      events: ManagerEventSink = ManagerEventSink.noop
+      events: ManagerEventSink = ManagerEventSink.noop,
+      identity: StubIdentity = StubIdentity()
   ): (StatusCode, String, String, SessionTokenStore) =
-    val svc                            = buildSvc(seed)
+    val svc                            = buildSvc(seed, identity)
     val started                        = svc.startAuth(scope, returnTo, seed).toOption.get
     val tokens                         = new SessionTokenStore
     val handlers                       = makeHandlersWith(directory, Some(svc), tokens, events)
@@ -585,6 +616,111 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     status shouldBe StatusCode.Found
     location shouldBe "/ui/?error=admin_required"
     session shouldBe ""
+  }
+
+  it should "name the tenant on the session profile of a tenant-scope login whatever provider name the profile carries" in {
+    // An SSO profile's authMethod is the issuer host, which a tenant admin picks through issuerUrl:
+    // a host called "database" must not make the profile look like the database authenticator's.
+    // Left without the tenant, a personal access token minted from the session would be owned by
+    // the superuser row of the same name.
+    val (_, _, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s20",
+      new RecordingDirectory(List(UserGrant(Some("acme"), "admin"))).lookup,
+      identity = StubIdentity(authMethod = DatabaseAuthenticator.AuthMethod)
+    )
+    tokens.get(session).map(_.profile.tenant) shouldBe Some(Some("acme"))
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+  }
+
+  // ================================================================
+  // 14. oidcCallback email fallback: only an email the IdP marks verified
+  // ================================================================
+
+  // The IdP vouches for the user name 'mallory'. Its email claim names a row 'admin@localhost.local'
+  // (the superuser's name), or an admin row of acme: a self-edited address, unless the IdP says it
+  // verified it. Mallory matches no row by name.
+  private val superuserByEmail = Map("admin@localhost.local" -> List(UserGrant(None, "admin")))
+  private val acmeAdminByEmail =
+    Map("boss@acme.example" -> List(UserGrant(Some("acme"), "admin")))
+
+  private def mallory(email: String, verified: Option[String]): StubIdentity =
+    StubIdentity(
+      username = "mallory",
+      claims = Map("email" -> email) ++ verified.map("email_verified" -> _)
+    )
+
+  "oidcCallback email fallback" should "not bind the superuser row an unverified email names (email_verified false)" in {
+    val directory                 = new NamedDirectory(superuserByEmail)
+    val (_, location, session, _) = callbackWith(
+      OidcScope.System,
+      "/ui/",
+      "s21",
+      directory.lookup,
+      identity = mallory("admin@localhost.local", Some("false"))
+    )
+    location shouldBe "/ui/?error=not_provisioned"
+    session shouldBe ""
+    directory.asked.toList shouldBe List((LoginRealm.System, "mallory", None))
+  }
+
+  it should "not bind the superuser row an email names when the IdP sends no email_verified claim" in {
+    val directory                 = new NamedDirectory(superuserByEmail)
+    val (_, location, session, _) = callbackWith(
+      OidcScope.System,
+      "/ui/",
+      "s22",
+      directory.lookup,
+      identity = mallory("admin@localhost.local", None)
+    )
+    location shouldBe "/ui/?error=not_provisioned"
+    session shouldBe ""
+    directory.asked.toList shouldBe List((LoginRealm.System, "mallory", None))
+  }
+
+  it should "bind the row a verified email names when the user name matches no row (email_verified true)" in {
+    val directory                      = new NamedDirectory(superuserByEmail)
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.System,
+      "/ui/",
+      "s23",
+      directory.lookup,
+      identity = mallory("admin@localhost.local", Some("true"))
+    )
+    location shouldBe "/ui/"
+    tokens.get(session).map(_.scope) shouldBe Some(SessionScope.Superuser)
+    directory.asked.toList shouldBe
+      List((LoginRealm.System, "mallory", Some("admin@localhost.local")))
+  }
+
+  it should "not bind the tenant row an unverified email names on a tenant-scope login" in {
+    val directory                 = new NamedDirectory(acmeAdminByEmail)
+    val (_, location, session, _) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s24",
+      directory.lookup,
+      identity = mallory("boss@acme.example", Some("false"))
+    )
+    location shouldBe "/ui/?error=not_provisioned"
+    session shouldBe ""
+    directory.asked.toList shouldBe List((LoginRealm.Tenant("acme"), "mallory", None))
+  }
+
+  it should "bind the tenant row a verified email names on a tenant-scope login" in {
+    val directory                      = new NamedDirectory(acmeAdminByEmail)
+    val (_, location, session, tokens) = callbackWith(
+      OidcScope.Tenant("acme"),
+      "/ui/?tenant=acme",
+      "s25",
+      directory.lookup,
+      identity = mallory("boss@acme.example", Some("true"))
+    )
+    location shouldBe "/ui/?tenant=acme"
+    tokens.get(session).map(_.scope) shouldBe
+      Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
   }
 
   // ---- SQL-token flow (/api/auth/sql-token) ----

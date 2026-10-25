@@ -629,14 +629,18 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
 
   /** A user directory keyed by (realm, identity) that records every lookup it is asked (realm,
     * identity, email claim). A key it does not hold answers no rows, like an identity with no row
-    * in that realm.
+    * in that realm. Like `UserStore.grantsForIdentity` it falls back to the email it is handed only
+    * when the identity matches no row, so a handler that hands one over can be seen binding it.
     */
   private final class RecordingDirectory(rows: Map[(LoginRealm, String), List[UserGrant]]):
     val asked: scala.collection.mutable.ListBuffer[(LoginRealm, String, Option[String])] =
       scala.collection.mutable.ListBuffer.empty
     val lookup: GrantsLookup = (realm, identity, email) =>
       asked += ((realm, identity, email))
-      rows.getOrElse((realm, identity), Nil)
+      rows.getOrElse(
+        (realm, identity),
+        email.filter(_ != identity).flatMap(e => rows.get((realm, e))).getOrElse(Nil)
+      )
 
   private type LoginOutcome =
     Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)]
@@ -880,11 +884,11 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     directory.asked shouldBe empty
   }
 
-  it should "look the identity up in the realm the login names, with the IdP's email claim: the tenant's for a tenant login, the system realm without one" in {
-    val email     = Some("alice@acme.example")
+  it should "look the identity up by its user name alone, in the realm the login names: the tenant's for a tenant login, the system realm without one" in {
+    // The profile carries an email claim; a password login hands none to the lookup.
     val directory = new RecordingDirectory(Map.empty)
     val h         = makeHandlers(
-      Right(passwordGrantProfile(email = email)),
+      Right(passwordGrantProfile(email = Some("alice@acme.example"))),
       noCalls(),
       grantsForIdentity = directory.lookup
     )
@@ -893,9 +897,59 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     h.login(LoginRequest("alice", "pw", tenant = None)).unsafeRunSync()
 
     directory.asked.toList shouldBe List(
-      (LoginRealm.Tenant(AcmeId), "alice", email),
-      (LoginRealm.System, "alice", email)
+      (LoginRealm.Tenant(AcmeId), "alice", None),
+      (LoginRealm.System, "alice", None)
     )
+  }
+
+  it should "not bind the superuser row that the email claim of the IdP account names on a login without tenant" in {
+    // The account's email is whatever its holder typed: it names the seeded superuser, the user
+    // name 'mallory' matches no row.
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, "admin@localhost.local") -> List(UserGrant(None, "admin")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(username = "mallory", email = Some("admin@localhost.local"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("mallory", "pw", tenant = None)).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked.toList shouldBe List((LoginRealm.System, "mallory", None))
+  }
+
+  it should "not bind the tenant row that the email claim of the IdP account names on a tenant login" in {
+    val directory = new RecordingDirectory(
+      Map(
+        (LoginRealm.Tenant(AcmeId), "boss@acme.example") -> List(UserGrant(Some(AcmeId), "admin"))
+      )
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(username = "mallory", email = Some("boss@acme.example"))),
+      noCalls(),
+      grantsForIdentity = directory.lookup
+    )
+
+    val out = h.login(LoginRequest("mallory", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+    directory.asked.toList shouldBe List((LoginRealm.Tenant(AcmeId), "mallory", None))
+  }
+
+  it should "refuse a database-authenticator profile without tenant on a tenant login: a superuser grant never opens one" in {
+    // A database tenant login always carries the tenant row it verified. A profile that does not
+    // (it is not what the authenticator produces) fails closed instead of opening the tenant as a
+    // superuser.
+    val h = makeHandlers(
+      Right(AuthenticatedProfile("root", "admin", Set.empty, Map.empty, DbAuthMethod, None)),
+      noCalls()
+    )
+
+    val out = h.login(LoginRequest("root", "pw", tenant = Some(AcmeId))).unsafeRunSync()
+
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "admin_required"))
   }
 
   it should "look the identity up in the realm of the tenant id when the login named the tenant another way" in {
@@ -1183,7 +1237,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     r.manageableTenants.toSet shouldBe Set("t-a", "t-b")
   }
 
-  it should "fall back to the email claim when the primary identity does not match" in {
+  it should "not fall back to the email claim on a password login: only the authenticated user name is matched" in {
+    // The same shape as the SSO email fallback (AuthHandlersOidcSpec), but a password-grant account's
+    // email is not vouched for: the row the email names is not bound, the user name matches none.
     val profile = AuthenticatedProfile(
       username = "alice@corp",
       role = "user",
@@ -1196,8 +1252,9 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       directory = Map("alice@corporate.example" -> List(UserGrant(None, "admin"))),
       profile = profile
     )
-    val (_, r) = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync().toOption.get
-    r.superuser shouldBe true
+    val out = h.login(LoginRequest("alice@corp", "p")).unsafeRunSync()
+    out.swap.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Forbidden, "not_provisioned"))
   }
 
   it should "403 not_provisioned when the directory yields no grants" in {

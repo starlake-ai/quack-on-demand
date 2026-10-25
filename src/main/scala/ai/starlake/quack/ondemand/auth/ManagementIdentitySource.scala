@@ -28,6 +28,8 @@ object ManagementIdentitySource:
         )
 
 /** Resolve a verified identity (+ optional email claim) to its `UserGrant`s within the realm the
-  * login was verified in ([[LoginRealm]]). Bound to `UserStore.grantsForIdentity` at startup.
+  * login was verified in ([[LoginRealm]]). Bound to `UserStore.grantsForIdentity` at startup. The
+  * email is the lookup's fallback key, so the caller hands one over only when the IdP vouches for
+  * it (an SSO token with `email_verified`); a password login hands none.
   */
 type GrantsLookup = (LoginRealm, String, Option[String]) => List[UserGrant]

@@ -322,7 +322,11 @@ object ManagerServerHarness:
       // Builds the statement executor from this harness's own supervisor, the way Main binds
       // RoutedExecutor to the supervisor that serves REST. When set it replaces previewExecutor
       // on every surface the harness wires (preview, undrop, restore, MCP, Iceberg).
-      executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None
+      executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None,
+      // The authentication service behind POST /api/auth/login. None keeps the in-memory one (the
+      // database authenticator's stand-in over `store`); a spec that drives a real chain, such as
+      // the manager-wide password grant behind the database check, passes its own.
+      authService: Option[AuthenticationService] = None
   ): Harness =
     val mgrCfg =
       minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
@@ -352,7 +356,10 @@ object ManagerServerHarness:
     val columnPolicyHandlers = new RoleColumnPolicyHandlers(sup)
     val rowPolicyHandlers    = new RoleRowPolicyHandlers(sup)
 
-    val authSvc      = new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+    val authSvc: AuthenticationService =
+      authService.getOrElse(
+        new InMemoryAuthService.Service(store, providersEnabled = enableProviders)
+      )
     val authHandlers = new AuthHandlers(
       authService = authSvc,
       tokens = sessions,
