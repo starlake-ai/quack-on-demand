@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
+import java.util.Locale
 import ai.starlake.quack.edge.auth.{
   AuthFailure,
   AuthScope,
@@ -44,7 +45,9 @@ enum RequiredScope:
 /** REST endpoints driving the UI's login lifecycle.
   *
   * Authentication (who you are) goes through `AuthenticationService.authenticateBasic`.
-  * Authorization (what you may do) depends on `identitySource`:
+  * Authorization (what you may do) depends on the login's mode, which `ManagementAuthModeResolver`
+  * resolves per scope: the system scope (no tenant) follows `identitySource`, a tenant follows its
+  * own `authProvider`:
   *   - `Db`: the authenticating profile IS the grant. Single-tenant or superuser.
   *   - `Oidc`: the JWT's `role` and any tenant claim are discarded; `grantsForIdentity` is
   *     consulted with the JWT's `preferred_username` (and `email` as fallback), in the realm the
@@ -381,9 +384,10 @@ final class AuthHandlers(
         case AuthScope.System    => None
         case AuthScope.Tenant(t) => Some(t)
       val mode = authModeResolver.modeFor(tenantOpt)
-      (named, mode) match
-        case (Some(n), Right(ManagementAuthMode.Oidc)) => ssoRequired(req, n)
-        case _                                         =>
+      (named, tenantOpt, mode) match
+        case (Some(typed), Some(id), Right(ManagementAuthMode.Oidc)) =>
+          ssoRequired(req, typed, id)
+        case _ =>
           authService.authenticateBasic(scope, req.username, req.password) match
             case Left(err) =>
               audit.restAs(
@@ -414,12 +418,15 @@ final class AuthHandlers(
   }
 
   /** The answer to a password login naming a tenant that signs in through its identity provider:
-    * `400 sso_required`, audited as a denied login with reason `sso_required`. `named` is the
-    * tenant as the caller typed it (trimmed).
+    * `400 sso_required`, audited as a denied login with reason `sso_required` under the tenant id
+    * the login resolved (not the typed text). The message names the tenant as the caller typed it
+    * (`typed`, trimmed), but its link carries `id`, URL-encoded: the id is the one spelling the
+    * tenant-scoped endpoints (`GET /api/auth/mode`, the SSO start) are sure to take.
     */
   private def ssoRequired(
       req: LoginRequest,
-      named: String
+      typed: String,
+      id: String
   ): Either[(StatusCode, ErrorResponse), (CookieValueWithMeta, LoginResponse)] =
     audit.restAs(
       req.username,
@@ -427,15 +434,16 @@ final class AuthHandlers(
       "auth",
       AuditActions.AuthLoginFailure,
       "denied",
-      tenant = req.tenant,
+      tenant = Some(id),
       detail = Map("username" -> req.username, "reason" -> "sso_required")
     )
+    val link = java.net.URLEncoder.encode(id, java.nio.charset.StandardCharsets.UTF_8)
     Left(
       (
         StatusCode.BadRequest,
         ErrorResponse(
           "sso_required",
-          s"tenant '$named' signs in through its identity provider: open /ui/?tenant=$named, " +
+          s"tenant '$typed' signs in through its identity provider: open /ui/?tenant=$link, " +
             "or use a personal access token"
         )
       )
@@ -544,10 +552,11 @@ final class AuthHandlers(
     *
     * `required` expresses what the chosen login URL demands:
     *   - `System`: no tenant was specified; any admin (superuser or tenant-admin) is accepted.
-    *   - `Tenant(id)`: a specific tenant was requested; the principal must be superuser, admin of
-    *     that tenant, or a regular user holding a grant on it (which mints a non-admin,
-    *     profile-only session -- `LoginResponse.admin = false`) -- DB-mode logins additionally
-    *     admit any user with a grant on that tenant as a profile-only session.
+    *   - `Tenant(id)`: a specific tenant was requested; the principal must be admin of that tenant
+    *     or a superuser (a `Db`-mode grant only: an `Oidc` tenant-realm login binds that tenant's
+    *     rows alone, so it can never be superuser). In `Db` mode only, a regular user holding a
+    *     grant on that tenant is admitted too, with a non-admin, profile-only session
+    *     (`LoginResponse.admin = false`); an `Oidc` login never mints one.
     *
     * The grant computation and the not_provisioned / admin_required gates are shared by both entry
     * points, so they cannot drift.
@@ -878,11 +887,13 @@ final class AuthHandlers(
 
   /** Resolve the admin-UI login mode for a scope. Unauthenticated: the SPA calls this before login
     * with the tenant from the URL (absent for the system scope) to decide whether to render the
-    * password form (`db`) or redirect to SSO (`oidc`). An unknown or misconfigured tenant returns
+    * password form (`db`) or redirect to SSO (`oidc`). The tenant is trimmed and lowercased first
+    * (tenant ids are lowercase slugs), so a typed `ACME` resolves to tenant `acme` as it does at
+    * login, instead of answering `tenant_not_found`. An unknown or misconfigured tenant returns
     * `400` with a stable error code so the UI can surface it instead of silently falling back.
     */
   def authMode(tenant: Option[String]): Out[AuthModeResponse] = IO.blocking {
-    authModeResolver.modeFor(tenant.map(_.trim).filter(_.nonEmpty)) match
+    authModeResolver.modeFor(tenant.map(_.trim.toLowerCase(Locale.ROOT)).filter(_.nonEmpty)) match
       case Left(err) =>
         Left((StatusCode.BadRequest, ErrorResponse(err.code, "tenant auth mode unresolved")))
       case Right(ManagementAuthMode.Db) =>

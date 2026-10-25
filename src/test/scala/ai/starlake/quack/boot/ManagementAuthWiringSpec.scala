@@ -104,11 +104,23 @@ class ManagementAuthWiringSpec extends AnyFlatSpec with Matchers:
 
   it should "keep the bare /ui/ SSO off under identitySource=db even when the manager-wide OIDC client is set" in {
     // identitySource governs the bare login: a db-mode manager never uses QOD_MGMT_OIDC_*, so the
-    // System scope answers before any discovery (no network).
-    val cfg = load("db", issuerUrl = "https://idp.example.com", clientId = "sys-app")
+    // System scope answers before any discovery (no network). The issuer is a loopback address
+    // that refuses connections, so a regression that did reach discovery would fail the assertion
+    // without making a call outside this host.
+    val cfg = load("db", issuerUrl = "http://127.0.0.1:1", clientId = "sys-app")
     val sso = ManagementAuthWiring.build(cfg, noProviders, noTenants).oidcSso
     sso.map(_.startAuth(OidcScope.System, "/ui/", "wiring-spec")) shouldBe
       Some(Left(OidcSsoError.ScopeNotConfigured))
+  }
+
+  it should "use the manager-wide OIDC client for the bare /ui/ SSO under identitySource=oidc" in {
+    // Port 1 on loopback refuses the connection: discovery of the manager-wide issuer fails at
+    // once and nothing leaves this host. DiscoveryFailed (not ScopeNotConfigured) shows the System
+    // scope reached discovery with the configured client.
+    val cfg = load("oidc", issuerUrl = "http://127.0.0.1:1", clientId = "sys-app")
+    val sso = ManagementAuthWiring.build(cfg, noProviders, noTenants).oidcSso
+    sso.map(_.startAuth(OidcScope.System, "/ui/", "wiring-spec")) shouldBe
+      Some(Left(OidcSsoError.DiscoveryFailed))
   }
 
   it should "keep wiring the SSO service under identitySource=oidc" in {

@@ -416,7 +416,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     calls shouldBe empty
   }
 
-  it should "name the tenant as the caller typed it in sso_required, checking the mode on the resolved id" in {
+  it should "name the tenant as typed in the sso_required message but link its resolved id, checking the mode on that id" in {
     val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h     = makeHandlers(
       Right(ssoAdmin),
@@ -432,24 +432,77 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
         status shouldBe StatusCode.BadRequest
         err.error shouldBe "sso_required"
         err.message shouldBe (
-          "tenant 'Acme' signs in through its identity provider: open /ui/?tenant=Acme, " +
+          "tenant 'Acme' signs in through its identity provider: open /ui/?tenant=t-sso, " +
             "or use a personal access token"
         )
       case Right(_) => fail("expected 400 sso_required, got a session")
     calls shouldBe empty
   }
 
-  it should "audit the sso_required refusal as a denied login with reason sso_required" in {
+  // Tenant ids are lowercase slugs, and the login resolves a typed case variant to the id. The
+  // tenant below is `ssoTenant` under such an id.
+  private val acmeSso = ssoTenant.copy(id = "acme")
+
+  it should "link the exact tenant id in sso_required when the typed value is a case variant of it" in {
+    // The link must open a login the tenant-scoped endpoints resolve: it carries the id the login
+    // resolved ('acme'), not the typed 'ACME'.
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(
+      Right(ssoAdmin),
+      calls,
+      resolveTenant = { case "ACME" => Some("acme"); case _ => None },
+      loadTenant = Map(acmeSso.id -> acmeSso).get
+    )
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("ACME"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 'ACME' signs in through its identity provider: open /ui/?tenant=acme, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+    // The id in the link is one the public mode endpoint answers oidc for.
+    h.authMode(Some("acme")).unsafeRunSync() shouldBe Right(AuthModeResponse("oidc", ""))
+  }
+
+  it should "URL-encode the resolved tenant id in the sso_required link" in {
+    // Ids are slugs in practice; the link is built so that no id can break out of the query.
+    val odd   = ssoTenant.copy(id = "t sso&x")
+    val calls = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
+    val h     = makeHandlers(Right(ssoAdmin), calls, loadTenant = Map(odd.id -> odd).get)
+
+    val out = h.login(LoginRequest("alice", "pw", tenant = Some("t sso&x"))).unsafeRunSync()
+
+    out match
+      case Left((status, err)) =>
+        status shouldBe StatusCode.BadRequest
+        err.error shouldBe "sso_required"
+        err.message shouldBe (
+          "tenant 't sso&x' signs in through its identity provider: open /ui/?tenant=t+sso%26x, " +
+            "or use a personal access token"
+        )
+      case Right(_) => fail("expected 400 sso_required, got a session")
+    calls shouldBe empty
+  }
+
+  it should "audit the sso_required refusal as a denied login with reason sso_required, under the resolved tenant id" in {
+    // A padded, case-variant typed value still records the tenant id, not the typed text.
     val telemetry = new RecordingTelemetryStore
     val calls     = scala.collection.mutable.Buffer.empty[(AuthScope, String, String)]
     val h         = makeHandlers(
       Right(ssoAdmin),
       calls,
-      loadTenant = ssoTenants,
+      resolveTenant = { case "ACME" => Some("acme"); case _ => None },
+      loadTenant = Map(acmeSso.id -> acmeSso).get,
       audit = new AuditRecorder(telemetry, _ => None)
     )
 
-    h.login(LoginRequest("alice", "pw", tenant = Some("t-sso"))).unsafeRunSync()
+    h.login(LoginRequest("alice", "pw", tenant = Some("  ACME "))).unsafeRunSync()
 
     telemetry.events should have size 1
     val e = telemetry.events.head
@@ -457,7 +510,7 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     e.action shouldBe "auth.login.failure"
     e.outcome shouldBe "denied"
     e.actor shouldBe "alice"
-    e.tenant shouldBe Some("t-sso")
+    e.tenant shouldBe Some("acme")
     e.detail shouldBe Map("username" -> "alice", "reason" -> "sso_required")
   }
 

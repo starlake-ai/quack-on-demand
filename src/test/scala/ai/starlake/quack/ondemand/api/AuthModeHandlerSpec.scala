@@ -137,6 +137,21 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       Right(AuthModeResponse("oidc", ""))
   }
 
+  it should "trim and lowercase the tenant first: ACME and '  acme ' answer what acme answers" in {
+    // Tenant ids are lowercase slugs, so a typed or followed ?tenant=ACME must reach tenant acme
+    // here too, or the SPA would fall back to the password form of an SSO tenant.
+    val h        = handlers(Map("acme" -> acmeSso), ManagementAuthMode.Db)
+    val expected = run(h, Some("acme"))
+    expected shouldBe Right(AuthModeResponse("oidc", ""))
+    run(h, Some("ACME")) shouldBe expected
+    run(h, Some("  acme ")) shouldBe expected
+  }
+
+  it should "still treat a blank tenant as the system scope" in {
+    run(handlers(Map.empty, ManagementAuthMode.Oidc), Some("   ")) shouldBe
+      Right(AuthModeResponse("oidc", ""))
+  }
+
   it should "reject an unknown tenant with 400 tenant_not_found" in {
     run(handlers(Map.empty, ManagementAuthMode.Db), Some("nope")) shouldBe
       Left(
