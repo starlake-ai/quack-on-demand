@@ -16,9 +16,10 @@ imagePullSecrets: []
 
 # --- Replicas ---------------------------------------------------------------
 # replicaCount > 1 turns on HA mode (QOD_HA_ENABLED=true): active-active
-# replicas with Postgres advisory-lock leader election. Requires
-# sessionJwtSecret (or existingSessionJwtSecret) so sessions verify on every
-# replica. See docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
+# replicas with Postgres advisory-lock leader election. Every replica signs
+# sessions with the same secret: sessionJwtSecret when set, else the one the
+# first manager stored in the control-plane database.
+# See docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
 replicaCount: 1
 
 # Optional override for the rendered names. `fullnameOverride` wins if set.
@@ -281,8 +282,13 @@ admin:
   existingSecret: ""
   existingSecretKey: adminPassword
 
-# Session JWT signing key shared by all replicas. REQUIRED when replicaCount > 1.
-# Generate with: openssl rand -hex 32
+# Session JWT signing key (QOD_SESSION_JWT_SECRET). Optional at any replica
+# count: left empty, the first manager generates one, stores it in the
+# control-plane database and every restart and replica reads it, so sessions
+# survive restarts. Set it (openssl rand -hex 32) only when another service
+# must verify the sessions with the same key. To rotate the stored one, run
+# DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'
+# and restart every replica: every session and reset link ends.
 sessionJwtSecret: ""
 # Name of a pre-existing Secret with key "sessionJwtSecret" (takes precedence).
 existingSessionJwtSecret: ""

@@ -118,15 +118,14 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 
 {{/*
-Session JWT secret name; fails when HA is on without a configured secret.
+Session JWT secret name; empty when none is configured (the manager then uses
+the one stored in its control-plane database).
 */}}
 {{- define "qod.sessionJwtSecretName" -}}
 {{- if .Values.existingSessionJwtSecret -}}
 {{- .Values.existingSessionJwtSecret -}}
 {{- else if .Values.sessionJwtSecret -}}
 {{- include "qod.fullname" . }}-session-jwt
-{{- else -}}
-{{- fail "replicaCount > 1 requires sessionJwtSecret or existingSessionJwtSecret (openssl rand -hex 32)" }}
 {{- end -}}
 {{- end -}}
 

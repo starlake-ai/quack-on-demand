@@ -150,8 +150,9 @@ services:
       PROXY_TLS_ENABLED:        ${TLS:-false}
 
       # ----- Starflow pairing (starflow profile; inert unless STARFLOW_ENABLED=true) -----
-      # Empty values equal unset: the Starlake menu/SSO stays off and boot
-      # generates a session secret, exactly as without these lines.
+      # Empty values equal unset: the Starlake menu/SSO stays off and the
+      # manager signs sessions with the secret its control-plane database
+      # stores (generated on first boot), exactly as without these lines.
       SL_ENABLED:             ${STARFLOW_ENABLED:-false}
       SL_URL:                 ${STARFLOW_URL:-http://localhost:${STARFLOW_PORT:-9900}}
       QOD_SESSION_JWT_SECRET: ${SESSION_JWT_SECRET:-}

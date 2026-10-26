@@ -96,7 +96,8 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 |---|---|---|
 | `image.repository` | `starlakeai/quack-on-demand` | |
 | `image.tag` | `""` (uses `Chart.AppVersion`) | |
-| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`); requires `sessionJwtSecret` or `existingSessionJwtSecret` (the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
+| `replicaCount` | `1` | Set to 2+ to enable HA mode (`QOD_HA_ENABLED`). Replicas share the session secret the control plane stores; `sessionJwtSecret` / `existingSessionJwtSecret` stay optional. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md). |
+| `sessionJwtSecret` / `existingSessionJwtSecret` | `""` | Optional at any replica count (`QOD_SESSION_JWT_SECRET`). Empty: the first manager generates the secret and stores it in the control-plane database, and every restart and replica reads it. Set one only when another service must verify the sessions; a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. |
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.user` | `""` (REQUIRED) | A dedicated non-superuser role with `CREATEDB` that owns the control-plane database. See [Tenant isolation](#tenant-isolation). |
 | `security.nodeLockdown` | `true` | `QOD_NODE_LOCKDOWN`. Keeps tenant users away from the node's mounted secrets. See [Tenant isolation](#tenant-isolation). |
@@ -117,7 +118,11 @@ defaults give you database auth everywhere with the seeded admin user.
 
 **1. Admin credentials and sessions** (always on): `admin.username` /
 `admin.password` (or `admin.existingSecret`; one of the two is REQUIRED) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
-`sessionJwtSecret` signs UI sessions and is REQUIRED when `replicaCount > 1`.
+`sessionJwtSecret` signs UI sessions and is optional: left empty, the first manager generates the
+secret and stores it in the control-plane database (`qodstate_boot_secret`), so sessions survive
+restarts and every replica verifies them. Rotate the stored one with
+`DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart of every replica (every
+session and password-reset link ends).
 The chart sets no static API key and refuses a non-empty `apiKey` (an all-empty
 block left in an older values file passes): people log in
 (`qod login`, the UI), and automation (CI, MCP clients, SCIM connectors) uses
@@ -206,7 +211,7 @@ When you need the wire encrypted (compliance such as SOC2 / HIPAA / PCI), run a 
 
 ## Operational notes
 
-- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Requires `sessionJwtSecret` or `existingSessionJwtSecret`; when using `existingSessionJwtSecret`, the pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md).
+- **Replicas** - default 1 (single manager, `Recreate` rollout). Set `replicaCount: 2` or more to enable active-active HA: all replicas serve REST + FlightSQL; one holds the Postgres advisory lock and runs singleton duties (reconcile, bootstrap). Replicas share the session secret stored in the control-plane database; `sessionJwtSecret` or `existingSessionJwtSecret` pins one instead (a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`). See [guides/RESILIENCE.md](../../../guides/RESILIENCE.md).
 - **K8s API scope** - manager calls Pod + Service APIs in its own namespace only. Bound by a `Role`. If you need the manager to spawn nodes in a different namespace, override `QOD_K8S_NAMESPACE` and grant the equivalent `Role` there.
 - **TLS** - leaving `flightsql.tls.existingSecret` empty makes the manager auto-generate a self-signed cert at boot. Fine for kind. For prod, mount a Secret containing your CA-signed cert chain + key (under any keys; reference them in `flightsql.tls.certKey` / `keyKey`).
 - **Probes** - liveness targets `/health` (always 200 while the JVM is alive); readiness targets `/ready` (503 until Postgres is reachable). Readiness gates traffic until Postgres connectivity is confirmed, so a rolling restart doesn't briefly serve requests against an unavailable control plane.

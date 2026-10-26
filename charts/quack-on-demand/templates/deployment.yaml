@@ -134,10 +134,12 @@ spec:
             {{- if gt (.Values.replicaCount | int) 1 }}
             - name: QOD_HA_ENABLED
               value: "true"
+            {{- end }}
+            {{- with include "qod.sessionJwtSecretName" . }}
             - name: QOD_SESSION_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "qod.sessionJwtSecretName" . | quote }}
+                  name: {{ . | quote }}
                   key: sessionJwtSecret
             {{- end }}
           lifecycle:
