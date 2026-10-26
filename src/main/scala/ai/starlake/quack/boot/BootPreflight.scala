@@ -42,8 +42,8 @@ object BootPreflight extends LazyLogging:
   /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
   val NoEdgeAuthMessage: String =
     "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +
-      "and no other quack-flightsql.auth provider is configured, so every FlightSQL or Quack " +
-      "client would be trusted as whatever user it names, superusers included, with no password. " +
+      "and no other quack-flightsql.auth provider is configured, so no FlightSQL or Quack client " +
+      "could ever connect. " +
       "System-scope OIDC (QOD_MGMT_OIDC_*) signs in to the admin UI and REST only, never to " +
       "FlightSQL. Set QOD_AUTH_DB_ENABLED=true, or a Keycloak or Azure password backend " +
       "(QOD_AUTH_KEYCLOAK_ENABLED=true or QOD_AUTH_AZURE_ENABLED=true, with their settings), or " +

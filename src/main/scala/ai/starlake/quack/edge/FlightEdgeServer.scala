@@ -85,11 +85,11 @@ final class FlightEdgeServer(
 
     server = builder.build()
     server.start()
-    // OPEN is reachable only from specs: a booted manager refuses an empty chain
-    // (BootPreflight.checkEdgeAuthAvailable).
+    // A booted manager always has a provider (BootPreflight.checkEdgeAuthAvailable); with none the
+    // handshake refuses every client.
     val authMode =
       if authService.hasProviders then "providers configured"
-      else "OPEN (trust-the-client; configure auth.* in application.conf for prod)"
+      else "none configured, every connection refused"
     logger.info(
       s"FlightSQL edge listening on ${cfg.host}:${cfg.port} (TLS=${cfg.tlsEnabled}, auth: $authMode)"
     )
@@ -101,9 +101,8 @@ final class FlightEdgeServer(
     * every subsequent RPC, and we look the peerId up in the ConnectionContext to recover (tenant,
     * pool, user).
     *
-    * Credential validation lives in [[EdgeHandshake]]: when providers are configured every fresh
-    * handshake is validated against the chain; otherwise the manager falls back to the v1 "trust
-    * the client" path (username from Basic header, no credential check).
+    * Credential validation lives in [[EdgeHandshake]]: every fresh handshake is validated against
+    * the configured chain, and with no provider configured every handshake is refused.
     */
   private val headerAuth: CallHeaderAuthenticator =
     new CallHeaderAuthenticator:

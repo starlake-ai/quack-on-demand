@@ -233,6 +233,27 @@ class FlightSqlRealClientSpec extends AnyFlatSpec with Matchers:
       h.shutdown()
   }
 
+  it should "fail with UNAUTHENTICATED when no authenticator is configured, even a good password" in {
+    val fix    = SecurityFixtures.freshStore()
+    val h      = FlightEdgeHarness.boot(fix.store, enableProviders = false, tls = false)
+    val client = h.newClient()
+    try
+      val opt = headersOpt(
+        tenant = SecurityFixtures.TenantName,
+        pool = SecurityFixtures.PoolName,
+        user = SecurityFixtures.AliceUsername,
+        password = SecurityFixtures.AlicePassword
+      )
+      val ex = intercept[FlightRuntimeException] {
+        client.getInfo(FlightDescriptor.command("SELECT 1".getBytes("UTF-8")), opt)
+      }
+      ex.status().code() shouldBe FlightStatusCode.UNAUTHENTICATED
+      ex.getMessage should include("no authenticator is configured")
+    finally
+      client.close()
+      h.shutdown()
+  }
+
   // -------------------------------------------------------------------------
   // Case 4: missing tenant header is rejected with UNAUTHENTICATED and a
   // description mentioning the missing tenant scope.

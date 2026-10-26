@@ -20,6 +20,7 @@ import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
 import ai.starlake.quack.ondemand.telemetry.EventJournal
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
+import ai.starlake.quack.security.InMemoryAuthService
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
@@ -216,7 +217,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       withAdmin: Boolean = false,
       ttlSec: Long = 3600,
       maxConcurrent: Int = 0,
-      stamping: Boolean = false
+      stamping: Boolean = false,
+      auth: AuthenticationService = InMemoryAuthService.acceptingAnyPassword()
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -280,7 +282,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     val user      = RbacUser("u-1", if superuser then None else Some("t-1"), "alice", kind = "user")
     val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)
     val handshake = new EdgeHandshake(
-      new AuthenticationService(AuthenticationConfig.disabled, "x"),
+      auth,
       lookupPool = (t, p) =>
         sup.findPoolKeyByTenantAndPoolName(t, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
@@ -337,6 +339,13 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.transport.types shouldBe List(Type.ConnectionRequest, Type.Disconnect)
     decodeConnectionRequest(fx.transport.posted(0)).toOption.get shouldBe
       hello(Token).copy(authString = "nodetok")
+
+  it should "refuse every client when no authenticator is configured" in:
+    val fx = setup(auth = new AuthenticationService(AuthenticationConfig.disabled, "x"))
+    errorText(fx.door.handle(encodeConnectionRequest(hello(Token), 1L)).unsafeRunSync()) should
+      include("no authenticator is configured")
+    fx.sessions.size shouldBe 0
+    fx.transport.types shouldBe Nil
 
   it should "refuse a malformed token without touching the auth chain" in:
     val fx = setup()

@@ -28,7 +28,7 @@ enum HandshakeFailure(val message: String):
 
 /** A validated, authorized principal bound to one (tenant, tenantDb, pool). `effectiveSet` is
   * computed once here and cached on the session so the per-statement ACL gate never re-queries
-  * Postgres; `profile` is the auth chain's view of the principal (None in trust-the-client mode).
+  * Postgres; `profile` is the auth chain's view of the principal.
   */
 final case class HandshakeBound(
     poolKey: PoolKey,
@@ -44,11 +44,11 @@ final case class HandshakeBound(
   *
   *   1. pre-resolve the (tenant, pool) target so the Basic chain can look up the right
   *      `qodstate_user` row (a same-named user in two tenants is two principals);
-  *   2. validate the credential against the configured chain (or trust the client when no provider
-  *      is configured, the v1 local-dev posture), and refuse as unauthenticated a profile whose
-  *      user name names no one: a blank name, or one that came from an email claim the identity
-  *      provider does not mark verified ([[ai.starlake.quack.edge.auth.IdentityNaming]], the rule
-  *      the management login applies too);
+  *   2. validate the credential against the configured chain (with no provider configured, refuse
+  *      every connection), and refuse as unauthenticated a profile whose user name names no one: a
+  *      blank name, or one that came from an email claim the identity provider does not mark
+  *      verified ([[ai.starlake.quack.edge.auth.IdentityNaming]], the rule the management login
+  *      applies too);
   *   3. re-resolve the target with the validated username;
   *   4. run the user-scope and pool-access gates and compute the EffectiveSet.
   *
@@ -94,11 +94,11 @@ final class EdgeHandshake(
     )
 
     // Second element: superuserAdmissible, true only when the credential was NOT validated by a
-    // tenant-scoped authority. The no-provider arm (trust the client) is for specs that build an
-    // AuthenticationService with no provider: a booted manager never reaches it, since
+    // tenant-scoped authority. With no provider at all every connection is refused, superusers
+    // included: nothing could check a credential. A booted manager never gets there, since
     // BootPreflight.checkEdgeAuthAvailable refuses an empty chain at boot.
     val validation: Either[String, (Option[AuthenticatedProfile], Boolean)] =
-      if !authService.hasProviders then Right((None, true))
+      if !authService.hasProviders then Left(EdgeHandshake.NoAuthenticator)
       else
         (bearer, basicPair) match
           case (Some(token), _) =>
@@ -156,43 +156,40 @@ final class EdgeHandshake(
       case Left(err)                                => Left(HandshakeFailure.Unauthenticated(err))
       case Right((profileOpt, superuserAdmissible)) =>
         val resolvedUsername = profileOpt.map(_.username).orElse(basicUsername)
-        // Bearer present but unknown AND no provider claimed it AND no Basic credentials: a
-        // stale session token from a prior manager restart.
-        if bearer.isDefined && profileOpt.isEmpty && resolvedUsername.isEmpty then
-          Left(
-            HandshakeFailure.Unauthenticated(
-              "session expired; please reconnect with username/password"
-            )
-          )
-        else
-          TenantSelector.resolve(
-            bearer = bearer,
-            headers = hdrs,
-            username = resolvedUsername,
-            lookupPool = lookupPool
-          ) match
-            case Right(resolved) =>
-              val jwtRoles  = profileOpt.map(_.role).filter(_.nonEmpty).toSet
-              val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
-              val jwtClaims = profileOpt.map(_.claims).getOrElse(Map.empty)
-              authorize(
-                AuthzRequest(
-                  resolved.poolKey.tenant,
-                  resolved.poolKey.pool,
-                  resolved.user,
-                  jwtRoles,
-                  jwtGroups,
-                  jwtClaims,
-                  superuserAdmissible = superuserAdmissible,
-                  edge = edge
+        TenantSelector.resolve(
+          bearer = bearer,
+          headers = hdrs,
+          username = resolvedUsername,
+          lookupPool = lookupPool
+        ) match
+          case Right(resolved) =>
+            val jwtRoles  = profileOpt.map(_.role).filter(_.nonEmpty).toSet
+            val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
+            val jwtClaims = profileOpt.map(_.claims).getOrElse(Map.empty)
+            authorize(
+              AuthzRequest(
+                resolved.poolKey.tenant,
+                resolved.poolKey.pool,
+                resolved.user,
+                jwtRoles,
+                jwtGroups,
+                jwtClaims,
+                superuserAdmissible = superuserAdmissible,
+                edge = edge
+              )
+            ) match
+              case Left(HandshakeDenial.Denied(err)) =>
+                Left(HandshakeFailure.Unauthorized(s"permission denied: $err"))
+              case Left(HandshakeDenial.Unavailable(err)) =>
+                Left(HandshakeFailure.Unavailable(s"authorization service unavailable: $err"))
+              case Right(auth) =>
+                Right(
+                  HandshakeBound(resolved.poolKey, resolved.user, auth.effectiveSet, profileOpt)
                 )
-              ) match
-                case Left(HandshakeDenial.Denied(err)) =>
-                  Left(HandshakeFailure.Unauthorized(s"permission denied: $err"))
-                case Left(HandshakeDenial.Unavailable(err)) =>
-                  Left(HandshakeFailure.Unavailable(s"authorization service unavailable: $err"))
-                case Right(auth) =>
-                  Right(
-                    HandshakeBound(resolved.poolKey, resolved.user, auth.effectiveSet, profileOpt)
-                  )
-            case Left(err) => Left(HandshakeFailure.Unauthenticated(err))
+          case Left(err) => Left(HandshakeFailure.Unauthenticated(err))
+
+object EdgeHandshake:
+
+  /** The refusal of every connection when the authentication service has no provider. */
+  val NoAuthenticator: String =
+    "no authenticator is configured on this manager: every connection is refused"

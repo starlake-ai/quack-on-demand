@@ -35,7 +35,8 @@ object TenantSelector:
     *   - JWT path: `tenant` + `pool` headers required (URL is authoritative; JWT claims are never
     *     trusted for routing). User is the validated `username` the auth module resolved (the JWT's
     *     `preferred_username`, which is what `qodstate_user.username` matches); it falls back to
-    *     the raw `sub` claim only when no validated username is available (trust-the-client mode).
+    *     the raw `sub` claim only when no validated username is available (the pre-resolution the
+    *     handshake runs before it validates the credential, to pick the tenant realm).
     *   - Basic path: bare username; `tenant` + `pool` headers required.
     *
     * Header names are plain (`tenant`, `pool`) so that Flight JDBC URL connection parameters route
@@ -64,7 +65,7 @@ object TenantSelector:
           // Prefer the username the auth module validated (the JWT's
           // preferred_username, matched against qodstate_user.username). Fall
           // back to the raw `sub` only when no validated username is available
-          // (e.g. trust-the-client mode with no providers configured).
+          // (the handshake's pre-resolution, before the credential is validated).
           val user = username.filter(_.nonEmpty).orElse(usernameFromJwt(token)).getOrElse("unknown")
           Resolved(key, user)
 

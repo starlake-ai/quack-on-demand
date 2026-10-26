@@ -3,8 +3,6 @@ package ai.starlake.quack.it
 import ai.starlake.quack.QuackNativeConfig
 import ai.starlake.quack.edge.*
 import ai.starlake.quack.edge.adapter.*
-import ai.starlake.quack.edge.auth.AuthenticationService
-import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.edge.quack.*
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
@@ -198,7 +196,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val rowPolicies = List(RoleRowPolicy("rlp-1", "r-1", "acme_db", "tpch1", "secret", "x = 1"))
     val eff         = EffectiveSet(user, Nil, Nil, grants, Nil, masks, rowPolicies)
     val handshake   = new EdgeHandshake(
-      new AuthenticationService(AuthenticationConfig.disabled, "x"),
+      ai.starlake.quack.security.InMemoryAuthService.acceptingAnyPassword(),
       lookupPool = (t, p) =>
         sup.findPoolKeyByTenantAndPoolName(t, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),

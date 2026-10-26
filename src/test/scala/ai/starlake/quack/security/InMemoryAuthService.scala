@@ -134,6 +134,30 @@ object InMemoryAuthService:
   def realServiceWithBasicChain(providers: List[BasicAuthProvider]): AuthenticationService =
     realServiceWithChains(providers, Nil, None)
 
+  /** A REAL [[AuthenticationService]] whose basic chain admits any user name with any password, as
+    * that user of the scope's realm (the database authenticator's profile shape). For specs that
+    * pin what happens around the auth chain, now that a service with no provider refuses every
+    * connection.
+    */
+  def acceptingAnyPassword(): AuthenticationService =
+    realServiceWithBasicChain(List(new BasicAuthProvider:
+      val name = "any-password"
+      def authenticate(
+          scope: AuthScope,
+          username: String,
+          password: String
+      ): Either[AuthFailure, AuthenticatedProfile] =
+        Right(
+          AuthenticatedProfile(
+            username = username,
+            role = "user",
+            groups = Set.empty,
+            claims = Map.empty,
+            authMethod = DatabaseAuthenticator.AuthMethod,
+            tenant = scope.tenantId
+          )
+        )))
+
   /** A REAL [[AuthenticationService]] whose basic chain is `basic` and whose manager-wide bearer
     * chain is `bearer`, with `tenantOidcRegistry` substituting a tenant's own OIDC authenticator
     * into a tenant-scope bearer chain as in production. Built like [[realServiceWithBasicChain]].
@@ -156,8 +180,8 @@ object InMemoryAuthService:
     * providers disabled via [[emptyAuthConfig]]) and whose `authenticateBasic` is wired to the
     * in-memory provider.
     *
-    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`, driving the
-    * `auth_disabled` 503 branch in auth handlers end-to-end.
+    * Pass `providersEnabled = false` to flip `hasProviders` back to `false`: no password verifies,
+    * and the edge handshake refuses every connection.
     */
   final class Service(
       store: InMemoryControlPlaneStore,

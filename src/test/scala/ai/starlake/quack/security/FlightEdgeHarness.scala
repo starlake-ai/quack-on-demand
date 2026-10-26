@@ -140,8 +140,8 @@ object FlightEdgeHarness:
     *   Seeded in-memory control plane store (use [[SecurityFixtures.freshStore]]).
     * @param enableProviders
     *   When `true` (default), the [[InMemoryAuthService.Service]] validates credentials against
-    *   bcrypt hashes in the store. When `false`, the service reports `hasProviders = false` and
-    *   lets the Flight server fall through to the "trust-the-client" legacy path.
+    *   bcrypt hashes in the store. When `false`, the service reports `hasProviders = false`, and
+    *   the edge refuses every handshake.
     * @param tls
     *   When `true`, a self-signed cert is auto-generated into a unique per-invocation tempdir via
     *   [[FlightEdgeServer.ensureCertFiles]]. When `false` (default), the server listens on plain
