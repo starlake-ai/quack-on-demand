@@ -330,7 +330,7 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 
 | Setting | Env var | Default |
 |---|---|---|
-| Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: a random secret is generated and printed at each boot, so sessions die on restart (HA refuses to boot without one) |
+| Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: the first boot generates one and stores it in the control-plane database, and every restart and HA replica reads it, so sessions survive restarts. Rotate it with `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart |
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
 | Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |

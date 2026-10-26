@@ -152,7 +152,7 @@
   boot with "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a
   static API key. Use a personal access token (qod auth pat create) or a qod login session, and
   unset QOD_API_KEY."; an empty value passes (older Compose files render `API_KEY=` as one). Boot
-  no longer generates a key, its banner shows only a generated `QOD_SESSION_JWT_SECRET`, and it
+  no longer generates a key, prints no secret (see the session secret entry below), and it
   refuses to start when nothing could create a session: no password backend
   (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in
   (`QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL` and `QOD_MGMT_OIDC_CLIENT_ID`
@@ -178,6 +178,26 @@
     `--username` names it (its personal access tokens then work again; a reset of the configured
     admin names without `--username` leaves a disabled account disabled and says so); a deleted
     superuser row comes back at the next boot with `QOD_ADMIN_PASSWORD` set.
+
+- **Sessions survive a restart without `QOD_SESSION_JWT_SECRET`, and HA no longer needs it.** A
+  manager with no session secret configured used to mint a random one per boot and print it in a
+  `GENERATED BOOT SECRET` banner, so every UI and CLI session (and every password-reset link) died
+  with the process, and HA refused to boot. The first boot now generates the secret once and
+  stores it in the control-plane database (new table `qodstate_boot_secret`, Liquibase `0049`, row
+  `session_jwt`); every later boot and every HA replica reads the same row (replicas booting
+  together converge on one value). The banner is gone: boot prints one line naming the source,
+  `session secret: from QOD_SESSION_JWT_SECRET`, `session secret: generated and stored in the
+  control plane` or `session secret: stored in the control plane`, never the value. A non-empty
+  `QOD_SESSION_JWT_SECRET` still wins and is never written to the database (the stored row is left
+  as it is, so unsetting the variable falls back to it); `qod start --with-starflow` and Compose's
+  Starflow profile keep pinning one, since Starflow verifies the manager's tokens with it. HA no
+  longer refuses an empty secret, and the Helm chart's `sessionJwtSecret` /
+  `existingSessionJwtSecret` are optional at any `replicaCount` (when set, the chart now passes
+  them with one replica too, where it used to ignore them). Rotate the stored secret with
+  `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart of every replica:
+  every session and outstanding reset link ends. Whoever can read the control-plane database can
+  forge sessions with it; that reader already holds every password hash and can rewrite
+  `qodstate_user`, so the trust boundary is unchanged.
 
 - **REST and MCP data statements run as their caller.** Preview, data diff, undrop, restore,
   Iceberg views, branch counts requested over REST and MCP `run_sql` go through the FlightSQL
