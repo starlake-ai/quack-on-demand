@@ -250,7 +250,8 @@ def test_serve_deletes_the_spec_when_launching_fails_before_the_manager(
     runner, wired, tmp_path, monkeypatch, failing
 ):
     # Between writing the spec and running the manager, an exception or a Ctrl-C (chdir, the
-    # provisioning thread's start, the Starflow start) must not leave its credentials on disk.
+    # provisioning thread's start) must not leave its credentials on disk. The Starflow start has
+    # its own case (test_serve_deletes_the_spec_when_the_starflow_start_fails).
     from qod_cli.commands import serve as serve_cmd
 
     spec = tmp_path / "state" / "serve-provision.json"
@@ -1484,6 +1485,27 @@ def starflow_wired(wired, monkeypatch):
     # Pin the platform so these tests exercise the wiring on every OS.
     monkeypatch.setattr(_starflow, "_is_windows", lambda: False)
     return wired
+
+
+def test_serve_deletes_the_spec_when_the_starflow_start_fails(
+    runner, starflow_wired, monkeypatch
+):
+    # The Starflow start runs after the spec is written and before the manager: a failure there
+    # must not leave the spec's credentials on disk either.
+    from qod_cli.commands import _starflow
+
+    spec = starflow_wired["tmp"] / "state" / "serve-provision.json"
+    seen = {}
+
+    def boom(*_a, **_kw):
+        seen["spec_written"] = spec.exists()
+        raise OSError("starflow start failed")
+
+    monkeypatch.setattr(_starflow, "start_after_ready", boom)
+    result = _invoke(runner, starflow_wired, "--with-starflow", "--pg-port", "25999")
+    assert result.exit_code != 0
+    assert seen["spec_written"] is True
+    assert not spec.exists()
 
 
 def test_serve_with_starflow_uses_the_embedded_postgres(runner, starflow_wired):

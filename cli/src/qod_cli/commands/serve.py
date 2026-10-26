@@ -907,11 +907,12 @@ def serve(
     # (ServeProvisionHook), from this spec: no credential is needed for it. An
     # outcome left by an earlier boot is deleted first, or the provisioning thread
     # could read it as this boot's.
-    spec_path = state_dir / SPEC_FILE
+    # Absolute: the run chdirs into state_dir below, and the cleanup must still find it.
+    spec_path = (state_dir / SPEC_FILE).absolute()
     write_spec(spec_path, provision_spec(tenant, resolved, pool, size))
     try:
         outcome_path(spec_path).unlink(missing_ok=True)
-        env["QOD_SERVE_PROVISION"] = str(spec_path.absolute())
+        env["QOD_SERVE_PROVISION"] = str(spec_path)
         # quack-on-demand.acl.enabled defaults to FALSE, so a persistent install has to
         # ask for it. TLS and DB auth are already on by default. A real env var or a
         # persisted `qod setup` value wins over this default.
