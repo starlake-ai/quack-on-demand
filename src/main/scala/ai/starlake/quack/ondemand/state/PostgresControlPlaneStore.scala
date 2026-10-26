@@ -147,6 +147,12 @@ final class PostgresControlPlaneStore(
     finally rs.close()
   }
 
+  def policyVersions(): Map[String, Long] = withConn { c =>
+    val rs = c.createStatement().executeQuery("SELECT id, policy_version FROM qodstate_tenant")
+    try drain(rs)(r => r.getString(1) -> r.getLong(2)).toMap
+    finally rs.close()
+  }
+
   def deleteTenant(id: String): Unit = withConn(c => deleteById(c, "qodstate_tenant", "id", id))
 
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit = withConn { c =>

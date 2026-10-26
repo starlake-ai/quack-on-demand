@@ -103,3 +103,5 @@ databaseChangeLog:
       file: db/changelog/0048-tenant-auth-client-secret.yaml
   - include:
       file: db/changelog/0049-boot-secret.yaml
+  - include:
+      file: db/changelog/0050-policy-version.yaml

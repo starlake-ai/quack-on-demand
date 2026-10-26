@@ -45,6 +45,15 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def updateTenantAcl(tenantId: String, acl: TenantAcl): Unit =
     tenants.updateWith(tenantId)(_.map(_.copy(acl = acl)))
 
+  // No trigger here: a test that needs a version moves it with bumpPolicyVersion.
+  private val policyVersionsOf = TrieMap.empty[String, Long]
+
+  def policyVersions(): Map[String, Long] =
+    tenants.keys.map(t => t -> policyVersionsOf.getOrElse(t, 0L)).toMap
+
+  def bumpPolicyVersion(tenantId: String): Unit =
+    policyVersionsOf.updateWith(tenantId)(v => Some(v.getOrElse(0L) + 1L))
+
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit =
     if tenants.contains(tenant.id) then
       throw new java.sql.SQLException(s"tenant id ${tenant.id} already exists")

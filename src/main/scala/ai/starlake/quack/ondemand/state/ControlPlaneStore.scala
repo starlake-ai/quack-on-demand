@@ -42,6 +42,11 @@ trait ControlPlaneStore:
     */
   def updateTenantAcl(tenantId: String, acl: TenantAcl): Unit
   def listTenants(): List[Tenant]
+
+  /** Every tenant's policy version (tenant id -> version), which Liquibase 0050's triggers bump on
+    * every change to the tenant's RBAC rows and ACL settings. Session handles carry it.
+    */
+  def policyVersions(): Map[String, Long]
   def deleteTenant(id: String): Unit
 
   /** Bootstrap a new tenant atomically: the tenant row plus every [[BuiltinRbac]] row (roles,
