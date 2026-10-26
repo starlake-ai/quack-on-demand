@@ -156,10 +156,17 @@
   refuses to start when nothing could create a session: no password backend
   (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in
   (`QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL` and `QOD_MGMT_OIDC_CLIENT_ID`
-  set). What replaces each use of the key:
+  set). These refusals read the configuration alone and come first, before the manager binds a
+  listener, migrates its database or seeds an admin (on the embedded control plane its Postgres
+  is already up, and is stopped again). The
+  admin UI's no-login mode is gone too: with no auth provider the UI used to skip the login
+  screen and run as a synthetic `anonymous` superuser; such a manager now refuses to boot, so
+  the UI always shows a login. What replaces each use of the key:
   - an operator's CLI or curl: a `qod login` session, or a PAT in `QOD_TOKEN`, sent as
     `X-API-Key` (the header keeps its name); a 401 from the CLI says "run qod login, or set
-    QOD_TOKEN to a personal access token";
+    QOD_TOKEN to a personal access token". `GET /api/auth/whoami` (`qod whoami`) now accepts a
+    live PAT too and answers with its owner's identity and the token's own scope, where it used
+    to answer `401 invalid`;
   - CI and IaC: a PAT an admin mints once (`qod auth pat create`), or `qod login
     --password-stdin` inside the job (the password on the first line of stdin, never in a flag or
     an env var);
@@ -190,10 +197,18 @@
   `qod serve` no longer hands its manager a per-boot key: it writes a spec file and the manager
   provisions the tenant, database and pool itself (`QOD_SERVE_PROVISION`, an add-only boot hook
   that never updates or deletes, reporting to `serve-provision.outcome.json`), so later boots
-  need no credential. An existing database whose kind, data path or init SQL differ, or a pool
-  name already serving another database, is refused with the way out
-  (`qod serve <target> --name <other>` or `--pool <other>`); any other refused step is printed
-  with its `finish by hand:` command. Attach mode (a manager already running) provisions with
+  need no credential to provision. A later boot waits for a routable node with `QOD_TOKEN` or
+  the profile's unexpired session when that credential can list pools, and prints the
+  node-warming note only when none can. The spec file is deleted once the manager reported, and
+  in any case when the manager exits (Ctrl-C, a refused boot, a release that never reads it).
+  An existing database whose kind, data path or init SQL differ, or a pool name already serving
+  another database, is refused with the way out (`qod serve <target> --name <other>` or
+  `--pool <other>`), on its own line in attach mode, never as a `finish by hand:` command; the
+  manager's reason names the existing row's kind and data path, not the ones the serve asked
+  for. Any other refused step is printed with its `finish by hand:` command. A launcher/manager
+  version mismatch now says to run the manager release matching this CLI (`qod --version`
+  shows it). `qod setup --no-auth` (or `QOD_AUTH_DB_ENABLED=false`) warns that the manager
+  then refuses to boot without another authenticator. Attach mode (a manager already running) provisions with
   `QOD_TOKEN`, the profile's session or a password prompt, and otherwise refuses with "run qod
   login, set QOD_TOKEN, or run qod serve in a terminal". `--with-starflow` now shares only the
   session secret with Starflow.
@@ -221,7 +236,11 @@
   `QOD_AUTH_AZURE_ENABLED`), or a bearer provider (`JWT_SECRET_KEY` or `JWT_PUBLIC_KEY_PATH`,
   `QOD_AUTH_GOOGLE_ENABLED`, `QOD_AUTH_AWS_ENABLED`). System-scope OIDC (`QOD_MGMT_OIDC_*`)
   signs in to the admin UI and REST only and adds no FlightSQL provider, so `AUTH=false` with
-  system-scope OIDC alone is refused too.
+  system-scope OIDC alone is refused too. The handshake itself fails closed as well: with no
+  provider configured, the FlightSQL edge and the Quack front door refuse every connection,
+  superusers included ("no authenticator is configured on this manager: every connection is
+  refused"), where they used to trust the client, and the edge no longer logs `auth: OPEN`. A
+  password login on such a service answers `401 invalid_credentials`, not `503 auth_disabled`.
 
 - **`GET /api/profile/pools`: the pools you may connect to.** Any session or PAT (the endpoint
   joins the profile allowlist) gets

@@ -118,7 +118,8 @@ defaults give you database auth everywhere with the seeded admin user.
 **1. Admin credentials and sessions** (always on): `admin.username` /
 `admin.password` (or `admin.existingSecret`; one of the two is REQUIRED) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
 `sessionJwtSecret` signs UI sessions and is REQUIRED when `replicaCount > 1`.
-The chart sets no static API key and refuses any `apiKey` value: people log in
+The chart sets no static API key and refuses a non-empty `apiKey` (an all-empty
+block left in an older values file passes): people log in
 (`qod login`, the UI), and automation (CI, MCP clients, SCIM connectors) uses
 personal access tokens (`qod auth pat create`). Upgrading from a release that set
 `apiKey`: mint those tokens first, point the automation at them, then delete
