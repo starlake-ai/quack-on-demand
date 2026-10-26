@@ -284,14 +284,7 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       "flightsql"
     ) shouldBe Left(HandshakeDenial.Unavailable(OpaAuthorizer.UnavailableMessage))
 
-  "OpaClient.jdkPost" should "never carry the bearer token in a transport error" in:
-    val token  = "s3cr3t-opa-token\ninjected"
-    val result = OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", Some(token))
-    result.isLeft shouldBe true
-    val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
-    leaked shouldBe false
-
-  "OpaAuthorizer.connect (RBAC overload)" should "carry parentPool, roles and claims from the EffectiveSet into the request body" in:
+  it should "carry parentPool, roles and claims from the EffectiveSet into the request body" in:
     wm.resetAll()
     wm.stubFor(post(anyUrl()).willReturn(okJson("""{"result":{"allow":true}}""")))
     val user = rbacUser("alice")
@@ -318,3 +311,10 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         .withRequestBody(matchingJsonPath("$.input.user.roles[0]", equalTo("analyst")))
         .withRequestBody(matchingJsonPath("$.input.user.claims.dept", equalTo("fin")))
     )
+
+  "OpaClient.jdkPost" should "never carry the bearer token in a transport error" in:
+    val token  = "s3cr3t-opa-token\ninjected"
+    val result = OpaClient.jdkPost(500)(s"$base/v1/data/qod/authz/connect", "{}", Some(token))
+    result.isLeft shouldBe true
+    val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
+    leaked shouldBe false

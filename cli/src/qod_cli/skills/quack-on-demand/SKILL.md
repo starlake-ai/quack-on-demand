@@ -816,10 +816,10 @@ Manager envs: `QOD_ACL_MODE` (default mode, `qod`), `QOD_OPA_URL` (fallback URL)
 - Fail closed: only `{"result": {"allow": true}}` allows; an undefined rule, a non-boolean
   `allow`, or `row_filter` / `masks` in the result deny with "policy error".
 - OPA unreachable, slow, non-2xx or a body over 1 MiB = `UNAVAILABLE` "authorization service
-  unavailable: OPA unreachable or returned an error (see the manager log)" (retryable), never a permission error. Check the OPA server, not the grants:
-  the cause (host, port, status) is only in the manager log, as a WARN
-  `OPA <connect|statement> error for tenant=<id>: ...`; `qod tenant opa-test` run as a superuser
-  shows it too.
+  unavailable: OPA unreachable or returned an error (see the manager log)" (retryable), never a
+  permission error. Check the OPA server, not the grants: the cause (host, port, status) is only
+  in the manager log, as a WARN `OPA <connect|statement> error for tenant=<id>: ...`;
+  `qod tenant opa-test` run as a superuser shows it too.
 - `400 opa_url_required`: set `--opa-url` or `QOD_OPA_URL` before `--mode opa`.
 - Policy changes apply within the cache TTL and never kill running sessions.
 - Catalog listings (`information_schema`, `duckdb_*`) are still filtered by QoD grants, so an

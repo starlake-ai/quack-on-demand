@@ -292,9 +292,11 @@
   Quack handshakes, every statement, the REST and MCP data tools and `GET /api/profile/pools`
   answered with the transport error, which could name a host, port or status. The tenant admin
   chooses the OPA URL, so that let a tenant probe whatever the manager's network reaches. They now
-  answer "OPA unreachable or returned an error (see the manager log)" (still `UNAVAILABLE` / `503 authz_unavailable`), the text `qod tenant opa-test`
-  already showed a non-superuser; the cause stays in the WARN line
-  `OPA <connect|statement> error for tenant=<id>: ...`, where the bearer token is now masked.
+  answer "OPA unreachable or returned an error (see the manager log)" (still `UNAVAILABLE` /
+  `503 authz_unavailable`), the same text `qod tenant opa-test` now shows a non-superuser, and the
+  statement history (`/api/profile/statements`) records that text too. The cause is only in the
+  manager's WARN line `OPA <connect|statement> error for tenant=<id>: ...`, where the bearer token
+  is now masked.
 
 - **Manager modules must be recompiled against this core** (`Tenant` gained a field, and
   `AuthzRequest`, `ExecCaller` and `PoolSupervisor.authorizeHandshake` take

@@ -162,9 +162,10 @@ How each outcome reaches the client:
 An outage is reported as `UNAVAILABLE`, not as a permission error, so clients retry and nobody
 chases a phantom grant problem. The client never sees the cause: the tenant admin chooses the OPA
 URL, so the exception, host, port or HTTP status would let anyone probe what the manager can reach.
-The manager logs it at WARN as `OPA <connect|statement> error for tenant=<id>: <cause>`. There is no circuit breaker: during an outage every decision waits
-up to `QOD_OPA_TIMEOUT_MS` and is refused. The timeout bounds the whole exchange, including the
-response body, and the body is capped at 1 MiB.
+The manager logs it at WARN as `OPA <connect|statement> error for tenant=<id>: <cause>`. There is
+no circuit breaker: during an outage every decision waits up to `QOD_OPA_TIMEOUT_MS` and is
+refused. The timeout bounds the whole exchange, including the response body, and the body is
+capped at 1 MiB.
 
 ## What QoD still enforces on an `opa` tenant
 
@@ -203,10 +204,11 @@ qod tenant opa-test acme --pool bi --user alice --sql "SELECT * FROM orders"    
 ```
 
 Prints the exact input document and the tenant OPA's answer (`allow`, `deny` or `error`). An
-`error` shows the transport cause to a superuser only; a tenant admin sees "OPA unreachable or returned an error (see the manager log)". Nothing
-is executed and the decision cache is neither read nor filled. Differences from a live session:
-`client.edge` is `dry-run`, `claims` is `{}`, and unqualified tables resolve to the pool's
-database and its `main` schema (no session `USE` state).
+`error` shows the transport cause to a superuser only; a tenant admin sees "OPA unreachable or
+returned an error (see the manager log)". Nothing is executed and the decision cache is neither
+read nor filled. Differences from a live session: `client.edge` is `dry-run`, `claims` is `{}`,
+and unqualified tables resolve to the pool's database and its `main` schema (no session `USE`
+state).
 
 ## Starter policy
 
