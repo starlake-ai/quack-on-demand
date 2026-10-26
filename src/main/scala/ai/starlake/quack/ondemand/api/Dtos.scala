@@ -985,7 +985,9 @@ final case class UserUpdateRequest(
     // upsert, which resets the account-lockout counters (failed_attempts,
     // locked_at) like every other admin write to the row. And unlike a DELETED
     // seeded admin (re-created at restart), a LOCKED one stays locked across
-    // restarts: recovery is another admin, or qod admin reset-password for a superuser.
+    // restarts: recovery is another admin, or for a superuser
+    // qod admin reset-password --username <name> (only a name given with
+    // --username is re-enabled).
     enabled: Option[Boolean] = None
 )
 final case class UserDeleteRequest(id: String)

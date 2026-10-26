@@ -204,8 +204,9 @@ final class UserHandlers(
     *
     * NOTE (HA): the floor's count-then-write is not atomic across replicas; two concurrent admin
     * requests can each observe two enabled superusers and both pass, reaching zero. Narrow,
-    * admin-only, and recoverable with `qod admin reset-password`, which also re-enables a disabled
-    * superuser; a conditional UPDATE or per-guard advisory lock is on the HA hardening backlog.
+    * admin-only, and recoverable with `qod admin reset-password --username <name>`, which also
+    * re-enables the superuser it names (only a name given with `--username` is re-enabled); a
+    * conditional UPDATE or per-guard advisory lock is on the HA hardening backlog.
     */
   private def selfAndFloorGuard(
       apiKey: Option[String],

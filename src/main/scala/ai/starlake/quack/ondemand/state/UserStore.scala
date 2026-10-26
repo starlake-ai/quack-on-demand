@@ -348,30 +348,42 @@ final class UserStore(
     }
 
   /** Break-glass reset of a SUPERUSER row (`tenant IS NULL`) by username, used only by the
-    * `admin reset-password` jar subcommand. One statement: new bcrypt hash, lockout cleared, the
-    * account re-enabled, `must_change_password` set to `mustChange`. Returns the row id, or None
-    * when no such superuser exists (a tenant user of the same name is never matched). Re-enabling
-    * makes this the recovery for a disabled superuser too: the last-superuser floor in
+    * `admin reset-password` jar subcommand. One statement: new bcrypt hash, lockout cleared,
+    * `must_change_password` set to `mustChange`, and the account re-enabled only when `reenable` (a
+    * disabled account stays disabled otherwise). Returns the row's id with its enabled flag before
+    * and after, or None when no such superuser exists (a tenant user of the same name is never
+    * matched). `reenable` is required, never defaulted: re-enabling a superuser also brings back
+    * every personal access token it owns, so only a caller that named the account asks for it. With
+    * it, this is the recovery for a disabled superuser too: the last-superuser floor in
     * `UserHandlers` can be raced to zero under HA, and no other credential reaches the manager.
     */
   def resetSuperuserPassword(
       username: String,
       plaintext: String,
-      mustChange: Boolean
-  ): Option[String] =
+      mustChange: Boolean,
+      reenable: Boolean
+  ): Option[UserStore.SuperuserReset] =
     withConn { c =>
       val hash = BCrypt.withDefaults().hashToString(12, plaintext.toCharArray)
-      val ps   = c.prepareStatement(
-        "UPDATE qodstate_user SET password_hash = ?, must_change_password = ?, enabled = TRUE, " +
-          "failed_attempts = 0, locked_at = NULL, updated_at = NOW() " +
-          "WHERE tenant IS NULL AND username = ? RETURNING id"
+      // The self-join's `prior` row is the version the statement read, so it carries the flag
+      // as it was before this update.
+      val ps = c.prepareStatement(
+        "UPDATE qodstate_user u SET password_hash = ?, must_change_password = ?, " +
+          "enabled = u.enabled OR ?, failed_attempts = 0, locked_at = NULL, updated_at = NOW() " +
+          "FROM qodstate_user prior " +
+          "WHERE prior.id = u.id AND u.tenant IS NULL AND u.username = ? " +
+          "RETURNING u.id, prior.enabled, u.enabled"
       )
       try
         ps.setString(1, hash)
         ps.setBoolean(2, mustChange)
-        ps.setString(3, username)
+        ps.setBoolean(3, reenable)
+        ps.setString(4, username)
         val rs = ps.executeQuery()
-        try if rs.next() then Some(rs.getString(1)) else None
+        try
+          if rs.next() then
+            Some(UserStore.SuperuserReset(rs.getString(1), rs.getBoolean(2), rs.getBoolean(3)))
+          else None
         finally rs.close()
       finally ps.close()
     }
@@ -566,6 +578,11 @@ final class UserStore(
     finally ps.close()
 
 object UserStore:
+
+  /** The outcome of [[UserStore.resetSuperuserPassword]]: the row id and its enabled flag before
+    * and after the reset.
+    */
+  final case class SuperuserReset(id: String, wasEnabled: Boolean, enabled: Boolean)
 
   /** Outcome of an upsert: the persisted id and whether the row was freshly inserted (`true`) or an
     * existing row got its password + kind refreshed (`false`).

@@ -35,7 +35,7 @@ def _invoke(runner, calls, *args, input=None):
 def test_reset_pipes_the_password_on_stdin_never_argv(runner, jar_run):
     result = _invoke(runner, jar_run, "--username", "root", input="n3w\n")
     assert result.exit_code == 0, result.output
-    assert jar_run["cmd"][-2:] == ["reset-password", "root"]
+    assert jar_run["cmd"][-3:] == ["reset-password", "root", "--reenable"]
     assert "n3w" not in " ".join(jar_run["cmd"])
     assert jar_run["input"] == "n3w\n"
 
@@ -55,7 +55,17 @@ def test_reset_defaults_to_both_builtin_admin_names(runner, jar_run, monkeypatch
 def test_reset_username_option_resets_only_that_one(runner, jar_run, monkeypatch):
     monkeypatch.setenv("QOD_ADMIN_USERNAME", "ops,root")
     _invoke(runner, jar_run, "--username", "root", input="pw\n")
-    assert jar_run["cmd"][-2:] == ["reset-password", "root"]
+    assert jar_run["cmd"][-3:] == ["reset-password", "root", "--reenable"]
+
+
+def test_reset_reenables_only_a_name_given_with_username(runner, jar_run, monkeypatch):
+    # Re-enabling a superuser revives its personal access tokens: the configured admin
+    # names reset passwords only, a deliberately disabled one stays disabled.
+    monkeypatch.setenv("QOD_ADMIN_USERNAME", "ops,root")
+    _invoke(runner, jar_run, "--must-change", input="pw\n")
+    assert "--reenable" not in jar_run["cmd"]
+    _invoke(runner, jar_run, "--username", "ops", "--must-change", input="pw\n")
+    assert jar_run["cmd"][-4:] == ["reset-password", "ops", "--reenable", "--must-change"]
 
 
 def test_reset_forwards_must_change(runner, jar_run):

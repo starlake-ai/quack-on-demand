@@ -2,8 +2,10 @@
 
 Runs the manager jar's one-shot `admin reset-password` subcommand, which
 writes the new bcrypt hash straight into the control-plane database (lockout
-cleared, account re-enabled), so it works with every login path blocked. It
-never starts Postgres:
+cleared), so it works with every login path blocked. A disabled superuser is
+re-enabled only when `--username` names it: re-enabling one also revives its
+personal access tokens, so resetting the configured admin names never undoes a
+deliberate disable. It never starts Postgres:
 an external control plane is reached as it is (the manager may be down), and
 the `qod serve` embedded one only while its Postgres is running.
 Authority is reaching that database with the configured credentials; anyone
@@ -34,7 +36,7 @@ def reset_password(
         None,
         "--username",
         help="Superuser to reset (default: every name in QOD_ADMIN_USERNAME, "
-        "seeded as one credential).",
+        "seeded as one credential). A disabled superuser named here is re-enabled.",
     ),
     must_change: bool = typer.Option(
         False, "--must-change", help="Force a password change at the next login."
@@ -51,7 +53,10 @@ def reset_password(
 ):
     """Set a new password for a superuser directly in the control-plane database.
 
-    Also clears its lockout and re-enables the account.
+    Also clears its lockout. A disabled superuser is re-enabled only when
+    --username names it, which also revives its personal access tokens;
+    without --username a disabled admin gets its new password but stays
+    disabled.
     """
     base_env = {**load_start_env(), **os.environ}
     users = [username] if username else admin_password.admin_usernames(base_env)
@@ -107,7 +112,13 @@ def reset_password(
             f"{env.get('QOD_PG_PORT') or '5432'}/{env.get('QOD_PG_DBNAME') or 'qod'}"
         )
     jar_path = jar.resolve() if jar is not None else resolve_jar(version)
-    args = ["admin", "reset-password", *users] + (["--must-change"] if must_change else [])
+    # --reenable only for an explicit --username: the configured names never revive a
+    # superuser someone disabled on purpose.
+    args = (
+        ["admin", "reset-password", *users]
+        + (["--reenable"] if username else [])
+        + (["--must-change"] if must_change else [])
+    )
     cmd = launcher.build_jar_command(
         resolve_java(), str(jar_path), args, java_opts=env.get("JAVA_OPTS")
     )
