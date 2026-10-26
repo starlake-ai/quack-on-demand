@@ -117,16 +117,8 @@ final class FlightEdgeServer(
         // (`Basic <base64>` or `Bearer <token>`).
         val authHeader = Option(headers.get("Authorization"))
           .orElse(Option(headers.get("x-qod-authorization")))
-        val bearer = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
-        val basic  = authHeader
-          .filter(_.startsWith("Basic "))
-          .map(_.stripPrefix("Basic "))
-          .map(b64 => new String(java.util.Base64.getDecoder.decode(b64)))
-        val basicPair = basic.flatMap { creds =>
-          creds.split(":", 2) match
-            case Array(u, p) => Some((u, p))
-            case _           => None
-        }
+        val bearer        = authHeader.filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+        val basicPair     = FlightEdgeServer.basicPairOf(authHeader)
         val basicUsername = basicPair.map(_._1)
         // Diagnostic: per-RPC header summary at DEBUG. Enables operators to
         // see exactly what credentials each Flight call carries when a driver
@@ -267,3 +259,18 @@ final class FlightEdgeServer(
 object FlightEdgeServer:
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
+
+  /** The `(user, password)` of a `Basic <base64>` authorization value, or None when it is not one.
+    * The value comes from an unauthenticated client: one that is not base64 gives no pair (the
+    * request then carries no basic credential), never an exception.
+    */
+  def basicPairOf(authHeader: Option[String]): Option[(String, String)] =
+    authHeader
+      .filter(_.startsWith("Basic "))
+      .map(_.stripPrefix("Basic "))
+      .flatMap(b64 => scala.util.Try(new String(java.util.Base64.getDecoder.decode(b64))).toOption)
+      .flatMap { creds =>
+        creds.split(":", 2) match
+          case Array(u, p) => Some((u, p))
+          case _           => None
+      }
