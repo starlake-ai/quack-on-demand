@@ -3,20 +3,27 @@ package ai.starlake.quack.edge
 import ai.starlake.quack.model.PoolKey
 import io.circe.parser._
 
+import java.nio.charset.StandardCharsets
 import java.util.Base64
+import scala.util.Try
 
 final case class Resolved(poolKey: PoolKey, user: String)
 
 object TenantSelector:
 
   /** Decode a JWT body (no signature check - that's the auth module's job). Returns the named claim
-    * value if present.
+    * value if present. The bearer comes from an unauthenticated client and runs here before any
+    * provider validated it, so a body that is not base64url, or not JSON, names no claim instead of
+    * throwing.
     */
   private def claimFromJwt(token: String, claim: String): Option[String] =
     token.split('.') match
       case Array(_, payload, _) =>
-        val decoded = new String(Base64.getUrlDecoder.decode(padded(payload)))
-        parse(decoded).toOption.flatMap(_.hcursor.get[String](claim).toOption)
+        Try(
+          new String(Base64.getUrlDecoder.decode(padded(payload)), StandardCharsets.UTF_8)
+        ).toOption
+          .flatMap(decoded => parse(decoded).toOption)
+          .flatMap(_.hcursor.get[String](claim).toOption)
       case _ => None
 
   private def usernameFromJwt(token: String): Option[String] = claimFromJwt(token, "sub")

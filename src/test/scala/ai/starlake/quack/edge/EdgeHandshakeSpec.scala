@@ -118,6 +118,15 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       case Left(HandshakeFailure.Unauthenticated(msg)) => msg should include("No bearer auth")
       case other => fail(s"expected Unauthenticated, got $other")
 
+  it should "refuse, never throw, a three-part bearer whose body is not base64" in:
+    // The pre-resolution decodes the body before any provider validates the token: a malformed
+    // one from an unauthenticated client must be an ordinary refusal on both doors.
+    val out =
+      handshake().authenticate(Some("a.!!not-base64!!.c"), None, Some("bi"), Some("acme"), false)
+    out match
+      case Left(HandshakeFailure.Unauthenticated(_)) => succeed
+      case other => fail(s"expected Unauthenticated, got $other")
+
   "authenticate with no provider configured" should "refuse every connection, superusers included" in:
     val open = new EdgeHandshake(
       new AuthenticationService(AuthenticationConfig.disabled, "x"),
