@@ -80,6 +80,11 @@ _ENV_PASSTHROUGH = (
 # Object-storage settings the spawn script reads.
 _ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
 _SQL_KEYS = ("dbInitSql", "lockdownSql")
+# The manager's extension policy (quack-on-demand.nodeExtensions, spec decision 17), assignment key
+# -> the variable the spawn script reads. Always all three, from the assignment only.
+_NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"),
+                       ("allowUnsigned", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"),
+                       ("autoinstallKnown", "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"))
 # Sensitive values never sit in the node's environment or command line (a node user with SQL reads
 # both back through getenv() or /proc/<pid>/environ|cmdline): they go to a private directory, one
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
@@ -526,6 +531,10 @@ class FleetMember:
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])
         secrets["QOD_NODE_AUTHZ_KEY"] = str(assignment["authzKey"])
         env["QOD_NODE_ID"] = str(assignment["nodeId"])
+        # On only for a JSON true; an older manager sends no policy, which leaves all three off.
+        extensions = assignment.get("nodeExtensions") or {}
+        for key, name in _NODE_EXTENSION_ENV:
+            env[name] = "true" if extensions.get(key) is True else "false"
         if self.node_bin is not None:
             env["QOD_NODE_BIN"] = str(self.node_bin)
         env["QOD_SECRETS_DIR_EPHEMERAL"] = "1"

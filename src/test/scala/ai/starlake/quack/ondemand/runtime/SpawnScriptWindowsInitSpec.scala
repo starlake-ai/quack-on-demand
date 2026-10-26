@@ -94,6 +94,9 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     val lines = out.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
     lines.head should startWith("SET temp_directory = '")
     lines should contain("SELECT 'db-init';")
+    lines should contain("INSTALL httpfs;")
+    lines should contain("INSTALL avro;")
+    lines.indexOf("INSTALL avro;") should be < lines.indexOf("SELECT 'db-init';")
     lines.exists(_.contains("secret_directory")) shouldBe false
     lines.exists(_.contains("quack_serve")) shouldBe false
     lines.exists(_.contains("LOAD quack")) shouldBe false
@@ -260,6 +263,28 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     }
     // The node directory goes with the node.
     nodeDirs(tmp) shouldBe Nil
+  }
+
+  it should "pass qod-node an extension flag only for the exact string true" in {
+    assume(!scala.util.Properties.isWin, "the stand-in qod-node is a shell script")
+    val probe     = Files.createDirectories(tempDir.resolve("probe-ext"))
+    val (p, _, _) = launch(
+      tempDir.resolve("start-ext"),
+      fakeQodNode(probe),
+      23963,
+      extraEnv = Seq(
+        "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "TRUE",
+        "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "true",
+        "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "false"
+      )
+    )
+    p.getInputStream.readAllBytes()
+    p.waitFor(60, TimeUnit.SECONDS) shouldBe true
+    Files
+      .readAllLines(probe.resolve("args"), StandardCharsets.UTF_8)
+      .asScala
+      .toList
+      .filter(_.endsWith("-extensions")) shouldBe List("--allow-unsigned-extensions")
   }
 
   it should "refuse to start without qod-node" in {

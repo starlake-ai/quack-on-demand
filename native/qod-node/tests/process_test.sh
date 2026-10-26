@@ -280,6 +280,35 @@ else
   cat "$work/term.out"
 fi
 
+# --- serve: the extension settings are fixed before the database opens ----------------------------
+# Off unless a flag turns one on (decision 17). The init SQL tries to turn both allow_* settings on:
+# DuckDB refuses while the database runs, so neither can a pool's or a database's initSql. The node
+# still loads quack (strict) with autoinstall off: it installs it explicitly.
+ext_settings() {
+  local label="$1" expected="$2"
+  shift 2
+  printf "SET allow_community_extensions = true;\nSET allow_unsigned_extensions = true;\nCOPY (SELECT current_setting('allow_community_extensions') AS c, current_setting('allow_unsigned_extensions') AS u, current_setting('autoinstall_known_extensions') AS a) TO '%s' (HEADER false);\n" "$work/ext-$label.csv" |
+    "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-ext-$label")" \
+      --secret-directory "$work/secret-dir" --node-id "$node_id" --init - "$@" > "$work/ext-$label.out" 2>&1 &
+  local ext_node=$!
+  pids+=("$ext_node")
+  if ! wait_for '\[qod-node\] ready' "$work/ext-$label.out"; then
+    fail "extensions $label: the node never became ready"
+    cat "$work/ext-$label.out"
+    return
+  fi
+  grep -q '1 of 3 statement(s) ran' "$work/ext-$label.out" ||
+    fail "extensions $label: the init SQL turned an allow_* setting on"
+  grep -q 'Cannot change allow_community_extensions setting while database is running' "$work/ext-$label.out" ||
+    fail "extensions $label: no refusal of SET allow_community_extensions"
+  [[ "$(tr -d '\r\n' < "$work/ext-$label.csv")" == "$expected" ]] ||
+    fail "extensions $label: settings $(tr -d '\r\n' < "$work/ext-$label.csv"), expected $expected"
+  kill -TERM "$ext_node"
+  wait_exit "$ext_node" || fail "extensions $label: the node did not stop"
+}
+ext_settings default "false,false,false"
+ext_settings all "true,true,true" --allow-community-extensions --allow-unsigned-extensions --autoinstall-known-extensions
+
 # --- serve: a quack_serve failure is fatal ---------------------------------------------------------
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack
 # does not refuse a port another listener holds.)

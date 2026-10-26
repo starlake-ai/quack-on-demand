@@ -305,7 +305,8 @@ class KubernetesQuackBackendSecuritySpec
     // One value per name: kubelet lets the last duplicate win, a reader of the first sees another.
     names.distinct shouldBe names
     names.toSet shouldBe allowed.keySet ++
-      Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv)
+      Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
+      ai.starlake.quack.NodeExtensionsConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
     values.get("kind") shouldBe Some("ducklake")
@@ -415,6 +416,43 @@ class KubernetesQuackBackendSecuritySpec
     withClue("a plain env value of the pod holds the node's key")(
       plainEnv("quack-nodeenv-key").exists(_.getValue == keys.keyHex("quack-nodeenv-key")) shouldBe
         false
+    )
+
+  "a node pod" should "carry the manager's extension policy as plain env, once each" in:
+    val names = ai.starlake.quack.NodeExtensionsConfig.EnvNames
+    def extensionEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId).filter(e => names.contains(e.getName)).map(e => e.getName -> e.getValue).sorted
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-ext-off", lakeMeta)).unsafeRunSync()
+    extensionEnv("quack-nodeenv-ext-off") shouldBe List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "false",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "false"
+    )
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true)
+    )
+    // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
+    // pod, so the pod has each name once, from the config.
+    backend
+      .start(
+        nodeEnvSpec(
+          "quack-nodeenv-ext-on",
+          lakeMeta + ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS" -> "true")
+        )
+      )
+      .unsafeRunSync()
+    extensionEnv("quack-nodeenv-ext-on") shouldBe List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "false",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "true"
     )
 
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on

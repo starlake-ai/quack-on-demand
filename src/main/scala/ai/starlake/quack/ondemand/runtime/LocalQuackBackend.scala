@@ -23,6 +23,8 @@ import scala.jdk.CollectionConverters.*
   * @param nodeKeys
   *   the keys every spawn's `QOD_NODE_AUTHZ_KEY` derives from; Main passes the manager's, so its
   *   handles verify
+  * @param nodeExtensions
+  *   the extension policy every spawn hands qod-node (spec decision 17); Main passes the manager's
   */
 final class LocalQuackBackend(
     min: Int,
@@ -31,7 +33,9 @@ final class LocalQuackBackend(
       LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript),
     nodeBin: Option[Path] = None,
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
-      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
+      ai.starlake.quack.NodeExtensionsConfig()
 ) extends QuackBackend
     with LazyLogging:
 
@@ -111,6 +115,10 @@ final class LocalQuackBackend(
     // The node's id, which qod-node checks every session handle against (the script passes it as
     // --node-id). No metastore key of this name reaches the environment.
     env.put(NodeSecretFiles.NodeIdEnv, spec.nodeId)
+    // The extension policy qod-node fixes before its database opens (spec decision 17): all three,
+    // always, after the metastore overlay, so neither a variable this process inherited (they are
+    // also the manager's own config variables) nor a metastore entry decides one.
+    nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
     // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy settings and before the
     // catalog ATTACH, unlike extraSetupSql which runs after it.
     if spec.dbInitSql.nonEmpty then env.put("dbInitSql", spec.dbInitSql)

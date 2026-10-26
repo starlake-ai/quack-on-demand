@@ -44,7 +44,9 @@ object BootFactories extends LazyLogging:
     * @param nodeKeys
     *   the manager's node keys: every node the local and Kubernetes backends start gets the key
     *   derived for its id. The fleet backend does not use them: a fleet node's key is derived per
-    *   heartbeat by `FleetHandlers`, which Main builds with the same keys.
+    *   heartbeat by `FleetHandlers`, which Main builds with the same keys. The local and Kubernetes
+    *   backends hand every node `mgrCfg.nodeExtensions` (spec decision 17); fleet nodes get it from
+    *   `FleetHandlers`, per heartbeat.
     */
   def quackBackend(
       mgrCfg: ManagerConfig,
@@ -63,7 +65,8 @@ object BootFactories extends LazyLogging:
             LocalQuackBackend.managerMarker(mgrCfg.port)
           ),
           nodeBin = nodeBin,
-          nodeKeys = nodeKeys
+          nodeKeys = nodeKeys,
+          nodeExtensions = mgrCfg.nodeExtensions
         )
       case "kubernetes" | "k8s" =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
@@ -79,7 +82,8 @@ object BootFactories extends LazyLogging:
           serviceType = mgrCfg.k8s.serviceType,
           runAsUser = mgrCfg.k8s.runAsUser,
           stopTimeoutSec = mgrCfg.k8s.stopTimeoutSec,
-          nodeKeys = nodeKeys
+          nodeKeys = nodeKeys,
+          nodeExtensions = mgrCfg.nodeExtensions
         )
       case "fleet" =>
         val proxies =
@@ -125,7 +129,8 @@ object BootFactories extends LazyLogging:
           LocalQuackBackend.managerMarker(mgrCfg.port)
         ),
         nodeBin = nodeBin,
-        nodeKeys = nodeKeys
+        nodeKeys = nodeKeys,
+        nodeExtensions = mgrCfg.nodeExtensions
       )
     else main
 

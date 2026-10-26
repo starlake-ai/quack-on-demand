@@ -8222,6 +8222,7 @@ components:
       - objectStoreSql
       - extraSetupSql
       - lockdownSql
+      - nodeExtensions
       properties:
         epoch:
           type: integer
@@ -8249,6 +8250,8 @@ components:
           type: string
         lockdownSql:
           type: string
+        nodeExtensions:
+          $ref: '#/components/schemas/FleetNodeExtensionsDto'
     FleetHeartbeatRequest:
       title: FleetHeartbeatRequest
       type: object
@@ -8293,6 +8296,20 @@ components:
           $ref: '#/components/schemas/FleetAssignmentDto'
         approval:
           type: string
+    FleetNodeExtensionsDto:
+      title: FleetNodeExtensionsDto
+      type: object
+      required:
+      - allowCommunity
+      - allowUnsigned
+      - autoinstallKnown
+      properties:
+        allowCommunity:
+          type: boolean
+        allowUnsigned:
+          type: boolean
+        autoinstallKnown:
+          type: boolean
     FleetNodeReportDto:
       title: FleetNodeReportDto
       type: object

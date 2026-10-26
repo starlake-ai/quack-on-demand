@@ -5,6 +5,18 @@
 
 namespace qod {
 
+//! The three extension settings qod-node fixes in the instance's config before the database opens
+//! (spec decision 17): off unless the operator's flag turns one on. DuckDB refuses to turn either
+//! allow_* setting on while a database runs, so nothing the node runs (the init SQL included) can.
+struct ExtensionPolicy {
+	//! allow_community_extensions (--allow-community-extensions).
+	bool allow_community = false;
+	//! allow_unsigned_extensions (--allow-unsigned-extensions).
+	bool allow_unsigned = false;
+	//! autoinstall_known_extensions (--autoinstall-known-extensions).
+	bool autoinstall_known = false;
+};
+
 //! What qod-node was asked to do, from its command line.
 struct NodeOptions {
 	enum class Mode { SERVE, BUILD_INFO, LIST_SETTINGS };
@@ -27,6 +39,8 @@ struct NodeOptions {
 	std::vector<std::string> init_files;
 	//! Exit when this process ends (the spawn script's wrapper). 0: no parent to watch.
 	long long parent_pid = 0;
+	//! Applied before the database opens, in every mode that opens one.
+	ExtensionPolicy extensions;
 };
 
 //! Parses the command line (UTF-8, the program name first; see Utf8Arguments). Throws

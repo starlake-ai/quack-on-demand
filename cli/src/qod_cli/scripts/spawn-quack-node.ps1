@@ -516,6 +516,10 @@ $sb = [System.Text.StringBuilder]::new()
 if (-not [string]::IsNullOrEmpty($proxySql))  { [void]$sb.AppendLine($proxySql) }
 # Before dbInitSql, so an operator's own SET temp_directory still wins.
 [void]$sb.AppendLine("SET temp_directory = '$($spillDir.Replace("'", "''"))';")
+# qod-node opens the database with autoinstall_known_extensions off (decision 17): install, without
+# loading, httpfs and avro. Mirrors spawn-quack-node.sh.
+[void]$sb.AppendLine("INSTALL httpfs;")
+[void]$sb.AppendLine("INSTALL avro;")
 if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql) }
 
 # Per-database object-store secret, emitted for EVERY kind: a `memory` or `duckdb-file`
@@ -632,6 +636,17 @@ if ([string]::IsNullOrEmpty($qodNodeId)) {
 $nodeArgs = @('--port', "$Port", '--bind', $nodeBind, '--secrets-dir', $secretsDir,
   '--secret-directory', $secretPath, '--node-id', $qodNodeId, '--parent-pid', "$PID", '--init', '-')
 if ($secretsEphemeral) { $nodeArgs += '--secrets-ephemeral' }
+# Decision 17, mirror of spawn-quack-node.sh: each extension flag only for the exact string "true"
+# (-ceq is case-sensitive like bash's ==).
+if ([Environment]::GetEnvironmentVariable('QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS') -ceq 'true') {
+  $nodeArgs += '--allow-community-extensions'
+}
+if ([Environment]::GetEnvironmentVariable('QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS') -ceq 'true') {
+  $nodeArgs += '--allow-unsigned-extensions'
+}
+if ([Environment]::GetEnvironmentVariable('QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS') -ceq 'true') {
+  $nodeArgs += '--autoinstall-known-extensions'
+}
 
 # stdout/stderr are inherited so node logs flow to the manager's console (LocalQuackBackend uses
 # inheritIO()). stdin is the pipe the init SQL goes down, closed once written.

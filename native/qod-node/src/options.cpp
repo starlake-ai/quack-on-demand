@@ -53,6 +53,12 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 			options.init_files.push_back(Value(args, i));
 		} else if (arg == "--parent-pid") {
 			options.parent_pid = Number(arg, Value(args, i), 1, 0x7fffffffLL);
+		} else if (arg == "--allow-community-extensions") {
+			options.extensions.allow_community = true;
+		} else if (arg == "--allow-unsigned-extensions") {
+			options.extensions.allow_unsigned = true;
+		} else if (arg == "--autoinstall-known-extensions") {
+			options.extensions.autoinstall_known = true;
 		} else {
 			throw std::invalid_argument("unknown option '" + arg + "'");
 		}
@@ -78,8 +84,11 @@ std::string Usage() {
 	return "usage:\n"
 	       "  qod-node --port <port> [--bind <address>] --secrets-dir <dir> [--secrets-ephemeral]\n"
 	       "           --secret-directory <path> --node-id <id> [--init <file>|-]... [--parent-pid <pid>]\n"
+	       "           [<extension flag>]...\n"
 	       "  qod-node --build-info\n"
-	       "  qod-node --list-settings [--init <file>|-]...\n";
+	       "  qod-node --list-settings [--init <file>|-]... [<extension flag>]...\n"
+	       "extension flags (each off unless given):\n"
+	       "  --allow-community-extensions --allow-unsigned-extensions --autoinstall-known-extensions\n";
 }
 
 } // namespace qod

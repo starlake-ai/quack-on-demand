@@ -195,6 +195,60 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     finally stop(p)
   }
 
+  it should "pass qod-node an extension flag only for the exact string true" in {
+    val start = dir("start")
+    val probe = dir("probe")
+    val bin   = fakeQodNode(tempDir.resolve("bin/qod-node"), probe)
+    val p     = launch(
+      start,
+      memory ++ Seq(
+        "QOD_NODE_BIN"                          -> bin.toString,
+        "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "true",
+        "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "TRUE",
+        "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "1"
+      )
+    )
+    try
+      awaitFile(probe.resolve("cwd"))
+      Files
+        .readAllLines(probe.resolve("args"))
+        .asScala
+        .toList
+        .filter(_.endsWith("-extensions")) shouldBe
+        List("--allow-community-extensions")
+    finally stop(p)
+  }
+
+  it should "pass qod-node no extension flag when the launcher sets all three false" in {
+    val start = dir("start")
+    val probe = dir("probe")
+    val bin   = fakeQodNode(tempDir.resolve("bin/qod-node"), probe)
+    val p     = launch(
+      start,
+      memory ++ Seq("QOD_NODE_BIN" -> bin.toString) ++
+        ai.starlake.quack.NodeExtensionsConfig().env.toSeq
+    )
+    try
+      awaitFile(probe.resolve("cwd"))
+      Files
+        .readAllLines(probe.resolve("args"))
+        .asScala
+        .toList
+        .filter(_.endsWith("-extensions")) shouldBe
+        Nil
+    finally stop(p)
+  }
+
+  "the node init SQL" should "install httpfs and avro without loading them, before the operator's SQL" in {
+    val lines =
+      dryRun(dir("start"), (memory :+ ("dbInitSql" -> "SELECT 'db-init';"))*).linesIterator.toList
+    lines should contain("INSTALL httpfs;")
+    lines should contain("INSTALL avro;")
+    lines.indexOf("INSTALL avro;") should be < lines.indexOf("SELECT 'db-init';")
+    lines should not contain "LOAD avro;"
+    lines should not contain "LOAD httpfs;"
+  }
+
   it should "resolve a relative QOD_NODE_BIN before moving qod-node into its own directory" in {
     val start = dir("start")
     val probe = dir("probe")

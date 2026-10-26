@@ -574,6 +574,7 @@ final case class ManagerConfig(
     mcp: McpConfig = McpConfig(),
     pat: PatConfig = PatConfig(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
+    nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =
@@ -631,6 +632,51 @@ final case class NodeAuthzConfig(
   /** [[internalUrl]], or this host's loopback URL on `restPort`. */
   def replicaUrl(restPort: Int): String =
     if internalUrl.trim.nonEmpty then internalUrl.trim else s"http://127.0.0.1:$restPort"
+
+/** The three extension settings qod-node fixes in a node's database config before it opens (spec
+  * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on
+  * while a database runs, so this is the only way to, and a change applies at each node's next
+  * start. Every backend hands all three to the spawn script ([[env]]), which passes qod-node a flag
+  * for each one that is on.
+  */
+final case class NodeExtensionsConfig(
+    @field @ConfigField(
+      envVar = "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
+      description =
+        "Let nodes load community extensions (allow_community_extensions). Off by default; a pool " +
+          "or database initSql that installs a community extension needs it. Applies at each " +
+          "node's next start."
+    )
+    allowCommunity: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+      description =
+        "Let nodes load extensions with a missing or invalid signature (allow_unsigned_extensions). " +
+          "Off by default. Applies at each node's next start."
+    )
+    allowUnsigned: Boolean = false,
+    @field @ConfigField(
+      envVar = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS",
+      description = "Let nodes download a known extension the first time a statement needs it " +
+        "(autoinstall_known_extensions). Off by default: nodes install what QoD's own setup " +
+        "needs explicitly. Applies at each node's next start."
+    )
+    autoinstallKnown: Boolean = false
+):
+  /** The spawn environment carrying these to qod-node: all three names, always, `true` or `false`,
+    * so neither a variable the launcher inherited nor a node's metastore decides one.
+    */
+  def env: Map[String, String] = Map(
+    NodeExtensionsConfig.AllowCommunityEnv   -> allowCommunity.toString,
+    NodeExtensionsConfig.AllowUnsignedEnv    -> allowUnsigned.toString,
+    NodeExtensionsConfig.AutoinstallKnownEnv -> autoinstallKnown.toString
+  )
+
+object NodeExtensionsConfig:
+  val AllowCommunityEnv: String   = "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"
+  val AllowUnsignedEnv: String    = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"
+  val AutoinstallKnownEnv: String = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+  val EnvNames: Set[String]       = Set(AllowCommunityEnv, AllowUnsignedEnv, AutoinstallKnownEnv)
 
 final case class RoutingConfig(
     @field @ConfigField(

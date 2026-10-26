@@ -354,6 +354,38 @@ def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, c
     assert "sec1-marker" not in err, "a dropped value was printed"
 
 
+EXTENSION_ENV = ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+                 "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS")
+
+
+def _extension_env(tmp_path, a):
+    """The three extension variables the node of assignment `a` is started with."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return [seen[0].get(k) for k in EXTENSION_ENV]
+
+
+def test_the_extension_policy_comes_from_the_assignment_only(tmp_path, monkeypatch):
+    # Decision 17: neither this process's own environment nor the metastore (tenant-admin input)
+    # decides a node's extension settings; all three are always set.
+    for k in EXTENSION_ENV:
+        monkeypatch.setenv(k, "true")
+    spoofed = dict(assignment(1), env={"pgHost": "h", "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS": "true"})
+    assert _extension_env(tmp_path / "off", spoofed) == ["false", "false", "false"]
+    on = dict(assignment(1), nodeExtensions={"allowCommunity": False, "allowUnsigned": True,
+                                             "autoinstallKnown": False})
+    assert _extension_env(tmp_path / "on", on) == ["false", "true", "false"]
+
+
+def test_an_extension_setting_is_on_only_for_a_json_true(tmp_path):
+    odd = dict(assignment(1), nodeExtensions={"allowCommunity": "true", "allowUnsigned": 1,
+                                              "autoinstallKnown": None})
+    assert _extension_env(tmp_path, odd) == ["false", "false", "false"]
+
+
 def test_a_dropped_assignment_key_is_named_once_per_pool(tmp_path, capsys):
     member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
     a = dict(assignment(1), env={**SEC1_ALLOWED, "PATH": "/nonexistent/sec1-marker-path"})

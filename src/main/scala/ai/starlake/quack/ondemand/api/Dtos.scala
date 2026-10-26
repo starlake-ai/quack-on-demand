@@ -332,6 +332,15 @@ final case class FleetHeartbeatRequest(
     node: FleetNodeReportDto
 )
 final case class FleetPoolKeyDto(tenant: String, tenantDb: String, pool: String)
+
+/** The manager's extension policy for the node (spec decision 17), as the join process hands it to
+  * the spawn script. Derived per heartbeat from `quack-on-demand.nodeExtensions`, never stored.
+  */
+final case class FleetNodeExtensionsDto(
+    allowCommunity: Boolean,
+    allowUnsigned: Boolean,
+    autoinstallKnown: Boolean
+)
 final case class FleetAssignmentDto(
     epoch: Long,
     nodeId: String,
@@ -344,7 +353,8 @@ final case class FleetAssignmentDto(
     dbInitSql: String,
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String
+    lockdownSql: String,
+    nodeExtensions: FleetNodeExtensionsDto
 )
 
 /** `approval` is approved | pending: a pending server gets no assignment until it is approved (`qod
@@ -1670,6 +1680,7 @@ object Dtos:
   given Codec[FleetNodeReportDto]       = deriveCodec
   given Codec[FleetHeartbeatRequest]    = deriveCodec
   given Codec[FleetPoolKeyDto]          = deriveCodec
+  given Codec[FleetNodeExtensionsDto]   = deriveCodec
   given Codec[FleetAssignmentDto]       = deriveCodec
   given Codec[FleetHeartbeatResponse]   = deriveCodec
   given Codec[FleetServerDto]           = deriveCodec

@@ -110,6 +110,43 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     r.assignment.map(_.authzKey == keys.keyHex("n1")) shouldBe Some(true)
   }
 
+  it should "carry the manager's extension policy in the assignment, off by default" in {
+    def assigned(h: FleetHandlers, store: FleetServerStore): Option[FleetNodeExtensionsDto] =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          0,
+          "n1",
+          PoolKey("acme", "db", "bi"),
+          21900,
+          "tok",
+          "memory",
+          Map("pgHost" -> "h"),
+          "",
+          "",
+          "",
+          ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(_.nodeExtensions)
+    val (store, h) = fixture()
+    assigned(h, store) shouldBe Some(FleetNodeExtensionsDto(false, false, false))
+    val onStore = new InMemoryFleetServerStore(clock = () => t0)
+    val on      = new FleetHandlers(
+      onStore,
+      hbCfg,
+      backend = Some(new FleetQuackBackend(onStore, hbCfg, clock = () => t0)),
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true)
+    )
+    assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
+  }
+
   it should "409 an address change on a known name even when idle (no takeover)" in {
     val (store, h) = fixture()
     h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()

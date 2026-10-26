@@ -21,6 +21,11 @@ package ai.starlake.quack.ondemand.runtime
   * object-store dataPaths, the local filesystem. Those are the real threats; autoloading a signed
   * built-in is not one of them.
   *
+  * Since in-engine authorization Phase C qod-node fixes the same three extension settings before
+  * the database opens (spec decision 17, `quack-on-demand.nodeExtensions`), so the three SETs below
+  * only matter where the operator turned one on: a lockdown pool still forces it off at runtime.
+  * They go with the rest of lockdown in Phase D (decision 20).
+  *
   * The LocalFileSystem restriction applies only when the tenant-db data lives in an object store; a
   * local dataPath needs the filesystem, and the edge LockdownScreen carries the local-file guard in
   * that mode.

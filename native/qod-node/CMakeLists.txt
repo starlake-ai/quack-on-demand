@@ -115,7 +115,9 @@ set(QOD_NODE_CORE_SOURCES
   src/handle.cpp
   src/init_runner.cpp
   src/json.cpp
+  src/json_writer.cpp
   src/lifetime.cpp
+  src/node_config.cpp
   src/node_hooks.cpp
   src/options.cpp
   src/secrets.cpp
@@ -185,6 +187,10 @@ if(QOD_NODE_TESTS)
   add_test(NAME authz COMMAND authz_test)
   qod_node_test(authz_engine_test)
   add_test(NAME authz_engine COMMAND authz_engine_test)
+  qod_node_test(json_writer_test)
+  add_test(NAME json_writer COMMAND json_writer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/canonical-json-v1.txt)
+  qod_node_test(node_config_test)
+  add_test(NAME node_config COMMAND node_config_test)
   qod_node_test(handle_tool)
   find_program(BASH bash)
   if(BASH AND NOT WIN32)

@@ -64,7 +64,10 @@ final class KubernetesQuackBackend(
     // The keys every pod's QOD_NODE_AUTHZ_KEY file derives from (Main passes the manager's, so its
     // session handles verify).
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
-      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    // The extension policy every pod's qod-node fixes before its database opens (spec decision 17).
+    nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
+      ai.starlake.quack.NodeExtensionsConfig()
 ) extends QuackBackend,
       LazyLogging:
 
@@ -173,6 +176,13 @@ final class KubernetesQuackBackend(
     nodeIdEnv.setName(NodeSecretFiles.NodeIdEnv)
     nodeIdEnv.setValue(spec.nodeId)
     envs.add(nodeIdEnv)
+    // Plain env like the node id: the policy is the manager's, not a secret.
+    nodeExtensions.env.toList.sorted.foreach { case (k, v) =>
+      val e = new EnvVar()
+      e.setName(k)
+      e.setValue(v)
+      envs.add(e)
+    }
 
     val containerPort = new ContainerPort()
     containerPort.setContainerPort(quackPort)

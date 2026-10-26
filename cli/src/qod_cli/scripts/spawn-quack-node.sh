@@ -480,6 +480,13 @@ INIT_SQL+="$PROXY_SQL"$'\n'
 # extraSetupSql still wins - DuckDB's SET is a plain reassignment, so the
 # later statement is the one that sticks.
 INIT_SQL+="$RESOURCE_SQL"
+# qod-node opens the database with autoinstall_known_extensions off (decision 17), so a statement no
+# longer downloads the known extension it needs. Install, without loading, the two QoD's own setup
+# reached only that way: httpfs (s3 and http reads, and Iceberg REST catalogs, on a node whose data
+# path is local) and avro (Iceberg manifests). Autoloading, still on, loads an installed extension on
+# first use. Best effort like every init statement: a node offline with neither installed logs it and
+# starts.
+INIT_SQL+=$'INSTALL httpfs;\nINSTALL avro;\n'
 # Per-database init SQL (tenant-db initSql, `dbInitSql` env var). Runs before the catalog ATTACH,
 # right after the proxy settings, and long before qod-node loads quack, so engine-level defaults
 # (SET memory_limit, SET temp_directory, extension INSTALLs) are already in effect when quack
@@ -579,6 +586,19 @@ NODE_ARGS=(--port "$PORT" --bind "$NODE_BIND" --secrets-dir "$QOD_SECRETS_DIR"
   --secret-directory "$SECRET_PATH" --node-id "$QOD_NODE_ID" --parent-pid "$$" --init -)
 if [[ "${QOD_SECRETS_DIR_EPHEMERAL:-}" == "1" ]]; then
   NODE_ARGS+=(--secrets-ephemeral)
+fi
+# Decision 17: qod-node fixes allow_community_extensions, allow_unsigned_extensions and
+# autoinstall_known_extensions before its database opens, each off unless the manager's
+# quack-on-demand.nodeExtensions turns it on (every launcher sets all three variables). Only the exact
+# string "true" turns one on.
+if [[ "${QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS:-}" == "true" ]]; then
+  NODE_ARGS+=(--allow-community-extensions)
+fi
+if [[ "${QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS:-}" == "true" ]]; then
+  NODE_ARGS+=(--allow-unsigned-extensions)
+fi
+if [[ "${QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS:-}" == "true" ]]; then
+  NODE_ARGS+=(--autoinstall-known-extensions)
 fi
 # The init SQL goes down a pipe to qod-node's stdin (printf is a builtin: the SQL never reaches an
 # argv). qod-node runs in WORK_DIR; the subshell execs it, so $! is qod-node's own pid. A writer still

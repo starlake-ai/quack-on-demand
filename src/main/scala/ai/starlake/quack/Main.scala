@@ -93,6 +93,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[DefaultMetastoreConfig]    = ProductHint[DefaultMetastoreConfig](camelMapping)
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
+  given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
@@ -127,6 +128,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[DefaultMetastoreConfig]   = deriveReader[DefaultMetastoreConfig]
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
   given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
+  given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
@@ -1883,7 +1885,8 @@ object Main extends IOApp with LazyLogging:
             backend = fleetBackend,
             publish = publisher,
             audit = auditRecorder,
-            nodeKeys = nodeKeys
+            nodeKeys = nodeKeys,
+            nodeExtensions = mgrCfg.nodeExtensions
           )
         ),
         patAuth = Some(patAuthenticator),

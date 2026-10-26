@@ -5,13 +5,15 @@
 // until a stop signal arrives or the spawn wrapper that started it ends; either one, while it is still
 // starting, ends it at once. What must not fail silently runs strict, here rather than in the SQL: the
 // secret directory, loading quack, the parse screen and quack_serve; the identity checks (node_hooks)
-// are registered before any SQL runs.
+// are registered before any SQL runs. The extension settings are fixed in the config before the
+// database opens (spec decision 17).
 
 #include "authz.hpp"
 #include "build_info.hpp"
 #include "duckdb.hpp"
 #include "init_runner.hpp"
 #include "lifetime.hpp"
+#include "node_config.hpp"
 #include "node_hooks.hpp"
 #include "options.hpp"
 #include "secrets.hpp"
@@ -37,7 +39,9 @@ void RunInitFiles(duckdb::Connection &con, const NodeOptions &options) {
 }
 
 int ListSettingsMode(const NodeOptions &options) {
-	duckdb::DuckDB db(nullptr);
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
 	duckdb::Connection con(db);
 	RunInitFiles(con, options);
 	ListSettings(duckdb::DBConfig::GetConfig(*db.instance), std::cout);
@@ -65,7 +69,11 @@ NodeSecrets ReadNodeSecrets(const NodeOptions &options) {
 int Serve(const NodeOptions &options) {
 	auto secrets = ReadNodeSecrets(options);
 
-	duckdb::DuckDB db(nullptr);
+	// Before the database opens (decision 17): nothing that runs in it, the init SQL included, can
+	// then turn on community or unsigned extensions.
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
 	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
 	// connection quack opens from here on.
 	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>(options.node_id, secrets.node_key));

@@ -290,6 +290,40 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       )
     finally backend.stop(PoolKey("t", "t_default", "p"), nodeId).unsafeRunSync()
 
+  // Decision 17: the extension policy reaches the spawn script as three plain variables, always all
+  // three, from the manager's config: neither the manager's own environment nor a metastore entry
+  // spelled like one decides them. The checks print only these three variables, never the dump.
+  it should "hand the node the manager's extension policy, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-extensions-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23098,
+      max = 23099,
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowUnsigned = true),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      "node-extensions",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS" -> "true"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      ai.starlake.quack.NodeExtensionsConfig.EnvNames.toList.sorted.map { name =>
+        out.linesIterator.filter(_.startsWith(s"$name=")).toList
+      } shouldBe List(
+        List("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS=false"),
+        List("QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS=true"),
+        List("QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS=false")
+      )
+    finally backend.stop(key, "node-extensions").unsafeRunSync()
+
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
   // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
   // QOD_NODE_BIN would run commands as the manager's user, lockdownSql would replace the manager's
