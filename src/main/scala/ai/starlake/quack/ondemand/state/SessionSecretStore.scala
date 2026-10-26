@@ -39,8 +39,9 @@ object SessionSecretStore:
 
   /** The control plane's secret, inserted first when absent. `ON CONFLICT DO NOTHING` then a read:
     * replicas booting at once all read the one row that won. Postgres generates the value (96 hex
-    * digits from three `gen_random_uuid()`, 366 random bits, core since PostgreSQL 13), so it never
-    * travels as a bind parameter, which statement logging or pgaudit would record.
+    * digits from three `gen_random_uuid()`, core since PostgreSQL 13; at least as strong as
+    * `SessionTokenStore.randomSecret()`), so it never travels as a bind parameter, which statement
+    * logging or pgaudit would record.
     */
   def loadOrCreate(ds: DataSource): Resolved =
     val c = ds.getConnection

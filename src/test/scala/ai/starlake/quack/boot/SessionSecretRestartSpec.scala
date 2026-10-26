@@ -136,7 +136,7 @@ class SessionSecretRestartSpec extends AnyFlatSpec with Matchers with BeforeAndA
          |  healthCheckIntervalSec = 2
          |  ha.enabled = false
          |  embeddedPostgres.enabled = false
-         |  admin { username = "admin", password = "admin", role = "admin" }
+         |  admin { username = "admin", password = "admin" }
          |  auth.management.sessionJwtSecret = ""
          |  defaultMetastore {
          |    pgHost = "${TestPostgres.pgHost}"

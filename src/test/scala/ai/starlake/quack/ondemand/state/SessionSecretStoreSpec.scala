@@ -121,6 +121,19 @@ class SessionSecretStoreSpec extends AnyFlatSpec with Matchers:
       finally pool.shutdownNow()
     }
 
+  "a stored secret shorter than 32 characters" should "refuse, naming the fix but not the value" in
+    withControlPlane() { (db, ds) =>
+      SessionSecretStore.loadOrCreate(ds)
+      val short = "short-hand-edited-value"
+      TestPostgres.psql(db, s"UPDATE qodstate_boot_secret SET value = '$short'")
+      val err = intercept[IllegalStateException](SessionSecretStore.resolve("", ds))
+      err.getMessage.contains(
+        "DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'"
+      ) shouldBe
+        true
+      err.getMessage.contains(short) shouldBe false
+    }
+
   "a resolved secret" should "never render its value" in withControlPlane() { (_, ds) =>
     val r = SessionSecretStore.resolve("", ds)
     r.toString.contains(r.secret) shouldBe false

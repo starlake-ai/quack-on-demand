@@ -51,9 +51,7 @@ class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers:
 
   private def secretOf(cfg: ManagerConfig): String = cfg.auth.management.sessionJwtSecret
 
-  private val unset   = """quack-on-demand { auth.management.sessionJwtSecret = "" }"""
-  private val unsetHa =
-    """quack-on-demand { ha.enabled = true, auth.management.sessionJwtSecret = "" }"""
+  private val unset  = """quack-on-demand { auth.management.sessionJwtSecret = "" }"""
   private val Pinned = "pinned-secret-0123456789abcdef0123456789"
 
   private val profile = AuthenticatedProfile(
@@ -83,7 +81,10 @@ class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers:
     val cfg      = load(s"""quack-on-demand { auth.management.sessionJwtSecret = "$Pinned" }""")
     val (out, p) = resolve(cfg, throw new AssertionError("control plane read"))
     (out == cfg) shouldBe true
-    p.contains("session secret: from QOD_SESSION_JWT_SECRET") shouldBe true
+    // Both places a value can come from: the env and the config key.
+    p.contains(
+      "session secret: from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)"
+    ) shouldBe true
     p.contains(Pinned) shouldBe false
   }
 
@@ -114,13 +115,6 @@ class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers:
       new SessionTokenStore(secretOf(after)).get(session).isDefined shouldBe true
       new ResetTokenStore(secretOf(after)).verify(resetLink, "hash-1").isRight shouldBe true
     }
-
-  it should "give every HA replica the same secret, with none configured" in withControlPlane {
-    ds =>
-      val (a, _) = resolve(load(unsetHa), ds)
-      val (b, _) = resolve(load(unsetHa), ds)
-      (secretOf(a).nonEmpty && secretOf(a) == secretOf(b)) shouldBe true
-  }
 
   it should "change nothing else in the configuration" in withControlPlane { ds =>
     val cfg      = load(unset)

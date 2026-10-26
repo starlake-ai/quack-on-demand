@@ -355,9 +355,10 @@ object Main extends IOApp with LazyLogging:
     LiquibaseRunner.fromDefaultMetastore(mgrCfg0.defaultMetastore.asMap).run()
 
     // The session JWT secret: QOD_SESSION_JWT_SECRET when set, else the control plane's, created by
-    // the first boot (so it needs the schema applied just above). Every component that signs or
-    // verifies with it (sessions, password-reset links, the OIDC state and SQL-token signers) reads
-    // it from mgrCfg, so nothing below may read mgrCfg0.
+    // the first boot (so it needs the schema applied just above). The rest of the boot runs in
+    // bootResolved, where only the resolved configuration is in scope: every component that signs
+    // or verifies with it (sessions, password-reset links, the OIDC state and SQL-token signers)
+    // reads it from there.
     val mgrCfg: ManagerConfig = BootPreflight.withSessionSecret(
       mgrCfg0, {
         val dm = mgrCfg0.defaultMetastore
@@ -368,6 +369,34 @@ object Main extends IOApp with LazyLogging:
         ds
       }
     )
+    bootResolved(
+      mgrCfg,
+      edgeCfg,
+      authCfg,
+      aclCfg,
+      metricsCfg,
+      opaCfg,
+      lockdownCfg,
+      modules,
+      quackCfgResolved,
+      qodNodeBin
+    )
+
+  /** The boot after the Liquibase apply and the session secret's resolution: `mgrCfg` carries the
+    * resolved secret, and the configuration as loaded is not in scope.
+    */
+  private def bootResolved(
+      mgrCfg: ManagerConfig,
+      edgeCfg: FlightConfig,
+      authCfg: AuthenticationConfig,
+      aclCfg: AclConfig,
+      metricsCfg: MetricsConfig,
+      opaCfg: OpaConfig,
+      lockdownCfg: NodeLockdownConfig,
+      modules: List[ai.starlake.quack.spi.ManagerModule],
+      quackCfgResolved: QuackNativeConfig,
+      qodNodeBin: Option[java.nio.file.Path]
+  ): IO[ExitCode] =
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 

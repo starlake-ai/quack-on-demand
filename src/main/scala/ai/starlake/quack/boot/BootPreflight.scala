@@ -119,8 +119,9 @@ object BootPreflight extends LazyLogging:
 
   /** The boot line naming where the session secret came from. */
   def sessionSecretLine(source: SessionSecretStore.Source): String = source match
-    case SessionSecretStore.Source.Configured => "session secret: from QOD_SESSION_JWT_SECRET"
-    case SessionSecretStore.Source.Created    =>
+    case SessionSecretStore.Source.Configured =>
+      "session secret: from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)"
+    case SessionSecretStore.Source.Created =>
       "session secret: generated and stored in the control plane (set QOD_SESSION_JWT_SECRET " +
         "to pin one)"
     case SessionSecretStore.Source.Stored =>

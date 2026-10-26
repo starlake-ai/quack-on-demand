@@ -57,7 +57,8 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   }
 
   /** Boots with HA on over the local runtime, which HA validation always refuses: a boot that gets
-    * past the removed-key refusal stops there, before any I/O (no Postgres probe, no Liquibase).
+    * past the removed-key refusal stops there, before it opens any socket or reaches Postgres (no
+    * probe, no Liquibase).
     */
   private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
     boot(
@@ -96,8 +97,9 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   }
 
   /** HA over Kubernetes with no session secret configured: every replica reads the control plane's,
-    * so HA validation passes. Lockout on with no SMTP relay is the next refusal, still before any
-    * I/O, and stops the boot there.
+    * so HA validation passes. Lockout on with no SMTP relay is the next refusal (after the native
+    * library check), still before the boot opens any socket or reaches Postgres, and stops it
+    * there.
     */
   it should "go past HA validation with no session secret configured" in {
     val err = intercept[RuntimeException](
@@ -267,8 +269,9 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   }
 
   "AuthenticationService.configuresProvider" should "agree with the chains the service builds" in {
-    // The boot check reads the config, before any I/O; the handshake reads the built chains. They
-    // must agree for every provider kind the service can build without a database or a key file.
+    // The boot check reads the config at the top of bootManager, before any socket; the handshake
+    // reads the built chains. They must agree for every provider kind the service can build
+    // without a database or a key file.
     for cfg <- List(emptyAuthConfig, keycloakAuth, azureAuth, googleAuth, awsAuth, jwtSecret) do
       val svc = new AuthenticationService(cfg, "")
       try AuthenticationService.configuresProvider(cfg) shouldBe svc.hasProviders
