@@ -291,8 +291,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     finally backend.stop(PoolKey("t", "t_default", "p"), nodeId).unsafeRunSync()
 
   // Decision 17: the extension policy reaches the spawn script as three plain variables, always all
-  // three, from the manager's config: neither the manager's own environment nor a metastore entry
-  // spelled like one decides them. The checks print only these three variables, never the dump.
+  // three, with the values of the backend's config; a metastore entry spelled like one is dropped
+  // (NodeMetastore) and does not change it. The checks print only these three variables, never the
+  // dump.
   it should "hand the node the manager's extension policy, whatever its metastore carries" in:
     val capture = java.io.File.createTempFile("env-capture-extensions-", ".txt")
     capture.deleteOnExit()

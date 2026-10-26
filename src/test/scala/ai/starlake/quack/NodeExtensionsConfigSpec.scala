@@ -17,8 +17,12 @@ class NodeExtensionsConfigSpec extends AnyFlatSpec with Matchers:
     * environment left out, so a developer's own exports cannot change the outcome.
     */
   private def load(env: Map[String, String] = Map.empty): ManagerConfig =
-    val overlay = ConfigFactory.parseString(env.map((k, v) => s"$k = \"$v\"").mkString("\n"))
-    val conf    = overlay
+    loadOverlay(env.map((k, v) => s"$k = \"$v\"").mkString("\n"))
+
+  /** The bundled application.conf under the HOCON `overlay`, the real environment left out. */
+  private def loadOverlay(overlay: String): ManagerConfig =
+    val conf = ConfigFactory
+      .parseString(overlay)
       .withFallback(ConfigFactory.parseResources("application.conf"))
       .resolve(ConfigResolveOptions.noSystem())
     ConfigSource.fromConfig(conf).at("quack-on-demand").loadOrThrow[ManagerConfig]
@@ -40,11 +44,10 @@ class NodeExtensionsConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "read the camelCase keys of an overlay" in {
-    val cfg = ConfigSource
-      .string("quack-on-demand.nodeExtensions { allowUnsigned = true, autoinstallKnown = true }")
-      .withFallback(ConfigSource.default)
-      .at("quack-on-demand")
-      .loadOrThrow[ManagerConfig]
+    val cfg =
+      loadOverlay(
+        "quack-on-demand.nodeExtensions { allowUnsigned = true, autoinstallKnown = true }"
+      )
     cfg.nodeExtensions shouldBe NodeExtensionsConfig(allowUnsigned = true, autoinstallKnown = true)
   }
 

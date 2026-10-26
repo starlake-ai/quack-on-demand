@@ -635,9 +635,9 @@ final case class NodeAuthzConfig(
 
 /** The three extension settings qod-node fixes in a node's database config before it opens (spec
   * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on
-  * while a database runs, so this is the only way to, and a change applies at each node's next
-  * start. Every backend hands all three to the spawn script ([[env]]), which passes qod-node a flag
-  * for each one that is on.
+  * while a database runs, so this is the only way to turn one on, and a change applies at each
+  * node's next start. Every backend hands all three to the spawn script ([[env]]), which passes
+  * qod-node a flag for each one that is on.
   */
 final case class NodeExtensionsConfig(
     @field @ConfigField(
