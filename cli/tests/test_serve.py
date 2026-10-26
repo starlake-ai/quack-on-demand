@@ -245,6 +245,35 @@ def test_serve_deletes_the_spec_once_the_manager_exits(runner, wired, tmp_path, 
     assert not spec.exists()
 
 
+@pytest.mark.parametrize("failing", ["chdir", "_spawn_provisioning", "ctrl_c"])
+def test_serve_deletes_the_spec_when_launching_fails_before_the_manager(
+    runner, wired, tmp_path, monkeypatch, failing
+):
+    # Between writing the spec and running the manager, an exception or a Ctrl-C (chdir, the
+    # provisioning thread's start, the Starflow start) must not leave its credentials on disk.
+    from qod_cli.commands import serve as serve_cmd
+
+    spec = tmp_path / "state" / "serve-provision.json"
+    seen = {}
+
+    def boom(*_a, **_kw):
+        seen["spec_written"] = spec.exists()
+        if failing == "ctrl_c":
+            raise KeyboardInterrupt
+        raise OSError("launch step failed")
+
+    if failing == "chdir":
+        monkeypatch.setattr(serve_cmd.os, "chdir", boom)
+    else:
+        monkeypatch.setattr(serve_cmd, "_spawn_provisioning", boom)
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code != 0
+    assert seen["spec_written"] is True
+    assert not spec.exists()
+
+
 def test_serve_hands_the_manager_its_provision_spec(runner, wired, tmp_path):
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")

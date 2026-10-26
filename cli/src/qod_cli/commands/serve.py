@@ -909,53 +909,53 @@ def serve(
     # could read it as this boot's.
     spec_path = state_dir / SPEC_FILE
     write_spec(spec_path, provision_spec(tenant, resolved, pool, size))
-    outcome_path(spec_path).unlink(missing_ok=True)
-    env["QOD_SERVE_PROVISION"] = str(spec_path.absolute())
-    # quack-on-demand.acl.enabled defaults to FALSE, so a persistent install has to
-    # ask for it. TLS and DB auth are already on by default. A real env var or a
-    # persisted `qod setup` value wins over this default.
-    env.setdefault("QOD_ACL_ENABLED", "true")
-    if env.get("QOD_ACL_ENABLED", "true").lower() != "true":
-        typer.echo(
-            f"WARN: ACL is disabled by QOD_ACL_ENABLED={env['QOD_ACL_ENABLED']} (from the "
-            "environment or qod setup); this gateway will not enforce table permissions.",
-            err=True,
-        )
-
-    # chdir is process-global; do it before spawning the provisioning thread so
-    # that thread never observes a cwd flip mid-run.
-    os.chdir(state_dir)
-
-    _spawn_provisioning(
-        manager_url=manager_url,
-        spec_path=spec_path,
-        tenant=tenant,
-        target=resolved,
-        pool=pool,
-        size=size,
-        profile=ctx.obj.profile,
-        ready_timeout=ready_timeout,
-        pg_port=effective_pg_port,
-        pg_data_dir=effective_pg_dir,
-        echo=lambda line: typer.echo(line, err=True),
-        password=password,
-        token=restart_token,
-        first_boot=first_boot,
-        admin_names=admin_password.admin_usernames(env),
-    )
-
-    if sf_plan is not None:
-        _starflow.start_after_ready(
-            sf_plan,
-            mgr_env=env,
-            # zonky trust auth: the password is a placeholder (EmbeddedControlPlane).
-            pg=starflow.PgCoords(
-                host="localhost", port=effective_pg_port, user="postgres", password="postgres"
-            ),
-            ready_timeout=ready_timeout,
-        )
-
     try:
+        outcome_path(spec_path).unlink(missing_ok=True)
+        env["QOD_SERVE_PROVISION"] = str(spec_path.absolute())
+        # quack-on-demand.acl.enabled defaults to FALSE, so a persistent install has to
+        # ask for it. TLS and DB auth are already on by default. A real env var or a
+        # persisted `qod setup` value wins over this default.
+        env.setdefault("QOD_ACL_ENABLED", "true")
+        if env.get("QOD_ACL_ENABLED", "true").lower() != "true":
+            typer.echo(
+                f"WARN: ACL is disabled by QOD_ACL_ENABLED={env['QOD_ACL_ENABLED']} (from the "
+                "environment or qod setup); this gateway will not enforce table permissions.",
+                err=True,
+            )
+
+        # chdir is process-global; do it before spawning the provisioning thread so
+        # that thread never observes a cwd flip mid-run.
+        os.chdir(state_dir)
+
+        _spawn_provisioning(
+            manager_url=manager_url,
+            spec_path=spec_path,
+            tenant=tenant,
+            target=resolved,
+            pool=pool,
+            size=size,
+            profile=ctx.obj.profile,
+            ready_timeout=ready_timeout,
+            pg_port=effective_pg_port,
+            pg_data_dir=effective_pg_dir,
+            echo=lambda line: typer.echo(line, err=True),
+            password=password,
+            token=restart_token,
+            first_boot=first_boot,
+            admin_names=admin_password.admin_usernames(env),
+        )
+
+        if sf_plan is not None:
+            _starflow.start_after_ready(
+                sf_plan,
+                mgr_env=env,
+                # zonky trust auth: the password is a placeholder (EmbeddedControlPlane).
+                pg=starflow.PgCoords(
+                    host="localhost", port=effective_pg_port, user="postgres", password="postgres"
+                ),
+                ready_timeout=ready_timeout,
+            )
+
         _exec(
             launcher.build_jar_command(
                 java, str(jar_path), list(ctx.args), java_opts=env.get("JAVA_OPTS")
@@ -966,5 +966,6 @@ def serve(
         # The spec can carry object-store credentials. The provisioning thread
         # deletes it once the manager reported; whatever else ended the run
         # (Ctrl-C, a refused boot, a release that never reads it, a ready
-        # timeout), it does not outlive the manager.
+        # timeout, a failure before the manager even started), it does not
+        # outlive the manager.
         spec_path.unlink(missing_ok=True)
