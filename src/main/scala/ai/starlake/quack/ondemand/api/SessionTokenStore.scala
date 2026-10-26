@@ -21,7 +21,8 @@ import scala.jdk.CollectionConverters._
   * **Lifetime.** JWT `exp` is absolute: a session is good for exactly `maxLifetime` after
   * `mintWithScope`, regardless of activity. Revocation works while the manager process still holds
   * the `jti` in the denylist; the denylist sweeps entries past their own `exp` and is lost on
-  * restart. For an absolute kill-all-sessions, rotate `secret` (env `QOD_SESSION_JWT_SECRET`).
+  * restart. For an absolute kill-all-sessions, rotate `secret`: change `QOD_SESSION_JWT_SECRET`,
+  * or, when it is unset, delete the control plane's stored one (`SessionSecretStore`) and restart.
   *
   * **Transport.** [[ManagerServer]] admits requests via `X-API-Key` header OR a `qod_session`
   * cookie carrying the same JWT. [[AuthHandlers.login]] sets the cookie HttpOnly + SameSite=Lax;

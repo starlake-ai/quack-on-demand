@@ -60,11 +60,15 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     * past the removed-key refusal stops there, before any I/O (no Postgres probe, no Liquibase).
     */
   private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
+    boot(
+      env,
+      "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }" +
+        "\n" + authOverlay
+    )
+
+  private def boot(env: String => Option[String], overlay: String): Unit =
     val source = ConfigSource
-      .string(
-        "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }" +
-          "\n" + authOverlay
-      )
+      .string(overlay)
       .withFallback(ConfigSource.default)
     val opa = OpaConfig
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
@@ -89,6 +93,22 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   it should "go on to HA validation with an empty QOD_API_KEY" in {
     val err = intercept[RuntimeException](bootUntilHaRefusal(keyEnv("")))
     err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
+  }
+
+  /** HA over Kubernetes with no session secret configured: every replica reads the control plane's,
+    * so HA validation passes. Lockout on with no SMTP relay is the next refusal, still before any
+    * I/O, and stops the boot there.
+    */
+  it should "go past HA validation with no session secret configured" in {
+    val err = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { ha.enabled = true, runtimeType = kubernetes, " +
+          "embeddedPostgres.enabled = false, auth.management.sessionJwtSecret = \"\", " +
+          "auth.lockout.enabled = true, smtp.host = \"\" }"
+      )
+    )
+    err.getMessage should startWith("auth.lockout.enabled is true but no SMTP relay")
   }
 
   /** Every `quack-flightsql.auth` provider off, whatever the test environment sets. */

@@ -6,9 +6,15 @@ import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig}
 import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
 import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
-import ai.starlake.quack.ondemand.api.SessionTokenStore
-import ai.starlake.quack.ondemand.state.{EmailFormat, FederatedSourceOps, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  EmailFormat,
+  FederatedSourceOps,
+  SessionSecretStore,
+  UserStore
+}
 import com.typesafe.scalalogging.LazyLogging
+
+import javax.sql.DataSource
 
 /** Boot-time gates and seeding that must run before the manager wires its components. Extracted
   * from Main.bootManager; every check keeps its original fail-fast behavior (sys.error aborts the
@@ -27,8 +33,8 @@ object BootPreflight extends LazyLogging:
     * `quack-on-demand.apiKey` (an operator's own config file, or a `-D` system property). An empty
     * value passes: older Compose files render `API_KEY=` as one. Both are read directly because,
     * with the field gone, pureconfig would ignore the key silently and the manager would boot
-    * without the credential its operator relies on. `Main.bootManager` runs it first, before the
-    * session secret is generated and before HA validation.
+    * without the credential its operator relies on. `Main.bootManager` runs it first, before HA
+    * validation and before any I/O.
     */
   def checkRemovedApiKey(
       env: String => Option[String],
@@ -91,37 +97,34 @@ object BootPreflight extends LazyLogging:
       )
     else Right(())
 
-  /** Resolve the boot secret an operator may leave unset: the session JWT signing secret. Outside
-    * HA, an unset (or empty) value is replaced with a fresh random one for this boot and printed to
-    * stdout, deliberately NOT through the logger, whose default ERROR root level would swallow an
-    * info line, so a first-run operator cannot miss it. Under HA the config is returned unchanged:
-    * a per-replica random secret cannot verify sessions minted by other replicas (HaPreconditions
-    * refuses the empty secret).
+  /** Resolve the session JWT signing secret ([[SessionSecretStore]]): a configured
+    * `QOD_SESSION_JWT_SECRET` wins and `controlPlane` is not touched; an unset (or blank) one is
+    * the control plane's, created by the first boot, so sessions survive a restart and every HA
+    * replica signs with the same value. `Main.bootManager` runs it right after the Liquibase apply
+    * (the table must exist) and before anything reads the secret. Prints one line naming the
+    * source, never the value, deliberately NOT through the logger, whose default ERROR root level
+    * would swallow an info line.
     */
-  def withGeneratedBootSecrets(cfg: ManagerConfig): ManagerConfig =
-    if cfg.ha.enabled || cfg.auth.management.sessionJwtSecret.trim.nonEmpty then cfg
+  def withSessionSecret(cfg: ManagerConfig, controlPlane: => DataSource): ManagerConfig =
+    val resolved =
+      SessionSecretStore.resolve(cfg.auth.management.sessionJwtSecret, controlPlane)
+    println(sessionSecretLine(resolved.source))
+    if resolved.source == SessionSecretStore.Source.Configured then cfg
     else
-      val secret = SessionTokenStore.randomSecret()
-      println(
-        s"""
-           |================================================================================
-           |  GENERATED BOOT SECRET
-           |
-           |  QOD_SESSION_JWT_SECRET was not configured, so a fresh random value was minted
-           |  for this boot only:
-           |
-           |  QOD_SESSION_JWT_SECRET=$secret
-           |
-           |  It changes on every restart: UI and CLI sessions die with the process. Pin it
-           |  to a stable value for production.
-           |================================================================================
-           |""".stripMargin
-      )
       cfg.copy(
         auth = cfg.auth.copy(
-          management = cfg.auth.management.copy(sessionJwtSecret = secret)
+          management = cfg.auth.management.copy(sessionJwtSecret = resolved.secret)
         )
       )
+
+  /** The boot line naming where the session secret came from. */
+  def sessionSecretLine(source: SessionSecretStore.Source): String = source match
+    case SessionSecretStore.Source.Configured => "session secret: from QOD_SESSION_JWT_SECRET"
+    case SessionSecretStore.Source.Created    =>
+      "session secret: generated and stored in the control plane (set QOD_SESSION_JWT_SECRET " +
+        "to pin one)"
+    case SessionSecretStore.Source.Stored =>
+      "session secret: stored in the control plane (set QOD_SESSION_JWT_SECRET to pin one)"
 
   /** Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery must each project
     * (password_hash, kind, enabled, must_change_password) -- exactly the shape

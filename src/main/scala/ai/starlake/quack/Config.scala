@@ -136,10 +136,11 @@ final case class ManagementAuthConfig(
     @field @ConfigField(
       envVar = "QOD_SESSION_JWT_SECRET",
       description =
-        "HS256 secret used to sign UI session JWTs. Pin a stable value (>= 32 chars) to make " +
-          "sessions survive manager restart and to share session state across replicas. Empty " +
-          "= autogenerate a fresh 32-byte secret at boot, printed to the console (sessions die " +
-          "on restart; HA refuses to boot).",
+        "HS256 secret used to sign UI session JWTs and password-reset links. Empty (the " +
+          "default) = the control plane's: generated once by the first boot, stored in " +
+          "qodstate_boot_secret and read by every restart and every HA replica, so sessions " +
+          "survive restarts. A set value (>= 32 chars) wins and is never stored; set one when " +
+          "another service must verify the sessions (the Starflow pairing).",
       sensitive = true
     )
     sessionJwtSecret: String,

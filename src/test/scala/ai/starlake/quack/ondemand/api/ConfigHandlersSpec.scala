@@ -89,6 +89,28 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     byPath("quack-flightsql.port").value shouldBe "31338"
   }
 
+  it should "never carry the session secret, configured or the control plane's" in {
+    val secret                         = "config-page-session-secret-0123456789abcdef"
+    def entries(sessionSecret: String) =
+      val cfg = ConfigFactory
+        .parseString(s"""quack-on-demand.auth.management.sessionJwtSecret = "$sessionSecret"""")
+        .withFallback(ConfigFactory.load())
+      new ConfigHandlers(cfg, liveEntries)
+        .list(None)(_ => SessionScope.Superuser)
+        .unsafeRunSync()
+        .toOption
+        .get
+        .entries
+    val path = "quack-on-demand.auth.management.sessionJwtSecret"
+
+    val configured = entries(secret)
+    configured.exists(_.value.contains(secret)) shouldBe false
+    configured.find(_.path == path).map(_.value) shouldBe Some("(set)")
+    // Unset, the manager signs with the control plane's secret: the page reads only the
+    // configuration, so it shows the key as unset and has no path to the stored value.
+    entries("").find(_.path == path).map(_.value) shouldBe Some("(unset)")
+  }
+
   it should "render missing optional values as '(unset)'" in {
     // smtp.host has no default in application.conf; dropping the path keeps the case independent
     // of QOD_SMTP_HOST in the invoking shell.

@@ -277,9 +277,8 @@ object Main extends IOApp with LazyLogging:
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
   ): IO[ExitCode] =
     // The three auth refusals run first, at the top of bootManager, before it opens any socket: they
-    // read the configuration alone. A removed QOD_API_KEY refuses boot before the session secret is
-    // generated and printed, and before HA validation, so an upgrade that still sets the key stops
-    // with the reason.
+    // read the configuration alone. A removed QOD_API_KEY refuses boot before HA validation, so an
+    // upgrade that still sets the key stops with the reason.
     BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
@@ -295,30 +294,21 @@ object Main extends IOApp with LazyLogging:
       .foreach(msg => sys.error(msg))
     val quackCfgResolved: QuackNativeConfig =
       quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
-    // An unset session JWT secret is generated and printed here, BEFORE anything reads it. A no-op
-    // under HA, so the gate below still sees the raw empty secret and refuses: per-replica random
-    // secrets cannot verify each other's sessions.
-    val mgrCfg = BootPreflight.withGeneratedBootSecrets(mgrCfg0)
     HaPreconditions
-      .validate(
-        mgrCfg.ha.enabled,
-        mgrCfg.runtimeType,
-        mgrCfg.auth.management.sessionJwtSecret,
-        mgrCfg.embeddedPostgres.enabled
-      )
+      .validate(mgrCfg0.ha.enabled, mgrCfg0.runtimeType, mgrCfg0.embeddedPostgres.enabled)
       .left
       .foreach(msg => sys.error(msg))
 
-    mgrCfg.fleet
-      .validateForRuntime(mgrCfg.runtimeType)
+    mgrCfg0.fleet
+      .validateForRuntime(mgrCfg0.runtimeType)
       .left
       .foreach(msg => sys.error(msg))
 
     TelemetryConfig
       .validate(
-        mgrCfg.telemetry.store,
-        mgrCfg.telemetry.stmtHistoryRetentionDays,
-        mgrCfg.telemetry.auditSink
+        mgrCfg0.telemetry.store,
+        mgrCfg0.telemetry.stmtHistoryRetentionDays,
+        mgrCfg0.telemetry.auditSink
       )
       .left
       .foreach(msg => sys.error(msg))
@@ -335,7 +325,7 @@ object Main extends IOApp with LazyLogging:
     // libduckdb (a bundled qod-node links the same one), so a manager that could not start a single
     // node refuses to boot with the reason.
     val qodNodeBin: Option[java.nio.file.Path] =
-      if BootFactories.runsLocalNodes(mgrCfg) then
+      if BootFactories.runsLocalNodes(mgrCfg0) then
         ai.starlake.quack.ondemand.runtime.QodNodeBinary.default match
           case Left(msg)  => sys.error(msg)
           case Right(bin) => Some(bin)
@@ -345,24 +335,39 @@ object Main extends IOApp with LazyLogging:
     // back in. Pure check, no DB/network required, so it runs before the Postgres
     // preflight below.
     BootPreflight
-      .checkLockoutSmtp(mgrCfg.auth.lockout.enabled, mgrCfg.smtp.host)
+      .checkLockoutSmtp(mgrCfg0.auth.lockout.enabled, mgrCfg0.smtp.host)
       .left
       .foreach(msg => sys.error(msg))
     logger.info(
-      if mgrCfg.auth.lockout.enabled then
-        s"account lockout: enabled (locks after ${mgrCfg.auth.lockout.maxFailures} consecutive failed logins)"
+      if mgrCfg0.auth.lockout.enabled then
+        s"account lockout: enabled (locks after ${mgrCfg0.auth.lockout.maxFailures} consecutive failed logins)"
       else "account lockout: disabled"
     )
 
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
-    Banner.postgresPreflight(mgrCfg.defaultMetastore.asMap) match
+    Banner.postgresPreflight(mgrCfg0.defaultMetastore.asMap) match
       case Left(message) =>
         println(message)
         sys.exit(1)
       case Right(()) => ()
 
-    LiquibaseRunner.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap).run()
+    LiquibaseRunner.fromDefaultMetastore(mgrCfg0.defaultMetastore.asMap).run()
+
+    // The session JWT secret: QOD_SESSION_JWT_SECRET when set, else the control plane's, created by
+    // the first boot (so it needs the schema applied just above). Every component that signs or
+    // verifies with it (sessions, password-reset links, the OIDC state and SQL-token signers) reads
+    // it from mgrCfg, so nothing below may read mgrCfg0.
+    val mgrCfg: ManagerConfig = BootPreflight.withSessionSecret(
+      mgrCfg0, {
+        val dm = mgrCfg0.defaultMetastore
+        val ds = new org.postgresql.ds.PGSimpleDataSource()
+        ds.setURL(s"jdbc:postgresql://${dm.pgHost}:${dm.pgPort}/${dm.dbName}")
+        ds.setUser(dm.pgUser)
+        ds.setPassword(dm.pgPassword)
+        ds
+      }
+    )
 
     ai.starlake.quack.ondemand.module.ModuleMigrations.run(modules, mgrCfg.defaultMetastore.asMap)
 

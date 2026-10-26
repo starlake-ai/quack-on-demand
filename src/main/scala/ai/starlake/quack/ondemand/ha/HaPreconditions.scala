@@ -3,9 +3,9 @@ package ai.starlake.quack.ondemand.ha
 import java.util.Locale
 
 /** Config-load-time gates for HA mode. HA requires a multi-manager-capable backend (Kubernetes or
-  * fleet; the local backend's port allocator and child processes are per-JVM), an explicit session
-  * JWT secret (sessions must verify on every replica, so the boot-generated per-replica fallback is
-  * refused), and an external Postgres (a single embedded server cannot back N replicas).
+  * fleet; the local backend's port allocator and child processes are per-JVM) and an external
+  * Postgres (a single embedded server cannot back N replicas). The session JWT secret needs no
+  * gate: with none configured, every replica reads the one the control plane stores.
   */
 object HaPreconditions:
 
@@ -14,7 +14,6 @@ object HaPreconditions:
   def validate(
       haEnabled: Boolean,
       runtimeType: String,
-      sessionJwtSecret: String,
       embeddedPostgres: Boolean = false
   ): Either[String, Unit] =
     if !haEnabled then Right(())
@@ -29,11 +28,5 @@ object HaPreconditions:
       Left(
         s"ha.enabled=true requires runtimeType=kubernetes or fleet, got '$runtimeType': " +
           "the local backend cannot run multi-manager (in-JVM port allocator, child processes)"
-      )
-    else if sessionJwtSecret.trim.isEmpty then
-      Left(
-        "ha.enabled=true requires an explicit QOD_SESSION_JWT_SECRET: replicas must share a " +
-          "private signing key, and the per-replica secret generated at boot cannot verify " +
-          "sessions minted by other replicas"
       )
     else Right(())
