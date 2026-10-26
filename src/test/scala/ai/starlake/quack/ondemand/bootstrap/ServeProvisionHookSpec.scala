@@ -245,18 +245,24 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     f.sup.findTenantDb("acme", "acme_shop").map(_.initSql) shouldBe
       Some("CREATE VIEW v AS SELECT 1 AS a")
     f.sup.get(PoolKey("acme", "acme_shop", "main")) shouldBe None
-    // Another location: the reason names both.
+    // Another location: the reason names the existing row's, never the spec's (the outcome and
+    // the ERROR log carry it).
     val g = new Fixture
     g.sup.createTenant(Tenant("acme")).unsafeRunSync()
     g.sup
       .createTenantDb("acme", "shop", TenantDbKind.InMemory, Map.empty, "/data/old")
       .unsafeRunSync()
-    g.write()
-    g.run() shouldBe Right(())
+    g.write(Database.copy(dataPath = s"/data/$Marker"))
+    val (result, logs) = LogCapture.logged(HookLogger)(g.run())
+    result shouldBe Right(())
     g.outcomeJson.hcursor.get[String]("reason") shouldBe Right(
-      "database 'acme_shop' already serves kind='memory' dataPath='/data/old', not " +
-        "kind='memory' dataPath=''; serve it under another name: qod serve <target> --name <other>"
+      "database 'acme_shop' already serves kind='memory' dataPath='/data/old', not the kind and " +
+        "dataPath this serve asked for; serve it under another name: qod serve <target> " +
+        "--name <other>"
     )
+    Files.readString(g.outcome).contains(Marker) shouldBe false
+    logs.exists(_.getFormattedMessage.contains("already serves")) shouldBe true
+    logs.exists(_.getFormattedMessage.contains(Marker)) shouldBe false
     g.sup.findTenantDb("acme", "acme_shop").map(_.dataPath) shouldBe Some("/data/old")
   }
 

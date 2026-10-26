@@ -41,6 +41,7 @@ import java.util.Locale
   *
   * The database body may carry object-store credentials. The spec is read once per run and never
   * logged, audited or echoed: log lines, audit rows and the outcome name objects and reasons only.
+  * A collision's reason quotes the existing row, never the spec's kind, `dataPath` or `initSql`.
   *
   * The outcome goes to `serve-provision.outcome.json` beside the spec, written to a temporary file
   * and renamed: `{"status":"ok","created":[...]}` (only what this run created, possibly nothing) or
@@ -208,8 +209,9 @@ object ServeProvisionHook extends LazyLogging:
         )
     }
 
-  /** What makes an existing database another one than the spec's, worded as `qod serve` worded it
-    * before it provisioned at boot; None when kind, dataPath and initSql all match.
+  /** What makes an existing database another one than the spec's; None when kind, dataPath and
+    * initSql all match. It quotes the existing row only: the reason lands in the ERROR log and the
+    * outcome file, and nothing there echoes the spec.
     */
   private def differs(td: TenantDb, req: TenantDbRequest): Option[String] =
     val sameStorage = td.kind.wireValue == req.kind && td.dataPath == req.dataPath
@@ -222,7 +224,7 @@ object ServeProvisionHook extends LazyLogging:
     else
       Some(
         s"database '${td.name}' already serves kind='${td.kind.wireValue}' " +
-          s"dataPath='${td.dataPath}', not kind='${req.kind}' dataPath='${req.dataPath}'"
+          s"dataPath='${td.dataPath}', not the kind and dataPath this serve asked for"
       )
 
   /** An object the spec names that already exists: left as it is. */
