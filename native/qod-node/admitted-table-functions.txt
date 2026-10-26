@@ -1,8 +1,6 @@
 check_peg_parser
-duckdb_approx_database_count
 duckdb_available_metrics
 duckdb_columns
-duckdb_connection_count
 duckdb_coordinate_systems
 duckdb_dialects
 duckdb_external_resource_types

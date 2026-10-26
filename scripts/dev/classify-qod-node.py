@@ -14,7 +14,8 @@ SettingClassesSpec fail until the generated tables match the JSON.
 Fail closed by construction:
   - a table function or a pragma no rule names is superuser;
   - a scalar, aggregate or window function is allowed unless a rule names it, except one whose name
-    holds a SUSPICIOUS_SUBSTRINGS entry and is not in REVIEWED_ALLOWED: that is superuser;
+    starts with a SCALAR_SUPERUSER_PREFIXES family or holds a SUSPICIOUS_SUBSTRINGS entry and is not in
+    REVIEWED_ALLOWED: that is superuser (quack_ has no exception);
   - an alias is at least as strict as the function it stands for;
   - a setting is superuser unless SESSION names it; an alias takes its target's class.
 Every default applied is printed under "review:": copy those lines into the commit message.
@@ -55,8 +56,7 @@ FILE_TABLE = {
 # manager's preludes (qod_session, ducklake_set_commit_message), the front door's client stream, and
 # query() / query_table(), which DuckDB binds inline so the describer sees what they read.
 ALLOWED_TABLE = {
-    "check_peg_parser", "duckdb_approx_database_count", "duckdb_available_metrics",
-    "duckdb_connection_count", "duckdb_coordinate_systems", "duckdb_dialects",
+    "check_peg_parser", "duckdb_available_metrics", "duckdb_coordinate_systems", "duckdb_dialects",
     "duckdb_external_resource_types", "duckdb_grammar_extensions", "duckdb_keywords",
     "duckdb_optimizers", "duckdb_prepared_statements", "duckdb_secret_type_parameters",
     "duckdb_secret_types", "duckdb_variables", "ducklake_set_commit_message", "generate_series",
@@ -71,7 +71,7 @@ SUPERUSER_TABLE = {
     # raw memory addresses; DuckDB's internal scan
     "arrow_scan", "arrow_scan_dumb", "seq_scan",
     # node state: settings and secrets, paths, other sessions, caches, logs, extensions
-    "duckdb_databases", "duckdb_eviction_queues", "duckdb_extension_repositories", "duckdb_extensions",
+    "duckdb_approx_database_count", "duckdb_connection_count", "duckdb_databases", "duckdb_eviction_queues", "duckdb_extension_repositories", "duckdb_extensions",
     "duckdb_external_file_cache", "duckdb_external_resources", "duckdb_log_contexts", "duckdb_logs",
     "duckdb_memory", "duckdb_secrets", "duckdb_settings", "duckdb_temporary_files", "which_secret",
     "pragma_database_size", "pragma_metadata_info", "pragma_storage_info",
@@ -128,18 +128,22 @@ SUPERUSER_SCALAR = {
     "setval",                   # writes a sequence named in a value
     "write_log",                # writes the node log
 }
-SCALAR_SUPERUSER_PREFIXES = ("quack_",)
+# quack's own; the extension families whose scalars may act on attached servers or catalogs.
+SCALAR_SUPERUSER_PREFIXES = ("quack_", "postgres_", "ducklake_", "iceberg_")
 
 # A name holding one of these is superuser unless judged and listed in REVIEWED_ALLOWED.
 SUSPICIOUS_SUBSTRINGS = ("attach", "aws", "azure", "catalog", "cloud", "config", "connect", "credential",
                          "env", "exec", "extension", "file", "http", "install", "load", "plan", "query",
                          "secret", "setting", "sql", "token", "write")
 
-# Judged harmless although their names hold a suspicious substring.
+# Judged harmless although their names hold a suspicious substring or start with a superuser family.
 REVIEWED_ALLOWED = {
     "current_connection_id", "current_query", "current_query_id",  # the session's own
     "json_deserialize_sql", "json_serialize_sql",                   # text to and from a parse tree
     "parse_filename",                                               # string manipulation
+    # pure value transforms of a superuser family (SCALAR_SUPERUSER_PREFIXES)
+    "iceberg_bucket", "iceberg_truncate",                           # Iceberg partition transforms
+    "postgres_hstore_get", "postgres_hstore_to_json",               # parse an hstore string
 }
 
 # ---- settings -------------------------------------------------------------------------------------------
@@ -200,6 +204,9 @@ def check_rules():
         fail(f"PRAGMA_ALLOWED and PRAGMA_SUPERUSER both name {sorted(PRAGMA_ALLOWED & PRAGMA_SUPERUSER)}")
     if SUPERUSER_SCALAR & REVIEWED_ALLOWED:
         fail(f"SUPERUSER_SCALAR and REVIEWED_ALLOWED both name {sorted(SUPERUSER_SCALAR & REVIEWED_ALLOWED)}")
+    quack = sorted(n for n in REVIEWED_ALLOWED if n.startswith("quack_"))
+    if quack:
+        fail(f"REVIEWED_ALLOWED names quack_ functions, which are superuser only: {quack}")
 
 
 def own_class(name, tpe, review):
@@ -218,10 +225,13 @@ def own_class(name, tpe, review):
         if name not in PRAGMA_SUPERUSER:
             review.append(f"pragma {name}: superuser (no rule names it)")
         return "superuser"
-    if name in SUPERUSER_SCALAR or name.startswith(SCALAR_SUPERUSER_PREFIXES):
+    if name in SUPERUSER_SCALAR:
         return "superuser"
+    # Before the families, so a reviewed pure member of one is allowed.
     if name in REVIEWED_ALLOWED:
         return "allowed"
+    if name.startswith(SCALAR_SUPERUSER_PREFIXES):
+        return "superuser"
     hit = next((s for s in SUSPICIOUS_SUBSTRINGS if s in name), None)
     if hit is not None:
         review.append(f"{tpe} {name}: superuser (its name holds '{hit}': judge it, then list it in "

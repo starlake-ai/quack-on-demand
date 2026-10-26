@@ -159,8 +159,9 @@ int main() {
 		Expect(admitted_set.count(name), std::string("kAdmittedTableFunctions lacks ") + name);
 	}
 	// The nearest relatives of what the lists hold stay in neither: they are superuser-only.
-	for (auto *name : {"duckdb_databases", "ducklake_scan", "iceberg_scan", "json_execute_serialized_sql",
-	                   "postgres_query", "pragma_table_info", "quack_query", "sql_auto_complete"}) {
+	for (auto *name : {"duckdb_connection_count", "duckdb_databases", "ducklake_scan", "iceberg_scan",
+	                   "json_execute_serialized_sql", "postgres_query", "pragma_table_info", "quack_query",
+	                   "sql_auto_complete"}) {
 		Expect(!file_set.count(name) && !admitted_set.count(name), std::string("an embedded list names ") + name);
 	}
 

@@ -43,6 +43,27 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
   private def tableClass(name: String): Option[FunctionClass] =
     FunctionClasses.of("system", "main", name, "table")
 
+  /** Every scalar, aggregate and window function that is not Allowed, by (name, type): a hand edit
+    * of one to allowed fails, and so does a regeneration that refuses a new one, until it is
+    * reviewed.
+    */
+  private val ExpectedRestrictedScalar = Set(
+    "current_setting",
+    "duckdb_aws_session_id",
+    "duckdb_format_sql",
+    "index_key",
+    "json_serialize_plan",
+    "postgres_close_pinned_connection",
+    "postgres_pin_connection",
+    "qod_screen",
+    "quack_check_token",
+    "quack_connection_id",
+    "quack_nop_authorization",
+    "quack_uri_parser",
+    "setval",
+    "write_log"
+  ).map(_ -> "scalar")
+
   private val ExpectedFile = Set(
     "avro_metadata",
     "glob",
@@ -76,9 +97,7 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
 
   private val ExpectedAdmittedTable = TableExtractor.DuckDbCatalogFunctions ++ Set(
     "check_peg_parser",
-    "duckdb_approx_database_count",
     "duckdb_available_metrics",
-    "duckdb_connection_count",
     "duckdb_coordinate_systems",
     "duckdb_dialects",
     "duckdb_external_resource_types",
@@ -156,6 +175,14 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "restrict exactly the reviewed scalar, aggregate and window functions, to superusers" in {
+    val restricted = FunctionClasses.all.collect {
+      case (k, c) if k.tpe != "table" && k.tpe != "pragma" && c != Allowed => (k.name, k.tpe) -> c
+    }
+    restricted.keySet shouldBe ExpectedRestrictedScalar
+    restricted.values.toSet shouldBe Set(Superuser)
+  }
+
   it should "list exactly the catalog functions the metadata filter narrows" in {
     tableNames(Set(Listing)) shouldBe TableExtractor.DuckDbCatalogFunctions
     FunctionClasses.all.collect { case (k, Listing) => k.tpe }.toSet shouldBe Set("table")
@@ -180,12 +207,15 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       ("ducklake_set_commit_message", "table", Allowed) -> ("ducklake_set_option", "table"),
       ("pragma_version", "table", Allowed)              -> ("pragma_storage_info", "table"),
       ("duckdb_variables", "table", Allowed)            -> ("duckdb_settings", "table"),
-      ("qod_session", "table", Allowed)                 -> ("qod_screen", "scalar"),
-      ("lower", "scalar", Allowed)                      -> ("current_setting", "scalar"),
-      ("json_serialize_sql", "scalar", Allowed)         -> ("json_serialize_plan", "scalar"),
-      ("nextval", "scalar", Allowed)                    -> ("setval", "scalar"),
-      ("table_info", "pragma", Allowed)                 -> ("storage_info", "pragma"),
-      ("show_tables", "pragma", Allowed)                -> ("import_database", "pragma")
+      ("duckdb_dialects", "table", Allowed)             -> ("duckdb_connection_count", "table"),
+      ("duckdb_keywords", "table", Allowed)      -> ("duckdb_approx_database_count", "table"),
+      ("postgres_hstore_get", "scalar", Allowed) -> ("postgres_pin_connection", "scalar"),
+      ("qod_session", "table", Allowed)          -> ("qod_screen", "scalar"),
+      ("lower", "scalar", Allowed)               -> ("current_setting", "scalar"),
+      ("json_serialize_sql", "scalar", Allowed)  -> ("json_serialize_plan", "scalar"),
+      ("nextval", "scalar", Allowed)             -> ("setval", "scalar"),
+      ("table_info", "pragma", Allowed)          -> ("storage_info", "pragma"),
+      ("show_tables", "pragma", Allowed)         -> ("import_database", "pragma")
     )
     pairs.foreach { case ((admitted, at, cls), (refused, rt)) =>
       withClue(admitted)(FunctionClasses.of("system", "main", admitted, at) shouldBe Some(cls))

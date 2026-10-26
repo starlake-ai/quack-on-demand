@@ -376,11 +376,11 @@ disable_progress_bar	main	pragma	superuser
 disable_verification	main	pragma	superuser
 disable_verify_parallelism	main	pragma	superuser
 divide	main	scalar	allowed
-duckdb_approx_database_count	main	table	allowed
+duckdb_approx_database_count	main	table	superuser
 duckdb_available_metrics	main	table	allowed
 duckdb_aws_session_id	main	scalar	superuser
 duckdb_columns	main	table	listing
-duckdb_connection_count	main	table	allowed
+duckdb_connection_count	main	table	superuser
 duckdb_constraints	main	table	superuser
 duckdb_coordinate_systems	main	table	allowed
 duckdb_databases	main	table	superuser
