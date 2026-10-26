@@ -1,3 +1,4 @@
+{{- include "qod.validateValues" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -86,20 +87,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "qod.postgresPasswordSecretName" . | quote }}
                   key:  {{ include "qod.postgresPasswordSecretKey" . | quote }}
-            {{- if or .Values.admin.existingSecret .Values.admin.password }}
+            # Always set: qod.validateValues requires admin.password or admin.existingSecret.
             - name: QOD_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "qod.adminPasswordSecretName" . | quote }}
                   key:  {{ include "qod.adminPasswordSecretKey" . | quote }}
-            {{- end }}
-            {{- if or .Values.apiKey.existingSecret .Values.apiKey.value }}
-            - name: QOD_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "qod.apiKeySecretName" . | quote }}
-                  key:  {{ .Values.apiKey.existingSecretKey | default "apiKey" | quote }}
-            {{- end }}
             # Pod injects its own namespace + name so the K8s backend can scope
             # pod create/list calls correctly even when default-ns differs.
             - name: QOD_K8S_NAMESPACE

@@ -35,6 +35,9 @@
 #                                                   (default 0)
 #   NUKE             "1" deletes the namespace before reinstalling.
 #                                                   (default 0)
+#   ADMIN_PASSWORD   password of the chart-seeded superusers (admin@localhost.local
+#                    and admin), applied on the first install only; step 5b logs
+#                    in with it.                       (default admin)
 #   LOAD_TPCH        TPC-H scale factor (positive integer) seeded into
 #                    acme_tpch.tpch1 inside the manager pod. Unset = skip.
 #   LOAD_TPCDS       TPC-DS scale factor (positive integer) seeded into
@@ -57,6 +60,7 @@ NAMESPACE="${NAMESPACE:-qod}"
 RELEASE="${RELEASE:-qod}"
 BUILD="${BUILD:-0}"
 NUKE="${NUKE:-0}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 # Browser-facing host for the OIDC redirects + the printed URLs. Default
 # localhost (same-host access). Set PUBLIC_HOST=<server-ip-or-hostname> to reach
 # the rig from a remote desktop: it threads into Keycloak's frontchannel URL
@@ -238,9 +242,12 @@ HELM_EXTRA_ARGS=()
 if [[ -n "$LOAD_TPCH" || -n "$LOAD_TPCDS" || -n "$LOAD_SSB" ]]; then
   HELM_EXTRA_ARGS+=(--set loadTpc.enabled=true)
 fi
+# The admin password reaches helm through --set-file and a process
+# substitution, never on its command line.
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   -f "$SCRIPT_DIR/values-local-stack.yaml" \
+  --set-file admin.password=<(printf '%s' "$ADMIN_PASSWORD") \
   --set auth.management.publicBaseUrl="$PUBLIC_BASE" \
   --set auth.keycloak.issuer="${PUBLIC_BASE}/auth/realms/qod" \
   "${HELM_EXTRA_ARGS[@]+"${HELM_EXTRA_ARGS[@]}"}" \
@@ -395,22 +402,39 @@ fi
 # The bootstrap manifest cannot express per-tenant authConfig, so wire acme's
 # OIDC for the /ui/?tenant=acme login via the REST API once the manager is up.
 # authProvider=keycloak is just the validation bucket; the admin-UI resolver
-# reads the generic authConfig keys (issuerUrl/clientId/clientSecretRef). The
-# /api namespace is open in the rig (no QOD_API_KEY), so no auth header is
-# needed. Best-effort: a non-zero exit must not fail the whole rig.
+# reads the generic authConfig keys (issuerUrl/clientId/clientSecretRef). /api
+# needs a credential: log in as the chart-seeded superuser admin with
+# ADMIN_PASSWORD and send the session as X-API-Key. The password reaches curl on
+# stdin and the session through a private header file, never a command line.
+# Best-effort: a non-zero exit must not fail the whole rig.
 if kubectl -n "$NAMESPACE" get configmap "$(kubectl -n "$NAMESPACE" get deploy \
      -l app.kubernetes.io/name=quack-on-demand -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" \
      -o jsonpath='{.data.QOD_MGMT_IDENTITY_SOURCE}' 2>/dev/null | grep -q oidc; then
   echo "[5b] configuring per-tenant OIDC for tenant 'acme' (/ui/?tenant=acme)..."
   acme_auth='{"name":"acme","authProvider":"keycloak","authConfig":{"issuerUrl":"http://keycloak:8080/auth/realms/qod","clientId":"qod-admin","clientSecretRef":"env:QOD_MGMT_OIDC_CLIENT_SECRET","scopes":"openid email profile"}}'
-  if curl -fsS -X POST http://localhost:20900/api/tenant/setAuth \
-       -H 'Content-Type: application/json' -d "$acme_auth" >/dev/null 2>&1; then
+  # JSON-escape the password (backslash, double quote) for the login body.
+  admin_pw_json="$(printf '%s' "$ADMIN_PASSWORD" | sed 's/[\\"]/\\&/g')"
+  qod_session="$(printf '{"username":"admin","password":"%s"}' "$admin_pw_json" \
+    | curl -fsS -X POST http://localhost:20900/api/auth/login \
+        -H 'Content-Type: application/json' --data-binary @- 2>/dev/null \
+    | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+  auth_header="$(mktemp)"
+  printf 'X-API-Key: %s\n' "$qod_session" > "$auth_header"
+  if [[ -n "$qod_session" ]] && curl -fsS -X POST http://localhost:20900/api/tenant/setAuth \
+       -H @"$auth_header" -H 'Content-Type: application/json' -d "$acme_auth" >/dev/null 2>&1; then
     echo "  acme OIDC configured (issuer realm 'qod', client 'qod-admin')."
   else
-    echo "  WARN: acme setAuth call failed; /ui/?tenant=acme SSO may not resolve." >&2
-    echo "        Retry once the manager is fully ready:" >&2
-    echo "        curl -X POST http://localhost:20900/api/tenant/setAuth -H 'Content-Type: application/json' -d '$acme_auth'" >&2
+    echo "  WARN: the admin login or the acme setAuth call failed; /ui/?tenant=acme SSO may not resolve." >&2
+    echo "        Retry once the manager is fully ready, with the qod CLI (password: ADMIN_PASSWORD):" >&2
+    echo "          qod login --url http://localhost:20900 --username admin" >&2
+    echo "          qod tenant set-auth acme --auth-provider keycloak \\" >&2
+    echo "            --auth-config issuerUrl=http://keycloak:8080/auth/realms/qod \\" >&2
+    echo "            --auth-config clientId=qod-admin \\" >&2
+    echo "            --auth-config clientSecretRef=env:QOD_MGMT_OIDC_CLIENT_SECRET \\" >&2
+    echo "            --auth-config 'scopes=openid email profile'" >&2
   fi
+  rm -f "$auth_header"
+  unset admin_pw_json qod_session
 fi
 
 # ---- summary -------------------------------------------------------------
@@ -440,6 +464,9 @@ admin UI is OIDC SSO (identitySource=oidc). Log in via Keycloak:
   system / superuser    http://${PUBLIC_HOST}:20900/ui/             (Keycloak user admin / admin)
   tenant acme           http://${PUBLIC_HOST}:20900/ui/?tenant=acme (Keycloak user alice / demo-alice)
   (non-superusers must use the per-tenant URL; bare /ui/ is superuser-only.)
+
+REST / qod CLI (the chart-seeded superuser, password ADMIN_PASSWORD):
+  qod login --url http://${PUBLIC_HOST}:20900 --username admin
 
 FlightSQL (gRPC+TLS) is host-mapped directly (NodePort + kind extraPortMapping):
   ${PUBLIC_HOST}:31338   (TLS cert CN=localhost -> clients set disableCertificateVerification=true)

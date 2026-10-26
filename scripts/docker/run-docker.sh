@@ -27,14 +27,17 @@
 #   PG_DBNAME        target catalog DB                      (default tpch)
 #   PG_SCHEMA        DuckLake schema                        (default main)
 #
-#   AUTH             "true" to enable FlightSQL DB auth     (default true)
-#                    Required for the admin UI to log in.
+#   AUTH             "true" to enable DB auth: FlightSQL and the admin login
+#                    (default true). "false" leaves no password login: nobody
+#                    can sign in without system-scope OIDC sign-in, which this
+#                    script does not pass.
 #   ADMIN_USERNAME   admin login (when AUTH=true)           (default admin)
 #   ADMIN_PASSWORD   admin password (when AUTH=true)        (default admin - rotate!)
 #                    QOD_ADMIN_USERNAME / QOD_ADMIN_PASSWORD are accepted too and
 #                    win over the short names. First boot only: the manager never
-#                    rewrites an existing admin row.
-#   API_KEY          REST API X-API-Key                     (unset = open API + warning)
+#                    rewrites an existing admin row. No static API key is passed:
+#                    people log in with these (qod login), and automation uses a
+#                    personal access token (qod auth pat create).
 #
 #   TLS              "true" to enable FlightSQL edge TLS    (default false)
 #                    With false, tpch-load-test needs --url grpc://...
@@ -124,8 +127,12 @@ PG_SCHEMA="${PG_SCHEMA:-main}"
 AUTH="${AUTH:-true}"
 ADMIN_USERNAME="${QOD_ADMIN_USERNAME:-${ADMIN_USERNAME:-admin}}"
 ADMIN_PASSWORD="${QOD_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-admin}}"
-API_KEY="${API_KEY:-}"
 TLS="${TLS:-false}"
+# API_KEY used to become the manager's static API key; this script no longer passes one.
+if [[ -n "${API_KEY:-}" ]]; then
+  echo "WARN: API_KEY is no longer used: this script passes no static API key to the manager." >&2
+  echo "      Unset it; automation uses a personal access token (qod login, then qod auth pat create)." >&2
+fi
 
 MANAGER_PORT="${MANAGER_PORT:-20900}"
 EDGE_PORT="${EDGE_PORT:-31338}"
@@ -202,7 +209,7 @@ echo "container:    $CONTAINER_NAME"
 echo "remote pg:    $PG_USER@$PG_HOST:$PG_PORT/$PG_DBNAME (schema: $PG_SCHEMA)"
 echo "manager:      http://localhost:$MANAGER_PORT/ui/"
 echo "flightsql:    localhost:$EDGE_PORT  (TLS=$TLS)"
-echo "auth:         AUTH=$AUTH$([[ "$AUTH" == "true" ]] && echo " (admin: $ADMIN_USERNAME)" || echo " (trust-the-client)")"
+echo "auth:         AUTH=$AUTH$([[ "$AUTH" == "true" ]] && echo " (admin: $ADMIN_USERNAME)" || echo " (no password login: nobody can sign in without system-scope OIDC)")"
 echo "ducklake:     $DATA_PATH  (host) -> /app/ducklake  (container)"
 echo "certs:        $CERTS_DIR  (host) -> /app/certs     (container)"
 echo ""
@@ -258,7 +265,6 @@ exec docker run --rm \
   -e QOD_AUTH_DB_ENABLED="$AUTH" \
   -e QOD_ADMIN_USERNAME="$ADMIN_USERNAME" \
   -e QOD_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-  ${API_KEY:+-e QOD_API_KEY="$API_KEY"} \
   -e PROXY_TLS_ENABLED="$TLS" \
   -e QOD_MIN_PORT="$QOD_NODE_MIN_PORT" \
   -e QOD_MAX_PORT="$QOD_NODE_MAX_PORT" \

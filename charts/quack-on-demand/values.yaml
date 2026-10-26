@@ -259,28 +259,27 @@ s3:
   existingSecretSecretKeyKey: s3SecretKey
 
 # --- Admin credentials -------------------------------------------------------
-# Initial admin user(s) seeded into qodstate_user on first boot only (a row
+# REQUIRED: admin.password or admin.existingSecret (the chart refuses to render
+# without one). The chart passes no static API key (there is no `apiKey` value
+# any more, and the chart refuses one): people log in (the UI, `qod login`) and
+# automation uses personal access tokens minted from a session
+# (`qod auth pat create`), so without an admin nobody could ever log in.
+#
+# The admin user(s) are seeded into qodstate_user on first boot only (a row
 # that already exists is never rewritten, so changing the password here and
-# re-deploying does NOT rotate it: use `qod auth change-password`).
-# `username` accepts a comma-separated list: every entry gets the same
-# password + admin role. Default seeds BOTH the project's documented
-# convention (`admin@localhost.local`) AND the short form (`admin`) so
-# operators can log in with either.
+# re-deploying does NOT rotate it: use `qod auth change-password`, or
+# `qod admin reset-password` with database access). `username` accepts a
+# comma-separated list: every entry gets the same password + admin role.
+# Default seeds BOTH the project's documented convention
+# (`admin@localhost.local`) AND the short form (`admin`) so operators can log
+# in with either.
 admin:
   username: "admin@localhost.local,admin"
-  # Either inline (dev) or via an externally-managed secret (prod).
+  # Either inline (dev) or via an externally-managed secret (prod), which holds
+  # the password under existingSecretKey.
   password: ""
   existingSecret: ""
   existingSecretKey: adminPassword
-
-# --- REST API gate ----------------------------------------------------------
-# Optional static X-API-Key for the /api/* admin endpoints. When unset
-# AND admin password is set, the UI's session-token flow still works for
-# the admin user. Leave empty for dev kind tests.
-apiKey:
-  value: ""
-  existingSecret: ""
-  existingSecretKey: apiKey
 
 # Session JWT signing key shared by all replicas. REQUIRED when replicaCount > 1.
 # Generate with: openssl rand -hex 32

@@ -93,14 +93,6 @@ secret name+key the user provided, or the chart-managed one.
 {{- end -}}
 {{- end -}}
 
-{{- define "qod.apiKeySecretName" -}}
-{{- if .Values.apiKey.existingSecret -}}
-{{- .Values.apiKey.existingSecret -}}
-{{- else -}}
-{{- include "qod.fullname" . }}-apikey
-{{- end -}}
-{{- end -}}
-
 {{- define "qod.s3SecretName" -}}
 {{- if .Values.s3.existingSecret -}}
 {{- .Values.s3.existingSecret -}}
@@ -148,4 +140,26 @@ remote-scheme (s3://, s3a://, r2://) AND credentials are available
 {{- $remote := or (hasPrefix "s3://" $p) (or (hasPrefix "s3a://" $p) (hasPrefix "r2://" $p)) -}}
 {{- $hasCreds := or .Values.s3.existingSecret (and .Values.s3.accessKey .Values.s3.secretKey) -}}
 {{- if and $remote $hasCreds -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Refusals checked on every render (deployment.yaml includes this first):
+- The chart passes no static API key any more. A value that carries a key is
+  refused: a non-empty apiKey.value or apiKey.existingSecret, or any other
+  non-empty apiKey. An all-empty block left in an older values file passes,
+  like an empty QOD_API_KEY on the manager.
+- An admin password is required: it seeds the admin on first boot, and
+  nobody can log in without one.
+*/}}
+{{- define "qod.validateValues" -}}
+{{- with .Values.apiKey }}
+{{- $key := . }}
+{{- if kindIs "map" $key }}
+{{- $key = printf "%s%s" (get $key "value" | default "" | toString | trim) (get $key "existingSecret" | default "" | toString | trim) }}
+{{- end }}
+{{- if trim (toString $key) }}
+{{- fail "apiKey was removed: the manager no longer accepts a static API key; use a personal access token" }}
+{{- end }}
+{{- end }}
+{{- $_ := required "admin.password or admin.existingSecret is required: it seeds the admin on first boot, and nobody can log in without one" (or .Values.admin.existingSecret .Values.admin.password) }}
 {{- end -}}

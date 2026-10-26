@@ -19,11 +19,14 @@ helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand \
   --version <release, e.g. 0.8.1> \
   --set postgres.host=<your-postgres-host> \
   --set postgres.user=<a-non-superuser-role> \
-  --set postgres.password=<your-postgres-password>
+  --set postgres.password=<your-postgres-password> \
+  --set admin.password=<the-admin-password>
 ```
 
-(Exact value keys: see [values.yaml](values.yaml); an external Postgres is
-required, per the prerequisites above.) You can also install from a checkout:
+(Exact value keys: see [values.yaml](values.yaml); an external Postgres and an
+admin password (`admin.password`, or `admin.existingSecret` in production) are
+required, and the chart refuses to render without them.) You can also install
+from a checkout:
 
 ### Local kind cluster (recommended for first-run)
 
@@ -57,6 +60,10 @@ helm install qod charts/quack-on-demand \
   --set admin.existingSecret=qod-admin
 ```
 
+`qod-admin` is a Secret holding the admin password under the key `adminPassword`
+(`admin.existingSecretKey`), for example
+`kubectl -n qod create secret generic qod-admin --from-file=adminPassword=./admin-password.txt`.
+
 Or package it locally and host on your own OCI registry:
 
 ```bash
@@ -76,7 +83,7 @@ OCI publication to a public registry is a planned follow-up.
 | `ServiceAccount` | Bound to the `Role` below. |
 | `Role` + `RoleBinding` | Pods + services CRUD in the manager's own namespace. **Not a `ClusterRole`** - the manager only ever talks to its own namespace. |
 | `ConfigMap` | `QOD_*` / `PROXY_*` env-var overrides - everything in `application.conf` that isn't a secret. |
-| `Secret` | Chart-managed only when `postgres.password` / `admin.password` / `apiKey.value` are inline. Production deploys should use `existingSecret` references instead. |
+| `Secret` | Chart-managed only when `postgres.password` / `admin.password` are inline. Production deploys should use `existingSecret` references instead. |
 | `Ingress` | Optional. HTTP for REST/UI. FlightSQL is gRPC and not handled here - front it with a Gateway / Envoy / Istio. |
 | `ServiceMonitor` | Optional, for the Prometheus Operator. |
 | `PodDisruptionBudget` | Optional, only created when `replicaCount > 1`. |
@@ -95,8 +102,7 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `security.nodeLockdown` | `true` | `QOD_NODE_LOCKDOWN`. Keeps tenant users away from the node's mounted secrets. See [Tenant isolation](#tenant-isolation). |
 | `security.aclEnabled` | `false` | `QOD_ACL_ENABLED`: enforce per-table role grants. |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
-| `admin.existingSecret` | `""` | Recommended for prod. Inline `admin.password` is dev-only. |
-| `apiKey.value` | `""` | Static `X-API-Key` for `/api/*`. Optional - UI login still works without it. |
+| `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
 | `service.flightsql.type` | `ClusterIP` | Override to `LoadBalancer` / `NodePort` to expose externally. |
 | `ingress.enabled` | `false` | REST/UI only. |
@@ -109,10 +115,14 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 The chart configures three independent auth axes. All are optional; the
 defaults give you database auth everywhere with the seeded admin user.
 
-**1. Admin credentials, API key, sessions** (always on): `admin.username` /
-`admin.password` (or `admin.existingSecret`) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
-`apiKey.value` optionally enables the static `X-API-Key` arm for `/api/*`;
+**1. Admin credentials and sessions** (always on): `admin.username` /
+`admin.password` (or `admin.existingSecret`; one of the two is REQUIRED) seed the superuser on first boot only (an existing admin row is never rewritten, so rotating the Secret does not change the password: use `qod auth change-password`, or `qod admin reset-password` with database access; with the default two admin names (`admin@localhost.local,admin`) both share the seeded password, so rotate each with `qod auth change-password --username <name>`, while `qod admin reset-password` resets every configured admin name by default);
 `sessionJwtSecret` signs UI sessions and is REQUIRED when `replicaCount > 1`.
+The chart sets no static API key and refuses any `apiKey` value: people log in
+(`qod login`, the UI), and automation (CI, MCP clients, SCIM connectors) uses
+personal access tokens (`qod auth pat create`). Upgrading from a release that set
+`apiKey`: mint those tokens first, point the automation at them, then delete
+`apiKey` from your values.
 
 **2. FlightSQL data plane** (what SQL clients authenticate against): database
 auth (bcrypt rows in `qodstate_user`) is always in the chain. Layer a

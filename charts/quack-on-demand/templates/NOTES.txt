@@ -12,19 +12,22 @@ Quack on Demand has been installed.
 
   Then open http://localhost:{{ .Values.service.rest.port }}/ui/
 
-{{- if .Values.admin.password }}
   Seeded admin user(s): {{ .Values.admin.username }}
-  Password: (chart-managed; from values.admin.password)
-  (used only when the admin row does not exist yet)
-{{- else if .Values.admin.existingSecret }}
-  Seeded admin user(s): {{ .Values.admin.username }}
+{{- if .Values.admin.existingSecret }}
   Password: (from {{ .Values.admin.existingSecret }}/{{ .Values.admin.existingSecretKey }})
-  (used only when the admin row does not exist yet)
 {{- else }}
-  WARNING: no admin password set, so no admin will be seeded. Set
-  admin.password or admin.existingSecret before first boot; the manager
-  logs an ERROR until an admin exists.
+  Password: (chart-managed; from values.admin.password)
 {{- end }}
+  (used only when the admin row does not exist yet)
+
+  From a shell, with the qod CLI (pip install qod):
+
+    qod login --url http://localhost:{{ .Values.service.rest.port }} --username {{ splitList "," .Values.admin.username | first | trim }}
+
+  This chart sets no static API key: automation (CI, MCP clients, SCIM
+  connectors) uses a personal access token, minted once from a session:
+
+    qod auth pat create --name ci
 {{- $security := .Values.security | default dict }}
 {{- if and (not (dig "nodeLockdown" true $security)) (not (dig "aclEnabled" false $security)) }}
 
