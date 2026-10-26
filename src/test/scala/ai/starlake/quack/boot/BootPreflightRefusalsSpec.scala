@@ -20,10 +20,10 @@ import pureconfig.ConfigSource
 /** The boot refusals of the static API key removal:
   *   - a non-empty `QOD_API_KEY` (environment) or `quack-on-demand.apiKey` (loaded configuration)
   *     stops the boot with the removal message, before HA validation; an empty value passes;
-  *   - a FlightSQL edge with no authenticator at all (the handshake would trust the client) stops
-  *     the boot, also before HA validation;
+  *   - a FlightSQL edge with no authenticator at all (the handshake would refuse every client)
+  *     stops the boot, also before HA validation;
   *   - a manager nobody can sign in to (no password provider and no system-scope OIDC sign-in, as
-  *     `ManagementAuthWiring` serves it) stops too.
+  *     `ManagementAuthWiring` serves it) stops too, also before HA validation.
   */
 class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   import Main.given
@@ -103,6 +103,21 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   it should "refuse a FlightSQL edge with no authenticator before HA validation" in {
     val err = intercept[RuntimeException](bootUntilHaRefusal(noEnv, NoEdgeAuth))
     err.getMessage shouldBe BootPreflight.NoEdgeAuthMessage
+  }
+
+  /** A bearer provider only (Google has no password grant), and system-scope sign-in by password:
+    * the edge has an authenticator, but nothing could create a session.
+    */
+  private val NoLogin =
+    "quack-flightsql.auth { database.enabled = false, keycloak.enabled = false, " +
+      "google { enabled = true, clientId = \"c\" }, azure.enabled = false, aws.enabled = false, " +
+      "jwt { secretKey = \"\", publicKeyPath = \"\" } }\n" +
+      "quack-on-demand.auth.management { identitySource = db, " +
+      "oidc { issuerUrl = \"https://accounts.google.com\", clientId = \"c\" } }"
+
+  it should "refuse a manager nobody can sign in to before HA validation" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(noEnv, NoLogin))
+    err.getMessage should startWith("nothing can sign in to this manager")
   }
 
   /** The management auth block with only the fields the login gate reads set. */
@@ -238,4 +253,13 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       val svc = new AuthenticationService(cfg, "")
       try AuthenticationService.configuresProvider(cfg) shouldBe svc.hasProviders
       finally svc.close()
+  }
+
+  "AuthenticationService.configuresPasswordProvider" should "agree with the basic chain built" in {
+    // The login check reads the config at the top of the boot; the service builds the chain later.
+    for cfg <- List(emptyAuthConfig, keycloakAuth, azureAuth, googleAuth, awsAuth, jwtSecret) do
+      val svc = new AuthenticationService(cfg, "")
+      try AuthenticationService.configuresPasswordProvider(cfg) shouldBe svc.hasPasswordProvider
+      finally svc.close()
+    AuthenticationService.configuresPasswordProvider(databaseAuth) shouldBe true
   }

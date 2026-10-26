@@ -196,8 +196,8 @@ object Main extends IOApp with LazyLogging:
     * coordinates while `seedAdminUsers` writes the admin row into the embedded server -- the auth
     * split-brain this wrapper exists to close. See `EmbeddedControlPlane.applyAuthCoordinates` for
     * the per-key env-override rule. The server is stopped (never deleted) on every exit path via
-    * `guarantee`, including a failed boot, including a failure in the control-plane database ensure
-    * step.
+    * `guarantee`, including a failed boot (a refusal `bootManager` throws while it builds its IO
+    * included: `boot` is deferred), including a failure in the control-plane database ensure step.
     *
     * This is deliberately NOT `DemoConfig.overlay`: it does not touch `runtimeType`, TLS, or ACL,
     * so a persistent embedded install keeps the normal secure posture. `DemoConfig.overlay` remains
@@ -212,14 +212,18 @@ object Main extends IOApp with LazyLogging:
     else
       IO.blocking(ai.starlake.quack.boot.EmbeddedControlPlane.start(mgrCfg.embeddedPostgres))
         .flatMap { cp =>
+          // Deferred: `bootManager` runs its refusals (sys.error) while it builds its IO, and an
+          // eager call would throw before `guarantee` is attached, leaving the server running.
           (IO.blocking(cp.ensureDatabase(mgrCfg.defaultMetastore.dbName)) *>
-            boot(
-              ai.starlake.quack.boot.EmbeddedControlPlane.applyCoordinates(mgrCfg, cp),
-              ai.starlake.quack.boot.EmbeddedControlPlane.applyAuthCoordinates(
-                authCfg,
-                cp,
-                mgrCfg.defaultMetastore.dbName,
-                env
+            IO.defer(
+              boot(
+                ai.starlake.quack.boot.EmbeddedControlPlane.applyCoordinates(mgrCfg, cp),
+                ai.starlake.quack.boot.EmbeddedControlPlane.applyAuthCoordinates(
+                  authCfg,
+                  cp,
+                  mgrCfg.defaultMetastore.dbName,
+                  env
+                )
               )
             )).guarantee(IO.blocking(cp.stop()))
         }
@@ -272,12 +276,23 @@ object Main extends IOApp with LazyLogging:
       env: String => Option[String] = sys.env.get,
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
   ): IO[ExitCode] =
-    // A removed QOD_API_KEY refuses boot first: before the session secret is generated and printed,
-    // and before HA validation, so an upgrade that still sets the key stops with the reason.
+    // The three auth refusals run first, at the top of bootManager, before it opens any socket: they
+    // read the configuration alone. A removed QOD_API_KEY refuses boot before the session secret is
+    // generated and printed, and before HA validation, so an upgrade that still sets the key stops
+    // with the reason.
     BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
-    // Then an empty FlightSQL auth chain, from the config alone: the edge and the Quack front door
-    // would trust every client as whatever user it names.
+    // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
+    // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
+    // Then a manager nothing could create a session on (a personal access token is minted with
+    // one): `/api` would be unreachable.
+    BootPreflight
+      .checkLoginAvailable(
+        AuthenticationService.configuresPasswordProvider(authCfg),
+        mgrCfg0.auth.management
+      )
+      .left
+      .foreach(msg => sys.error(msg))
     val quackCfgResolved: QuackNativeConfig =
       quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
     // An unset session JWT secret is generated and printed here, BEFORE anything reads it. A no-op
@@ -588,12 +603,6 @@ object Main extends IOApp with LazyLogging:
       lockout = mgrCfg.auth.lockout,
       lockoutStore = Some(userStore)
     )
-    // A session is the only way in (a personal access token is minted with one): refuse to boot
-    // when nothing could create one.
-    BootPreflight
-      .checkLoginAvailable(authService.hasPasswordProvider, mgrCfg.auth.management)
-      .left
-      .foreach(msg => sys.error(msg))
 
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaders.get(tenant, tenantDb)

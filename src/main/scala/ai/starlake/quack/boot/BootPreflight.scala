@@ -51,12 +51,13 @@ object BootPreflight extends LazyLogging:
       "QOD_AUTH_GOOGLE_ENABLED=true or QOD_AUTH_AWS_ENABLED=true."
 
   /** Pure gate: the FlightSQL edge needs an authenticator. With an empty `quack-flightsql.auth`
-    * chain (no basic and no bearer provider) the edge handshake trusts the client and binds
-    * whatever user it names, superusers included, with no password; system-scope OIDC adds no edge
-    * provider, so it does not count. The FlightSQL edge has no enable switch and always starts, so
-    * the check holds whether or not the Quack front door (`QOD_QUACK_ENABLED`) runs too. It reads
-    * the configuration, not a built [[AuthenticationService]], so `Main.bootManager` runs it right
-    * after the removed-key refusal, before any I/O and before HA validation.
+    * chain (no basic and no bearer provider) the edge handshake refuses every client, so no
+    * FlightSQL or Quack client could connect; system-scope OIDC adds no edge provider, so it does
+    * not count. The FlightSQL edge has no enable switch and always starts, so the check holds
+    * whether or not the Quack front door (`QOD_QUACK_ENABLED`) runs too. It reads the
+    * configuration, not a built [[AuthenticationService]], so `Main.bootManager` runs it right
+    * after the removed-key refusal, at the top of `bootManager`, before it opens any socket and
+    * before HA validation.
     */
   def checkEdgeAuthAvailable(auth: AuthenticationConfig): Either[String, Unit] =
     if AuthenticationService.configuresProvider(auth) then Right(()) else Left(NoEdgeAuthMessage)
@@ -65,10 +66,11 @@ object BootPreflight extends LazyLogging:
     * has no password provider (its basic chain is empty, as with `QOD_AUTH_DB_ENABLED=false` and no
     * Keycloak or Azure password backend) AND system-scope OIDC sign-in is not served: nothing could
     * create a session, a personal access token is minted with one, and `/api` would be unreachable.
-    * System-scope OIDC counts exactly as `ManagementAuthWiring` serves it: `identitySource=oidc`
-    * with the issuer URL and the client id set (under `db` the system scope gets no OIDC client,
-    * whatever `QOD_MGMT_OIDC_*` hold). Tenant OIDC does not count: it is configured through `/api`
-    * and never yields a superuser.
+    * `Main.bootManager` runs it right after the edge check, from the configuration alone
+    * (`AuthenticationService.configuresPasswordProvider`). System-scope OIDC counts exactly as
+    * `ManagementAuthWiring` serves it: `identitySource=oidc` with the issuer URL and the client id
+    * set (under `db` the system scope gets no OIDC client, whatever `QOD_MGMT_OIDC_*` hold). Tenant
+    * OIDC does not count: it is configured through `/api` and never yields a superuser.
     */
   def checkLoginAvailable(
       hasPasswordProvider: Boolean,

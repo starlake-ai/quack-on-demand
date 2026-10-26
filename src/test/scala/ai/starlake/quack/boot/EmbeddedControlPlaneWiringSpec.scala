@@ -125,6 +125,20 @@ class EmbeddedControlPlaneWiringSpec extends AnyFlatSpec with Matchers:
         .unsafeRunSync()
     assertPortFree(port)
 
+  it should "stop the server when the boot body throws while it builds its IO" in:
+    // Main.bootManager runs its refusals (sys.error) eagerly, before it returns an IO: such a
+    // throw must still find the server's stop attached.
+    val dir  = Files.createTempDirectory("qod-embedded-wiring-eager-fail")
+    val port = freePort()
+    val cfg  = base.copy(embeddedPostgres =
+      EmbeddedPostgresConfig(enabled = true, port = port, dataDir = dir.toString)
+    )
+    an[RuntimeException] should be thrownBy
+      Main
+        .withEmbeddedControlPlane(cfg, baseAuth)((_, _) => sys.error("refused at boot"))
+        .unsafeRunSync()
+    assertPortFree(port)
+
   it should "stop the server when ensureDatabase itself fails" in:
     val dir  = Files.createTempDirectory("qod-embedded-wiring-ensuredb-fail")
     val port = freePort()
