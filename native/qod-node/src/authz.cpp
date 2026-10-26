@@ -98,7 +98,7 @@ std::string NodeAuthz::Screen(const std::string &connection_id, const std::strin
 	if (!refusal.empty()) {
 		return kRefused + refusal;
 	}
-	connections_[connection_id] = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce};
+	connections_[connection_id] = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx};
 	return "";
 }
 

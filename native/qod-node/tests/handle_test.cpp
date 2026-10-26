@@ -55,6 +55,14 @@ std::string Sign(const std::string &payload, const std::string &key = kKey) {
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(key, payload));
 }
 
+const std::string kCtx(64, 'c');
+
+std::string PayloadWithCtx(const std::string &ctx_json) {
+	auto payload = Payload();
+	payload.insert(payload.find(",\"nonce\""), ",\"ctx\":" + ctx_json);
+	return payload;
+}
+
 // The golden handle NodeHandlesSpec (Scala) mints from fixed inputs, and its prelude: both sides agree
 // on the handle's format and on the prelude's spelling.
 void VerifyGolden(const std::string &path) {
@@ -64,12 +72,14 @@ void VerifyGolden(const std::string &path) {
 		failures++;
 		return;
 	}
-	std::string line, key_hex, text, prelude;
+	std::string line, key_hex, text, prelude, ctx;
 	while (std::getline(in, line)) {
 		if (line.rfind("key=", 0) == 0) {
 			key_hex = line.substr(4);
 		} else if (line.rfind("handle=", 0) == 0) {
 			text = line.substr(7);
+		} else if (line.rfind("ctx=", 0) == 0) {
+			ctx = line.substr(4);
 		} else if (line.rfind("prelude=", 0) == 0) {
 			prelude = line.substr(8);
 		}
@@ -85,6 +95,7 @@ void VerifyGolden(const std::string &path) {
 		Expect(handle.policy_version == 42 && handle.nonce == "0123456789abcdef0123456789abcdef" &&
 		           handle.exp == 1761200060000,
 		       "golden version, nonce, exp");
+		Expect(!ctx.empty() && handle.ctx == ctx, "golden ctx");
 	} catch (std::invalid_argument &error) {
 		std::cerr << "FAIL: the golden handle does not verify: " << error.what() << std::endl;
 		failures++;
@@ -146,6 +157,18 @@ int main(int argc, char **argv) {
 	auto v2 = Payload();
 	v2.replace(v2.find("\"v\":1"), 5, "\"v\":2");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v2), kKey, kNode, kNow); }, "version", "version 2");
+
+	// ---- the session context digest (optional until node protocol 3)
+	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).ctx.empty(), "a handle without ctx");
+	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx + "\"")), kKey, kNode, kNow).ctx == kCtx,
+	       "the handle's ctx");
+	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("null")), kKey, kNode, kNow).ctx.empty(), "a null ctx is none");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx.substr(1) + "\"")), kKey, kNode, kNow); },
+	              "bad ctx", "a short ctx");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + std::string(64, 'C') + "\"")), kKey, kNode, kNow); },
+	              "bad ctx", "an uppercase ctx");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("42")), kKey, kNode, kNow); }, "malformed handle",
+	              "a ctx that is no string");
 
 	// ---- nonce ledger
 	qod::NonceLedger ledger;

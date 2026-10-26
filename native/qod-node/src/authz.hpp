@@ -38,6 +38,8 @@ struct Installed {
 	int64_t policy_version = 0;
 	int64_t exp = 0;
 	std::string nonce;
+	//! The installing (or last refreshing) handle's ctx: a refresh may change it.
+	std::string ctx;
 };
 
 //! Why `next` may not install on a connection that holds `current` (null: none yet); empty when it

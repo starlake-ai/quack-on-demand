@@ -9,14 +9,19 @@ import java.util.Base64
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
+/** A minted handle: its text, and what the minting replica keeps about it (the nonce names it in
+  * the decide context registry, `expiresAt` is its `exp`).
+  */
+final case class MintedHandle(text: String, nonce: String, expiresAt: Long)
+
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
   * docs/superpowers/specs/2026-10-23-in-engine-authorization-design.md, section 2).
   *
   * The manager sends one as [[prelude]], its own PREPARE right before every statement on a node
   * connection; qod-node verifies it and installs the principal on that connection. A handle is
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
-  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `nonce`, `exp`): the MAC covers
-  * the bytes as sent, so the two sides never have to agree on a canonical form.
+  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `nonce`, `exp`): the MAC
+  * covers the bytes as sent, so the two sides never have to agree on a canonical form.
   * native/qod-node/src/handle.cpp reads it; a nonce makes it single-use and `exp` bounds it to
   * [[LifetimeMs]].
   *
@@ -79,9 +84,22 @@ object NodeHandles:
   /** A handle's `pool`: `tenant/tenantDb/pool`. */
   def pool(key: PoolKey): String = s"${key.tenant}/${key.tenantDb}/${key.pool}"
 
+  /** The handle's `ctx`: lowercase hex SHA-256 of the canonical session context
+    * ([[DecideContext.json]]), or of `{}` for a principal minted without one.
+    */
+  def contextDigest(context: Option[DecideContext]): String =
+    CanonicalJson.sha256Hex(context.fold(Json.obj())(DecideContext.json))
+
+  /** [[contextDigest]] of no context. */
+  val EmptyContextDigest: String = contextDigest(None)
+
+  private val ContextDigestPattern = "[0-9a-f]{64}".r
+  private val NoncePattern         = "[0-9a-f]{32}".r
+
   /** The handle for one statement on `nodeId`, minted by `replica` (the URL nodes call back for
-    * verdicts) for `principal` on `pool` at `nowMs`. Refuses [[NodePrincipal.Unbound]]: there is no
-    * one to vouch for.
+    * verdicts) for `principal` on `pool` at `nowMs`, carrying the tenant's `policyVersion` and the
+    * session's `ctx` ([[contextDigest]]). Refuses [[NodePrincipal.Unbound]]: there is no one to
+    * vouch for.
     */
   def mint(
       secret: String,
@@ -90,10 +108,15 @@ object NodeHandles:
       principal: NodePrincipal,
       pool: String,
       policyVersion: Long,
+      ctx: String,
       nowMs: Long,
       nonce: String = newNonce()
-  ): String =
+  ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
+    require(policyVersion >= 0L, "a policy version is never negative")
+    require(ContextDigestPattern.matches(ctx), "ctx must be 64 lowercase hex digits")
+    require(NoncePattern.matches(nonce), "a nonce is 32 lowercase hex digits")
+    val exp     = nowMs + LifetimeMs
     val payload = Json
       .obj(
         "v"         -> Json.fromInt(1),
@@ -108,13 +131,15 @@ object NodeHandles:
         ),
         "pool"          -> Json.fromString(pool),
         "policyVersion" -> Json.fromLong(policyVersion),
+        "ctx"           -> Json.fromString(ctx),
         "nonce"         -> Json.fromString(nonce),
-        "exp"           -> Json.fromLong(nowMs + LifetimeMs)
+        "exp"           -> Json.fromLong(exp)
       )
       .noSpaces
       .getBytes(StandardCharsets.UTF_8)
-    Base64.getUrlEncoder.withoutPadding.encodeToString(payload) + "." +
+    val text = Base64.getUrlEncoder.withoutPadding.encodeToString(payload) + "." +
       hex(hmac(nodeKey(secret, nodeId), payload))
+    MintedHandle(text, nonce, exp)
 
   /** The prelude statement that installs `handle` on a node connection. A handle holds only
     * base64url characters, `.` and hex digits, so it needs no quoting; qod-node admits exactly this

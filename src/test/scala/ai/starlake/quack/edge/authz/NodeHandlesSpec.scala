@@ -1,8 +1,16 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.acl.parser.Verb
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
+import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.RbacUser
+import ai.starlake.quack.ondemand.state.{
+  RbacGroup,
+  RbacRole,
+  RbacUser,
+  RoleColumnPolicy,
+  RolePermission
+}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -16,6 +24,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   private val GoldenNode   = "quack-acme-db-bi-1"
   private val Alice        =
     NodePrincipal("u-1", "alice", Some("acme"), superuser = false, system = false)
+  private val Ctx0 = NodeHandles.EmptyContextDigest
 
   private def golden(key: String): String =
     Files
@@ -24,34 +33,75 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       .collectFirst { case l if l.startsWith(s"$key=") => l.drop(key.length + 1) }
       .get
 
+  private val GoldenContext = DecideContext(
+    EffectiveSet(
+      RbacUser("u-1", Some("acme"), "alice", "user"),
+      List(RbacRole("r-1", "acme", "analyst")),
+      List(RbacGroup("g-1", "acme", "bi")),
+      List(RolePermission("p-1", "r-1", "acme_db", "main", "*", "RO")),
+      Nil
+    ),
+    PoolKey("acme", "acme_db", "bi"),
+    restriction = None
+  )
+
   "mint" should "produce exactly the golden handle qod-node's handle_test verifies" in {
     NodeHandles.nodeKeyHex(GoldenSecret, GoldenNode) shouldBe golden("key")
-    NodeHandles.mint(
+    val minted = NodeHandles.mint(
       GoldenSecret,
       GoldenNode,
       "http://10.0.0.1:20900",
       Alice,
       "acme/acme_db/bi",
       policyVersion = 42L,
+      ctx = golden("ctx"),
       nowMs = 1761200000000L,
       nonce = "0123456789abcdef0123456789abcdef"
-    ) shouldBe golden("handle")
+    )
+    minted.text shouldBe golden("handle")
+    minted.nonce shouldBe "0123456789abcdef0123456789abcdef"
+    minted.expiresAt shouldBe 1761200060000L
   }
 
   it should "expire the handle LifetimeMs after minting and use a fresh nonce each time" in {
-    val a = HandleInspector.payload(NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, 1000L))
-    val b = HandleInspector.payload(NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, 1000L))
-    a.hcursor.get[Long]("exp") shouldBe Right(1000L + NodeHandles.LifetimeMs)
-    a.hcursor.get[String]("nonce") should not be b.hcursor.get[String]("nonce")
-    a.hcursor.get[String]("nonce").map(_.matches("[0-9a-f]{32}")) shouldBe Right(true)
+    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L)
+    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L)
+    val pa = HandleInspector.payload(a.text)
+    pa.hcursor.get[Long]("exp") shouldBe Right(1000L + NodeHandles.LifetimeMs)
+    pa.hcursor.get[String]("nonce") shouldBe Right(a.nonce)
+    a.expiresAt shouldBe 1000L + NodeHandles.LifetimeMs
+    a.nonce should not be b.nonce
+    a.nonce should fullyMatch regex "[0-9a-f]{32}"
   }
 
   it should "refuse to vouch for no principal" in {
     val e = intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, 1000L)
     )
     e.getMessage should include("no principal is bound to this statement")
   }
+
+  it should "refuse a ctx that is not 64 lowercase hex digits, and a negative policy version" in {
+    List("", "a" * 63, "A" * 64, "g" * 64, Ctx0 + "0").foreach { bad =>
+      withClue(s"ctx '$bad': ") {
+        intercept[IllegalArgumentException](
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, 1000L)
+        ).getMessage should include("ctx")
+      }
+    }
+    intercept[IllegalArgumentException](
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, 1000L)
+    ).getMessage should include("policy version")
+  }
+
+  it should "refuse a nonce that is not 32 lowercase hex digits, as qod-node does" in
+    List("", "a" * 31, "a" * 33, "A" * 32, "g" * 32).foreach { bad =>
+      withClue(s"nonce '$bad': ") {
+        intercept[IllegalArgumentException](
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L, nonce = bad)
+        ).getMessage should include("nonce")
+      }
+    }
 
   "a node key" should "differ per node and per secret" in {
     NodeHandles.nodeKeyHex("a" * 32, "n1") should not be NodeHandles.nodeKeyHex("a" * 32, "n2")
@@ -83,26 +133,125 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "Binder Error: no PIPELINE 2: here"
   }
 
+  "the session context digest" should "be the golden one, over the golden canonical context" in {
+    CanonicalJson.render(DecideContext.json(GoldenContext)) shouldBe golden("context")
+    NodeHandles.contextDigest(Some(GoldenContext)) shouldBe golden("ctx")
+  }
+
+  it should "be the digest of {} for a principal minted without a context" in {
+    NodeHandles.contextDigest(None) shouldBe
+      "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    NodeHandles.EmptyContextDigest shouldBe NodeHandles.contextDigest(None)
+  }
+
+  it should "not depend on the order of roles, groups or permissions" in {
+    val e  = GoldenContext.effective
+    val e2 = e.copy(
+      roles = e.roles :+ RbacRole("r-2", "acme", "ops"),
+      permissions = e.permissions :+ RolePermission("p-2", "r-2", "acme_db", "main", "t", "RW")
+    )
+    val e3 = e2.copy(roles = e2.roles.reverse, permissions = e2.permissions.reverse)
+    NodeHandles.contextDigest(Some(GoldenContext.copy(effective = e2))) shouldBe
+      NodeHandles.contextDigest(Some(GoldenContext.copy(effective = e3)))
+  }
+
+  it should "change with everything a decision reads" in {
+    val base     = NodeHandles.contextDigest(Some(GoldenContext))
+    val e        = GoldenContext.effective
+    val variants = List(
+      "a JWT role"      -> GoldenContext.copy(effective = e.copy(roles = Nil)),
+      "a JWT group"     -> GoldenContext.copy(effective = e.copy(groups = Nil)),
+      "a claim"         -> GoldenContext.copy(effective = e.copy(claims = Map("dept" -> "fin"))),
+      "a permission"    -> GoldenContext.copy(effective = e.copy(permissions = Nil)),
+      "a column policy" -> GoldenContext.copy(effective =
+        e.copy(columnPolicies =
+          List(RoleColumnPolicy("cp-1", "r-1", "acme_db", "main", "t", "ssn", "deny", None))
+        )
+      ),
+      "a verb ceiling" -> GoldenContext.copy(effective =
+        e.copy(verbCeiling = Some(Set(Verb.Read)))
+      ),
+      "the pool"   -> GoldenContext.copy(poolKey = PoolKey("acme", "acme_db", "etl")),
+      "the user"   -> GoldenContext.copy(effective = e.copy(user = e.user.copy(id = "u-2"))),
+      "a PAT"      -> GoldenContext.copy(restriction = Some(TokenRestriction.Unrestricted)),
+      "branchOnly" -> GoldenContext.copy(restriction =
+        Some(TokenRestriction.Unrestricted.copy(branchOnly = true))
+      ),
+      "PAT roles" -> GoldenContext.copy(restriction =
+        Some(TokenRestriction.Unrestricted.copy(roles = Some(Set("analyst"))))
+      ),
+      "a PAT database" -> GoldenContext.copy(restriction =
+        Some(TokenRestriction.Unrestricted.copy(databases = Some(Set("acme_db"))))
+      )
+    )
+    variants.foreach { (what, ctx) =>
+      withClue(s"$what: ")(NodeHandles.contextDigest(Some(ctx)) should not be base)
+    }
+  }
+
+  it should "ignore what does not change authority: a PAT's expiry and limits" in {
+    val r = TokenRestriction.Unrestricted
+    NodeHandles.contextDigest(Some(GoldenContext.copy(restriction = Some(r)))) shouldBe
+      NodeHandles.contextDigest(
+        Some(
+          GoldenContext.copy(restriction =
+            Some(
+              r.copy(
+                expiresAt = Some(Instant.ofEpochSecond(5)),
+                stmtTimeoutMs = Some(10),
+                maxRows = Some(3)
+              )
+            )
+          )
+        )
+      )
+  }
+
+  private val Node2 = RunningNode(
+    "quack-acme-db-bi-2",
+    PoolKey("acme", "acme_db", "bi"),
+    Role.Dual,
+    "127.0.0.1",
+    21900,
+    "tok",
+    None,
+    None,
+    Instant.EPOCH
+  )
+
   "NodeKeys" should "mint for the node's own id and pool, at its clock" in {
     val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L)
-    val node = RunningNode(
-      "quack-acme-db-bi-2",
-      PoolKey("acme", "acme_db", "bi"),
-      Role.Dual,
-      "127.0.0.1",
-      21900,
-      "tok",
-      None,
-      None,
-      Instant.EPOCH
-    )
-    val p = HandleInspector.payload(keys.prelude(node, Alice))
+    val p    = HandleInspector.payload(keys.prelude(Node2, Alice))
     p.hcursor.get[String]("node") shouldBe Right("quack-acme-db-bi-2")
     p.hcursor.get[String]("pool") shouldBe Right("acme/acme_db/bi")
     p.hcursor.get[String]("replica") shouldBe Right("http://127.0.0.1:20900")
     p.hcursor.get[Long]("exp") shouldBe Right(5000L + NodeHandles.LifetimeMs)
     p.hcursor.downField("principal").get[String]("id") shouldBe Right("u-1")
-    keys.keyHex(node.nodeId) shouldBe NodeHandles.nodeKeyHex("k" * 32, node.nodeId)
+    keys.keyHex(Node2.nodeId) shouldBe NodeHandles.nodeKeyHex("k" * 32, Node2.nodeId)
+  }
+
+  it should "carry the node's tenant's current policy version and the principal's ctx" in {
+    var acme                     = 7L
+    val versions: PolicyVersions = t => if t == "acme" then acme else 99L
+    val keys        = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L, versions)
+    val withContext = Alice.copy(context = Some(GoldenContext))
+    val p1          = HandleInspector.payload(keys.handle(Node2, withContext))
+    p1.hcursor.get[Long]("policyVersion") shouldBe Right(7L)
+    p1.hcursor.get[String]("ctx") shouldBe Right(golden("ctx"))
+    acme = 8L
+    HandleInspector.payload(keys.handle(Node2, Alice)).hcursor.get[Long]("policyVersion") shouldBe
+      Right(8L)
+    HandleInspector
+      .payload(keys.handle(Node2, NodePrincipal.System))
+      .hcursor
+      .get[String]("ctx") shouldBe
+      Right(NodeHandles.EmptyContextDigest)
+  }
+
+  it should "carry policy version 0 without a version source" in {
+    val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L)
+    HandleInspector.payload(keys.handle(Node2, Alice)).hcursor.get[Long]("policyVersion") shouldBe
+      Right(0L)
   }
 
   "NodePrincipal.of" should "name the user, flag a superuser, and map the system caller" in {

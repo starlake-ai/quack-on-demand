@@ -60,6 +60,9 @@ int main() {
 	auto older = next;
 	older.policy_version = 2;
 	ExpectMentions(qod::RefreshRefusal(&current, older), "older policy version", "a lower policy version");
+	auto rescoped = next;
+	rescoped.ctx = std::string(64, 'b');
+	Expect(qod::RefreshRefusal(&current, rescoped).empty(), "a refresh may change the session context");
 
 	// ---- the parse screen
 	qod::NodeAuthz authz(kNode, kKey, [] { return now_ms; });

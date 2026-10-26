@@ -7,31 +7,36 @@ import java.util.Base64
 
 /** The manager's node-key secret and what derives from it: every node's key, delivered to the node
   * as its `QOD_NODE_AUTHZ_KEY` file, and the session handles the manager mints for statements on
-  * that node. `replica` is the URL nodes call back for verdicts (`QOD_INTERNAL_URL`).
+  * that node. `replica` is the URL nodes call back for verdicts (`QOD_INTERNAL_URL`); `versions`
+  * the tenants' policy versions.
   */
 final class NodeKeys(
     secret: String,
     val replica: String,
-    clock: () => Long = () => System.currentTimeMillis()
+    clock: () => Long = () => System.currentTimeMillis(),
+    versions: PolicyVersions = PolicyVersions.zero
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
   /** The key of node `nodeId`, as its secret file holds it. */
   def keyHex(nodeId: String): String = NodeHandles.nodeKeyHex(secret, nodeId)
 
-  /** A fresh handle for one statement of `principal` on `node`. Every handle carries policy version
-    * 0: no node caches verdicts by it yet.
+  /** A fresh handle for one statement of `principal` on `node`: the node's tenant's current policy
+    * version and the digest of the principal's session context.
     */
   def handle(node: RunningNode, principal: NodePrincipal): String =
-    NodeHandles.mint(
-      secret,
-      node.nodeId,
-      replica,
-      principal,
-      NodeHandles.pool(node.poolKey),
-      policyVersion = 0L,
-      nowMs = clock()
-    )
+    NodeHandles
+      .mint(
+        secret,
+        node.nodeId,
+        replica,
+        principal,
+        NodeHandles.pool(node.poolKey),
+        policyVersion = versions.current(node.poolKey.tenant),
+        ctx = NodeHandles.contextDigest(principal.context),
+        nowMs = clock()
+      )
+      .text
 
   /** [[handle]] as the prelude statement the node runs before the statement itself. */
   def prelude(node: RunningNode, principal: NodePrincipal): String =

@@ -3,14 +3,17 @@ package ai.starlake.quack.edge.authz
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 
 /** Who a statement on a node runs for, as the manager vouches for it in a session handle
-  * ([[NodeHandles]]). `tenant` None for a principal of no tenant.
+  * ([[NodeHandles]]). `tenant` None for a principal of no tenant. `context` is the session's
+  * authorization context, which the handle's `ctx` digests; None (the system principal, and every
+  * principal until the router fills it) digests as `{}`.
   */
 final case class NodePrincipal(
     id: String,
     name: String,
     tenant: Option[String],
     superuser: Boolean,
-    system: Boolean
+    system: Boolean,
+    context: Option[DecideContext] = None
 )
 
 object NodePrincipal:

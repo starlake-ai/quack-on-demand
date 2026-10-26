@@ -40,7 +40,7 @@ public:
 		if (!authz.Consume(handle)) {
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
-		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce};
+		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx};
 		installed_ = true;
 	}
 
