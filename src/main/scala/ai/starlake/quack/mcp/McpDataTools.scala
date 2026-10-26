@@ -398,11 +398,10 @@ final class McpDataTools(
 
   /** `describe_table` routed at an Iceberg alias: the table detail from [[IcebergCatalogHandlers]]
     * (admin-gated metadata), plus a small `sample` run like the DuckLake arm's: through the routed
-    * executor as the MCP principal (`callerFor`: the static key is the system caller, a PAT its
-    * owner with the token's restriction and id), capped by the token's maxRows. The sample never
-    * goes through a REST credential lookup, and any sample failure (no pool, ACL denial, router
-    * failure, a raised error, `sampleTimeout` elapsing) degrades to the detail alone instead of
-    * failing the call.
+    * executor as the MCP principal (`callerFor`: the PAT's owner with the token's restriction and
+    * id), capped by the token's maxRows. The sample never goes through a REST credential lookup,
+    * and any sample failure (no pool, ACL denial, router failure, a raised error, `sampleTimeout`
+    * elapsing) degrades to the detail alone instead of failing the call.
     */
   private def describeIcebergTable(
       principal: McpPrincipal,

@@ -26,11 +26,13 @@ import ai.starlake.quack.ondemand.rbac.AuthzRequest
   * token kill the statement. System and session callers carry `None`.
   *
   * `system` is the ONLY privilege signal: a system caller gets the synthetic superuser EffectiveSet
-  * in the routed executor (no ACL, no CLS/RLS, never attenuated), and `superuserAdmissible` is no
-  * route to it. It is set only by [[ExecCaller.system]] at trusted internal sites (the static key,
-  * the restore dry run, the branch change counter). `identity` is a label for logs and history;
-  * user names are not reserved (a tenant may have a user called "superuser"), so nothing may decide
-  * privilege from it.
+  * in the routed executor (no ACL, no CLS/RLS, never attenuated) and runs on nodes as
+  * `NodePrincipal.System`, and `superuserAdmissible` is no route to it. It is set only by
+  * [[ExecCaller.system]], for the manager's own work: the restore dry run
+  * (`CatalogRestoreHandlers`) and the branch change counter (`BranchWiring`). No credential is a
+  * system caller: [[RestCaller]] and `McpDataTools.callerFor` run a session or a PAT as its user,
+  * through the handshake gate. `identity` is a label for logs and history; user names are not
+  * reserved (a tenant may have a user called "superuser"), so nothing may decide privilege from it.
   */
 final case class ExecCaller(
     connectionId: String,
@@ -66,9 +68,10 @@ final case class ExecCaller(
 
 object ExecCaller:
 
-  /** A trusted internal caller: the static key or a system leg. Labelled with
-    * [[CatalogPreviewHandlers.SuperuserIdentity]] for logs; the privilege is the flag. It never
-    * reaches the handshake gate, so its `superuserAdmissible = true` decides nothing.
+  /** The manager acting for itself (the restore dry run, the branch change counter), never a
+    * credential. Labelled with [[CatalogPreviewHandlers.SuperuserIdentity]] for logs; the privilege
+    * is the flag. It never reaches the handshake gate, so its `superuserAdmissible = true` decides
+    * nothing.
     */
   def system(connectionId: String): ExecCaller =
     ExecCaller(

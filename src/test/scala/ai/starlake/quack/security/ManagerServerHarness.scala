@@ -283,6 +283,10 @@ object ManagerServerHarness:
       // how tags are wired. kindOf defaults to always-DuckLake so stub
       // readers are reached even though the fixture tenant-dbs are InMemory.
       catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None,
+      // The restore handler's reader. None keeps the harness's own stub, under which no table is
+      // live (404 not_found before the executor); a spec driving a restore to the executor passes
+      // a reader that reports the table live.
+      restoreCatalogReader: Option[DuckLakeCatalogReader] = None,
       auditCatalogReads: Boolean = false,
       // Preview executor stub (Spec 00 Task 5). Defaults to a non-denied RouterFailure so
       // authz specs that never intend to exercise a real query still get a deterministic,
@@ -565,7 +569,7 @@ object ManagerServerHarness:
       store,
       statementExecutor,
       statementExecutor,
-      (_, _) => restoreReader,
+      (_, _) => restoreCatalogReader.getOrElse(restoreReader),
       CatalogConfig(),
       restCaller,
       audit = audit

@@ -41,9 +41,9 @@ object IcebergCatalogHandlers:
   * [[ai.starlake.quack.ondemand.catalog.iceberg.NodeMetadataQuery NodeMetadataQuery]]; the preview
   * and diff DATA statements go through the routed [[CatalogPreviewHandlers.PreviewExecutor]] as the
   * caller, exactly like the DuckLake preview, so the ACL applies to them: `callerOf`
-  * ([[RestCaller]]) turns the `apiKey` into the [[ExecCaller]] (static key: system; session: its
-  * user; PAT: its owner with the token's restriction and id; any other token: 401 `unauthorized`
-  * and the executor is never called).
+  * ([[RestCaller]]) turns the `apiKey` into the [[ExecCaller]] (session: its user; PAT: its owner
+  * with the token's restriction and id; no credential or any other token: 401 `unauthorized`, and
+  * the executor is never called).
   *
   * Audit: browse/detail/history emit
   * [[ai.starlake.quack.ondemand.telemetry.AuditActions.CatalogRead AuditActions.CatalogRead]] only

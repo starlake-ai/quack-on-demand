@@ -127,7 +127,8 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
   private def fixture(
       executor: CatalogPreviewHandlers.PreviewExecutor,
       cfg: McpConfig = McpConfig(),
-      sessionOf: String => Option[SessionTokenStore.Session] = _ => None
+      sessionOf: String => Option[SessionTokenStore.Session] = _ => None,
+      stmtHistory: StatementHistoryStore = new StatementHistoryStore()
   ): McpDataTools =
     val store   = new InMemoryControlPlaneStore()
     val backend = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
@@ -161,7 +162,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val profile = new ProfileHandlers(
       sessionOf,
       NoopTelemetryStore,
-      new StatementHistoryStore(),
+      stmtHistory,
       _ => None,
       sup,
       RestCaller()
@@ -543,6 +544,45 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     withClue(out)(out.isRight shouldBe true)
     val keys = out.toOption.get.hcursor.keys.map(_.toSet)
     keys shouldBe Some(Set("usage", "statements"))
+  }
+
+  it should "scope a tenant user's PAT to that user's own statements in its own tenant" in {
+    // What PatAuthenticator.sessionOf builds for a tenant user's PAT: the owner, its tenant, no
+    // admin scope.
+    val session = SessionTokenStore.Session(
+      AuthenticatedProfile("alice", "user", Set.empty, Map.empty, "pat", Some(Tenant)),
+      SessionScope(superuser = false, manageableTenants = Set.empty),
+      java.time.Instant.now()
+    )
+    val history = new StatementHistoryStore()
+    List(("alice", Tenant), ("bob", Tenant), ("alice", "globex")).foreach { (user, tenant) =>
+      history.record(
+        ai.starlake.quack.edge.StatementRecord(
+          ts = java.time.Instant.now(),
+          user = user,
+          tenant = tenant,
+          pool = "sales",
+          nodeId = "n1",
+          sql = s"SELECT '$user@$tenant'",
+          durationMs = 1L,
+          status = "ok",
+          error = None
+        )
+      )
+    }
+    val tools = fixture(
+      rangeExecutor(1),
+      sessionOf = t => Option.when(t == patToken)(session),
+      stmtHistory = history
+    )
+    val out = call(tools, "my_usage", patFor(Some(Tenant), admin = false))
+    withClue(out)(out.isRight shouldBe true)
+    val statements = out.toOption.get.hcursor.downField("statements").downField("statements")
+    val seen       = statements.values.toList.flatten.map { s =>
+      (s.hcursor.get[String]("user").toOption, s.hcursor.get[String]("tenant").toOption)
+    }
+    // bob's statement in the same tenant and alice's namesake in another tenant stay out.
+    seen shouldBe List((Some("alice"), Some(Tenant)))
   }
 
   it should "carry the PAT owner's realm as superuserAdmissible: true only for a tenant-less owner" in {

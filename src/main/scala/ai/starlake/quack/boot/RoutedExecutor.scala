@@ -12,6 +12,14 @@ import cats.effect.IO
   * [[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers.PreviewExecutor CatalogPreviewHandlers.PreviewExecutor]]
   * (REST preview, data diff, restore, undrop, branch change counts, the MCP data tools): token
   * restriction checks, EffectiveSet resolution and attenuation, then the router.
+  *
+  * Every statement runs as its caller. A session or a PAT resolves through the FlightSQL handshake
+  * gate (`PoolSupervisor.authorizeHandshakeDetailed`: tenant and pool kill switches, user
+  * registered and enabled, pool access), in the caller's own realm (`superuserAdmissible`); the
+  * effective set it gets names that user, a superuser included, and the router makes it the
+  * statement's principal on the node (`NodePrincipal.of`). Only an `ExecCaller.system` caller, the
+  * manager's own work (the restore dry run, the branch change counter), skips the gate and runs as
+  * `NodePrincipal.System`.
   */
 object RoutedExecutor:
 
@@ -24,13 +32,14 @@ object RoutedExecutor:
     ]
 
   // Adapts FlightSqlRouter.execute to PreviewExecutor, mirroring the FlightSQL
-  // handshake's EffectiveSet resolution: a system caller (ExecCaller.system) gets a
-  // synthetic superuser EffectiveSet (NOT None, which PostgresAclValidator
+  // handshake's EffectiveSet resolution: a system caller (ExecCaller.system, the manager's own
+  // work) gets a synthetic superuser EffectiveSet (NOT None, which PostgresAclValidator
   // denies fail-safe) and is never attenuated -- a system caller is definitionally
-  // TokenRestriction.Unrestricted; real sessions resolve through
+  // TokenRestriction.Unrestricted; every session and PAT resolves through
   // sup.authorizeHandshakeDetailed (same gate + 60s cache as the handshake, edge "mcp"), a
   // Denied short-circuiting to AccessDenied and an Unavailable (the tenant's OPA unreachable)
-  // to RouterFailure.Unavailable before fsRouter.execute.
+  // to RouterFailure.Unavailable before fsRouter.execute. A superuser's set is its own row's
+  // (system = false), so nodes run its statements as that user, never as NodePrincipal.System.
   // recordExecution = false for read-only probes (preview, data diff, restore
   // dry-run); true for undrop's CTAS and restore's CREATE OR REPLACE so the
   // snapshot carries the author stamp.
@@ -51,9 +60,10 @@ object RoutedExecutor:
       recordExecution: Boolean
   ): CatalogPreviewHandlers.PreviewExecutor =
     (caller, poolKey, sql) =>
-      // Privilege from the typed flag ONLY (ExecCaller.system at trusted internal sites), never
-      // from the user name: names are not reserved, and a tenant user called "superuser" used to
-      // match the old `identity == "superuser"` test and run with the synthetic superuser set.
+      // Privilege from the typed flag ONLY (ExecCaller.system: the restore dry run and the branch
+      // change counter), never from the user name: names are not reserved, and a tenant user
+      // called "superuser" used to match the old `identity == "superuser"` test and run with the
+      // synthetic superuser set.
       val isSuperuser = caller.system
       val effectiveSetIO: IO[Either[ai.starlake.quack.edge.RouterFailure, Option[
         ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -140,11 +150,11 @@ object RoutedExecutor:
       effectiveSetIO.flatMap {
         case Left(denied) => IO.pure(Left(denied))
         case Right(eff)   =>
-          // Skip attenuation for the superuser sentinel rather than relying on
+          // Skip attenuation for the system caller's synthetic set rather than relying on
           // attenuatedBy's Unrestricted no-op path: this keeps "the synthetic
           // superuser set is never narrowed" an explicit invariant here, not
-          // an incidental consequence of every superuser caller currently
-          // being built with ExecCaller.unrestricted.
+          // an incidental consequence of ExecCaller.system building every system
+          // caller with TokenRestriction.Unrestricted.
           val narrowed =
             if isSuperuser then eff
             else

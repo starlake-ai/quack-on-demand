@@ -29,13 +29,14 @@ import scala.sys.process._
   * the same backend `PoolSupervisor.createPool` uses in production, never invoked as a raw script
   * directly), then decoded through the real [[ArrowRowsDecoder]].
   *
-  * NOT exercised here: the ACL/RLS/CLS half. The router is constructed with the default
-  * `StatementValidator.allowAll` and the synthetic system set `RoutedExecutor` gives a superuser
-  * caller (a statement with no principal bound gets no session handle, so it never reaches a node),
-  * so this spec proves SQL shape, routing, node execution, Arrow decode, and truncation -- NOT
-  * authorization (which `PreviewAuthzSpec` and `CatalogPreviewHandlersSpec` pin at the handler
-  * layer; the set's user has no tenant, so even the REAL `PostgresAclValidator` would admit it as a
-  * superuser, unchecked).
+  * NOT exercised here: the ACL/RLS/CLS half and the caller's identity. The router is constructed
+  * with the default `StatementValidator.allowAll` and, as a stand-in, the synthetic system set
+  * `RoutedExecutor` gives a system caller (a statement with no principal bound gets no session
+  * handle, so it never reaches a node); a real preview runs as its caller
+  * (`StatementIdentitySpec`). So this spec proves SQL shape, routing, node execution, Arrow decode,
+  * and truncation -- NOT authorization (which `PreviewAuthzSpec` and `CatalogPreviewHandlersSpec`
+  * pin at the handler layer; the set's user has no tenant, so even the REAL `PostgresAclValidator`
+  * would admit it as a superuser, unchecked).
   *
   * The decoded rows are compared against a direct `duckdb` CLI query of the same catalog at the
   * same snapshot; comparison is unordered-set equality via an identical lexicographic re-sort of
@@ -173,9 +174,10 @@ class PreviewEndToEndSpec
     // (`limit + 1`) so the decoder can observe truncation; ArrowRowsDecoder.decode still stops
     // collecting at `limit`, so the response never carries the extra row.
     val sql = buildPreviewSql(schema, table, snapshotId, limit + 1)
-    // The set RoutedExecutor builds for a superuser caller: the manager acting for itself. The node
-    // runs the statement for NodePrincipal.System; with no set bound there is no principal to
-    // vouch for, so no session handle can be minted.
+    // The set RoutedExecutor builds for a system caller (the manager acting for itself), a stand-in
+    // here: a real preview runs as its caller. The node runs the statement for
+    // NodePrincipal.System; with no set bound there is no principal to vouch for, so no session
+    // handle can be minted.
     val system = EffectiveSet(
       RbacUser(id = "", tenant = None, username = "superuser", kind = "admin"),
       Nil,
