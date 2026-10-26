@@ -3,8 +3,8 @@ package ai.starlake.quack.boot
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
 import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig}
-import ai.starlake.quack.edge.auth.AuthQueryPreconditions
-import ai.starlake.quack.edge.config.DatabaseAuthConfig
+import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
 import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.quack.ondemand.state.{EmailFormat, FederatedSourceOps, UserStore}
@@ -38,6 +38,28 @@ object BootPreflight extends LazyLogging:
     val inEnv    = env("QOD_API_KEY").exists(_.trim.nonEmpty)
     val inConfig = raw.hasPath(path) && raw.getValue(path).unwrapped().toString.trim.nonEmpty
     if inEnv || inConfig then Left(RemovedApiKeyMessage) else Right(())
+
+  /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
+  val NoEdgeAuthMessage: String =
+    "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +
+      "and no other quack-flightsql.auth provider is configured, so every FlightSQL or Quack " +
+      "client would be trusted as whatever user it names, superusers included, with no password. " +
+      "System-scope OIDC (QOD_MGMT_OIDC_*) signs in to the admin UI and REST only, never to " +
+      "FlightSQL. Set QOD_AUTH_DB_ENABLED=true, or a Keycloak or Azure password backend " +
+      "(QOD_AUTH_KEYCLOAK_ENABLED=true or QOD_AUTH_AZURE_ENABLED=true, with their settings), or " +
+      "a bearer provider: an external JWT issuer (JWT_SECRET_KEY or JWT_PUBLIC_KEY_PATH), " +
+      "QOD_AUTH_GOOGLE_ENABLED=true or QOD_AUTH_AWS_ENABLED=true."
+
+  /** Pure gate: the FlightSQL edge needs an authenticator. With an empty `quack-flightsql.auth`
+    * chain (no basic and no bearer provider) the edge handshake trusts the client and binds
+    * whatever user it names, superusers included, with no password; system-scope OIDC adds no edge
+    * provider, so it does not count. The FlightSQL edge has no enable switch and always starts, so
+    * the check holds whether or not the Quack front door (`QOD_QUACK_ENABLED`) runs too. It reads
+    * the configuration, not a built [[AuthenticationService]], so `Main.bootManager` runs it right
+    * after the removed-key refusal, before any I/O and before HA validation.
+    */
+  def checkEdgeAuthAvailable(auth: AuthenticationConfig): Either[String, Unit] =
+    if AuthenticationService.configuresProvider(auth) then Right(()) else Left(NoEdgeAuthMessage)
 
   /** Pure gate: something must be able to create a session. Refuses when the authentication service
     * has no password provider (its basic chain is empty, as with `QOD_AUTH_DB_ENABLED=false` and no

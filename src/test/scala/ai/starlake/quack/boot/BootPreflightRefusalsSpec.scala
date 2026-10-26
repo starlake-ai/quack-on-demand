@@ -17,9 +17,11 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import pureconfig.ConfigSource
 
-/** The two boot refusals of the static API key removal:
+/** The boot refusals of the static API key removal:
   *   - a non-empty `QOD_API_KEY` (environment) or `quack-on-demand.apiKey` (loaded configuration)
   *     stops the boot with the removal message, before HA validation; an empty value passes;
+  *   - a FlightSQL edge with no authenticator at all (the handshake would trust the client) stops
+  *     the boot, also before HA validation;
   *   - a manager nobody can sign in to (no password provider and no system-scope OIDC sign-in, as
   *     `ManagementAuthWiring` serves it) stops too.
   */
@@ -57,10 +59,11 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   /** Boots with HA on over the local runtime, which HA validation always refuses: a boot that gets
     * past the removed-key refusal stops there, before any I/O (no Postgres probe, no Liquibase).
     */
-  private def bootUntilHaRefusal(env: String => Option[String]): Unit =
+  private def bootUntilHaRefusal(env: String => Option[String], authOverlay: String = ""): Unit =
     val source = ConfigSource
       .string(
-        "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }"
+        "quack-on-demand { ha.enabled = true, runtimeType = local, embeddedPostgres.enabled = false }" +
+          "\n" + authOverlay
       )
       .withFallback(ConfigSource.default)
     val opa = OpaConfig
@@ -86,6 +89,20 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
   it should "go on to HA validation with an empty QOD_API_KEY" in {
     val err = intercept[RuntimeException](bootUntilHaRefusal(keyEnv("")))
     err.getMessage should include("ha.enabled=true requires runtimeType=kubernetes or fleet")
+  }
+
+  /** Every `quack-flightsql.auth` provider off, whatever the test environment sets. */
+  private val NoEdgeAuth =
+    "quack-flightsql.auth { database.enabled = false, keycloak.enabled = false, " +
+      "google.enabled = false, azure.enabled = false, aws.enabled = false, " +
+      "jwt { secretKey = \"\", publicKeyPath = \"\" } }\n" +
+      // System-scope OIDC set: it gates the admin UI and REST only, so it must not admit the edge.
+      "quack-on-demand.auth.management { identitySource = oidc, " +
+      "oidc { issuerUrl = \"https://accounts.google.com\", clientId = \"c\" } }"
+
+  it should "refuse a FlightSQL edge with no authenticator before HA validation" in {
+    val err = intercept[RuntimeException](bootUntilHaRefusal(noEnv, NoEdgeAuth))
+    err.getMessage shouldBe BootPreflight.NoEdgeAuthMessage
   }
 
   /** The management auth block with only the fields the login gate reads set. */
@@ -158,4 +175,67 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
         AzureAuthConfig(enabled = true, tenantId = "t", clientId = "c", clientSecret = "s")
       )
     ) shouldBe true
+  }
+
+  private val jwtSecret =
+    emptyAuthConfig.copy(jwt =
+      emptyAuthConfig.jwt.copy(secretKey = "edge-jwt-secret-of-at-least-256-bits-0123")
+    )
+  private val jwtPublicKey =
+    emptyAuthConfig.copy(jwt = emptyAuthConfig.jwt.copy(publicKeyPath = "/keys/issuer.pem"))
+  private val databaseAuth =
+    emptyAuthConfig.copy(database = emptyAuthConfig.database.copy(enabled = true))
+  private val keycloakAuth = emptyAuthConfig.copy(keycloak =
+    emptyAuthConfig.keycloak
+      .copy(enabled = true, baseUrl = "https://kc", realm = "r", clientId = "c")
+  )
+  private val googleAuth =
+    emptyAuthConfig.copy(google = emptyAuthConfig.google.copy(enabled = true, clientId = "c"))
+  private val azureAuth = emptyAuthConfig.copy(azure =
+    AzureAuthConfig(enabled = true, tenantId = "t", clientId = "c", clientSecret = "s")
+  )
+  private val awsAuth = emptyAuthConfig.copy(aws =
+    emptyAuthConfig.aws.copy(enabled = true, region = "eu-west-1", userPoolId = "p", clientId = "c")
+  )
+
+  "checkEdgeAuthAvailable" should "refuse a chain with no provider at all" in {
+    BootPreflight.checkEdgeAuthAvailable(emptyAuthConfig) shouldBe
+      Left(BootPreflight.NoEdgeAuthMessage)
+  }
+
+  it should "name what to set, and that system-scope OIDC does not count" in {
+    val msg = BootPreflight.NoEdgeAuthMessage
+    for env <- List(
+        "QOD_AUTH_DB_ENABLED=true",
+        "QOD_AUTH_KEYCLOAK_ENABLED",
+        "QOD_AUTH_AZURE_ENABLED",
+        "JWT_SECRET_KEY",
+        "JWT_PUBLIC_KEY_PATH",
+        "QOD_AUTH_GOOGLE_ENABLED",
+        "QOD_AUTH_AWS_ENABLED",
+        "QOD_MGMT_OIDC"
+      )
+    do msg should include(env)
+  }
+
+  it should "admit each provider kind on its own" in {
+    for (label, cfg) <- List(
+        "database"       -> databaseAuth,
+        "keycloak"       -> keycloakAuth,
+        "azure"          -> azureAuth,
+        "google"         -> googleAuth,
+        "aws"            -> awsAuth,
+        "jwt secret key" -> jwtSecret,
+        "jwt public key" -> jwtPublicKey
+      )
+    do withClue(label)(BootPreflight.checkEdgeAuthAvailable(cfg) shouldBe Right(()))
+  }
+
+  "AuthenticationService.configuresProvider" should "agree with the chains the service builds" in {
+    // The boot check reads the config, before any I/O; the handshake reads the built chains. They
+    // must agree for every provider kind the service can build without a database or a key file.
+    for cfg <- List(emptyAuthConfig, keycloakAuth, azureAuth, googleAuth, awsAuth, jwtSecret) do
+      val svc = new AuthenticationService(cfg, "")
+      try AuthenticationService.configuresProvider(cfg) shouldBe svc.hasProviders
+      finally svc.close()
   }

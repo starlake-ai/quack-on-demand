@@ -32,6 +32,10 @@ class AuthenticationService(
       tenantOidcRegistry.fold("")(_ => " (per-tenant OIDC registry enabled)")
   )
 
+  /** Whether either chain holds a provider. A booted manager always has one:
+    * `BootPreflight.checkEdgeAuthAvailable` refuses an empty chain, which would leave the edge
+    * handshake trusting the client.
+    */
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
   /** Whether the basic chain holds a password provider (database, or Keycloak / Azure ROPC). With
@@ -214,3 +218,14 @@ class AuthenticationService(
       logger.info("Initializing AWS Cognito bearer authentication provider")
       providers += OidcProviderFactory.createAws(config.aws, config.roleClaim)
     providers.result()
+
+object AuthenticationService:
+
+  /** Whether `config` turns on at least one provider, of either chain: exactly when
+    * `buildBasicChain` or `buildBearerChain` would build one, so a service built from it has
+    * `hasProviders`. Read by `BootPreflight.checkEdgeAuthAvailable` before anything is built.
+    */
+  def configuresProvider(config: AuthenticationConfig): Boolean =
+    config.database.enabled || config.keycloak.enabled || config.azure.enabled ||
+      config.google.enabled || config.aws.enabled || config.jwt.secretKey.nonEmpty ||
+      config.jwt.publicKeyPath.nonEmpty

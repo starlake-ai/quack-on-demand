@@ -94,7 +94,9 @@ final class EdgeHandshake(
     )
 
     // Second element: superuserAdmissible, true only when the credential was NOT validated by a
-    // tenant-scoped authority.
+    // tenant-scoped authority. The no-provider arm (trust the client) is for specs that build an
+    // AuthenticationService with no provider: a booted manager never reaches it, since
+    // BootPreflight.checkEdgeAuthAvailable refuses an empty chain at boot.
     val validation: Either[String, (Option[AuthenticatedProfile], Boolean)] =
       if !authService.hasProviders then Right((None, true))
       else

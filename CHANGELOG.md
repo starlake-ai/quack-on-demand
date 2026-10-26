@@ -205,9 +205,23 @@
   `admin.existingSecret`, since nobody could log in without an admin. `docker-compose.yml`
   passes no `API_KEY` to the manager or to Starflow, `starflow-db-init` needs only
   `SESSION_JWT_SECRET`, and `scripts/docker/run-docker-compose.sh` and `run-docker.sh` stop
-  generating and forwarding it (each warns about a leftover `API_KEY`). `AUTH=false` now refuses
-  to boot unless system-scope OIDC sign-in is configured (neither file passes it). The kind rig
-  and `test-api.sh` log in as the seeded admin.
+  generating and forwarding it (each warns about a leftover `API_KEY`). `run-docker.sh` now
+  refuses `AUTH=false` up front, since it can pass no other FlightSQL authenticator; under
+  Compose, `AUTH=false` boots only with another FlightSQL authenticator and a way to sign in to
+  the admin UI (see the next entry and `.env.example`). The kind rig and `test-api.sh` log in as
+  the seeded admin.
+
+- **BREAKING: the trust-the-client FlightSQL and Quack mode is gone.** With no
+  `quack-flightsql.auth` provider at all (`QOD_AUTH_DB_ENABLED=false` and no Keycloak, Azure,
+  Google, AWS or external JWT provider), the FlightSQL edge and the Quack front door trusted the
+  client: they bound whatever user it named, superusers included, with no password, and the edge
+  logged `auth: OPEN (trust-the-client ...)`. The manager now refuses to boot in that state, with
+  "the FlightSQL edge and the Quack front door have no authenticator: ...", naming what to set:
+  `QOD_AUTH_DB_ENABLED=true`, a Keycloak or Azure password backend (`QOD_AUTH_KEYCLOAK_ENABLED`,
+  `QOD_AUTH_AZURE_ENABLED`), or a bearer provider (`JWT_SECRET_KEY` or `JWT_PUBLIC_KEY_PATH`,
+  `QOD_AUTH_GOOGLE_ENABLED`, `QOD_AUTH_AWS_ENABLED`). System-scope OIDC (`QOD_MGMT_OIDC_*`)
+  signs in to the admin UI and REST only and adds no FlightSQL provider, so `AUTH=false` with
+  system-scope OIDC alone is refused too.
 
 - **`GET /api/profile/pools`: the pools you may connect to.** Any session or PAT (the endpoint
   joins the profile allowlist) gets

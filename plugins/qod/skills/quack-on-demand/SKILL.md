@@ -115,10 +115,14 @@ qod start
 qod start --version 0.8.3
 qod start --jar /path/to/quack-on-demand-assembly.jar
 
-# QOD_AUTH_DB_ENABLED=false (no password login) is refused at boot unless
-# system-scope OIDC sign-in is configured (QOD_MGMT_IDENTITY_SOURCE=oidc with
-# QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID): nobody could log in
-# otherwise
+# QOD_AUTH_DB_ENABLED=false (no password login) boots only with another
+# FlightSQL authenticator: a Keycloak or Azure password backend
+# (QOD_AUTH_KEYCLOAK_ENABLED / QOD_AUTH_AZURE_ENABLED) or a bearer provider
+# (JWT_SECRET_KEY / JWT_PUBLIC_KEY_PATH, QOD_AUTH_GOOGLE_ENABLED,
+# QOD_AUTH_AWS_ENABLED), plus a way to sign in to the UI (Keycloak, Azure, or
+# system-scope OIDC: QOD_MGMT_IDENTITY_SOURCE=oidc with QOD_MGMT_OIDC_ISSUER_URL
+# and QOD_MGMT_OIDC_CLIENT_ID). System OIDC gates only the UI and REST, so on
+# its own it is refused at boot
 
 # Is anything running, and what is it serving? (pools need a qod login
 # session or QOD_TOKEN)
@@ -220,8 +224,8 @@ CLI cache under the user-cache dir. The admin is
 `admin@localhost.local` with the password chosen at first boot (no built-in
 default; rotate with `qod auth change-password`, recover with
 `qod admin reset-password`). The
-manager logs `auth: providers configured` when DB auth is on, and
-`auth: OPEN` otherwise.
+FlightSQL edge logs `auth: providers configured` at startup; a manager with no
+FlightSQL authenticator refuses to boot instead.
 
 **Self-contained demo.** For evaluation with no external Postgres and no
 Docker, `qod serve --demo` boots everything against an embedded, ephemeral
@@ -2252,7 +2256,8 @@ opt-in except pod security:
 | `/api/*` returns 401 (the CLI adds "run qod login, or set QOD_TOKEN to a personal access token") | No valid credential on the call: none sent, an expired or revoked session or PAT, or a former static API key | `qod login`, or set `QOD_TOKEN` to a personal access token (`X-API-Key: <token>` on raw REST calls) |
 | Manager refuses to boot: `QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static API key. Use a personal access token (qod auth pat create) or a qod login session, and unset QOD_API_KEY.` | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
 | `qod start` / `qod serve` (with or without `--demo`) refuse to launch, naming `QOD_API_KEY` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
-| Manager refuses to boot: `nothing can sign in to this manager: ...`, naming `QOD_AUTH_DB_ENABLED` and `QOD_MGMT_IDENTITY_SOURCE` / `QOD_MGMT_OIDC_ISSUER_URL` / `QOD_MGMT_OIDC_CLIENT_ID` | No password backend (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in, which counts only with `QOD_MGMT_IDENTITY_SOURCE=oidc` and both the issuer and the client id set: nobody could ever log in | Turn database auth back on (`QOD_AUTH_DB_ENABLED=true`), or configure system-scope OIDC sign-in: `QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL`, `QOD_MGMT_OIDC_CLIENT_ID` and `QOD_MGMT_OIDC_CLIENT_SECRET` |
+| Manager refuses to boot: `the FlightSQL edge and the Quack front door have no authenticator: ...` | `QOD_AUTH_DB_ENABLED=false` and no other `quack-flightsql.auth` provider: every FlightSQL or Quack client would be trusted as whatever user it names. System-scope OIDC (`QOD_MGMT_OIDC_*`) does not count: it signs in to the admin UI and REST only | `QOD_AUTH_DB_ENABLED=true`, or a Keycloak or Azure password backend (`QOD_AUTH_KEYCLOAK_ENABLED=true` / `QOD_AUTH_AZURE_ENABLED=true` with their settings), or a bearer provider (`JWT_SECRET_KEY` or `JWT_PUBLIC_KEY_PATH`, `QOD_AUTH_GOOGLE_ENABLED=true`, `QOD_AUTH_AWS_ENABLED=true`) |
+| Manager refuses to boot: `nothing can sign in to this manager: ...`, naming `QOD_AUTH_DB_ENABLED` and `QOD_MGMT_IDENTITY_SOURCE` / `QOD_MGMT_OIDC_ISSUER_URL` / `QOD_MGMT_OIDC_CLIENT_ID` | FlightSQL has only a bearer provider, and there is no password backend (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in, which counts only with `QOD_MGMT_IDENTITY_SOURCE=oidc` and both the issuer and the client id set: nobody could ever log in | Turn database auth back on (`QOD_AUTH_DB_ENABLED=true`), or configure system-scope OIDC sign-in: `QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL`, `QOD_MGMT_OIDC_CLIENT_ID` and `QOD_MGMT_OIDC_CLIENT_SECRET` |
 | `helm install` / `helm upgrade` fails: `apiKey was removed: the manager no longer accepts a static API key; use a personal access token` | The chart values still carry a non-empty `apiKey` (an all-empty block left from an older values file passes) | Delete `apiKey` from the values (and the Secret it named); give automation a personal access token |
 | `helm install` fails: `admin.password or admin.existingSecret is required: ...` | The chart needs an admin: without one nobody can log in | Set `admin.password`, or `admin.existingSecret` naming a Secret that holds the password under `admin.existingSecretKey` (default `adminPassword`) |
 | `qod serve` prints `qod serve: create tenant` / `create database` / `create pool` `failed: <reason>`, then `finish by hand: <command>` | The manager refused that boot provisioning step, for the reason a REST create would give (a name, a quota, encryption); the outcome is also in `serve-provision.outcome.json` in qod's data dir, and the manager log has it at ERROR. Provisioning is add-only, so nothing existing changed, and the manager keeps running | Fix the cause the reason names, then run the printed command, or re-run `qod serve` |

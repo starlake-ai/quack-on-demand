@@ -27,11 +27,11 @@
 #   PG_DBNAME        target catalog DB                      (default tpch)
 #   PG_SCHEMA        DuckLake schema                        (default main)
 #
-#   AUTH             "true" to enable DB auth: FlightSQL and the admin login
-#                    (default true). "false" leaves no password login, and
-#                    this script passes no system-scope OIDC sign-in
-#                    (QOD_MGMT_IDENTITY_SOURCE=oidc with an issuer and a client
-#                    id), so the manager refuses to boot: nobody could log in.
+#   AUTH             DB auth for FlightSQL and the admin login (default true).
+#                    Only "true" is accepted: "false" leaves the FlightSQL edge
+#                    no authenticator, and this script passes no Keycloak,
+#                    Azure or bearer provider (nor any OIDC sign-in), so the
+#                    manager would refuse to boot. The script refuses first.
 #   ADMIN_USERNAME   admin login (when AUTH=true)           (default admin)
 #   ADMIN_PASSWORD   admin password (when AUTH=true)        (default admin - rotate!)
 #                    QOD_ADMIN_USERNAME / QOD_ADMIN_PASSWORD are accepted too and
@@ -126,6 +126,16 @@ PG_DBNAME="${PG_DBNAME:-tpch}"
 PG_SCHEMA="${PG_SCHEMA:-main}"
 
 AUTH="${AUTH:-true}"
+# The manager refuses to boot with an empty FlightSQL auth chain, and this script can
+# configure no provider but the database one: refuse AUTH=false here, with the same fix.
+if [[ "$AUTH" != "true" ]]; then
+  echo "error: AUTH=$AUTH would leave the FlightSQL edge with no authenticator, and this script" >&2
+  echo "       passes no other provider, so the manager would refuse to boot. Use AUTH=true, or run" >&2
+  echo "       the image yourself with QOD_AUTH_DB_ENABLED=false plus a Keycloak or Azure password" >&2
+  echo "       backend (QOD_AUTH_KEYCLOAK_ENABLED / QOD_AUTH_AZURE_ENABLED) or a bearer provider" >&2
+  echo "       (JWT_SECRET_KEY or JWT_PUBLIC_KEY_PATH, QOD_AUTH_GOOGLE_ENABLED, QOD_AUTH_AWS_ENABLED)." >&2
+  exit 1
+fi
 ADMIN_USERNAME="${QOD_ADMIN_USERNAME:-${ADMIN_USERNAME:-admin}}"
 ADMIN_PASSWORD="${QOD_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-admin}}"
 TLS="${TLS:-false}"
@@ -210,7 +220,7 @@ echo "container:    $CONTAINER_NAME"
 echo "remote pg:    $PG_USER@$PG_HOST:$PG_PORT/$PG_DBNAME (schema: $PG_SCHEMA)"
 echo "manager:      http://localhost:$MANAGER_PORT/ui/"
 echo "flightsql:    localhost:$EDGE_PORT  (TLS=$TLS)"
-echo "auth:         AUTH=$AUTH$([[ "$AUTH" == "true" ]] && echo " (admin: $ADMIN_USERNAME)" || echo " (no password login and no OIDC sign-in passed: the manager refuses to boot)")"
+echo "auth:         AUTH=$AUTH (admin: $ADMIN_USERNAME)"
 echo "ducklake:     $DATA_PATH  (host) -> /app/ducklake  (container)"
 echo "certs:        $CERTS_DIR  (host) -> /app/certs     (container)"
 echo ""

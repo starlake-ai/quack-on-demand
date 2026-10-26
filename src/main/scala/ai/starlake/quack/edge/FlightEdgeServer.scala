@@ -85,6 +85,8 @@ final class FlightEdgeServer(
 
     server = builder.build()
     server.start()
+    // OPEN is reachable only from specs: a booted manager refuses an empty chain
+    // (BootPreflight.checkEdgeAuthAvailable).
     val authMode =
       if authService.hasProviders then "providers configured"
       else "OPEN (trust-the-client; configure auth.* in application.conf for prod)"

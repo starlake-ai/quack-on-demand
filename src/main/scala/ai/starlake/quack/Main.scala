@@ -275,6 +275,9 @@ object Main extends IOApp with LazyLogging:
     // A removed QOD_API_KEY refuses boot first: before the session secret is generated and printed,
     // and before HA validation, so an upgrade that still sets the key stops with the reason.
     BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
+    // Then an empty FlightSQL auth chain, from the config alone: the edge and the Quack front door
+    // would trust every client as whatever user it names.
+    BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
     val quackCfgResolved: QuackNativeConfig =
       quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
     // An unset session JWT secret is generated and printed here, BEFORE anything reads it. A no-op
