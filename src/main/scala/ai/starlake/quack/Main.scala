@@ -846,7 +846,8 @@ object Main extends IOApp with LazyLogging:
       events = moduleEventBus.sink,
       changePasswordStore = Some(userStore),
       ssoTickets = ssoTicketStore,
-      starlakeNotifier = starlakeNotifier
+      starlakeNotifier = starlakeNotifier,
+      patSessionOf = patAuthenticator.sessionOf
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT

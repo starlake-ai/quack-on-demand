@@ -408,7 +408,8 @@ object ManagerServerHarness:
         resolveTenantOf.fold[String => Option[String]](_ => None)(build => build(sup)),
       oidc = oidcOf.map(build => build(sup)),
       audit = audit,
-      events = events
+      events = events,
+      patSessionOf = t => patAuth.flatMap(_.sessionOf(t))
     )
 
     // Public password-recovery handler over the harness's DuckDB UserStore. The

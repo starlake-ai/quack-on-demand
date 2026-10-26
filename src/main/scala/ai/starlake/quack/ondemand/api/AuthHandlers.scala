@@ -132,7 +132,12 @@ final class AuthHandlers(
       * integration (tests, legacy code, `slIntegrationOn == false`) fire nothing; Main selects
       * [[HttpStarlakeNotifier]] only when the Starlake SSO integration is on.
       */
-    starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier
+    starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier,
+    /** The synthetic session of a personal access token (`PatAuthenticator.sessionOf`), which
+      * [[whoami]] answers for when no session JWT matches. Defaults to none: callers that wire no
+      * PAT store (tests) answer whoami for session JWTs only.
+      */
+    patSessionOf: String => Option[SessionTokenStore.Session] = _ => None
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -826,7 +831,11 @@ final class AuthHandlers(
     }.flatTap(_ => dispatchStarlakeLogout(tok))
       .as(Right(clearCookie(forwardedProto)))
 
-  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT.
+  /** Whoami. Same input shape as logout: header OR cookie, whichever carries the live JWT, or a
+    * live personal access token, answered with its owner's identity and the token's own scope
+    * (`patSessionOf`; a token restricted with `dropAdmin` is no superuser here either). The JWT is
+    * tried first; a token that is not one, or not a live one, is tried as a PAT before the failure
+    * below is answered.
     *
     * The error body distinguishes WHY the lookup failed so the client (and operators reading the
     * network tab) can tell apart the four very different cases that previously all surfaced as
@@ -839,19 +848,34 @@ final class AuthHandlers(
     *   - `expired` -- the JWT's `exp` claim is in the past. Actually expired.
     *   - `revoked` -- the jti is on the in-process denylist (an explicit logout, not yet GC'd).
     */
-  def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] = IO.delay {
-    val token = apiKey.orElse(cookie).getOrElse("")
-    tokens.lookupResult(token) match
-      case SessionTokenStore.LookupResult.Ok(s) =>
-        Right(
-          WhoamiResponse(
-            username = s.profile.username,
-            role = s.profile.role,
-            tenant = s.profile.tenant,
-            superuser = s.scope.superuser,
-            manageableTenants = s.scope.manageableTenants.toList.sorted
-          )
-        )
+  def whoami(apiKey: Option[String], cookie: Option[String]): Out[WhoamiResponse] =
+    // Blocking: a PAT is verified against the control-plane database.
+    IO.blocking {
+      val token = apiKey.orElse(cookie).getOrElse("")
+      tokens.lookupResult(token) match
+        case SessionTokenStore.LookupResult.Ok(s) => Right(whoamiOf(s))
+        // No PAT is ever a JWT: a value without the PAT prefix costs no store call.
+        case failure =>
+          patSessionOf(token) match
+            case Some(s) => Right(whoamiOf(s))
+            case None    => whoamiAnswer(failure)
+    }
+
+  private def whoamiOf(s: SessionTokenStore.Session): WhoamiResponse =
+    WhoamiResponse(
+      username = s.profile.username,
+      role = s.profile.role,
+      tenant = s.profile.tenant,
+      superuser = s.scope.superuser,
+      manageableTenants = s.scope.manageableTenants.toList.sorted
+    )
+
+  /** Whoami's answer for a session lookup: the identity, or why there is none. */
+  private def whoamiAnswer(
+      lookup: SessionTokenStore.LookupResult
+  ): Either[(StatusCode, ErrorResponse), WhoamiResponse] =
+    lookup match
+      case SessionTokenStore.LookupResult.Ok(s)     => Right(whoamiOf(s))
       case SessionTokenStore.LookupResult.NoSession =>
         Left(
           (StatusCode.Unauthorized, ErrorResponse("no_session", "no session token presented"))
@@ -868,7 +892,6 @@ final class AuthHandlers(
         Left(
           (StatusCode.Unauthorized, ErrorResponse("revoked", "session token has been revoked"))
         )
-  }
 
   /** Mint a single-use Starlake SSO ticket carrying the caller's session grant. Session-authed
     * (token via header or cookie, [[Endpoints.authToken]]); any valid session may call this, admin

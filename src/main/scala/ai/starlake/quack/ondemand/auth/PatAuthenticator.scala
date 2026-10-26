@@ -97,9 +97,9 @@ final class PatAuthenticator(
 
   /** A synthetic session equivalent to what a password login would mint for this principal, so the
     * session-consuming code (the guard's admission, the profile endpoints, the self-lock guard,
-    * audit attribution) works off a PAT unchanged. `/api/auth/whoami` is not one of them: it reads
-    * session JWTs only. The role is the computed privilege level, not the raw `qodstate_user.kind`
-    * label, matching the `admin` / `user` distinction `LoginResponse.admin` carries.
+    * audit attribution, `/api/auth/whoami`) works off a PAT unchanged. The role is the computed
+    * privilege level, not the raw `qodstate_user.kind` label, matching the `admin` / `user`
+    * distinction `LoginResponse.admin` carries.
     */
   def sessionOf(token: String): Option[SessionTokenStore.Session] =
     resolve(token).map { p =>

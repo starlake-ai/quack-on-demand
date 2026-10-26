@@ -60,11 +60,6 @@ class SuperuserPatCompletenessSpec
     Try(TestPostgres.dropDatabase(dbName))
     ()
 
-  /** Endpoints that answer a superuser PAT with 401 by design: they read only a session JWT. The
-    * static key got the same 401 there, so the PAT loses nothing.
-    */
-  private val SessionOnly: Set[String] = Set("/api/auth/whoami")
-
   /** Public, zero-arg vals of `module` whose runtime return type is a tapir Endpoint. */
   private def endpointsOf(module: AnyRef): List[(String, AnyEndpoint)] =
     module.getClass.getMethods.toList
@@ -132,8 +127,7 @@ class SuperuserPatCompletenessSpec
           val path = concretePath(ep)
           val r    = call(h, ep, Some(pat))
           val code = errorCode(r.body())
-          if SessionOnly.contains(path) then None
-          else if r.statusCode() == 401 || code.exists(Set("admin_required", "tenant_forbidden"))
+          if r.statusCode() == 401 || code.exists(Set("admin_required", "tenant_forbidden"))
           then Some(s"$name [${methodOf(ep)} $path] -> ${r.statusCode()} ${code.getOrElse("")}")
           else None
         }
@@ -142,3 +136,26 @@ class SuperuserPatCompletenessSpec
         }
       finally h.shutdown()
     }
+
+  it should "be answered by whoami with its owner's identity" in {
+    TestPostgres.ensureReachable()
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(
+      fix.store,
+      patStore = Some(pats),
+      patUserOf =
+        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
+      patAuth =
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+    )
+    try
+      val r = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(h.superuserPat()))
+      withClue(s"GET /api/auth/whoami body: ${r.body()}") {
+        r.statusCode() shouldBe 200
+        val body = io.circe.parser.parse(r.body()).toOption.get.hcursor
+        body.get[String]("username") shouldBe Right(SecurityFixtures.RootUsername)
+        body.get[Boolean]("superuser") shouldBe Right(true)
+        body.get[Option[String]]("tenant") shouldBe Right(None)
+      }
+    finally h.shutdown()
+  }

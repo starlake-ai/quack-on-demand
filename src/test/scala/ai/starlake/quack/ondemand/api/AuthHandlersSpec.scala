@@ -107,7 +107,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       // The rows a profile that is not the database authenticator's is looked up in. No rows
       // unless a test supplies a directory: a database-authenticator profile never reads it.
       grantsForIdentity: GrantsLookup = (_, _, _) => Nil,
-      events: ManagerEventSink = ManagerEventSink.noop
+      events: ManagerEventSink = ManagerEventSink.noop,
+      patSessionOf: String => Option[SessionTokenStore.Session] = _ => None
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -128,7 +129,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       resolveTenant = resolveTenant,
       audit = audit,
-      events = events
+      events = events,
+      patSessionOf = patSessionOf
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -1257,6 +1259,45 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     val handlers = makeHandlers(Right(profile), calls, store)
     val result   = handlers.whoami(Some(token), None).unsafeRunSync()
     result.swap.toOption.get._2.error shouldBe "revoked"
+  }
+
+  it should "answer a live personal access token with its owner's identity and scope" in {
+    val owner = AuthenticatedProfile("bob", "user", Set.empty, Map.empty, "pat", Some("t-abc123"))
+    val pat   = SessionTokenStore.Session(
+      owner,
+      SessionScope(superuser = false, manageableTenants = Set.empty),
+      java.time.Instant.now()
+    )
+    val asked    = scala.collection.mutable.Buffer.empty[String]
+    val handlers = makeHandlers(
+      Right(owner),
+      scala.collection.mutable.Buffer.empty,
+      patSessionOf = t => { asked += t; Option.when(t == "qod_pat_live")(pat) }
+    )
+    val resp = handlers.whoami(Some("qod_pat_live"), None).unsafeRunSync().toOption.get
+    (resp.username, resp.role, resp.tenant, resp.superuser, resp.manageableTenants) shouldBe
+      ("bob", "user", Some("t-abc123"), false, Nil)
+    // A token no PAT resolves keeps the session lookup's own reason.
+    handlers
+      .whoami(Some("qod_pat_revoked"), None)
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get
+      ._2
+      .error shouldBe
+      "invalid"
+    // A live session JWT is answered by the session: the PAT lookup is never asked for it.
+    val store   = new SessionTokenStore
+    val session = store.mintWithScope(owner, SessionScope(superuser = false, Set.empty))
+    val viaJwt  = makeHandlers(
+      Right(owner),
+      scala.collection.mutable.Buffer.empty,
+      store,
+      patSessionOf = t => { asked += t; None }
+    )
+    viaJwt.whoami(Some(session), None).unsafeRunSync().map(_.username) shouldBe Right("bob")
+    asked.toList shouldBe List("qod_pat_live", "qod_pat_revoked")
   }
 
   // ----- cookie Secure auto-derive from request scheme -----
