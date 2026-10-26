@@ -201,9 +201,9 @@
   gains nothing new, since it can already rewrite `qodstate_user`. A read-only holder (a `pg_dump`
   backup, a snapshot, a read replica, a SELECT-only role) now also gets the management plane: on an
   install with no `QOD_SESSION_JWT_SECRET` it can forge a superuser session. That comes on top of
-  the data credentials the same database already stores (tenant catalog `pgPassword` and
+  the credentials the same database already stores, among them tenant catalog `pgPassword` and
   duckdb-file encryption keys, object-store keys, inline federation secrets, the node-key secret,
-  tenant OIDC client secrets). Protect control-plane backups and replicas like the secret itself;
+  the manager's bearer to each node, tenant OIDC client secrets and tenant OPA tokens. Protect control-plane backups and replicas like the secret itself;
   when they are less trusted than the manager, pin `QOD_SESSION_JWT_SECRET` from an external secret
   store: nothing is persisted then, and backups never carry it.
 
