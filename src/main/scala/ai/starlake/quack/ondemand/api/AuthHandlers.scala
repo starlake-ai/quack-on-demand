@@ -134,10 +134,11 @@ final class AuthHandlers(
       */
     starlakeNotifier: StarlakeNotifier = NoopStarlakeNotifier,
     /** The synthetic session of a personal access token (`PatAuthenticator.sessionOf`), which
-      * [[whoami]] answers for when no session JWT matches. Defaults to none: callers that wire no
-      * PAT store (tests) answer whoami for session JWTs only.
+      * [[whoami]] answers for when no session JWT matches. Required, so the manager's wiring cannot
+      * silently drop it; a caller that wires no PAT store passes `_ => None` and answers whoami for
+      * session JWTs only.
       */
-    patSessionOf: String => Option[SessionTokenStore.Session] = _ => None
+    patSessionOf: String => Option[SessionTokenStore.Session]
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]

@@ -1395,7 +1395,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tokens = tokens,
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = fakeDirectory,
-      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc)
+      authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc),
+      patSessionOf = _ => None
     )
 
   "login (oidc)" should "treat tenant=NULL admin row as superuser, ignoring JWT role" in {

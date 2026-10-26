@@ -244,7 +244,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = directory,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       oidc = svc,
-      events = events
+      events = events,
+      patSessionOf = _ => None
     )
 
   // ---- helper: run a real startAuth + callback round-trip ----
@@ -396,7 +397,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = (_, _, _) => Nil,
       authModeResolver =
         new ManagementAuthModeResolver(Map(acmeOidc.id -> acmeOidc).get, ManagementAuthMode.Db),
-      oidc = Some(buildSvc("s4b"))
+      oidc = Some(buildSvc("s4b")),
+      patSessionOf = _ => None
     )
     handlers.authMode(None).unsafeRunSync().map(_.mode) shouldBe Right("db")
     handlers.authMode(Some("acme")).unsafeRunSync().map(_.mode) shouldBe Right("oidc")
@@ -982,7 +984,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       identitySource = ManagementIdentitySource.Oidc,
       grantsForIdentity = (_, _, _) => Nil,
       authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
-      sqlToken = svc
+      sqlToken = svc,
+      patSessionOf = _ => None
     )
 
   private val sqlTokenDiscovery = new OidcDiscovery(httpGet =

@@ -116,7 +116,8 @@ class AuthModeHandlerSpec extends AnyFlatSpec with Matchers:
       tokens = new SessionTokenStore,
       identitySource = ManagementIdentitySource.Db,
       grantsForIdentity = noGrants,
-      authModeResolver = new ManagementAuthModeResolver(tenants.get, systemMode)
+      authModeResolver = new ManagementAuthModeResolver(tenants.get, systemMode),
+      patSessionOf = _ => None
     )
 
   private def run(h: AuthHandlers, tenant: Option[String]) =

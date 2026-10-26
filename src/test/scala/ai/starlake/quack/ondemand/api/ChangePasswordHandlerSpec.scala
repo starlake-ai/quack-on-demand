@@ -129,7 +129,8 @@ class ChangePasswordHandlerSpec extends AnyFlatSpec with Matchers:
         ManagementAuthMode.Db
       ),
       resolveTenant = _ => None,
-      changePasswordStore = users
+      changePasswordStore = users,
+      patSessionOf = _ => None
     )
 
   private def handlers(users: UserStore): AuthHandlers = handlers(Some(users))
