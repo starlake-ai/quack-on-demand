@@ -26,11 +26,11 @@ import java.time.Instant
 import scala.util.Try
 
 /** Fleet surface. The heartbeat (from `qod fleet join`) is machine-to-machine: `X-Fleet-Token` is
-  * the credential (constant-time compare against the join token), never a session or API key. No
-  * clock here: every timestamp is the store's.
+  * the credential (constant-time compare against the join token), never a session or a personal
+  * access token. No clock here: every timestamp is the store's.
   *
-  * The admin server endpoints (list / drain / undrain / remove / approve) are superuser or static
-  * key only and answer `400 fleet_disabled` when `backend` is None (runtimeType is not fleet).
+  * The admin server endpoints (list / drain / undrain / remove / approve) are superuser only and
+  * answer `400 fleet_disabled` when `backend` is None (runtimeType is not fleet).
   */
 final class FleetHandlers(
     store: FleetServerStore,
@@ -85,7 +85,7 @@ final class FleetHandlers(
   ): Out[FleetHeartbeatResponse] =
     val startedAt = req.node.startedAt.map(s => Try(Instant.parse(s)).toOption)
     // Not a fleet manager: no server rows may be written, whoever the caller (on a local or K8s
-    // manager the route sits behind the API-key guard, so a static-key caller reaches it).
+    // manager the route sits behind the API-key guard, so any admitted caller reaches it).
     if backend.isEmpty then IO.pure(Left(disabled))
     else if !tokenOk(token) then IO.pure(Left(FleetErrors.unauthorized))
     else if !ValidStates.contains(req.node.state) then

@@ -34,6 +34,16 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
       rs.getString(1)
     finally c.close()
 
+  private def disable(url: String, username: String): Unit =
+    val c = DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      c.createStatement()
+        .executeUpdate(
+          s"UPDATE qodstate_user SET enabled = FALSE WHERE tenant IS NULL AND username = '$username'"
+        )
+      ()
+    finally c.close()
+
   "reset" should "rehash, clear lockout and honor --must-change" in withFreshDb { url =>
     val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try
@@ -66,6 +76,19 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
       store.upsertUser(Some("acme"), "alice", "pw", "user")
       AdminResetCli.reset(store, "nobody", "x", mustChange = false) shouldBe 1
       AdminResetCli.reset(store, "alice", "x", mustChange = false) shouldBe 1
+    finally store.close()
+  }
+
+  it should "re-enable a disabled superuser" in withFreshDb { url =>
+    val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+    try
+      store.upsertUser(None, "root", "old-pw", "admin")
+      disable(url, "root")
+      AdminResetCli.reset(store, "root", "new-pw", mustChange = false) shouldBe 0
+      column(
+        url,
+        "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+      ) shouldBe "t"
     finally store.close()
   }
 
@@ -223,4 +246,20 @@ class AdminResetCliSpec extends AnyFlatSpec with Matchers:
     err should include(
       "if the first boot never created it, export QOD_ADMIN_PASSWORD and restart the manager once"
     )
+  }
+
+  it should "re-enable a disabled superuser, as qod admin reset-password runs it" in withFreshDb {
+    url =>
+      val store = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try store.upsertUser(None, "root", "old-pw", "admin")
+      finally store.close()
+      disable(url, "root")
+      val (code, out, _) = runOnDb(url, List("root"))
+      code shouldBe 0
+      out should include("password reset for superuser 'root'")
+      column(
+        url,
+        "SELECT enabled FROM qodstate_user WHERE tenant IS NULL AND username = 'root'"
+      ) shouldBe "t"
+      verifies(url, "root", "new-pw") shouldBe true
   }

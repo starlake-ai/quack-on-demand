@@ -180,7 +180,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     rows.head.event.patId shouldBe Some("pat-9")
   }
 
-  it should "leave patId at None when execute() is called without one (session/static-key)" in {
+  it should "leave patId at None when execute() is called without one (a session)" in {
     val (router, journal, store) = setupWithJournal()
     router.execute("hist-7", "alice", poolKey, "SELECT 1").unsafeRunSync()
     journal.drainNow()

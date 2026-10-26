@@ -660,9 +660,9 @@ final class ManagerServer(
         )
       else Nil
 
-    // Mounted only when a handler is wired (Main always wires one). Session-only by
-    // construction: the handler refuses a PAT presented as the credential, so these
-    // routes cannot be driven by the very tokens they manage.
+    // Mounted only when a handler is wired (Main always wires one). A session reaches all
+    // of its user's tokens; a PAT only the subtree it roots (it may mint a child of
+    // itself, never touch a sibling, its parent or itself): see PatHandlers.
     val patEndpoints: List[ServerEndpoint[Any, IO]] = pat.toList.flatMap { h =>
       List[ServerEndpoint[Any, IO]](
         PatEndpoints.create.serverLogic { case (token, req) => h.create(token, req) },

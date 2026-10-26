@@ -30,8 +30,8 @@ final class UserHandlers(
     userStore: UserStore,
     audit: AuditRecorder = AuditRecorder.noop,
     // Composed bearer lookup (session JWT or PAT), for the self-lock guard.
-    // The default resolves nothing: a static-key caller has no identity and
-    // skips the self-check by construction.
+    // The default resolves nothing, so the self-check never matches (wirings
+    // without sessions, such as unit tests).
     sessionOf: String => Option[SessionTokenStore.Session] = _ => None
 ):
 
@@ -74,9 +74,9 @@ final class UserHandlers(
 
   // ---------- /user/create ----------
 
-  /** Tenant-scope semantics: `req.tenant = None` creates a superuser, which only an existing
-    * superuser session (or a static-key caller) may do. `Some(t)` requires the session to manage
-    * `t`. The `req.tenant` value here is a display name OR id (the supervisor normalizes).
+  /** Tenant-scope semantics: `req.tenant = None` creates a superuser, which only a superuser (a
+    * session or a personal access token) may do. `Some(t)` requires the caller to manage `t`. The
+    * `req.tenant` value here is a display name OR id (the supervisor normalizes).
     */
   def createUser(req: UserCreateRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -199,13 +199,13 @@ final class UserHandlers(
 
   /** Refuses removing the caller's own account, or the last enabled superuser, from the management
     * plane. Self first (the clearer message when both would apply); the floor is
-    * identity-independent, so the static key and a removed admin's still-live session are covered.
-    * Both answers are 400.
+    * identity-independent, so a removed admin's still-live session is covered. Both answers are
+    * 400.
     *
     * NOTE (HA): the floor's count-then-write is not atomic across replicas; two concurrent admin
     * requests can each observe two enabled superusers and both pass, reaching zero. Narrow,
-    * admin-only, recoverable via the static key; a conditional UPDATE or per-guard advisory lock is
-    * on the HA hardening backlog.
+    * admin-only, and recoverable with `qod admin reset-password`, which also re-enables a disabled
+    * superuser; a conditional UPDATE or per-guard advisory lock is on the HA hardening backlog.
     */
   private def selfAndFloorGuard(
       apiKey: Option[String],
@@ -243,8 +243,8 @@ final class UserHandlers(
       case None =>
         // Lock guardrails: both fire only on an explicit lock request. Order:
         // self first (the clearer message when both would apply), then the
-        // last-enabled-superuser floor, which is identity-independent so the
-        // static key and a locked superuser's still-live session are covered.
+        // last-enabled-superuser floor, which is identity-independent so a
+        // locked superuser's still-live session is covered.
         val lockGuard: Option[(StatusCode, ErrorResponse)] =
           if !req.enabled.contains(false) then None
           else

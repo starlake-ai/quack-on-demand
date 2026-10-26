@@ -27,9 +27,9 @@ final class ManifestHandlers(
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
-  /** Manifest export / import are cross-tenant operations -- a dump or replay touches every
-    * tenant's pools, roles, groups and users. Restricted to superusers; non-superuser sessions are
-    * rejected with 403. Static `QOD_API_KEY` callers (no session row) are admitted.
+  /** Manifest export / import are cross-tenant operations: a dump or replay touches every tenant's
+    * pools, roles, groups and users. Restricted to superusers; every other caller is rejected with
+    * 403.
     */
   private def superuserCheck(apiKey: Option[String])(
       scopeOf: SessionScope.Resolver

@@ -25,7 +25,7 @@ import scala.jdk.CollectionConverters._
   *
   * **Transport.** [[ManagerServer]] admits requests via `X-API-Key` header OR a `qod_session`
   * cookie carrying the same JWT. [[AuthHandlers.login]] sets the cookie HttpOnly + SameSite=Lax;
-  * CLI / static-key callers stay header-only.
+  * CLI callers stay header-only.
   *
   * The constructor argument `secret` is the raw HMAC key. HS256 requires >= 32 bytes; a shorter key
   * throws at construction. Use [[SessionTokenStore.randomSecret]] for an in-process default.

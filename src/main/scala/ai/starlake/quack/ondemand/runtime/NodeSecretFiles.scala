@@ -95,10 +95,10 @@ object NodeSecretFiles extends LazyLogging:
     "(?i).*(PASSWORD|PASSWD|PASSFILE|SECRET|TOKEN|PASSPHRASE|CREDENTIAL|PRIVATE|API_?KEY|ACCESS_KEY|CONNECTION_STRING|JWT).*".r
 
   /** True for an inherited manager environment variable that must not reach a node process: the
-    * manager's own credentials (`QOD_API_KEY`, `QOD_SESSION_JWT_SECRET`, `QOD_ADMIN_PASSWORD`,
-    * control-plane and SMTP passwords, a module's payment key...) are readable by any node user
-    * through `getenv()` otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) are kept:
-    * an operator may rely on DuckDB's credential chain reading them.
+    * manager's own credentials (`QOD_SESSION_JWT_SECRET`, `QOD_ADMIN_PASSWORD`, control-plane and
+    * SMTP passwords, a module's payment key...) are readable by any node user through `getenv()`
+    * otherwise. Cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) are kept: an operator may rely
+    * on DuckDB's credential chain reading them.
     */
   def isInheritedSecret(name: String): Boolean =
     !SdkPrefixes.exists(p => name.toUpperCase(java.util.Locale.ROOT).startsWith(p)) &&

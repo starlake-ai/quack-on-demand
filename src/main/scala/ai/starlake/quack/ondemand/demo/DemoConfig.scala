@@ -17,10 +17,10 @@ final case class DemoConfigs(
 
 /** Produces the demo posture by copying the base configs with demo overrides.
   *
-  * Guardrail 1: this overlay is the ONLY place the insecure demo settings (REST open, demo
-  * credentials) are produced, and it is called ONLY from [[DemoRunner.runDemo]]. `normalManagerRun`
-  * never invokes it, so a normal boot cannot acquire the demo posture. Case-class `copy` returns
-  * new instances; the base configs are never mutated.
+  * Guardrail 1: this overlay is the ONLY place the demo settings (the advertised demo admin
+  * password, the throwaway metastore) are produced, and it is called ONLY from
+  * [[DemoRunner.runDemo]]. `normalManagerRun` never invokes it, so a normal boot cannot acquire the
+  * demo posture. Case-class `copy` returns new instances; the base configs are never mutated.
   *
   * The FlightSQL edge keeps TLS ON: the edge auto-generates a self-signed cert at boot
   * (`FlightEdgeServer.ensureCertFiles`), pointed under the ephemeral demo home so `qod demo`

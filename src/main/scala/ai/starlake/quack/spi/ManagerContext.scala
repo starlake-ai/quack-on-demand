@@ -32,9 +32,9 @@ final case class ManagerContext(
       * and users.
       */
     scopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver,
-    /** Resolves a session JWT to the full session (identity + scope), None for static keys and
-      * unknown tokens. scopeOf is the scope-only projection; portal-style modules need the caller's
-      * username/tenant too. Exempt from the SPI stability promise.
+    /** Resolves a session JWT to the full session (identity + scope), None for anything else (a
+      * personal access token included). scopeOf is the scope-only projection; portal-style modules
+      * need the caller's username/tenant too. Exempt from the SPI stability promise.
       */
     sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session]
 )

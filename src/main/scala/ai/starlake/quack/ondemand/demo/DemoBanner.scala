@@ -51,7 +51,7 @@ object DemoBanner:
     )
     s"""|
         |===================================================================
-        | QoD demo ready  (self-signed TLS, open REST, ephemeral catalog)
+        | QoD demo ready  (self-signed TLS, ephemeral catalog)
         |===================================================================
         |
         |  DuckLake: $dataPath (tenant acme, $rows TPC-H rows)

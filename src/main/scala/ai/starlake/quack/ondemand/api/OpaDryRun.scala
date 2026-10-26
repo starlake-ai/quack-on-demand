@@ -25,13 +25,12 @@ object OpaDryRun:
 
   /** What a tenant admin sees for a transport failure. The tenant admin chooses the OPA URL, so the
     * exception class or HTTP status would turn the dry run into a network probe of whatever the
-    * manager can reach; superusers and the static key keep the detail for debugging.
+    * manager can reach; superusers keep the detail for debugging.
     */
   val GenericTransportError: String = "OPA unreachable or returned an error"
 
   /** A left is `(errorCode, message)`; `not_found` maps to 404, anything else to 400.
-    * `detailedErrors` is true only for a superuser or static-key caller: see
-    * [[GenericTransportError]].
+    * `detailedErrors` is true only for a superuser caller: see [[GenericTransportError]].
     */
   def run(
       sup: PoolSupervisor,

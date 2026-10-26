@@ -135,9 +135,9 @@ final class FlightSqlRouter(
       realm: String = "tenant",
       prepareDurationMs: Option[Long] = None,
       /** The acting personal-access-token id, when the resolved principal authenticated with one.
-        * `None` for session-authenticated and static-key callers (and for the raw FlightSQL wire,
-        * which has no PAT concept). Threaded into both the statement-history row and the paired
-        * audit row (denial or write) so the two always agree on who acted.
+        * `None` for session-authenticated callers (and for the raw FlightSQL wire, which has no PAT
+        * concept). Threaded into both the statement-history row and the paired audit row (denial or
+        * write) so the two always agree on who acted.
         */
       patId: Option[String] = None,
       /** Audit origin of the statement: `"flightsql"` for the Arrow edge, `"quack"` for the native

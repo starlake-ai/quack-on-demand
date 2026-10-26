@@ -78,8 +78,8 @@ final class LocalQuackBackend(
     // through getenv() / /proc/<pid>/environ. The sensitive values (NodeSecretFiles.Keys: metastore
     // pgPassword / encryptionKey, federation and object-store SQL, the node token, the node's key,
     // the manager's own QOD_S3_* / QOD_AZURE_* credentials) go to a private directory the script
-    // reads and deletes; the manager's other credentials it inherited (QOD_API_KEY, the session
-    // JWT secret, passwords...) are dropped outright.
+    // reads and deletes; the manager's other credentials it inherited (the session JWT secret,
+    // passwords, any *API_KEY*...) are dropped outright.
     val inherited = env.asScala.toMap
     val secrets   = NodeSecretFiles.collect(
       spec.metastore,

@@ -30,10 +30,10 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import scala.util.control.NonFatal
 
-/** Who is asking. `isAdmin` = tenant admin on the tenant, superuser, or the static key; every other
-  * principal is a plain data-plane user and must be able to connect to the parent. `branchOnly` =
-  * the credential is a PAT restricted to branch writes: it may create and write branches, but a
-  * merge writes main, so merge refuses it (`branch_only_token`).
+/** Who is asking. `isAdmin` = tenant admin on the tenant, or superuser; every other principal is a
+  * plain data-plane user and must be able to connect to the parent. `branchOnly` = the credential
+  * is a PAT restricted to branch writes: it may create and write branches, but a merge writes main,
+  * so merge refuses it (`branch_only_token`).
   */
 final case class BranchActor(identity: String, isAdmin: Boolean, branchOnly: Boolean = false)
 

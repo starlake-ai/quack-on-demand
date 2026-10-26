@@ -9,10 +9,6 @@ interface AuthState {
   superuser: boolean;
   manageableTenants: string[];
   loading: boolean;
-  // True when the server has no auth providers configured (auth.* all
-  // disabled). In that case the UI runs without a login screen and the
-  // "user" is a synthetic anonymous principal.
-  authEnabled: boolean;
   // "db" = password form login; "oidc" = IdP redirect flow.
   identitySource: 'db' | 'oidc';
   // Human-readable IdP label, e.g. "Keycloak" or "Google". Empty string when db mode.
@@ -32,9 +28,6 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-const ANONYMOUS_USERNAME = 'anonymous';
-const ANONYMOUS_ROLE     = 'admin';
-
 // The tenant to use for login-mode resolution and SSO start: `?tenant=` wins; otherwise the
 // tenant of a scoped path (/ui/t/<tenant>/...), so a session-expiry reload or a direct hit on a
 // scoped page resolves (and, for SSO, starts) that tenant's own identity provider rather than
@@ -53,7 +46,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [superuser, setSuperuser]                   = useState<boolean>(false);
   const [manageableTenants, setManageableTenants]   = useState<string[]>([]);
   const [loading, setLoading]   = useState(true);
-  const [authEnabled, setAuthEnabled] = useState(true);
   const [identitySource, setIdentitySource] = useState<'db' | 'oidc'>('db');
   const [ssoProviderName, setSsoProviderName] = useState<string>('');
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
@@ -61,13 +53,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [fleetEnabled, setFleetEnabled] = useState(false);
 
   // On mount:
-  //   1. Ask the server whether auth is enabled (open endpoint, no token).
-  //   2. If disabled -> set a synthetic "anonymous" user and skip everything.
-  //   3. Resolve the per-tenant login mode from the URL's ?tenant= via
+  //   1. Read the client config (open endpoint, no token).
+  //   2. Resolve the per-tenant login mode from the URL's ?tenant= via
   //      /api/auth/mode (db -> password form, oidc -> SSO redirect). The bare
   //      /ui/ (no tenant) resolves to the manager-wide system mode.
-  //   4. Resume any existing session via /api/auth/whoami; on 401 fall through
+  //   3. Resume any existing session via /api/auth/whoami; on 401 fall through
   //      to whichever login screen the resolved mode dictates.
+  // There is no anonymous mode: a manager nobody can sign in to refuses to boot.
   useEffect(() => {
     (async () => {
       let cfg;
@@ -83,17 +75,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTelemetryEnabled(cfg.telemetryEnabled !== false);
       setStarlakeUrl(cfg.starlakeUrl ?? null);
       setFleetEnabled(cfg.fleetEnabled === true);
-      if (!cfg.authEnabled) {
-        setAuthEnabled(false);
-        setUsername(ANONYMOUS_USERNAME);
-        setRole(ANONYMOUS_ROLE);
-        setTenant(null);
-        setSuperuser(true);
-        setManageableTenants([]);
-        setLoading(false);
-        return;
-      }
-      setAuthEnabled(true);
       // Resolve the login mode for the tenant in the URL BEFORE deciding what
       // to render, so the gate does not flash the password form then swap to
       // the SSO redirect (or vice versa).
@@ -164,8 +145,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function logout() {
-    // No-op when auth is disabled - there's no session to revoke.
-    if (!authEnabled) return;
     // OIDC mode: redirect to the IdP logout endpoint; the server clears the
     // session cookie there.
     if (identitySource === 'oidc') { ssoLogout(); return; }
@@ -181,7 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, authEnabled, identitySource, ssoProviderName, telemetryEnabled, starlakeUrl, fleetEnabled, login, logout, ssoLogin }}>
+    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, identitySource, ssoProviderName, telemetryEnabled, starlakeUrl, fleetEnabled, login, logout, ssoLogin }}>
       {children}
     </AuthContext.Provider>
   );

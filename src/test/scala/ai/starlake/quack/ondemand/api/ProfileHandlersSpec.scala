@@ -189,7 +189,7 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "answer 400 no_session_identity for an unknown token" in {
     val tokens = new SessionTokenStore()
-    val out    = handlers(tokens).usage(None, Some("static-key-not-a-jwt")).unsafeRunSync()
+    val out    = handlers(tokens).usage(None, Some("not-a-jwt")).unsafeRunSync()
     out.isLeft shouldBe true
     val (status, err) = out.swap.getOrElse(fail("expected an error"))
     status.code shouldBe 400
@@ -269,7 +269,7 @@ class ProfileHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "answer 400 no_session_identity for an unknown token" in {
     val tokens = new SessionTokenStore()
-    val out    = handlers(tokens).statements(None, Some("static-key-not-a-jwt")).unsafeRunSync()
+    val out    = handlers(tokens).statements(None, Some("not-a-jwt")).unsafeRunSync()
     out.isLeft shouldBe true
     val (status, err) = out.swap.getOrElse(fail("expected an error"))
     status.code shouldBe 400

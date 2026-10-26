@@ -144,8 +144,7 @@ function Shell() {
   // `tenant === null` flags the session as system-scoped; tenant-bound
   // admins (when that path lands) are silently dropped from the nav --
   // the matching backend endpoints also 403 them so URL deep-links don't
-  // leak. `authEnabled === false` is the no-auth dev mode; treat the
-  // synthetic anonymous user as a superuser there.
+  // leak.
   const principal = usePrincipal();
   const isSuperuser = principal.superuser;
   const location = useLocation();

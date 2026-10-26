@@ -9,9 +9,8 @@ import sttp.model.StatusCode
   * substitution) and masks sensitive values.
   *
   * The handler is read-only; mutating a value still requires setting the listed env var and
-  * restarting the manager. Access is gated to superusers -- a UI session whose scope is not
-  * superuser is rejected here even though it passed `apiKeyGuard`. Static `QOD_API_KEY` callers (no
-  * session row) are admitted; they're already trusted operators.
+  * restarting the manager. Access is gated to superusers: a session or personal access token whose
+  * scope is not superuser is rejected here even though it passed `apiKeyGuard`.
   */
 final class ConfigHandlers(
     config: Config,

@@ -203,7 +203,7 @@ final class PoolSupervisor(
     mutationGates.set(gates)
 
   /** First Left wins. A throwing gate refuses (fail closed): a broken quota store must not grant
-    * unlimited provisioning. gateBypass short-circuits (superuser / static-key callers).
+    * unlimited provisioning. gateBypass short-circuits (superuser callers).
     */
   private def gateCheck(
       m: ai.starlake.quack.spi.StructureMutation,

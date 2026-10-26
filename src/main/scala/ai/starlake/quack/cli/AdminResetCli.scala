@@ -11,14 +11,14 @@ import java.nio.charset.StandardCharsets
 import scala.util.control.NonFatal
 
 /** `java -jar qod.jar admin reset-password <username>... [--must-change]`, password on the first
-  * stdin line. Break-glass recovery of superuser passwords straight in the control-plane database,
-  * so it works with every login path blocked. It never starts Postgres: an external control plane
-  * is reached as configured (the manager may be down), the embedded one only while a running
-  * `qod serve` owns it (`EmbeddedControlPlane.attachRunning`). Every named superuser that exists is
-  * reset to the same password in one store session (the default admin names are seeded as one
-  * credential). Authority = reaching that database with the configured credentials. Exit 0 at least
-  * one updated, 1 none of the names is a superuser / usage / control plane not initialized, 2
-  * control plane unreachable.
+  * stdin line. Break-glass recovery of superusers straight in the control-plane database (a new
+  * password, the lockout cleared, the account re-enabled), so it works with every login path
+  * blocked. It never starts Postgres: an external control plane is reached as configured (the
+  * manager may be down), the embedded one only while a running `qod serve` owns it
+  * (`EmbeddedControlPlane.attachRunning`). Every named superuser that exists is reset to the same
+  * password in one store session (the default admin names are seeded as one credential). Authority =
+  * reaching that database with the configured credentials. Exit 0 at least one updated, 1 none of
+  * the names is a superuser / usage / control plane not initialized, 2 control plane unreachable.
   */
 object AdminResetCli:
 

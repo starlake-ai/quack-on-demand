@@ -366,8 +366,8 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
         case _ => IO.pure(Right(()))
       })
       .unsafeRunSync()
-    // Only a non-superuser (tenant-admin) session runs the gate; static-key /
-    // superuser callers (apiKey = None) bypass it, matching createPool.
+    // Only a non-superuser (tenant-admin) session runs the gate; superuser
+    // callers bypass it, matching createPool.
     val out = h
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "16", "64Gi"),

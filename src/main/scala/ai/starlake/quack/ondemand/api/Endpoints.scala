@@ -20,8 +20,8 @@ object Endpoints:
     .in("api")
     .errorOut(statusCode.and(jsonBody[ErrorResponse]))
 
-  // Secured endpoints accept the session token via either the X-API-Key header
-  // (CLI / static key) or the qod_session cookie (browser). Resolved to one
+  // Secured endpoints accept the credential via either the X-API-Key header (CLI:
+  // a session or a personal access token) or the qod_session cookie (browser). Resolved to one
   // Option[String], header taking precedence. Using this input means an endpoint
   // physically cannot forget the cookie transport.
   val authToken: sttp.tapir.EndpointInput[Option[String]] =

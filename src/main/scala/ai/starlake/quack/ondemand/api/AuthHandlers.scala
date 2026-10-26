@@ -81,8 +81,8 @@ enum RequiredScope:
   *
   * Transport: on successful login the handler sets a `qod_session` cookie carrying the same JWT
   * returned in `LoginResponse.token`. The browser auto-attaches the cookie on subsequent `/api/...`
-  * calls; CLI / static-key callers stay on the X-API-Key header path. Logout always clears the
-  * cookie and (process-locally) marks the jti revoked until its natural exp.
+  * calls; CLI callers stay on the X-API-Key header path. Logout always clears the cookie and
+  * (process-locally) marks the jti revoked until its natural exp.
   */
 final class AuthHandlers(
     authService: AuthenticationService,

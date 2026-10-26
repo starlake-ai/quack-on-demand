@@ -235,9 +235,8 @@ export interface ClientConfigResponse {
   quackHost?: string;
   quackPort?: number;
   quackTls?: boolean;
-  // When false, no auth providers are configured server-side and the UI
-  // skips the login screen entirely. The REST API may still require an
-  // X-API-Key - that's a separate gate.
+  // Whether the server has an auth provider configured. The UI does not read it:
+  // a manager nobody can sign in to refuses to boot, so there is always a login.
   authEnabled: boolean;
   // True iff the runtime backend supports node placement (Kubernetes).
   // The UI hides cohort/placement controls when false.

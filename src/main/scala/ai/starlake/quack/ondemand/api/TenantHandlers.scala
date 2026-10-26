@@ -47,7 +47,7 @@ final class TenantHandlers(
     )
 
   /** Tenant creation is an inherently cross-tenant action (it mints a brand-new isolation scope),
-    * so it is restricted to superusers. Static `QOD_API_KEY` callers (no session row) are admitted.
+    * so it is restricted to superusers.
     */
   def createTenant(req: TenantRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -157,8 +157,7 @@ final class TenantHandlers(
 
   /** Lifecycle mutations on an EXISTING tenant. The per-request body-tenant guard in
     * `TenantScopeCheck.reject` is what protects against a foreign tenant being targeted; tenant
-    * admins can manage their own tenant. Static `QOD_API_KEY` callers (no session row) are
-    * admitted.
+    * admins can manage their own tenant.
     */
   def deleteTenant(req: TenantOpRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -228,8 +227,8 @@ final class TenantHandlers(
     * superuser adds or changes a `clientSecretRef`, one secret source) and a refusal stores
     * nothing. The secret is write-only: responses carry only `clientSecretSet`, and the audit row
     * records only that the stored secret changed (`clientKey -> changed`, never the value), set,
-    * replaced or removed, a drop by an issuer change or a new reference included. Static-key
-    * callers count as superusers, as in [[SuperuserCheck]].
+    * replaced or removed, a drop by an issuer change or a new reference included. A superuser
+    * caller is decided as in [[SuperuserCheck]].
     */
   def setTenantAuth(req: SetTenantAuthRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver

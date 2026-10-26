@@ -264,8 +264,8 @@ final class TenantDbHandlers(
           )
         }
 
-  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin session
-    * (tenant or system) or the static key may read it: `ManagerServer.apiKeyGuard` already rejects
+  /** Resolved defaultMetastore connection values for the admin UI's create form. Any admin caller
+    * (tenant or system, session or PAT) may read it: `ManagerServer.apiKeyGuard` already rejects
     * unauthenticated callers and demotes profile sessions, and the values are deployment-wide
     * (tenant admins already see pgHost/pgUser on redacted database/list rows). `pgPassword` is
     * absent from the response type by construction.

@@ -2,7 +2,8 @@
 
 Runs the manager jar's one-shot `admin reset-password` subcommand, which
 writes the new bcrypt hash straight into the control-plane database (lockout
-cleared), so it works with every login path blocked. It never starts Postgres:
+cleared, account re-enabled), so it works with every login path blocked. It
+never starts Postgres:
 an external control plane is reached as it is (the manager may be down), and
 the `qod serve` embedded one only while its Postgres is running.
 Authority is reaching that database with the configured credentials; anyone
@@ -48,7 +49,10 @@ def reset_password(
     version: str = typer.Option(None, "--version", envvar="QOD_VERSION", help="Manager release."),
     jar: Path = typer.Option(None, "--jar", help="Run this local jar instead of downloading."),
 ):
-    """Set a new password for a superuser directly in the control-plane database."""
+    """Set a new password for a superuser directly in the control-plane database.
+
+    Also clears its lockout and re-enables the account.
+    """
     base_env = {**load_start_env(), **os.environ}
     users = [username] if username else admin_password.admin_usernames(base_env)
     embedded_dir = Path(
