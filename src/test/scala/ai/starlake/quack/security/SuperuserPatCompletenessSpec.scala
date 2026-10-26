@@ -1,4 +1,3 @@
-// src/test/scala/ai/starlake/quack/security/SuperuserPatCompletenessSpec.scala
 package ai.starlake.quack.security
 
 import ai.starlake.quack.ondemand.api.EndpointModules
@@ -14,18 +13,19 @@ import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
 import scala.util.Try
 
-/** A superuser personal access token reaches every endpoint the static API key reached, so removing
-  * the key strands no caller.
+/** A superuser personal access token passes the guard on every non-public endpoint, so removing the
+  * static key strands no caller. Handler-level checks (`superuser_required`) are not covered.
   *
   * Every endpoint declared in [[EndpointModules.all]] (the registry the OpenAPI generator and the
   * cookie and tenant-scope completeness specs reflect over, so a new endpoint is covered without
   * touching this file) is called twice: with no credential, and with a superuser PAT. The guard's
   * own refusal is a 401 with no body (a handler's 401 carries its JSON error); an endpoint
   * answering that to the anonymous call is non-public, and the PAT must then get neither a 401 nor
-  * a `403 admin_required` there. The guard decides on the path before any route matches, so a
-  * declared endpoint this harness does not mount (federation, branches, the Iceberg views) still
-  * exercises it, and answers 404 once the guard admits the token. No request carries a body: a body
-  * the guard refuses unread would desynchronize the reused HTTP/1.1 connection.
+  * a `403 admin_required` or `403 tenant_forbidden` there. The guard decides on the path before any
+  * route matches, so a declared endpoint this harness does not mount (federation, branches, the
+  * Iceberg views) still exercises it, and answers 404 once the guard admits the token. No request
+  * carries a body: a body the guard refuses unread would desynchronize the reused HTTP/1.1
+  * connection.
   *
   * The PAT store is real Postgres (`qodstate_pat` has an FK to `qodstate_user`); cancelled when it
   * is unreachable.
@@ -133,8 +133,8 @@ class SuperuserPatCompletenessSpec
           val r    = call(h, ep, Some(pat))
           val code = errorCode(r.body())
           if SessionOnly.contains(path) then None
-          else if r.statusCode() == 401 || code.contains("admin_required") then
-            Some(s"$name [${methodOf(ep)} $path] -> ${r.statusCode()} ${code.getOrElse("")}")
+          else if r.statusCode() == 401 || code.exists(Set("admin_required", "tenant_forbidden"))
+          then Some(s"$name [${methodOf(ep)} $path] -> ${r.statusCode()} ${code.getOrElse("")}")
           else None
         }
         withClue(s"endpoints refusing a superuser PAT:\n${refused.mkString("\n")}\n") {

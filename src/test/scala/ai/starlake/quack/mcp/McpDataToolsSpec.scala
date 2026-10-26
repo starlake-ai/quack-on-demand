@@ -13,6 +13,7 @@ import ai.starlake.quack.model.{
   RunningNode,
   TenantDbKind
 }
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
@@ -26,6 +27,7 @@ import ai.starlake.quack.ondemand.api.{
   IcebergCatalogHandlers,
   ProfileHandlers,
   RestCaller,
+  SessionTokenStore,
   TagHandlers,
   TenantDbHandlers
 }
@@ -124,7 +126,8 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
 
   private def fixture(
       executor: CatalogPreviewHandlers.PreviewExecutor,
-      cfg: McpConfig = McpConfig()
+      cfg: McpConfig = McpConfig(),
+      sessionOf: String => Option[SessionTokenStore.Session] = _ => None
   ): McpDataTools =
     val store   = new InMemoryControlPlaneStore()
     val backend = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
@@ -156,7 +159,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val profile = new ProfileHandlers(
-      _ => None,
+      sessionOf,
       NoopTelemetryStore,
       new StatementHistoryStore(),
       _ => None,
@@ -517,6 +520,29 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       "tenant"   -> Json.fromString(Tenant)
     )
     captured.map(_.patId).toList shouldBe List(Some("pat-1"))
+  }
+
+  "my_usage" should "return the usage and statements of a PAT principal's owner" in {
+    val session = SessionTokenStore.Session(
+      AuthenticatedProfile(
+        McpSuperuserPat.Owner.username,
+        "admin",
+        Set.empty,
+        Map.empty,
+        "pat",
+        None
+      ),
+      SessionScope.Superuser,
+      java.time.Instant.now()
+    )
+    val tools = fixture(
+      rangeExecutor(1),
+      sessionOf = t => Option.when(t == McpSuperuserPat.Token)(session)
+    )
+    val out = call(tools, "my_usage", McpSuperuserPat.principal)
+    withClue(out)(out.isRight shouldBe true)
+    val keys = out.toOption.get.hcursor.keys.map(_.toSet)
+    keys shouldBe Some(Set("usage", "statements"))
   }
 
   it should "carry the PAT owner's realm as superuserAdmissible: true only for a tenant-less owner" in {

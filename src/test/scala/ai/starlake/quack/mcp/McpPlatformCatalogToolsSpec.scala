@@ -412,6 +412,33 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       seen.toList.map((leg, c) => (leg, c.system, c.patId)) shouldBe List(("read", true, None))
     }
 
+  "undrop_table with the superuser PAT" should "run the CTAS as the PAT's owner, not the system caller" in
+    withRecordingTools { (tools, seen) =>
+      val out = call(
+        tools,
+        "undrop_table",
+        McpSuperuserPat.principal,
+        "tenant"   -> Json.fromString(Tenant0),
+        "database" -> Json.fromString(TenantDb),
+        "schema"   -> Json.fromString("tpch1"),
+        "table"    -> Json.fromString("doomed")
+      )
+      withClue(out)(out.isRight shouldBe true)
+      seen.toList.map((leg, c) => (leg, ownerShape(c), c.superuserAdmissible)) shouldBe
+        List(
+          (
+            "undrop",
+            (
+              McpSuperuserPat.Owner.username,
+              TokenRestriction.Unrestricted,
+              Some(McpSuperuserPat.PatId),
+              false
+            ),
+            true
+          )
+        )
+    }
+
   "undrop_table with a PAT" should "run the CTAS as the PAT's owner, with its restriction and id" in
     withRecordingTools { (tools, seen) =>
       val out = call(
