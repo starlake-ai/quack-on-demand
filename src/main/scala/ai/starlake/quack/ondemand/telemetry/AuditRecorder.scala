@@ -16,18 +16,18 @@ final class AuditRecorder(
     /** Resolves a bearer to the session it authenticates. The composed lookup wired at boot
       * (`Main.scala`) tries a session JWT first, then falls back to a PAT bearer resolved through
       * `PatAuthenticator.sessionOf`, so a PAT-authenticated REST/MCP call attributes to its real
-      * owner instead of falling through to the "unresolved token" `static-key` branch below.
+      * owner instead of to `anonymous`.
       */
     sessionLookup: String => Option[SessionTokenStore.Session],
     onDrop: Int => Unit = _ => (),
     /** Resolves a bearer to the `qodstate_pat` id it presented, when it is a PAT. `None` for a
-      * session token, the static key, or no token at all -- the default no-op keeps every
+      * session token, an unresolved token, or no token at all; the default no-op keeps every
       * pre-existing construction site (tests, `AuditRecorder.noop`) behaving exactly as before.
       * Appended AFTER `onDrop` deliberately, not inserted before it: every in-tree call site that
       * sets `onDrop` already does so by name, so this ordering is source-compatible with them, but
       * an out-of-tree SPI module built against the old (store, sessionLookup, patIdOf, onDrop)
       * positional order would silently swap the two on a naive rebuild if patIdOf had been inserted
-      * before onDrop instead -- appending avoids that trap entirely.
+      * before onDrop instead; appending avoids that trap entirely.
       */
     patIdOf: String => Option[String] = _ => None
 ) extends LazyLogging:
@@ -38,13 +38,14 @@ final class AuditRecorder(
     */
   def onDropCounter(f: Int => Unit): Unit = dropHook = f
 
-  /** (actor, realm) for a REST caller: session token wins; an unresolved non-empty token is the
-    * static QOD_API_KEY; no token at all is the open dev mode.
+  /** (actor, realm) for a REST caller: the user a session or PAT resolves to; a token that resolves
+    * to no one, or no token at all, is `anonymous`. The guard admits only sessions and PATs, so an
+    * admitted call always carries a user.
     */
   def actorOf(token: Option[String]): (String, String) =
     token.flatMap(sessionLookup) match
       case Some(s) => (s.profile.username, if s.scope.superuser then "system" else "tenant")
-      case None    => (if token.exists(_.nonEmpty) then "static-key" else "anonymous", "system")
+      case None    => ("anonymous", "system")
 
   def rest(
       token: Option[String],
@@ -78,7 +79,7 @@ final class AuditRecorder(
       /** The `qodstate_pat` id of the token that acted. `rest` resolves this automatically from the
         * bearer via `patIdOf` before delegating here; a caller that already has an actor/realm
         * resolved some other way (bypassing `rest`) passes it explicitly, and `None` is the correct
-        * value for session and static-key callers.
+        * value for session callers.
         */
       patId: Option[String] = None
   ): Unit =

@@ -340,7 +340,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
         boom,
         reader,
         cfg,
-        ai.starlake.quack.ondemand.api.RestCaller.staticOnly
+        ai.starlake.quack.ondemand.api.RestCaller()
       )
       val undropH =
         new ai.starlake.quack.ondemand.api.CatalogUndropHandlers(
@@ -348,7 +348,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
           boom,
           reader,
           cfg,
-          ai.starlake.quack.ondemand.api.RestCaller.staticOnly
+          ai.starlake.quack.ondemand.api.RestCaller()
         )
       val manifest = new ManifestHandlers(
         store,

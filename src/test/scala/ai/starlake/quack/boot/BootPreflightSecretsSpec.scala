@@ -6,14 +6,19 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import pureconfig.ConfigSource
 
-/** Pins the boot-secret generation contract: unset session JWT secret / API key are replaced with
-  * fresh random values outside HA, and left untouched under HA (where HaPreconditions refuses the
-  * empty secret instead).
+import java.io.{ByteArrayOutputStream, PrintStream}
+import java.nio.charset.StandardCharsets
+
+/** Pins the boot-secret generation contract: an unset session JWT secret is replaced with a fresh
+  * random value outside HA and left untouched under HA (where HaPreconditions refuses the empty
+  * secret instead). No API key is generated, and the banner prints only the session secret.
+  *
+  * Assertions compare as booleans: a failure must not print a generated secret or a config dump.
   */
-class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers with org.scalatest.OptionValues:
+class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers:
   import Main.given
 
-  // Overlays pin the two fields regardless of QOD_* env vars in the invoking shell.
+  // Overlays pin the secret regardless of QOD_* env vars in the invoking shell.
   private def load(overlay: String): ManagerConfig =
     ConfigSource
       .string(overlay)
@@ -21,43 +26,49 @@ class BootPreflightSecretsSpec extends AnyFlatSpec with Matchers with org.scalat
       .at("quack-on-demand")
       .loadOrThrow[ManagerConfig]
 
-  "withGeneratedBootSecrets" should "generate both secrets when unset outside HA" in {
-    val cfg = load("""quack-on-demand { apiKey = "", auth.management.sessionJwtSecret = "" }""")
-    val out = BootPreflight.withGeneratedBootSecrets(cfg)
-    out.auth.management.sessionJwtSecret should not be empty
-    out.apiKey.value should startWith("qod_")
-    // 32 random bytes: base64 secret, url-safe base64 key past the prefix.
+  /** `withGeneratedBootSecrets` with stdout captured: (result, banner). */
+  private def generate(cfg: ManagerConfig): (ManagerConfig, String) =
+    val out    = new ByteArrayOutputStream()
+    val result = Console.withOut(new PrintStream(out, true, StandardCharsets.UTF_8)) {
+      BootPreflight.withGeneratedBootSecrets(cfg)
+    }
+    (result, out.toString(StandardCharsets.UTF_8))
+
+  private val unset = """quack-on-demand { auth.management.sessionJwtSecret = "" }"""
+
+  "withGeneratedBootSecrets" should "generate the session secret when unset outside HA" in {
+    val (out, _) = generate(load(unset))
+    // 32 random bytes, base64.
     out.auth.management.sessionJwtSecret.length should be >= 43
-    out.apiKey.value.length should be >= 43
   }
 
-  it should "generate fresh values on every boot" in {
-    val cfg = load("""quack-on-demand { apiKey = "", auth.management.sessionJwtSecret = "" }""")
-    val a   = BootPreflight.withGeneratedBootSecrets(cfg)
-    val b   = BootPreflight.withGeneratedBootSecrets(cfg)
-    a.auth.management.sessionJwtSecret should not be b.auth.management.sessionJwtSecret
-    a.apiKey should not be b.apiKey
+  it should "print only the session secret in its banner, never an API key" in {
+    val (_, banner) = generate(load(unset))
+    banner.contains("QOD_SESSION_JWT_SECRET=") shouldBe true
+    banner.contains("QOD_API_KEY") shouldBe false
+    banner.contains("API-key") shouldBe false
   }
 
-  it should "leave explicitly configured values untouched" in {
+  it should "generate a fresh secret on every boot" in {
+    val cfg    = load(unset)
+    val (a, _) = generate(cfg)
+    val (b, _) = generate(cfg)
+    (a.auth.management.sessionJwtSecret == b.auth.management.sessionJwtSecret) shouldBe false
+  }
+
+  it should "leave a configured secret untouched and print nothing" in {
     val cfg = load(
-      """quack-on-demand { apiKey = "pinned-key", auth.management.sessionJwtSecret = "pinned-secret-0123456789abcdef0123456789" }"""
+      """quack-on-demand { auth.management.sessionJwtSecret = "pinned-secret-0123456789abcdef0123456789" }"""
     )
-    BootPreflight.withGeneratedBootSecrets(cfg) shouldBe cfg
-  }
-
-  it should "generate only the missing one" in {
-    val cfg = load(
-      """quack-on-demand { apiKey = "pinned-key", auth.management.sessionJwtSecret = "" }"""
-    )
-    val out = BootPreflight.withGeneratedBootSecrets(cfg)
-    out.apiKey shouldBe Some("pinned-key")
-    out.auth.management.sessionJwtSecret should not be empty
+    val (out, banner) = generate(cfg)
+    (out == cfg) shouldBe true
+    banner.isEmpty shouldBe true
   }
 
   it should "be a no-op under HA so HaPreconditions can refuse the empty secret" in {
-    val cfg = load(
-      """quack-on-demand { ha.enabled = true, apiKey = "", auth.management.sessionJwtSecret = "" }"""
-    )
-    BootPreflight.withGeneratedBootSecrets(cfg) shouldBe cfg
+    val cfg =
+      load("""quack-on-demand { ha.enabled = true, auth.management.sessionJwtSecret = "" }""")
+    val (out, banner) = generate(cfg)
+    (out == cfg) shouldBe true
+    banner.isEmpty shouldBe true
   }

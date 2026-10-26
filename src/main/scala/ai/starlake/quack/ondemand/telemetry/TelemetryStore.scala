@@ -9,7 +9,7 @@ import java.time.Instant
 final case class AuditEvent(
     ts: Instant,
     family: String,     // "control-plane" | "auth" | "data-denial" | "data-write"
-    actor: String,      // username; "anonymous" / "static-key" when the caller is unresolved
+    actor: String,      // username; "anonymous" when the caller is unresolved
     actorRealm: String, // "system" | "tenant"
     tenant: Option[String],
     action: String, // dotted verb, e.g. "role.create", "auth.login.failure", "sql.denied"
@@ -18,8 +18,8 @@ final case class AuditEvent(
     origin: String,  // "rest" | "flightsql"
     detail: Map[String, String],
     /** The `qodstate_pat` id of the token that acted, when the caller authenticated with a personal
-      * access token. `None` for session-authenticated and static-key callers, which is the
-      * overwhelming majority of rows and the default for every existing call site.
+      * access token. `None` for session-authenticated callers, which is the overwhelming majority
+      * of rows and the default for every existing call site.
       */
     patId: Option[String] = None
 ):
@@ -71,7 +71,7 @@ final case class StatementEvent(
     status: String,        // same enum as the ring: "ok" | "denied" | "error" | ...
     error: Option[String], // caller caps at 500 chars before offer
     /** The `qodstate_pat` id of the token that ran the statement, when the caller authenticated
-      * with a personal access token. `None` for session-authenticated and static-key callers.
+      * with a personal access token. `None` for session-authenticated callers.
       */
     patId: Option[String] = None
 )

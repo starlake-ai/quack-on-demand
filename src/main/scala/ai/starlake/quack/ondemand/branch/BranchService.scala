@@ -152,7 +152,7 @@ final class BranchService(
 
   /** A non-admin may act on a parent iff it can connect to at least one of its pools: exactly the
     * FlightSQL handshake gate, so "may query" and "may branch" are the same permission. Admins
-    * (tenant admins, superusers, the static key) never reach the gate, so it runs with
+    * (tenant admins and superusers) never reach the gate, so it runs with
     * `superuserAdmissible = false`: the actor binds a row of the parent's tenant, never a superuser
     * row. Uses `authorizeHandshakeDetailed` (not the legacy string-left delegate) so an OPA outage
     * on an opa-mode parent is distinguishable from an ordinary grant refusal: `Res` has its own

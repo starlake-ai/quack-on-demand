@@ -28,7 +28,7 @@ import java.time.Instant
 
 class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                 = None
+  private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
   private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** One-row IntVector "id" Arrow stream, reused as a canned successful QueryResult payload. */
@@ -201,13 +201,12 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
         readerOverride: DuckLakeCatalogReader = stubReader(),
         executorOverride: CatalogPreviewHandlers.PreviewExecutor = executor,
-        patsOverride: String => Option[PatPrincipal] = _ => None,
-        staticKey: Option[String] = Some(IdentityFixtures.StaticKey)
+        patsOverride: String => Option[PatPrincipal] = _ => None
     ): CatalogPreviewHandlers =
       new CatalogPreviewHandlers(
         sup,
         store,
-        RestCaller(staticKey, sessionsOverride, patsOverride),
+        IdentityFixtures.restCaller(sessionsOverride, patsOverride),
         executorOverride,
         (_, _) => readerOverride,
         cfgOverride,
@@ -225,7 +224,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         asOfTag: Option[String] = None,
         asOfTs: Option[Instant] = None,
         limit: Option[Int] = None,
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, apiKey)(
         SuperuserScope
@@ -239,7 +238,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         table: String = "region",
         from: String = "12",
         to: String = "42",
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(SuperuserScope)
         .unsafeRunSync()
@@ -255,7 +254,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         limit: Option[Int] = None,
         cursor: Option[String] = None,
         changeType: Option[String] = None,
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, apiKey)(
         SuperuserScope
@@ -300,7 +299,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val h = new CatalogPreviewHandlers(
       nonDuckLakeSup,
       nonDuckLakeStore,
-      RestCaller.staticOnly,
+      RestCaller(),
       executor,
       (_, _) => stubReader(),
       cfg,
@@ -337,10 +336,11 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     preview(h, table = "re\"gion", limit = Some(10))
     seenSql shouldBe Some("""SELECT * FROM "tpch1"."re""gion" LIMIT 11""")
 
-  it should "pass PoolKey and (no-session) superuser-equivalent identity to the executor" in new Stubs:
+  it should "pass the PoolKey and the caller's identity to the executor" in new Stubs:
     val h = handlers()
     preview(h)
     seenPoolKey shouldBe Some(PoolKey("acme", "acme_tpch1", "bi"))
+    seenUser shouldBe Some(IdentityFixtures.RootUsername)
 
   it should "pass the session's username when a session token is presented" in new Stubs:
     val profile = AuthenticatedProfile("alice", "user", Set.empty, Map.empty, "db", Some("acme"))
@@ -358,7 +358,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     val h                        = new CatalogPreviewHandlers(
       noPoolSup,
       noPoolStore,
-      RestCaller.staticOnly,
+      RestCaller(),
       executor,
       (_, _) => stubReader(),
       cfg,
@@ -705,11 +705,11 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
 
   import IdentityFixtures.*
 
-  "preview" should "run the static key as the unrestricted superuser" in new Stubs:
+  "preview" should "run a superuser session as its user, never as a system caller" in new Stubs:
     val h = handlers()
-    preview(h, apiKey = Some(StaticKey))
-    seenCallers.map(c => (c.identity, c.restriction, c.patId)) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None))
+    preview(h, apiKey = Some(RootSessionTok))
+    seenCallers.map(c => (c.identity, c.restriction, c.patId, c.system)) shouldBe
+      List((RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "run a session as its user, unrestricted" in new Stubs:
     val h = handlers(sessionsOverride = sessionOf)
@@ -735,12 +735,19 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       Some((StatusCode.Unauthorized, "unauthorized"))
     seenCallers shouldBe Nil
 
-  it should "flag the static key as a system caller, and nothing else" in new Stubs:
+  it should "401 an absent credential without calling the executor" in new Stubs:
+    val h   = handlers(sessionsOverride = sessionOf, patsOverride = patOf)
+    val out = preview(h, apiKey = None)
+    out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Unauthorized, "unauthorized"))
+    seenCallers shouldBe Nil
+
+  it should "never flag a REST caller as a system caller" in new Stubs:
     val h = handlers(sessionsOverride = sessionOf, patsOverride = patOf)
-    preview(h, apiKey = Some(StaticKey))
+    preview(h, apiKey = Some(RootSessionTok))
     preview(h, apiKey = Some(SessionTok))
     preview(h, apiKey = Some(PatTok))
-    seenCallers.map(_.system) shouldBe List(true, false, false)
+    seenCallers.map(_.system) shouldBe List(false, false, false)
 
   it should "run a session or PAT of a tenant user NAMED 'superuser' as that user, not system" in new Stubs:
     val h = handlers(sessionsOverride = sentinelSessionOf, patsOverride = sentinelPatOf)
@@ -749,12 +756,12 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     seenCallers.map(c => (c.identity, c.system, c.patId)) shouldBe
       List(("superuser", false, None), ("superuser", false, Some("pat-sentinel")))
 
-  "dataDiff" should "run the static key as the unrestricted superuser" in new Stubs:
+  "dataDiff" should "run a superuser session as its user, never as a system caller" in new Stubs:
     queueDiffResults(summary = Nil, page = Nil)
     val h = handlers(executorOverride = queuedExecutor)
-    dataDiff(h, apiKey = Some(StaticKey))
-    seenCallers.map(c => (c.identity, c.restriction, c.patId)).distinct shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None))
+    dataDiff(h, apiKey = Some(RootSessionTok))
+    seenCallers.map(c => (c.identity, c.restriction, c.patId, c.system)).distinct shouldBe
+      List((RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "run a session as its user, unrestricted" in new Stubs:
     queueDiffResults(summary = Nil, page = Nil)
@@ -785,17 +792,47 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
       Some((StatusCode.Unauthorized, "unauthorized"))
     seenCallers shouldBe Nil
 
-/** Credentials shared by the executor-identity cases of the catalog handler specs: a static key, a
-  * session for `alice`, and a PAT owned by `alice` carrying a non-trivial restriction.
+  it should "401 an absent credential without calling the executor" in new Stubs:
+    val h =
+      handlers(
+        executorOverride = queuedExecutor,
+        sessionsOverride = sessionOf,
+        patsOverride = patOf
+      )
+    val out = dataDiff(h, apiKey = None)
+    out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+      Some((StatusCode.Unauthorized, "unauthorized"))
+    seenCallers shouldBe Nil
+
+/** Credentials shared by the executor-identity cases of the catalog handler specs: a superuser's
+  * session (`root`, the default credential of those specs), a session for `alice`, and a PAT owned
+  * by `alice` carrying a non-trivial restriction.
   */
 object IdentityFixtures:
-  val StaticKey                        = "static-key-1"
   val SessionTok                       = "alice-session"
   val PatTok                           = "qod_pat_alice"
   val PatId                            = "pat-00000001"
   val PatMaxRows                       = 3
   val PatRestriction: TokenRestriction =
     TokenRestriction.Unrestricted.copy(pools = Some(Set("bi")), maxRows = Some(PatMaxRows))
+
+  /** A superuser's login session: what the specs run as by default. */
+  val RootUsername   = "root"
+  val RootSessionTok = "root-session"
+  private val root   = AuthenticatedProfile(RootUsername, "admin", Set.empty, Map.empty, "db", None)
+  val rootSessionOf: String => Option[SessionTokenStore.Session] = t =>
+    Option.when(t == RootSessionTok)(
+      SessionTokenStore.Session(root, SessionScope.Superuser, Instant.now())
+    )
+
+  /** The specs' executor-identity resolver: the root session first, then `sessionsOverride`'s
+    * sessions, then `patsOverride`'s PATs. Anything else, no credential included, is a 401.
+    */
+  def restCaller(
+      sessionsOverride: String => Option[SessionTokenStore.Session] = _ => None,
+      patsOverride: String => Option[PatPrincipal] = _ => None
+  ): RestCaller =
+    RestCaller(sessionOf = t => rootSessionOf(t).orElse(sessionsOverride(t)), patOf = patsOverride)
 
   private val alice =
     AuthenticatedProfile("alice", "admin", Set.empty, Map.empty, "db", Some("acme"))

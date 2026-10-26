@@ -280,9 +280,10 @@ final class FleetHandlers(
         IO.delay(publish.topologyChanged()).as(Right(()))
     }
 
-  /** Let a pending server take nodes. Idempotent; the first approver and time are kept. The next
-    * reconcile pass fills pending slots onto it. Refused (409 source_unknown) while the server's
-    * latest heartbeat has no known source address: the approval is bound to that source.
+  /** Let a pending server take nodes. Idempotent; the first approver (the calling user, as the
+    * audit row names it) and time are kept. The next reconcile pass fills pending slots onto it.
+    * Refused (409 source_unknown) while the server's latest heartbeat has no known source address:
+    * the approval is bound to that source.
     */
   def approve(req: FleetServerOpRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver

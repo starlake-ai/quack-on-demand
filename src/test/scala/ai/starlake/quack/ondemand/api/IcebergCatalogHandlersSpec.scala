@@ -39,7 +39,7 @@ import scala.collection.mutable.ListBuffer
 class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
   import Dtos.given
 
-  private val NoKey: Option[String]                 = None
+  private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
   private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** The gate's scope for a token caller: an admin of tenant `acme`. */
@@ -365,11 +365,8 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
     def handlers(
         cfgOverride: CatalogConfig = cfg,
-        callerOf: RestCaller = RestCaller(
-          Some(IdentityFixtures.StaticKey),
-          IdentityFixtures.sessionOf,
-          IdentityFixtures.patOf
-        )
+        callerOf: RestCaller =
+          IdentityFixtures.restCaller(IdentityFixtures.sessionOf, IdentityFixtures.patOf)
     ): IcebergCatalogHandlers =
       new IcebergCatalogHandlers(
         sup,
@@ -388,7 +385,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         operation: Option[String] = None,
         h: IcebergCatalogHandlers = handlers()
     ) =
-      h.history("acme", "acme_tpch1", alias, "probe", "t", limit, before, operation, NoKey)(
+      h.history("acme", "acme_tpch1", alias, "probe", "t", limit, before, operation, RootKey)(
         SuperuserScope
       ).unsafeRunSync()
 
@@ -398,7 +395,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         asOfTs: Option[Instant] = None,
         limit: Option[Int] = None,
         h: IcebergCatalogHandlers = handlers(),
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.preview("acme", "acme_tpch1", "Ice", "probe", "t", asOf, asOfTag, asOfTs, limit, apiKey)(
         AcmeAdmin
@@ -410,7 +407,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
         limit: Option[Int] = None,
         changeType: Option[String] = None,
         h: IcebergCatalogHandlers = handlers(),
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.dataDiff("acme", "acme_tpch1", "Ice", "probe", "t", from, to, limit, changeType, apiKey)(
         AcmeAdmin
@@ -424,12 +421,15 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
   "the alias check" should "404 an unknown, sql, disabled or foreign alias" in new Stubs:
     val h = handlers()
     for alias <- List("nope", "pg", "old", "ice2") do
-      errOf(h.schemas("acme", "acme_tpch1", alias, NoKey)(SuperuserScope).unsafeRunSync()) shouldBe
+      errOf(
+        h.schemas("acme", "acme_tpch1", alias, RootKey)(SuperuserScope).unsafeRunSync()
+      ) shouldBe
         (StatusCode.NotFound, "catalog_not_found")
     metaSqls shouldBe empty
 
   it should "resolve a differently cased alias and use the folded alias in SQL" in new Stubs:
-    val out = handlers().schemas("acme", "acme_tpch1", "ICE", NoKey)(SuperuserScope).unsafeRunSync()
+    val out =
+      handlers().schemas("acme", "acme_tpch1", "ICE", RootKey)(SuperuserScope).unsafeRunSync()
     out.toOption.get shouldBe List(CatalogSchemaEntry("probe", -1), CatalogSchemaEntry("sales", -1))
     metaSqls.head should include("database_name = 'ice'")
 
@@ -477,12 +477,12 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
   "tables" should "list the schema's tables" in new Stubs:
     handlers()
-      .tables("acme", "acme_tpch1", "Ice", "probe", NoKey)(SuperuserScope)
+      .tables("acme", "acme_tpch1", "Ice", "probe", RootKey)(SuperuserScope)
       .unsafeRunSync() shouldBe Right(List("t", "u"))
 
   "detail" should "return columns, files and the current snapshot" in new Stubs:
     val out = handlers()
-      .detail("acme", "acme_tpch1", "Ice", "probe", "t", NoKey)(SuperuserScope)
+      .detail("acme", "acme_tpch1", "Ice", "probe", "t", RootKey)(SuperuserScope)
       .unsafeRunSync()
       .toOption
       .get
@@ -503,7 +503,7 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     // row that is not the highest-sequence one; the newest-by-seq row (S4) must NOT win.
     currentId = S2
     val out = handlers()
-      .detail("acme", "acme_tpch1", "Ice", "probe", "t", NoKey)(SuperuserScope)
+      .detail("acme", "acme_tpch1", "Ice", "probe", "t", RootKey)(SuperuserScope)
       .unsafeRunSync()
       .toOption
       .get
@@ -682,10 +682,10 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
   private def callers(execCallers: ListBuffer[ExecCaller]) =
     execCallers.toList.map(c => (c.identity, c.restriction, c.patId, c.system))
 
-  "preview's executor caller" should "be the system caller for the static key" in new Stubs:
-    preview(apiKey = Some(StaticKey))
+  "preview's executor caller" should "be a superuser session's user, never a system caller" in new Stubs:
+    preview(apiKey = Some(RootSessionTok))
     callers(execCallers) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None, true))
+      List((RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "be the session's user, unrestricted, for a session" in new Stubs:
     preview(apiKey = Some(SessionTok))
@@ -706,17 +706,17 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
     telemetryStore.events.last.outcome shouldBe "denied"
 
   it should "run a tenant user NAMED 'superuser' as that user, not system" in new Stubs:
-    val h = handlers(callerOf = RestCaller(None, sentinelSessionOf, sentinelPatOf))
+    val h = handlers(callerOf = RestCaller(sessionOf = sentinelSessionOf, patOf = sentinelPatOf))
     preview(h = h, apiKey = Some(SentinelSessionTok))
     preview(h = h, apiKey = Some(SentinelPatTok))
     execCallers.toList.map(c => (c.identity, c.system, c.patId)) shouldBe
       List(("superuser", false, None), ("superuser", false, Some("pat-sentinel")))
 
-  "dataDiff's executor caller" should "be the system caller for the static key" in new Stubs:
+  "dataDiff's executor caller" should "be a superuser session's user, never a system caller" in new Stubs:
     execResult = () => diffResult()
-    dataDiff(apiKey = Some(StaticKey))
+    dataDiff(apiKey = Some(RootSessionTok))
     callers(execCallers) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None, true))
+      List((RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "be the session's user, unrestricted, for a session" in new Stubs:
     execResult = () => diffResult()
@@ -734,3 +734,12 @@ class IcebergCatalogHandlersSpec extends AnyFlatSpec with Matchers:
       (StatusCode.Unauthorized, "unauthorized")
     execCallers shouldBe empty
     telemetryStore.events.last.outcome shouldBe "denied"
+
+  "preview's executor caller" should "be refused with 401 for an absent credential" in new Stubs:
+    errOf(preview(apiKey = None)) shouldBe (StatusCode.Unauthorized, "unauthorized")
+    execCallers shouldBe empty
+
+  "dataDiff's executor caller" should "be refused with 401 for an absent credential" in new Stubs:
+    execResult = () => diffResult()
+    errOf(dataDiff(apiKey = None)) shouldBe (StatusCode.Unauthorized, "unauthorized")
+    execCallers shouldBe empty

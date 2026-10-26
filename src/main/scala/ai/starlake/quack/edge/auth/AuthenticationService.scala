@@ -34,6 +34,12 @@ class AuthenticationService(
 
   val hasProviders: Boolean = basicProviders.nonEmpty || bearerProviders.nonEmpty
 
+  /** Whether the basic chain holds a password provider (database, or Keycloak / Azure ROPC). With
+    * none and no system-scope OIDC, nothing can create a session, and
+    * `BootPreflight.checkLoginAvailable` refuses to boot.
+    */
+  val hasPasswordProvider: Boolean = basicProviders.nonEmpty
+
   /** Authenticate `(scope, username, password)` against the basic chain.
     *
     *   - [[AuthScope.System]] -- manager UI login with empty tenant, or FlightSQL handshake with

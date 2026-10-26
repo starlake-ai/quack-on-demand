@@ -11,22 +11,20 @@ import org.scalatest.matchers.should.Matchers
   * from [[SecurityFixtures]]. There is no shared state between cases. The harness is torn down in a
   * try/finally block immediately after each test so ports are released promptly.
   *
-  * Groups: A. apiKeyGuard modes (open vs. static key enforcement) B. Public paths that bypass the
-  * guard C. Login admin gate (AuthHandlers.login) D. Superuser gate on /api/config/server and
+  * Groups: A. apiKeyGuard (sessions and personal access tokens only) B. Public paths that bypass
+  * the guard C. Login admin gate (AuthHandlers.login) D. Superuser gate on /api/config/server and
   * /api/manifest/export|import
   */
 class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   // ------------------------------------------------------------------
-  // A. apiKeyGuard modes
+  // A. apiKeyGuard: sessions and PATs only
   // ------------------------------------------------------------------
 
-  "apiKeyGuard" should "refuse an unauthenticated /api call even with no static key configured" in {
+  "apiKeyGuard" should "refuse an unauthenticated /api call; a session admits" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
-      // No open mode: an unset key means "static-key auth disabled", never
-      // "namespace open". Only a session (or PAT) credential admits.
       val resp = get(h.httpClient, s"${h.baseUrl}/api/tenant/list")
       withClue(s"GET /api/tenant/list body: ${resp.body()}") {
         resp.statusCode() shouldBe 401
@@ -39,12 +37,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "treat an empty static key exactly like an unset one" in {
+  it should "refuse an empty X-API-Key like an absent one" in {
     val fix = SecurityFixtures.freshStore()
-    // Compose / k8s configs routinely materialize QOD_API_KEY="" -- pureconfig
-    // then yields Some(""), which must neither open the namespace nor become a
-    // matchable key.
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = Some(""))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val keyless = get(h.httpClient, s"${h.baseUrl}/api/tenant/list")
       withClue(s"keyless body: ${keyless.body()}") {
@@ -57,9 +52,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "keep public endpoints keyless with no static key configured" in {
+  it should "keep public endpoints keyless" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val resp = get(h.httpClient, s"${h.baseUrl}/api/config/client")
       withClue(s"GET /api/config/client body: ${resp.body()}") {
@@ -68,31 +63,35 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "return 401 when static key is set but X-API-Key header is missing" in {
+  it should "refuse a credential that is neither a session nor a PAT, on every transport" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/tenant/list")
-      withClue(s"GET /api/tenant/list body: ${resp.body()}") {
-        resp.statusCode() shouldBe 401
+      // What a static API key used to be: an opaque string the manager compared against its
+      // configuration. The manager knows no such credential: every transport answers 401.
+      List("k1", "wrong", "qod_pat_unknown").foreach { bogus =>
+        val header = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(bogus))
+        withClue(s"X-API-Key $bogus: ")(header.statusCode() shouldBe 401)
+        val cookie = getWithCookie(h.httpClient, s"${h.baseUrl}/api/tenant/list", bogus)
+        withClue(s"qod_session cookie $bogus: ")(cookie.statusCode() shouldBe 401)
+        val scimUrl = s"${h.baseUrl}/api/scim/v2/${SecurityFixtures.TenantId}/Users"
+        val bearer  = h.httpClient.send(
+          java.net.http.HttpRequest
+            .newBuilder(java.net.URI.create(scimUrl))
+            .header("Authorization", s"Bearer $bogus")
+            .GET()
+            .timeout(RequestTimeout)
+            .build(),
+          java.net.http.HttpResponse.BodyHandlers.ofString()
+        )
+        withClue(s"SCIM Bearer $bogus: ")(bearer.statusCode() shouldBe 401)
       }
     finally h.shutdown()
   }
 
-  it should "allow GET /api/tenants when X-API-Key matches the static key" in {
+  it should "allow GET /api/tenant/list when X-API-Key is a valid session token" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
-    try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some("k1"))
-      withClue(s"GET /api/tenant/list body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-      }
-    finally h.shutdown()
-  }
-
-  it should "allow GET /api/tenants when X-API-Key is a valid session token" in {
-    val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       val resp  = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(token))
@@ -102,20 +101,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "return 401 when X-API-Key is a wrong value" in {
-    val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
-    try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some("wrong"))
-      withClue(s"GET /api/tenant/list body: ${resp.body()}") {
-        resp.statusCode() shouldBe 401
-      }
-    finally h.shutdown()
-  }
-
   it should "not admit a percent-encoded /api prefix with no key" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       // The guard tests the request path for the `/api/` prefix while tapir
       // routes on DECODED segments. If the two ever disagree, `/%61pi/...`
@@ -133,7 +121,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "not admit a slash-prefixed /api path with no key" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       // Tapir drops EVERY leading slash before segmenting, so `////api/...`
       // routes to the tenant-list endpoint. A guard that keeps the leading
@@ -154,7 +142,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "demote a non-admin session to the profile allowlist" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       // bob is a role=user principal in acme: a tenant-scoped login mints a
       // profile-only session (no admin grant, empty manageableTenants).
@@ -186,7 +174,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "let a non-admin session reach both /api/profile routes" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.BobUsername,
@@ -217,7 +205,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "match the profile allowlist exactly, never by prefix" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.BobUsername,
@@ -237,7 +225,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "keep admin sessions unrestricted" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       val resp  = get(h.httpClient, s"${h.baseUrl}/api/pool/list", apiKey = Some(token))
@@ -251,9 +239,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
   // B. Public paths bypass the guard
   // ------------------------------------------------------------------
 
-  "Public paths" should "allow POST /api/auth/login without X-API-Key (static key mode)" in {
+  "Public paths" should "allow POST /api/auth/login without a credential" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val body =
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""
@@ -267,9 +255,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "allow POST /api/auth/change-password without X-API-Key (static key mode)" in {
+  it should "allow POST /api/auth/change-password without a credential" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val body =
         s"""{"username":"${SecurityFixtures.RootUsername}","currentPassword":"${SecurityFixtures.RootPassword}","newPassword":"new-password"}"""
@@ -287,9 +275,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "allow POST /api/auth/forgot-password without X-API-Key (static key mode)" in {
+  it should "allow POST /api/auth/forgot-password without a credential" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       // Anti-enumeration: a nonexistent account still answers 200 (the row lookup
       // misses and nothing is mailed). A 200 -- not the guard's bare 401 -- proves
@@ -302,9 +290,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "allow POST /api/auth/reset-password without X-API-Key (static key mode)" in {
+  it should "allow POST /api/auth/reset-password without a credential" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       // A garbage token reaches the handler and comes back 400 invalid_token --
       // a JSON error body, unlike apiKeyGuard's bare bodyless 401. Asserting that
@@ -318,9 +306,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "allow GET /api/config/client without X-API-Key (static key mode)" in {
+  it should "allow GET /api/config/client without a credential" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val resp = get(h.httpClient, s"${h.baseUrl}/api/config/client")
       withClue(s"GET /api/config/client body: ${resp.body()}") {
@@ -334,7 +322,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     // The harness boots runtimeType=local: the heartbeat is public at the guard only when
     // runtimeType=fleet, so an anonymous call here must get the guard's 401, not a 404 from
     // an unmounted route or anything the handler would answer.
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h = ManagerServerHarness.boot(fix.store)
     try
       val body = """{"name":"srv-1","advertiseHost":"10.0.0.1","nodePort":21900,""" +
         """"node":{"assignmentEpoch":0,"state":"none"}}"""
@@ -347,18 +335,20 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "answer 400 fleet_disabled (not 404) on the fleet routes outside fleet mode" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
-      val list = get(h.httpClient, s"${h.baseUrl}/api/fleet/servers", apiKey = Some("k1"))
+      val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+      val list  = get(h.httpClient, s"${h.baseUrl}/api/fleet/servers", apiKey = Some(token))
       withClue(s"GET /api/fleet/servers body: ${list.body()}") {
         list.statusCode() shouldBe 400
         parse(list.body()).toOption.flatMap(_.hcursor.get[String]("error").toOption) shouldBe
           Some("fleet_disabled")
       }
-      // A static-key caller passes the guard but must not be able to write a server row.
+      // A superuser session passes the guard but must not be able to write a server row.
       val body = """{"name":"srv-1","advertiseHost":"10.0.0.1","nodePort":21900,""" +
         """"node":{"assignmentEpoch":0,"state":"none"}}"""
-      val hb = post(h.httpClient, s"${h.baseUrl}/api/fleet/heartbeat", body, apiKey = Some("k1"))
+      val hb =
+        post(h.httpClient, s"${h.baseUrl}/api/fleet/heartbeat", body, apiKey = Some(token))
       withClue(s"POST /api/fleet/heartbeat body: ${hb.body()}") {
         hb.statusCode() shouldBe 400
         parse(hb.body()).toOption.flatMap(_.hcursor.get[String]("error").toOption) shouldBe
@@ -373,7 +363,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   "AuthHandlers.login" should "return 200 with token + superuser=true for root" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val body =
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""
@@ -397,7 +387,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
   // -- so they stay pinned at unit level in AuthHandlersSpec / AuthHandlersOidcSpec.
   it should "mint a non-admin session for bob on his own tenant" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val body =
         s"""{"username":"${SecurityFixtures.BobUsername}","password":"${SecurityFixtures.BobPassword}","tenant":"${SecurityFixtures.TenantId}"}"""
@@ -424,7 +414,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       kind = "admin",
       enabled = false
     )
-    val h = ManagerServerHarness.boot(s, staticApiKey = None)
+    val h = ManagerServerHarness.boot(s)
     try
       val goodPw =
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""
@@ -446,7 +436,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "return 400 with code invalid_credentials for blank password" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val body = s"""{"username":"${SecurityFixtures.RootUsername}","password":""}"""
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
@@ -459,7 +449,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   it should "return 503 with code auth_disabled when no providers are configured" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None, enableProviders = false)
+    val h   = ManagerServerHarness.boot(fix.store, enableProviders = false)
     try
       val body =
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""
@@ -477,7 +467,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   "ConfigHandlers /api/config/server" should "admit root's superuser session" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       val resp  = get(h.httpClient, s"${h.baseUrl}/api/config/server", apiKey = Some(token))
@@ -487,20 +477,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "admit the static-key path" in {
-    val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
-    try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/config/server", apiKey = Some("k1"))
-      withClue(s"GET /api/config/server body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-      }
-    finally h.shutdown()
-  }
-
   it should "deny alice's tenant-scoped session with 403 superuser_required" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,
@@ -517,7 +496,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   "ManifestHandlers /api/manifest/export" should "admit root's superuser session" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       val resp  = get(h.httpClient, s"${h.baseUrl}/api/manifest/export", apiKey = Some(token))
@@ -527,20 +506,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "admit the static-key path" in {
-    val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
-    try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/manifest/export", apiKey = Some("k1"))
-      withClue(s"GET /api/manifest/export body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-      }
-    finally h.shutdown()
-  }
-
   it should "deny alice's tenant-scoped session with 403 superuser_required" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,
@@ -557,7 +525,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   "ManifestHandlers /api/manifest/import" should "admit root's superuser session (200 or 400, not 403)" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
       // Minimal valid-shape manifest body. The handler may accept or reject
@@ -581,32 +549,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "admit the static-key path (200 or 400, not 403)" in {
-    val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some("k1"))
-    try
-      val yamlBody =
-        """apiVersion: quack-on-demand/v1
-          |kind: ConfigManifest
-          |exportedAt: '2026-06-10T00:00:00Z'
-          |exportedFrom: { managerVersion: test, hostname: localhost }
-          |""".stripMargin
-      val resp = post(
-        h.httpClient,
-        s"${h.baseUrl}/api/manifest/import",
-        yamlBody,
-        contentType = "application/yaml",
-        apiKey = Some("k1")
-      )
-      withClue(s"POST /api/manifest/import body: ${resp.body()}") {
-        resp.statusCode() should not be 403
-      }
-    finally h.shutdown()
-  }
-
   it should "deny alice's tenant-scoped session with 403 before parsing the body" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = None)
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       val token = h.mintToken(
         SecurityFixtures.AliceUsername,
@@ -653,7 +598,6 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       val clock = new ExpiringClock
       val h     = ManagerServerHarness.boot(
         fix.store,
-        staticApiKey = Some("k1"),
         sessions = new ai.starlake.quack.ondemand.api.SessionTokenStore(clock = clock.now)
       )
       try
@@ -678,7 +622,6 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     val clock = new ExpiringClock
     val h     = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some("k1"),
       sessions = new ai.starlake.quack.ondemand.api.SessionTokenStore(clock = clock.now)
     )
     try

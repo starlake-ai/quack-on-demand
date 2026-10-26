@@ -28,7 +28,7 @@ import java.time.Instant
 
 class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                 = None
+  private val RootKey: Option[String]               = Some(IdentityFixtures.RootSessionTok)
   private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
@@ -179,7 +179,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         writeExecutor,
         (_, _) => readerOverride,
         cfgOverride,
-        RestCaller(Some(IdentityFixtures.StaticKey), sessionsOverride, patsOverride),
+        IdentityFixtures.restCaller(sessionsOverride, patsOverride),
         audit = audit
       )
 
@@ -190,7 +190,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
         expected: Option[Long] = None,
         schema: String = "tpch1",
         table: String = "orders",
-        apiKey: Option[String] = NoKey
+        apiKey: Option[String] = RootKey
     ) =
       h.restore(
         RestoreRequest("acme", "acme_tpch1", schema, table, to, dryRun, expected),
@@ -203,7 +203,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h
       .restore(
         RestoreRequest("nope", "acme_tpch1", "tpch1", "orders", "39"),
-        NoKey
+        RootKey
       )(SuperuserScope)
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
@@ -384,10 +384,11 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
   // ---------- executor identity (PAT regression) ----------
 
-  "restore's replace" should "run the static key as the unrestricted superuser" in new Stubs:
-    restore(handlers(), to = "39", apiKey = Some(IdentityFixtures.StaticKey)).isRight shouldBe true
-    writeCallers.map(c => (c.identity, c.restriction, c.patId)) shouldBe
-      List((CatalogPreviewHandlers.SuperuserIdentity, TokenRestriction.Unrestricted, None))
+  "restore's replace" should "run a superuser session as its user, never as a system caller" in new Stubs:
+    restore(handlers(), to = "39", apiKey = Some(IdentityFixtures.RootSessionTok)).isRight shouldBe
+      true
+    writeCallers.map(c => (c.identity, c.restriction, c.patId, c.system)) shouldBe
+      List((IdentityFixtures.RootUsername, TokenRestriction.Unrestricted, None, false))
 
   it should "run a session as its user, unrestricted" in new Stubs:
     val h = handlers(sessionsOverride = IdentityFixtures.sessionOf)
@@ -421,6 +422,19 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
     )
     List(Some(true), None).foreach { dry =>
       val out = restore(h, to = "39", dryRun = dry, apiKey = Some("qod_pat_unknown"))
+      out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
+        Some((StatusCode.Unauthorized, "unauthorized"))
+    }
+    readCallers shouldBe Nil
+    writeCallers shouldBe Nil
+
+  it should "401 an absent credential on both legs without calling either executor" in new Stubs:
+    val h = handlers(
+      sessionsOverride = IdentityFixtures.sessionOf,
+      patsOverride = IdentityFixtures.patOf
+    )
+    List(Some(true), None).foreach { dry =>
+      val out = restore(h, to = "39", dryRun = dry, apiKey = None)
       out.left.toOption.map(e => (e._1, e._2.error)) shouldBe
         Some((StatusCode.Unauthorized, "unauthorized"))
     }

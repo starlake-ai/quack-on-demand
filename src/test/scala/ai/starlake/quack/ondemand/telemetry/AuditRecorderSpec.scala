@@ -47,13 +47,26 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     (e.actor, e.actorRealm, e.origin, e.outcome) shouldBe ("alice", "tenant", "rest", "ok")
   }
 
-  it should "record static-key callers as static-key/system and no token as anonymous" in {
+  it should "record an unresolved token and no token alike as anonymous" in {
     val store = new RecordingStore
     val r     = recorder(store, _ => None)
     r.rest(Some("static-abc"), "control-plane", "pool.delete", "ok")
     r.rest(None, "control-plane", "pool.delete", "ok")
     store.events.map(e => (e.actor, e.actorRealm)).toList shouldBe
-      List(("static-key", "system"), ("anonymous", "system"))
+      List(("anonymous", "system"), ("anonymous", "system"))
+  }
+
+  it should "record a superuser session as its user in the system realm" in {
+    val store = new RecordingStore
+    recorder(store, t => if t == "root-tok" then Some(session("root", superuser = true)) else None)
+      .rest(Some("root-tok"), "control-plane", "pool.delete", "ok")
+    store.events.map(e => (e.actor, e.actorRealm)).toList shouldBe List(("root", "system"))
+  }
+
+  it should "record the manager's own work (AuditActor.System) as system, whatever the lookup" in {
+    val store = new RecordingStore
+    AuditActor.System.controlPlane(recorder(store, _ => None), "tenant.create", "ok")
+    store.events.map(e => (e.actor, e.actorRealm)).toList shouldBe List(("system", "system"))
   }
 
   it should "resolve a PAT bearer to its owner's actor via the composed session lookup, " +
@@ -70,7 +83,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
       (e.actor, e.actorRealm, e.patId) shouldBe ("alice", "tenant", Some("pat-1"))
     }
 
-  it should "leave pat_id at None for a static-key bearer even when patIdOf is wired" in {
+  it should "leave pat_id at None for an unresolved bearer even when patIdOf is wired" in {
     val store    = new RecordingStore
     val patToken = "qod_pat_alice"
     val r        = new AuditRecorder(
@@ -80,7 +93,7 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     )
     r.rest(Some("static-abc"), "control-plane", "pool.scale", "ok")
     val e = store.events.head
-    (e.actor, e.actorRealm, e.patId) shouldBe ("static-key", "system", None)
+    (e.actor, e.actorRealm, e.patId) shouldBe ("anonymous", "system", None)
   }
 
   it should "let an explicit patId argument win over patIdOf's resolution" in {

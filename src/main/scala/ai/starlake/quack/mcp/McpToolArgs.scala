@@ -66,24 +66,25 @@ private[mcp] object McpToolArgs:
     )
 
   /** The tenant a tool call acts in. A tenant-scoped PAT owns exactly one answer (an explicit
-    * differing `tenant` argument is an error, never silently ignored); superuser PATs and the
-    * static key must say which tenant they mean.
+    * differing `tenant` argument is an error, never silently ignored); a superuser PAT is not bound
+    * to a tenant and must say which one it means.
     */
   def tenantOf(principal: McpPrincipal, args: JsonObject): Either[String, String] =
     val explicit = str(args, "tenant")
     principal match
-      case McpPrincipal.Pat(p) if p.user.tenant.isDefined =>
-        val own = p.user.tenant.get
-        explicit match
-          case Some(t) if t != own =>
-            Left(
-              s"your token is scoped to tenant '$own'; omit the 'tenant' argument or pass '$own'"
+      case McpPrincipal.Pat(p) =>
+        p.user.tenant match
+          case Some(own) =>
+            explicit match
+              case Some(t) if t != own =>
+                Left(
+                  s"your token is scoped to tenant '$own'; omit the 'tenant' argument or pass '$own'"
+                )
+              case _ => Right(own)
+          case None =>
+            explicit.toRight(
+              "the 'tenant' argument is required: a superuser credential is not bound to a tenant"
             )
-          case _ => Right(own)
-      case _ =>
-        explicit.toRight(
-          "the 'tenant' argument is required: a superuser credential is not bound to a tenant"
-        )
 
   /** REST-handler bridge: the handlers' (code, ErrorResponse) rejections become tool-level error
     * text, keeping the stable `error` code in front so agents can branch on it.

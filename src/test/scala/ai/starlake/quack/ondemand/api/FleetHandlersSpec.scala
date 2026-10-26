@@ -1,12 +1,14 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.FleetConfig
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
+import ai.starlake.quack.ondemand.telemetry.{AuditRecorder, NoopTelemetryStore}
 import ai.starlake.quack.ondemand.state.{
   ApproveResult,
   ClaimMiss,
@@ -389,12 +391,30 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
 
   // --- Admin surface (Task 8) ----------------------------------------------------------------
 
+  // The approver an approval records is the calling user, resolved like the audit actor: the token
+  // "k" every admin case sends is a superuser session for "root" here.
+  private val rootAudit = new AuditRecorder(
+    NoopTelemetryStore,
+    t =>
+      Option.when(t == "k")(
+        SessionTokenStore.Session(
+          AuthenticatedProfile("root", "admin", Set.empty, Map.empty, "db", None),
+          SessionScope.Superuser,
+          t0
+        )
+      )
+  )
   private def adminFixture() =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
     val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
-    val h       =
-      new FleetHandlers(store, cfg, backend = Some(backend), publish = StateChangePublisher.noop)
+    val h       = new FleetHandlers(
+      store,
+      cfg,
+      backend = Some(backend),
+      publish = StateChangePublisher.noop,
+      audit = rootAudit
+    )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
     store.recordHeartbeat(
@@ -560,7 +580,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       Left("fleet_disabled")
   }
 
-  "approve" should "approve a pending server, idempotently, superuser only" in {
+  "approve" should "approve a pending server, idempotently, superuser only, recording the approving user" in {
     val (store, h) = adminFixture()
     store.recordHeartbeat(
       Heartbeat(
@@ -586,7 +606,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     h.approve(FleetServerOpRequest("p"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
     val row = store.get("p").get
     row.approved shouldBe true
-    row.approvedBy shouldBe Some("static-key")
+    row.approvedBy shouldBe Some("root")
     h.approve(FleetServerOpRequest("p"), Some("k"))(superuser).unsafeRunSync() shouldBe Right(())
     h.approve(FleetServerOpRequest("ghost"), Some("k"))(superuser)
       .unsafeRunSync()

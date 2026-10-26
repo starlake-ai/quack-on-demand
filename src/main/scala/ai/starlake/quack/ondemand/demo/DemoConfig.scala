@@ -54,7 +54,6 @@ object DemoConfig:
       admin =
         if passwordDefaulted then baseManager.admin.copy(password = DefaultAdminPassword)
         else baseManager.admin,
-      apiKey = None,
       defaultMetastore = metastore
     )
     val flight = baseFlight.copy(

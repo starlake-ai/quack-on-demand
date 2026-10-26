@@ -388,7 +388,7 @@ final case class PatConfig(
     maxDepth: Int = 8
 )
 
-/** MCP server for AI agents at POST /mcp. Auth: PAT or the static API key; session JWTs and
+/** MCP server for AI agents at POST /mcp. Auth: a personal access token as Bearer; session JWTs and
   * passwords are never accepted there.
   */
 final case class McpConfig(
@@ -491,15 +491,6 @@ final case class ManagerConfig(
       description = "Manager REST + admin UI port."
     )
     port: Int,
-    @field @ConfigField(
-      envVar = "QOD_API_KEY",
-      description =
-        "Static admin API key sent as X-API-Key. Unset or empty: outside HA a random key is " +
-          "generated at boot and printed to the console; under HA the static-key arm stays " +
-          "disabled and /api accepts only session and PAT credentials (never open).",
-      sensitive = true
-    )
-    apiKey: Option[String],
     @field @ConfigField(
       envVar = "QOD_RUNTIME_TYPE",
       description =

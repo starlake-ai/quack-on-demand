@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
-import ai.starlake.quack.ManagerConfig
+import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig}
 import ai.starlake.quack.edge.auth.AuthQueryPreconditions
 import ai.starlake.quack.edge.config.DatabaseAuthConfig
 import ai.starlake.quack.model.{FederatedAlias, Names}
@@ -16,58 +16,88 @@ import com.typesafe.scalalogging.LazyLogging
   */
 object BootPreflight extends LazyLogging:
 
-  /** Resolve the two boot secrets an operator may leave unset: the session JWT signing secret and
-    * the static admin API key. Outside HA, an unset (or empty) value is replaced with a fresh
-    * random one for this boot, and the generated values are printed to stdout -- deliberately NOT
-    * through the logger, whose default ERROR root level would swallow an info line -- so a
-    * first-run operator cannot miss them. Under HA the config is returned unchanged: a per-replica
-    * random secret cannot verify sessions minted by other replicas (HaPreconditions refuses the
-    * empty secret), and a per-replica API key behind one load balancer would authenticate on only
-    * the replica that minted it.
+  /** The refusal for a removed static API key, verbatim in the boot error. */
+  val RemovedApiKeyMessage: String =
+    "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static " +
+      "API key. Use a personal access token (qod auth pat create) or a qod login session, and " +
+      "unset QOD_API_KEY."
+
+  /** Pure gate: the static API key was removed. Refuses when the environment holds a non-empty
+    * (after trimming) `QOD_API_KEY`, or when the loaded configuration holds a non-empty
+    * `quack-on-demand.apiKey` (an operator's own config file, or a `-D` system property). An empty
+    * value passes: older Compose files render `API_KEY=` as one. Both are read directly because,
+    * with the field gone, pureconfig would ignore the key silently and the manager would boot
+    * without the credential its operator relies on. `Main.bootManager` runs it first, before the
+    * session secret is generated and before HA validation.
+    */
+  def checkRemovedApiKey(
+      env: String => Option[String],
+      raw: com.typesafe.config.Config
+  ): Either[String, Unit] =
+    val path     = "quack-on-demand.apiKey"
+    val inEnv    = env("QOD_API_KEY").exists(_.trim.nonEmpty)
+    val inConfig = raw.hasPath(path) && raw.getValue(path).unwrapped().toString.trim.nonEmpty
+    if inEnv || inConfig then Left(RemovedApiKeyMessage) else Right(())
+
+  /** Pure gate: something must be able to create a session. Refuses when the authentication service
+    * has no password provider (its basic chain is empty, as with `QOD_AUTH_DB_ENABLED=false` and no
+    * Keycloak or Azure password backend) AND system-scope OIDC sign-in is not served: nothing could
+    * create a session, a personal access token is minted with one, and `/api` would be unreachable.
+    * System-scope OIDC counts exactly as `ManagementAuthWiring` serves it: `identitySource=oidc`
+    * with the issuer URL and the client id set (under `db` the system scope gets no OIDC client,
+    * whatever `QOD_MGMT_OIDC_*` hold). Tenant OIDC does not count: it is configured through `/api`
+    * and never yields a superuser.
+    */
+  def checkLoginAvailable(
+      hasPasswordProvider: Boolean,
+      mgmt: ManagementAuthConfig
+  ): Either[String, Unit] =
+    val systemOidc =
+      mgmt.identitySource.trim.toLowerCase(Locale.ROOT) == "oidc" &&
+        mgmt.oidc.issuerUrl.trim.nonEmpty && mgmt.oidc.clientId.trim.nonEmpty
+    if !hasPasswordProvider && !systemOidc then
+      Left(
+        "nothing can sign in to this manager: the authentication service has no password " +
+          "provider (QOD_AUTH_DB_ENABLED=false and no Keycloak or Azure password backend) and " +
+          "system-scope OIDC sign-in is not configured (it needs QOD_MGMT_IDENTITY_SOURCE=oidc " +
+          "with QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID set). Without a session no " +
+          "personal access token can be minted, so /api would be unreachable. Set " +
+          "QOD_AUTH_DB_ENABLED=true, or set QOD_MGMT_IDENTITY_SOURCE=oidc with " +
+          "QOD_MGMT_OIDC_ISSUER_URL, QOD_MGMT_OIDC_CLIENT_ID and QOD_MGMT_OIDC_CLIENT_SECRET."
+      )
+    else Right(())
+
+  /** Resolve the boot secret an operator may leave unset: the session JWT signing secret. Outside
+    * HA, an unset (or empty) value is replaced with a fresh random one for this boot and printed to
+    * stdout, deliberately NOT through the logger, whose default ERROR root level would swallow an
+    * info line, so a first-run operator cannot miss it. Under HA the config is returned unchanged:
+    * a per-replica random secret cannot verify sessions minted by other replicas (HaPreconditions
+    * refuses the empty secret).
     */
   def withGeneratedBootSecrets(cfg: ManagerConfig): ManagerConfig =
-    if cfg.ha.enabled then cfg
+    if cfg.ha.enabled || cfg.auth.management.sessionJwtSecret.trim.nonEmpty then cfg
     else
-      val genSecret = Option.when(cfg.auth.management.sessionJwtSecret.trim.isEmpty)(
-        SessionTokenStore.randomSecret()
+      val secret = SessionTokenStore.randomSecret()
+      println(
+        s"""
+           |================================================================================
+           |  GENERATED BOOT SECRET
+           |
+           |  QOD_SESSION_JWT_SECRET was not configured, so a fresh random value was minted
+           |  for this boot only:
+           |
+           |  QOD_SESSION_JWT_SECRET=$secret
+           |
+           |  It changes on every restart: UI and CLI sessions die with the process. Pin it
+           |  to a stable value for production.
+           |================================================================================
+           |""".stripMargin
       )
-      val genKey = Option.when(cfg.apiKey.forall(_.trim.isEmpty))(randomApiKey())
-      if genSecret.isEmpty && genKey.isEmpty then cfg
-      else
-        val lines =
-          genSecret.map(s => s"  QOD_SESSION_JWT_SECRET=$s").toList ++
-            genKey.map(k => s"  QOD_API_KEY=$k").toList
-        println(
-          s"""
-             |================================================================================
-             |  GENERATED BOOT SECRETS
-             |
-             |  The following were not configured, so fresh random values were minted for
-             |  this boot only:
-             |
-             |${lines.mkString("\n")}
-             |
-             |  They change on every restart: UI/CLI sessions and API-key callers die with
-             |  the process. Pin both env vars to stable values for production.
-             |================================================================================
-             |""".stripMargin
+      cfg.copy(
+        auth = cfg.auth.copy(
+          management = cfg.auth.management.copy(sessionJwtSecret = secret)
         )
-        cfg.copy(
-          apiKey = genKey.orElse(cfg.apiKey),
-          auth = cfg.auth.copy(
-            management = cfg.auth.management.copy(
-              sessionJwtSecret = genSecret.getOrElse(cfg.auth.management.sessionJwtSecret)
-            )
-          )
-        )
-
-  /** 32 random bytes, url-safe base64 without padding, `qod_`-prefixed so a leaked value is
-    * recognizable in config dumps the way `qod_pat_` tokens are.
-    */
-  private def randomApiKey(): String =
-    val bytes = new Array[Byte](32)
-    new java.security.SecureRandom().nextBytes(bytes)
-    "qod_" + java.util.Base64.getUrlEncoder.withoutPadding.encodeToString(bytes)
+      )
 
   /** Cheap startup gate: when database auth is enabled, systemQuery/tenantQuery must each project
     * (password_hash, kind, enabled, must_change_password) -- exactly the shape

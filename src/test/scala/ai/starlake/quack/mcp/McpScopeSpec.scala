@@ -37,7 +37,6 @@ class McpScopeSpec extends AnyFlatSpec with Matchers:
     )
     new McpRoutes(
       cfg = McpConfig(),
-      staticKey = None,
       resolvePat = t => if t == token then Some(principal) else None,
       tools = List(tool("run_sql"), tool("list_databases")),
       serverVersion = "test"

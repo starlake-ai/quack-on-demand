@@ -37,22 +37,6 @@ object SessionScope:
   def resolver(lookup: String => Option[SessionScope]): Resolver =
     credential => credential.flatMap(lookup).getOrElse(NoAccess)
 
-  /** TRANSITIONAL, removed with the static API key: `lookup` widened so the configured key
-    * (constant-time compare; an unset or empty key matches nothing) resolves to [[Superuser]], as
-    * it did before scope was total. Every other token goes to `lookup`.
-    */
-  def staticKeyLookup(
-      staticKey: Option[String],
-      lookup: String => Option[SessionScope]
-  ): String => Option[SessionScope] =
-    val key = staticKey.filter(_.nonEmpty).map(_.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-    token =>
-      val isStatic = key.exists(k =>
-        java.security.MessageDigest
-          .isEqual(token.getBytes(java.nio.charset.StandardCharsets.UTF_8), k)
-      )
-      if isStatic then Some(Superuser) else lookup(token)
-
   /** The telemetry tenant-scoping rule, shared by the audit / history / usage / active-statement
     * handlers (`None` result = no tenant restriction):
     *   - superuser: the requested tenant filter passes through unchanged;

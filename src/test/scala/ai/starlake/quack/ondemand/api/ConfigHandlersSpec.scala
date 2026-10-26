@@ -55,13 +55,18 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     val sens = liveEntries.filter(_.sensitive).map(_.path).toSet
     sens should contain("quack-on-demand.admin.password")
     sens should contain("quack-on-demand.defaultMetastore.pgPassword")
-    sens should contain("quack-on-demand.apiKey")
+    sens should contain("quack-on-demand.auth.management.sessionJwtSecret")
     sens should contain("quack-flightsql.auth.database.password")
     sens should contain("quack-flightsql.auth.jwt.secretKey")
     sens should contain("quack-flightsql.auth.keycloak.clientSecret")
     sens should contain("quack-flightsql.auth.google.clientSecret")
     sens should contain("quack-flightsql.auth.azure.clientSecret")
     sens should contain("quack-on-demand.metrics.azure.instrumentationKey")
+  }
+
+  it should "drop the removed static API key from the config page" in {
+    liveEntries.exists(_.path == "quack-on-demand.apiKey") shouldBe false
+    liveEntries.exists(_.envVar == "QOD_API_KEY") shouldBe false
   }
 
   "ConfigHandlers.list" should "never leak sensitive values; render plain ones as-is" in {
@@ -85,17 +90,18 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "render missing optional values as '(unset)'" in {
-    val cfg   = ConfigFactory.load()
+    // smtp.host has no default in application.conf; dropping the path keeps the case independent
+    // of QOD_SMTP_HOST in the invoking shell.
+    val cfg   = ConfigFactory.load().withoutPath("quack-on-demand.smtp.host")
     val views = new ConfigHandlers(cfg, liveEntries)
-      .list(None)(_ => SessionScope.Superuser)
+      .list(None)(_ => ai.starlake.quack.ondemand.auth.SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
       .entries
     val byPath = views.map(v => v.path -> v).toMap
 
-    // apiKey has no default in application.conf and no env var set in the test JVM.
-    val apiKey = byPath("quack-on-demand.apiKey")
-    apiKey.isSet shouldBe false
-    apiKey.value shouldBe "(unset)"
+    val host = byPath("quack-on-demand.smtp.host")
+    host.isSet shouldBe false
+    host.value shouldBe "(unset)"
   }

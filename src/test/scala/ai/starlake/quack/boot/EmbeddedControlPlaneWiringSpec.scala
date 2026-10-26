@@ -67,7 +67,6 @@ class EmbeddedControlPlaneWiringSpec extends AnyFlatSpec with Matchers:
     seenMgr.get.defaultMetastore.pgPort shouldBe port.toString
     seenMgr.get.defaultMetastore.pgHost shouldBe "localhost"
     // Posture guardrail: nothing outside the five pg coordinates moved.
-    seenMgr.get.apiKey shouldBe cfg.apiKey
     seenMgr.get.runtimeType shouldBe cfg.runtimeType
     seenMgr.get.defaultMetastore.dataPath shouldBe cfg.defaultMetastore.dataPath
     // The auth.database block is re-anchored to the same live server, keyed by the SAME

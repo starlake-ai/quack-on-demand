@@ -48,7 +48,6 @@ object ManagerServerHarness:
   private[security] def minimalManagerConfig(port: Int = 0): ManagerConfig = ManagerConfig(
     host = "127.0.0.1",
     port = port,
-    apiKey = None, // open REST namespace
     runtimeType = "local",
     minPort = 40000,
     maxPort = 41000,
@@ -261,9 +260,6 @@ object ManagerServerHarness:
     * The returned [[Harness]] holds `baseUrl`, `tokens` (for direct test introspection), and
     * `shutdown()` to stop the server.
     *
-    *   - `staticApiKey` flows into [[ManagerConfig.apiKey]] so the [[ManagerServer.apiKeyGuard]]
-    *     enforces it (`Some("...")` enables the static-key path; `None`, the default, leaves the
-    *     REST namespace open).
     *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`,
     *     driving the `auth_disabled` 503 branch in [[AuthHandlers.login]].
     *
@@ -271,7 +267,6 @@ object ManagerServerHarness:
     */
   def boot(
       store: InMemoryControlPlaneStore,
-      staticApiKey: Option[String] = None,
       enableProviders: Boolean = true,
       audit: AuditRecorder = AuditRecorder.noop,
       auditLimiter: AuditRateLimiter = new AuditRateLimiter(),
@@ -317,7 +312,7 @@ object ManagerServerHarness:
         (Option[String], String) => Option[ai.starlake.quack.ondemand.state.RbacUser]
       ] = None,
       // PAT admission on /api (guard + profile handlers). None keeps the guard
-      // session-and-static-key only, exactly like a Main boot without Postgres.
+      // session-only, exactly like a Main boot without Postgres.
       patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
       // Mount POST /mcp wired over the harness handlers, mirroring Main's
       // mcp.enabled gate. Off by default so pre-existing specs see no new route.
@@ -361,8 +356,7 @@ object ManagerServerHarness:
       // the manager-wide password grant behind the database check, passes its own.
       authService: Option[AuthenticationService] = None
   ): Harness =
-    val mgrCfg =
-      minimalManagerConfig(port = 0).copy(apiKey = staticApiKey)
+    val mgrCfg  = minimalManagerConfig(port = 0)
     val edgeCfg = minimalFlightConfig
     val tracker = new NodeLoadTracker
     val backend = stubBackend
@@ -534,9 +528,8 @@ object ManagerServerHarness:
         override def currentTableInfo(schema: String, table: String): Option[(Long, Long)] = None
         override def latestTableSnapshot(schema: String, table: String): Option[Long]      = None
 
-    // Main's executor-identity resolver: static key, session, PAT (when wired), else 401.
+    // Main's executor-identity resolver: session, PAT (when wired), else 401.
     val restCaller = RestCaller(
-      staticKey = staticApiKey,
       sessionOf = sessions.get,
       patOf = t => patAuth.flatMap(_.resolve(t))
     )
@@ -593,22 +586,14 @@ object ManagerServerHarness:
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
-    // Main's wiring (total scopeOf; PAT resolution via patAuth; static key shared
-    // with the api-key guard).
+    // Main's wiring (total scopeOf; PAT resolution via patAuth).
     val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
       if !mcpEnabled then None
       else
-        // TRANSITIONAL, like Main until the static key goes: McpPrincipal.StaticKey curries no
-        // token into the handlers, so on this wiring an absent credential is the static key
-        // McpRoutes admitted.
-        val mcpTokenScope = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-          sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-        )
         val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-          t =>
-            if t.isEmpty && staticApiKey.exists(_.nonEmpty) then
-              ai.starlake.quack.ondemand.auth.SessionScope.Superuser
-            else mcpTokenScope(t)
+          ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+            sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+          )
         val mcpCatalog = catalogHandlers.getOrElse(
           new CatalogHandlers((_, _) => noSnapshotReader, sup, store)
         )
@@ -671,7 +656,6 @@ object ManagerServerHarness:
           )
           new ai.starlake.quack.mcp.McpRoutes(
             ai.starlake.quack.McpConfig(),
-            staticApiKey.filter(_.nonEmpty),
             patAuth.fold[String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal]](_ => None)(
               pa => pa.resolve
             ),

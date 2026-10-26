@@ -2,6 +2,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
+import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.model.{FederatedSecret, FederatedSource, Tenant}
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -30,6 +31,24 @@ import java.sql.DriverManager
   * Uses the same in-memory fixture stack as [[RbacTenantScopeSpec]] (no HTTP, no Postgres).
   */
 class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
+
+  // A superuser's session, resolved by the audit recorder: an admitted call always carries a user.
+  private val RootSessionTok                                          = "root-session"
+  private val rootLookup: String => Option[SessionTokenStore.Session] = t =>
+    Option.when(t == RootSessionTok)(
+      SessionTokenStore.Session(
+        AuthenticatedProfile(
+          SecurityFixtures.RootUsername,
+          "admin",
+          Set.empty,
+          Map.empty,
+          "db",
+          None
+        ),
+        SessionScope.Superuser,
+        java.time.Instant.now()
+      )
+    )
 
   // ---------------------------------------------------------------------------
   // Stub QuackBackend: no real child processes (mirrors ManagerServerHarness).
@@ -83,13 +102,12 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
   // Tests
   // ---------------------------------------------------------------------------
 
-  "createRole" should "audit ok with actor, action, tenant, and target on success" in {
+  "createRole" should "audit ok with the acting user, action, tenant, and target on success" in {
     val store        = new RecordingTelemetryStore
-    val audit        = new AuditRecorder(store, _ => None)
+    val audit        = new AuditRecorder(store, rootLookup)
     val (roles, tid) = buildRoleHandlers(audit)
-    // Superuser fixture: the scope resolves to a superuser => TenantScopeCheck admits.
     roles
-      .createRole(RoleCreateRequest(tid, "auditors", None), Some("any-static-key"))(_ =>
+      .createRole(RoleCreateRequest(tid, "auditors", None), Some(RootSessionTok))(_ =>
         SessionScope.Superuser
       )
       .unsafeRunSync()
@@ -99,7 +117,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     e.action shouldBe "role.create"
     e.outcome shouldBe "ok"
     e.tenant shouldBe Some(tid)
-    e.actor shouldBe "static-key"
+    e.actor shouldBe SecurityFixtures.RootUsername
+    e.actorRealm shouldBe "system"
     e.target.isDefined shouldBe true
     e.detail.get("name") shouldBe Some("auditors")
   }
@@ -126,7 +145,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
   "TenantHandlers.setTenantAuth" should
     "audit ok with clientKey -> changed when the write sends a client secret, never the value" in {
       val store = new RecordingTelemetryStore
-      val audit = new AuditRecorder(store, _ => None)
+      val audit = new AuditRecorder(store, rootLookup)
       val fix   = SecurityFixtures.freshStore()
       val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
       sup.restore()
@@ -137,9 +156,9 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
         Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
         clientSecret = Some("kc-s3cr3t")
       )
-      // Superuser fixture: the scope resolves to a superuser, so the caller is one.
+      // Root's superuser session: the scope resolves to a superuser, so the caller is one.
       tenants
-        .setTenantAuth(req, Some("any-static-key"))(_ => SessionScope.Superuser)
+        .setTenantAuth(req, Some(RootSessionTok))(_ => SessionScope.Superuser)
         .unsafeRunSync()
         .isRight shouldBe
         true
@@ -178,8 +197,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
   private val AcmeIssuer = "https://idp.example.com/realms/acme"
   private val AcmeConfig = Map("issuerUrl" -> AcmeIssuer, "clientId" -> "qod")
 
-  /** The outcome and detail of the one `tenant.auth.update` row that a write by the static key (a
-    * superuser) leaves on a keycloak tenant `acme` holding `stored` as its client secret.
+  /** The outcome and detail of the one `tenant.auth.update` row that a write by root's superuser
+    * session leaves on a keycloak tenant `acme` holding `stored` as its client secret.
     */
   private def auditedWrite(
       stored: Option[String],
@@ -199,10 +218,10 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     )
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
     sup.restore()
-    val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, _ => None))
+    val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, rootLookup))
     val req     = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
     tenants
-      .setTenantAuth(req, Some("any-static-key"))(_ => SessionScope.Superuser)
+      .setTenantAuth(req, Some(RootSessionTok))(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .isRight shouldBe
       true
@@ -292,22 +311,22 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
   // ---------------------------------------------------------------------------
 
   "FederatedSourceHandlers.createSource" should
-    "audit ok with actor 'static-key' and tenant id on success" in {
+    "audit ok with the acting user and the tenant id on success" in {
       val store = new RecordingTelemetryStore
-      val audit = new AuditRecorder(store, _ => None)
+      val audit = new AuditRecorder(store, rootLookup)
       val h     = buildFederatedHandlers(audit)
       h.createSource(
         SecurityFixtures.TenantName,
         SecurityFixtures.TenantDbName,
         FederatedSourceCreateRequest(alias = "ext_s3", setupSql = Some("ATTACH ..."), None, false),
-        Some("any-static-key")
+        Some(RootSessionTok)
       ).unsafeRunSync()
       store.events should not be empty
       val e = store.events.head
       e.family shouldBe "control-plane"
       e.action shouldBe "federation.source.upsert"
       e.outcome shouldBe "ok"
-      e.actor shouldBe "static-key"
+      e.actor shouldBe SecurityFixtures.RootUsername
       e.tenant shouldBe Some(SecurityFixtures.TenantId)
       e.target shouldBe Some("ext_s3")
     }
@@ -317,14 +336,14 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     // legacy spelling), so auditing `req.alias` would leave the trail naming something that is
     // not in the table. `Ext_S3` and `ext_s3` are one row to DuckDB and to the store.
     val store = new RecordingTelemetryStore
-    val audit = new AuditRecorder(store, _ => None)
+    val audit = new AuditRecorder(store, rootLookup)
     val h     = buildFederatedHandlers(audit)
     val out   = h
       .createSource(
         SecurityFixtures.TenantName,
         SecurityFixtures.TenantDbName,
         FederatedSourceCreateRequest(alias = "Ext_S3", setupSql = Some("ATTACH ..."), None, false),
-        Some("any-static-key")
+        Some(RootSessionTok)
       )
       .unsafeRunSync()
       .toOption
@@ -399,7 +418,6 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       val limiter = new AuditRateLimiter()
       val harness = ManagerServerHarness.boot(
         fix.store,
-        staticApiKey = Some("correct-key"),
         audit = audit,
         auditLimiter = limiter
       )

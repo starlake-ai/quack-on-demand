@@ -199,9 +199,9 @@ object Main extends IOApp with LazyLogging:
     * `guarantee`, including a failed boot, including a failure in the control-plane database ensure
     * step.
     *
-    * This is deliberately NOT `DemoConfig.overlay`: it does not touch `apiKey`, `runtimeType`, TLS,
-    * or ACL, so a persistent embedded install keeps the normal secure posture. `DemoConfig.overlay`
-    * remains reachable only from `DemoRunner.runDemo`.
+    * This is deliberately NOT `DemoConfig.overlay`: it does not touch `runtimeType`, TLS, or ACL,
+    * so a persistent embedded install keeps the normal secure posture. `DemoConfig.overlay` remains
+    * reachable only from `DemoRunner.runDemo`.
     */
   private[quack] def withEmbeddedControlPlane(
       mgrCfg: ManagerConfig,
@@ -265,13 +265,21 @@ object Main extends IOApp with LazyLogging:
       /** The native Quack front door block; loaded from `quack-native` when the caller does not
         * pass one (demo and serve overlays set their system properties before this runs).
         */
-      quackCfg: Option[QuackNativeConfig] = None
+      quackCfg: Option[QuackNativeConfig] = None,
+      /** What the removed-key refusal reads (`BootPreflight.checkRemovedApiKey`): the process
+        * environment and the raw configuration. Tests pass their own.
+        */
+      env: String => Option[String] = sys.env.get,
+      rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
   ): IO[ExitCode] =
+    // A removed QOD_API_KEY refuses boot first: before the session secret is generated and printed,
+    // and before HA validation, so an upgrade that still sets the key stops with the reason.
+    BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
     val quackCfgResolved: QuackNativeConfig =
       quackCfg.getOrElse(ConfigSource.default.at("quack-native").loadOrThrow[QuackNativeConfig])
-    // Unset boot secrets (session JWT secret, static API key) are generated and printed here,
-    // BEFORE anything reads them. A no-op under HA, so the gate below still sees the raw empty
-    // secret and refuses: per-replica random secrets cannot verify each other's sessions.
+    // An unset session JWT secret is generated and printed here, BEFORE anything reads it. A no-op
+    // under HA, so the gate below still sees the raw empty secret and refuses: per-replica random
+    // secrets cannot verify each other's sessions.
     val mgrCfg = BootPreflight.withGeneratedBootSecrets(mgrCfg0)
     HaPreconditions
       .validate(
@@ -577,6 +585,12 @@ object Main extends IOApp with LazyLogging:
       lockout = mgrCfg.auth.lockout,
       lockoutStore = Some(userStore)
     )
+    // A session is the only way in (a personal access token is minted with one): refuse to boot
+    // when nothing could create one.
+    BootPreflight
+      .checkLoginAvailable(authService.hasPasswordProvider, mgrCfg.auth.management)
+      .left
+      .foreach(msg => sys.error(msg))
 
     def catalogReader(tenant: String, tenantDb: String): DuckLakeCatalogReader =
       catalogReaders.get(tenant, tenantDb)
@@ -612,7 +626,7 @@ object Main extends IOApp with LazyLogging:
     )
 
     // A PAT bearer must attribute to its real owner, not fall through to the
-    // "unresolved token" static-key branch: session lookup first, PAT second.
+    // anonymous actor: session lookup first, PAT second.
     // patIdOf feeds pat_id on every audit.rest(apiKey, ...) call site (dozens,
     // across the REST handlers the MCP admin tools curry the raw PAT bearer
     // into) with zero call-site changes.
@@ -639,14 +653,10 @@ object Main extends IOApp with LazyLogging:
       rawConfig = com.typesafe.config.ConfigFactory.load(),
       audit = auditRecorder,
       singleton = singletonTasks,
-      // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or an
-      // expired or unknown token, is NoAccess. TRANSITIONAL: the static key is a superuser
-      // through SessionScope.staticKeyLookup until the key is removed.
-      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(
-        ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
-          mgrCfg.apiKey,
-          t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-        )
+      // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or one that
+      // does not resolve, is SessionScope.NoAccess to a module gate.
+      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+        sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
       ),
       sessionOf = sessionTokens.get
     )
@@ -1488,12 +1498,8 @@ object Main extends IOApp with LazyLogging:
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            // TRANSITIONAL: staticKeyLookup goes with the static key.
-            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(
-              ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
-                mgrCfg.apiKey,
-                t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-              )
+            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
             ),
             catalogAliasOf = catalogAliasOf,
             attachStatusOf = attachStatusOf
@@ -1542,11 +1548,9 @@ object Main extends IOApp with LazyLogging:
         routedExecutor(recordExecution = false)
 
       // The executor identity of the catalog preview / data-diff / undrop / restore handlers:
-      // static key -> superuser, session -> its user, PAT -> its owner WITH its restriction and
-      // id, anything else -> 401. The JWT-only `sessionTokens.get` used to sit here, so a PAT
-      // (admitted by the guard) fell through to the synthetic superuser.
+      // session -> its user, PAT -> its owner WITH its restriction and id, anything else (no
+      // credential included) -> 401. Never a system caller: that is the manager's own work.
       val restCaller = ai.starlake.quack.ondemand.api.RestCaller(
-        staticKey = mgrCfg.apiKey,
         sessionOf = sessionTokens.get,
         patOf = patAuthenticator.resolve
       )
@@ -1647,9 +1651,9 @@ object Main extends IOApp with LazyLogging:
       )
 
       // Branches (Epic 1): the lifecycle service and its REST handlers. The actor resolver
-      // accepts a session JWT (UI / CLI login), a PAT (the MCP data tools curry the bearer as
-      // apiKey), the static key, or nothing (the MCP static principal); any other present token
-      // is refused with 401 instead of becoming the superuser admin actor.
+      // accepts a session JWT (UI / CLI login) or a PAT (the MCP data tools curry the bearer as
+      // apiKey); no credential, or any other token, is refused with 401 instead of becoming the
+      // superuser admin actor.
       val branchActorOf =
         ai.starlake.quack.ondemand.api.BranchHandlers.actorResolver(restCaller)
       lazy val branchService: ai.starlake.quack.ondemand.branch.BranchService =
@@ -1690,24 +1694,16 @@ object Main extends IOApp with LazyLogging:
         }
 
       // MCP endpoint (POST /mcp): the agent-facing tool surface over the SAME handler
-      // instances REST uses. Auth is PAT or the static key only; the run_sql path goes
-      // through routedExecutor(recordExecution = true) so DuckLake snapshots carry the
-      // acting user's author stamp exactly like FlightSQL writes.
+      // instances REST uses. Auth is a PAT only; the run_sql path goes through
+      // routedExecutor(recordExecution = true) so DuckLake snapshots carry the acting
+      // user's author stamp exactly like FlightSQL writes.
       val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
         if !mgrCfg.mcp.enabled then None
         else
-          // TRANSITIONAL (removed with McpPrincipal.StaticKey): that principal curries no token
-          // into the REST handlers, so on this wiring alone an absent credential is the static
-          // key McpRoutes admitted. Every PAT curries its own token and resolves through the
-          // total resolver.
-          val mcpTokenScope = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-            sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-          )
           val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-            t =>
-              if t.isEmpty && mgrCfg.apiKey.exists(_.nonEmpty) then
-                ai.starlake.quack.ondemand.auth.SessionScope.Superuser
-              else mcpTokenScope(t)
+            ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+            )
           for
             cat      <- catalogHandlers
             hist     <- catalogHistoryHandlers
@@ -1776,7 +1772,6 @@ object Main extends IOApp with LazyLogging:
             )
             new ai.starlake.quack.mcp.McpRoutes(
               mgrCfg.mcp,
-              mgrCfg.apiKey.filter(_.nonEmpty),
               patAuthenticator.resolve,
               dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
                 identityTools.tools ++ accessTools.tools ++ platformTools.tools,
@@ -1784,8 +1779,7 @@ object Main extends IOApp with LazyLogging:
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
         logger.warn("mcp: enabled but a required handler is unwired; POST /mcp not mounted")
-      else if mgrCfg.mcp.enabled then
-        logger.info("mcp: serving POST /mcp (bearer auth: PAT or static API key)")
+      else if mgrCfg.mcp.enabled then logger.info("mcp: serving POST /mcp (bearer auth: PAT)")
       else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
 
       // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),

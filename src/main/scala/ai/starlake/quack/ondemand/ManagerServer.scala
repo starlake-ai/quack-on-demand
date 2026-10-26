@@ -80,7 +80,7 @@ final class ManagerServer(
     fleet: Option[FleetHandlers] = None,
     // PAT admission on /api: a PAT presented as the bearer credential (X-API-Key
     // header) is accepted wherever its owner's session JWT would be. None (tests /
-    // callers without Postgres) keeps the guard session-and-static-key only.
+    // callers without Postgres) keeps the guard session-only.
     patAuth: Option[ai.starlake.quack.ondemand.auth.PatAuthenticator] = None,
     // SCIM 2.0 provisioning surface (/api/scim/v2/{tenant}). None leaves the routes
     // unmounted; Main always wires it. SCIM clients authenticate with Authorization:
@@ -91,9 +91,9 @@ final class ManagerServer(
     // display name, and manageableTenants holds ids. None = unknown, compare raw.
     canonicalTenantIdOf: String => Option[String] = _ => None,
     // The MCP endpoint (POST /mcp), pre-built by Main when quack-on-demand.mcp.enabled.
-    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (PAT or
-    // static key, never sessions), and the guard's path filter ignores non-/api paths
-    // anyway -- mounting it here keeps that invariant explicit.
+    // Mounted OUTSIDE apiKeyGuard on purpose: /mcp does its own bearer auth (a PAT,
+    // never sessions), and the guard's path filter ignores non-/api paths anyway:
+    // mounting it here keeps that invariant explicit.
     mcpRoutes: Option[HttpRoutes[IO]] = None,
     // The native Quack front door's listener config, surfaced to the UI's connection card.
     quackCfg: Option[ai.starlake.quack.QuackNativeConfig] = None,
@@ -108,30 +108,16 @@ final class ManagerServer(
   // without the qod_pat_ prefix before touching the store, so the composition
   // costs a session caller nothing and a PAT caller one prefix check.
   //
-  // `scopeOfToken` is what every handler gate receives. It is total: no credential, or a token
-  // that stopped resolving between the guard and the handler, is SessionScope.NoAccess (see
-  // SessionScope.resolver). TRANSITIONAL: the static key resolves to a superuser through
-  // SessionScope.staticKeyLookup until the key is removed. The guard itself does not use it; it
-  // resolves once through `sessionOfToken`.
+  // `scopeOfToken` is what every handler gate receives. It is total: no credential, or one that
+  // stopped resolving between the guard and the handler, is `SessionScope.NoAccess` (see
+  // SessionScope.resolver). The guard itself does not use it; it resolves once through
+  // `sessionOfToken`.
   private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-    ai.starlake.quack.ondemand.auth.SessionScope.resolver(
-      ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
-        cfg.apiKey,
-        t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-      )
+    ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+      sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
     )
   private val sessionOfToken: String => Option[SessionTokenStore.Session] =
     t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
-
-  /** Constant-time string equality for secret comparison (static API key). `MessageDigest.isEqual`
-    * does not short-circuit on the first differing byte, closing the timing side-channel that
-    * `String.equals` (via `Option.contains`) opens. Length is not treated as secret.
-    */
-  private def constantTimeEq(a: String, b: String): Boolean =
-    java.security.MessageDigest.isEqual(
-      a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-      b.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-    )
 
   /** Best-effort host of an OIDC issuer URL, for a cosmetic provider label in the client config. */
   private def issuerHost(issuerUrl: String): String =
@@ -184,12 +170,9 @@ final class ManagerServer(
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
   /** Gate on the api namespace. Every non-public `/api/...` request must carry a credential: a
-    * session token, a live personal access token (admitted with exactly its owner's scope, admin or
-    * profile-only), or -- when `cfg.apiKey` is set -- the static key via `X-API-Key`.
-    *
-    * An unset (or empty) `cfg.apiKey` only disables the static-key arm; it never opens the
-    * namespace. The former open mode is gone: a keyless dev workflow logs in through
-    * `/api/auth/login` (or sets `QOD_API_KEY`).
+    * session token or a live personal access token, admitted with exactly its owner's scope (admin
+    * or profile-only). There is no other credential and no anonymous access: a keyless dev workflow
+    * logs in through `/api/auth/login`.
     *
     * Sessions come in two flavors since the regular-user profile feature: admin sessions (JWT
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
@@ -203,18 +186,6 @@ final class ManagerServer(
     * `/ui/...`).
     */
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
-    // Treat an empty string the same as unset. Compose / k8s configs routinely
-    // pass `QOD_API_KEY=${API_KEY:-}` with `.env API_KEY=` empty; pureconfig
-    // then materializes `Some("")`, which would otherwise enable the guard
-    // with a key no client ever sends.
-    val staticConfigured = cfg.apiKey.filter(_.nonEmpty)
-    if staticConfigured.isEmpty then
-      logger.info(
-        "QOD_API_KEY unset: static-key auth disabled; only session and PAT " +
-          "credentials are accepted on /api"
-      )
-    else logger.info("REST API X-API-Key enforcement enabled (static key + UI session tokens).")
-
     Kleisli { req =>
       // Router parity: tapir segments the path as
       // renderString.dropWhile(_ == '/').split("/").map(decode), i.e. every
@@ -232,12 +203,11 @@ final class ManagerServer(
       else
         // Admit on X-API-Key header OR on the qod_session cookie. The cookie
         // is the browser path (HttpOnly so JS can't read it; SameSite=Lax so
-        // it doesn't leak cross-origin); the header is the CLI / static-key
-        // path. A request can present either; the static key only ever
-        // matches via the header.
+        // it doesn't leak cross-origin); the header is the CLI path (a session
+        // or a personal access token). A request can present either.
         // SCIM clients (Okta, Entra) can only send Authorization: Bearer, so for the
         // SCIM prefix the bearer value is admitted exactly like an X-API-Key header
-        // (static key or PAT). Scoped to /api/scim/ on purpose: nothing else should
+        // (a session or a PAT). Scoped to /api/scim/ on purpose: nothing else should
         // gain a third credential transport.
         val bearerToken =
           if path.startsWith("/api/scim/") then
@@ -250,12 +220,6 @@ final class ManagerServer(
           req.headers.get(CIString("X-API-Key")).map(_.head.value).orElse(bearerToken)
         val cookieToken = req.cookies.find(_.name == SessionTokenStore.CookieName).map(_.content)
         val provided    = headerToken.orElse(cookieToken)
-        // Constant-time compare so a caller can't recover the static key byte by
-        // byte from response timing. `Option.contains` uses String.equals, which
-        // short-circuits on the first mismatched char.
-        val staticMatch = (staticConfigured, headerToken) match
-          case (Some(expected), Some(actual)) => constantTimeEq(actual, expected)
-          case _                              => false
         // Resolved ONCE: the admin decision, the non-admin demotion below and the
         // per-request tenant scope check further down all read this one lookup. Separate
         // lookups race a session expiring between them: admitted as admin by the first,
@@ -266,8 +230,7 @@ final class ManagerServer(
         val tokenScope      = resolved.map(_.scope)
         val nonAdminSession = resolved.isDefined && !sessionAdmin
 
-        val admitted =
-          staticMatch || sessionAdmin || (nonAdminSession && isProfileApi(path))
+        val admitted = sessionAdmin || (nonAdminSession && isProfileApi(path))
         // Strip control characters -- jsonb rejects NUL (0x00); cap length so
         // detail stays bounded. An unsanitized `%00` in the path would make
         // the insert throw and the attacker would erase their own trail.
@@ -322,9 +285,8 @@ final class ManagerServer(
               )
             OptionT.pure[IO](Response[IO](Status.Unauthorized))
         else
-          // Per-request tenant scope check. Only applies when there is a known
-          // session (not the static key). Body-tenant endpoints
-          // do their own check via TenantScopeCheck.reject.
+          // Per-request tenant scope check on the admitted credential's scope.
+          // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
           val queryTenant = req.uri.query.params.get("tenant")
           val pathTenant  = TenantScopeGuard
             .extractTenant(path, queryTenant)

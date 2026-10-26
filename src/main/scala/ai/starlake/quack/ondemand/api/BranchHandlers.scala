@@ -15,9 +15,9 @@ import sttp.model.StatusCode
 
 /** REST handlers for branches (Epic 1). Gate = [[TenantDbGate]] on the PARENT tenant-db (tenant
   * resolve, [[TenantScopeCheck]], DuckLake kind), then everything else is the service's business
-  * rules. The actor is what `actorOf` resolves: the session's username (tenant admin or superuser),
-  * a PAT's owner (an MCP data-tier PAT curries its bearer as `apiKey` and arrives here as a
-  * non-admin actor whose `mayUse` gate is the handshake), or the static key; any other token is a
+  * rules. The actor is what `actorOf` resolves: the session's username (tenant admin or superuser)
+  * or a PAT's owner (an MCP data-tier PAT curries its bearer as `apiKey` and arrives here as a
+  * non-admin actor whose `mayUse` gate is the handshake); no credential, or any other token, is a
   * 401 before the service is reached (see [[BranchHandlers.actorResolver]]). The data diff
   * delegates to [[CatalogPreviewHandlers]], whose [[RestCaller]] resolves the executor identity.
   */
@@ -260,22 +260,17 @@ final class BranchHandlers(
 
 object BranchHandlers:
 
-  private val StaticActor = BranchActor(CatalogPreviewHandlers.SuperuserIdentity, isAdmin = true)
-
-  /** The branch actor a bearer resolves to, through [[RestCaller.resolve]] (the one resolution):
-    * absent (the static key, as the MCP static principal curries it; the REST guard never admits a
-    * credential-less request) or the configured static key -> the superuser admin actor; a session
-    * -> its user, admin when it manages a tenant; a PAT -> its owner, admin per the PAT, carrying
-    * its `branchOnly` restriction (merge refuses it). Any other present token (unknown, expired,
-    * revoked, a session that died between the guard and the handler) is refused with 401
-    * `unauthorized`: it used to become the superuser admin actor, able to approve a merge.
+  /** The branch actor a bearer resolves to, through [[RestCaller.resolve]] (the one resolution): a
+    * session -> its user, admin when it manages a tenant; a PAT -> its owner, admin per the PAT,
+    * carrying its `branchOnly` restriction (merge refuses it). No credential, or any other token
+    * (unknown, expired, revoked, a session that died between the guard and the handler), is refused
+    * with 401 `unauthorized`: never a superuser admin actor able to approve a merge.
     */
   def actorResolver(
       callers: RestCaller
   ): Option[String] => Either[(StatusCode, ErrorResponse), BranchActor] =
     apiKey =>
       callers.resolve(apiKey).map {
-        case RestCaller.Principal.System     => StaticActor
         case RestCaller.Principal.Session(s) =>
           BranchActor(
             s.profile.username,

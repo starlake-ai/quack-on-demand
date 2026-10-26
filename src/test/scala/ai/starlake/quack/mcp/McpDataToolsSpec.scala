@@ -333,7 +333,7 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       sourcesOf = id => sources.getOrElse(id, Nil),
       meta = icebergMeta(metaSqls),
       executor = previewExec,
-      callerOf = RestCaller.staticOnly,
+      callerOf = RestCaller(),
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 

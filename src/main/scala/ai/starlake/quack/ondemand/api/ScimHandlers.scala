@@ -787,7 +787,7 @@ final class ScimHandlers(
                   "type"        -> Json.fromString("oauthbearertoken"),
                   "name"        -> Json.fromString("Bearer token"),
                   "description" -> Json.fromString(
-                    "QoD personal access token or static API key as an OAuth bearer token"
+                    "QoD personal access token as an OAuth bearer token"
                   )
                 )
               )

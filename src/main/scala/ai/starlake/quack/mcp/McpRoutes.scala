@@ -26,18 +26,16 @@ final case class McpToolDef(
 /** The MCP Streamable HTTP endpoint: `POST /mcp`, one JSON-RPC message per request, plain JSON
   * response, no SSE and no session id, so any HA replica answers any request.
   *
-  * Auth first, before the body is even parsed: `Authorization: Bearer <t>` where `t` is the static
-  * API key (constant-time compare, only when configured non-empty) or a live PAT. A session JWT
-  * fails both arms by construction (wrong prefix for the PAT arm, no constant-time match for the
-  * static arm), which is the design: `/mcp` never admits session credentials and never runs
-  * unauthenticated -- there is no open mode here and never was.
+  * Auth first, before the body is even parsed: `Authorization: Bearer <t>` where `t` is a live
+  * personal access token, and nothing else. A session JWT fails by construction (no `qod_pat_`
+  * prefix, so the PAT lookup refuses it), which is the design: `/mcp` never admits session
+  * credentials and never runs unauthenticated.
   *
   * `resolvePat` is the narrow seam (`PatAuthenticator.resolve` in Main) so protocol tests need no
   * store.
   */
 final class McpRoutes(
     cfg: McpConfig,
-    staticKey: Option[String],
     resolvePat: String => Option[PatPrincipal],
     tools: List[McpToolDef],
     serverVersion: String
@@ -47,20 +45,12 @@ final class McpRoutes(
 
   private val byName: Map[String, McpToolDef] = tools.map(t => t.name -> t).toMap
 
-  private def constantTimeEq(a: String, b: String): Boolean =
-    java.security.MessageDigest.isEqual(
-      a.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-      b.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-    )
-
   private def authenticate(header: Option[String]): Option[McpPrincipal] =
     header.flatMap { h =>
       if !h.startsWith("Bearer ") then None
       else
         val token = h.stripPrefix("Bearer ")
-        if token.nonEmpty && staticKey.exists(k => constantTimeEq(token, k)) then
-          Some(McpPrincipal.StaticKey)
-        else resolvePat(token).map(p => new McpPrincipal.Pat(p, token))
+        resolvePat(token).map(p => new McpPrincipal.Pat(p, token))
     }
 
   private def jsonResponse(status: Status, body: Json): Response[IO] =
