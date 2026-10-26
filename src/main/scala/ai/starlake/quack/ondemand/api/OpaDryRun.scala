@@ -23,11 +23,11 @@ object OpaDryRun:
 
   val Edge = "dry-run"
 
-  /** What a tenant admin sees for a transport failure. The tenant admin chooses the OPA URL, so the
-    * exception class or HTTP status would turn the dry run into a network probe of whatever the
-    * manager can reach; superusers keep the detail for debugging.
+  /** What a tenant admin sees for a transport failure: the live edges' message
+    * ([[OpaAuthorizer.UnavailableMessage]]), for the same reason. Superusers keep the detail for
+    * debugging.
     */
-  val GenericTransportError: String = "OPA unreachable or returned an error"
+  val GenericTransportError: String = OpaAuthorizer.UnavailableMessage
 
   /** A left is `(errorCode, message)`; `not_found` maps to 404, anything else to 400.
     * `detailedErrors` is true only for a superuser caller: see [[GenericTransportError]].

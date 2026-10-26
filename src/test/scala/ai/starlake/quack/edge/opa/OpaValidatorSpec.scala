@@ -85,10 +85,12 @@ class OpaValidatorSpec extends AnyFlatSpec with Matchers:
         meta shouldBe Map("authz_source" -> "opa", "opa_decision_id" -> "d9")
       case other => fail(other.toString)
 
-  it should "return ValidatorUnavailable on transport error" in:
-    validator(Left("ConnectException")).validate(
+  it should "return ValidatorUnavailable with the shared message, never the transport cause" in:
+    val result = validator(Left("ConnectException: opa.internal:8181")).validate(
       ctx("SELECT * FROM orders", Some(eff(true)))
-    ) shouldBe a[ValidatorUnavailable]
+    )
+    result shouldBe ValidatorUnavailable(OpaAuthorizer.UnavailableMessage)
+    result.toString.contains("opa.internal") shouldBe false
 
   it should "bypass superusers and never call OPA" in:
     val calls = StringBuilder()

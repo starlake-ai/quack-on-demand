@@ -1,5 +1,6 @@
 package ai.starlake.quack.security
 
+import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.ondemand.telemetry.EventJournal
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import com.github.tomakehurst.wiremock.WireMockServer
@@ -110,10 +111,14 @@ class OpaFlightEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
 
   it should "answer UNAVAILABLE when OPA is unreachable at handshake" in:
     wm.resetAll()
-    withBoot(url = closedPortUrl) { b =>
+    val url = closedPortUrl
+    withBoot(url = url) { b =>
       val e = flightError(query(b.h, bob, "SELECT * FROM orders"))
       e.status().code() shouldBe FlightStatusCode.UNAVAILABLE
       e.getMessage should include("authorization service unavailable")
+      e.getMessage should include(OpaAuthorizer.UnavailableMessage)
+      val port = url.substring(url.lastIndexOf(':') + 1)
+      e.getMessage.contains(port) shouldBe false
     }
 
   it should "answer UNAVAILABLE when OPA errors at handshake" in:
@@ -133,6 +138,8 @@ class OpaFlightEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       val e = flightError(query(b.h, bob, "SELECT * FROM orders"))
       e.status().code() shouldBe FlightStatusCode.UNAVAILABLE
       e.getMessage should include("authorization service unavailable")
+      e.getMessage should include(OpaAuthorizer.UnavailableMessage)
+      e.getMessage.contains("HTTP 500") shouldBe false
     }
 
   it should "send a 3-table join to OPA as ONE statement call carrying 3 accesses" in:

@@ -287,6 +287,15 @@
   to the user's session reaches `/api/pool/list`); non-admins get 403, as they do today without
   a key.
 
+- **Security: OPA transport details now go to the manager log only.** When a tenant's OPA cannot
+  decide (unreachable, timed out, a non-2xx status, a body over 1 MiB, no URL), the FlightSQL and
+  Quack handshakes, every statement, the REST and MCP data tools and `GET /api/profile/pools`
+  answered with the transport error, which could name a host, port or status. The tenant admin
+  chooses the OPA URL, so that let a tenant probe whatever the manager's network reaches. They now
+  answer "OPA unreachable or returned an error (see the manager log)" (still `UNAVAILABLE` / `503 authz_unavailable`), the text `qod tenant opa-test`
+  already showed a non-superuser; the cause stays in the WARN line
+  `OPA <connect|statement> error for tenant=<id>: ...`, where the bearer token is now masked.
+
 - **Manager modules must be recompiled against this core** (`Tenant` gained a field, and
   `AuthzRequest`, `ExecCaller` and `PoolSupervisor.authorizeHandshake` take
   `superuserAdmissible` with no default: a module that builds one or calls it passes it).

@@ -26,7 +26,8 @@ final class OpaAuthorizer(
   override def isOpa(tenant: Tenant): Boolean = tenant.acl.isOpa(cfg.defaultMode)
 
   /** Handshake gate 4 for an opa tenant: a Deny is a permission refusal, an Error (OPA unreachable,
-    * malformed answer, no URL) is `Unavailable` so the edges answer a retryable UNAVAILABLE.
+    * malformed answer, no URL) is `Unavailable` so the edges answer a retryable UNAVAILABLE. The
+    * Error's cause is logged by `run`; the client gets [[OpaAuthorizer.UnavailableMessage]] only.
     */
   override def connect(
       tenant: Tenant,
@@ -42,7 +43,7 @@ final class OpaAuthorizer(
       case Decision.Allow(_)           => Right(())
       case Decision.Deny(reason, _, _) =>
         Left(HandshakeDenial.Denied(s"pool access denied by policy: $reason"))
-      case Decision.Error(cause) => Left(HandshakeDenial.Unavailable(cause))
+      case Decision.Error(_) => Left(HandshakeDenial.Unavailable(OpaAuthorizer.UnavailableMessage))
 
   def connect(
       tenant: Tenant,
@@ -172,3 +173,12 @@ final class OpaAuthorizer(
             logger.warn(s"OPA $kind error for tenant=${tenant.id}: $cause")
           case d => logger.debug(s"OPA $kind tenant=${tenant.id} user=${user.name} -> $d")
         decision
+
+object OpaAuthorizer:
+
+  /** What a client sees when OPA cannot decide (unreachable, timed out, a non-2xx status, a body
+    * over 1 MiB, no URL configured). The tenant admin chooses the OPA URL, so the transport detail
+    * (exception class, host, port, status) would turn every outage into a network probe of whatever
+    * the manager can reach; that detail goes to the manager log only.
+    */
+  val UnavailableMessage: String = "OPA unreachable or returned an error (see the manager log)"

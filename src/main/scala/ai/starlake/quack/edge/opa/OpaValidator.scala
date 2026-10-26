@@ -8,7 +8,8 @@ import com.typesafe.scalalogging.LazyLogging
   * with PostgresAclValidator, so OPA sees exactly the accesses QoD would have checked. Every
   * `Refuse` denies (there is no wildcard escape: OPA cannot judge what the parser could not
   * resolve). Transport errors become
-  * [[ai.starlake.quack.edge.sql.ValidatorUnavailable ValidatorUnavailable]].
+  * [[ai.starlake.quack.edge.sql.ValidatorUnavailable ValidatorUnavailable]] carrying
+  * [[OpaAuthorizer.UnavailableMessage]] only; the cause is in the manager log.
   */
 final class OpaValidator(
     authorizer: OpaAuthorizer,
@@ -89,4 +90,4 @@ final class OpaValidator(
                       denied,
                       Source ++ id.map("opa_decision_id" -> _)
                     )
-                  case Decision.Error(cause) => ValidatorUnavailable(cause)
+                  case Decision.Error(_) => ValidatorUnavailable(OpaAuthorizer.UnavailableMessage)
