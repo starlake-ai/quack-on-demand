@@ -34,7 +34,8 @@ _PROMPTS: tuple[tuple[str, str, str], ...] = (
     ("QOD_PG_PASSWORD", "Postgres password", "azizam"),
     ("QOD_PG_DBNAME", "Control-plane database", "qod"),
     ("QOD_ADMIN_USERNAME", "Admin username", "admin@localhost.local,admin"),
-    ("QOD_AUTH_DB_ENABLED", "Enable DB-backed auth (true/false)", "true"),
+    ("QOD_AUTH_DB_ENABLED", "Enable DB-backed auth (true/false; false needs another "
+     "authenticator)", "true"),
     ("PROXY_TLS_ENABLED", "Enable FlightSQL edge TLS (true/false)", "true"),
 )
 # REMOVED_API_KEY stays masked: an earlier CLI may have stored one in [start].
@@ -97,6 +98,18 @@ def _check_connection(merged: dict[str, str]) -> tuple[bool, str]:
     return True, f"connection check ok ({host}:{port})"
 
 
+# Saved with QOD_AUTH_DB_ENABLED=false: the manager boots only when something else can
+# authenticate FlightSQL clients and create a session (BootPreflight).
+_NO_DB_AUTH_NOTE = (
+    "note: QOD_AUTH_DB_ENABLED=false: the manager refuses to boot unless another "
+    "authenticator is configured: a Keycloak or Azure password backend "
+    "(QOD_AUTH_KEYCLOAK_ENABLED / QOD_AUTH_AZURE_ENABLED), or a bearer provider "
+    "(JWT_SECRET_KEY / JWT_PUBLIC_KEY_PATH, QOD_AUTH_GOOGLE_ENABLED, QOD_AUTH_AWS_ENABLED) "
+    "together with system-scope OIDC sign-in (QOD_MGMT_IDENTITY_SOURCE=oidc with "
+    "QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID)."
+)
+
+
 def _is_interactive() -> bool:
     """Split out from the call site so tests can force the prompt branch
     without fighting CliRunner's stdin substitution (sys.stdin is rebound to
@@ -120,7 +133,10 @@ def setup(
         None, "--admin-username", help="Seeded admin username (QOD_ADMIN_USERNAME)."
     ),
     auth: bool = typer.Option(
-        None, "--auth/--no-auth", help="DB-backed auth (QOD_AUTH_DB_ENABLED)."
+        None, "--auth/--no-auth",
+        help="DB-backed auth (QOD_AUTH_DB_ENABLED). --no-auth needs another authenticator "
+        "(a Keycloak or Azure password backend, or a bearer provider with system-scope "
+        "OIDC sign-in), or the manager refuses to boot.",
     ),
     tls: bool = typer.Option(
         None, "--tls/--no-tls", help="FlightSQL edge TLS (PROXY_TLS_ENABLED)."
@@ -282,3 +298,5 @@ def setup(
     if not ctx.obj.json_output:
         typer.echo(f"saved to {config_path()}")
         typer.echo("run: qod start")
+    if values.get("QOD_AUTH_DB_ENABLED", "").strip().lower() == "false":
+        typer.echo(_NO_DB_AUTH_NOTE, err=True)

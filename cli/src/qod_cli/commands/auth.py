@@ -263,5 +263,6 @@ def logout(ctx: typer.Context):
 
 @covers("GET", "/api/auth/whoami")
 def whoami(ctx: typer.Context):
-    """Verify the current session."""
+    """Show who the current credential signs in as: the qod login session, or a
+    personal access token in QOD_TOKEN."""
     call(ctx, "GET", "/api/auth/whoami")

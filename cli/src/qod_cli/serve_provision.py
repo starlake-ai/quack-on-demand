@@ -34,19 +34,22 @@ from .serve_target import ServeTarget, composed_db_name
 class ProvisionError(Exception):
     """A provisioning step that failed in a way the user can act on.
 
-    `manual` names the equivalent hand-run command so the caller can finish by
-    hand. The manager is deliberately left running when one of these is raised:
-    every step is ensure-semantics, so the next `qod serve` resumes where this
-    one stopped.
+    `manual` names the equivalent hand-run commands, one per line, so the caller
+    can finish by hand. `hint` is advice that is no such command (where to look,
+    or a collision's way out, where a create would collide again). The manager is
+    deliberately left running when one of these is raised: every step is
+    ensure-semantics, so the next `qod serve` resumes where this one stopped.
     """
 
-    def __init__(self, step: str, detail: str, manual: str = ""):
+    def __init__(self, step: str, detail: str, manual: str = "", hint: str = ""):
         self.step = step
         self.detail = detail
         self.manual = manual
+        self.hint = hint
         message = f"{step}: {detail}"
-        if manual:
-            message += f" ({manual})"
+        for extra in (manual, hint):
+            if extra:
+                message += f" ({extra})"
         super().__init__(message)
 
 
@@ -56,8 +59,8 @@ SPEC_FILE = "serve-provision.json"
 OUTCOME_FILE = "serve-provision.outcome.json"
 
 # The fix every collision names (a database name or a pool name already taken): both
-# this module and the boot hook end such a refusal with it, and no create-by-hand
-# command follows, since it would collide again.
+# this module (as the refusal's hint) and the boot hook (in its reason) give it, and
+# no create-by-hand command follows, since it would collide again.
 ANOTHER_NAME = "serve it under another name"
 
 
@@ -153,9 +156,13 @@ def write_spec(path: Path, spec: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        json.dump(spec, out, indent=2)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(spec, out, indent=2)
+        os.replace(tmp, path)
+    finally:
+        # A failed write leaves no partial copy of the credentials behind.
+        tmp.unlink(missing_ok=True)
 
 
 def outcome_path(spec_path: Path) -> Path:
@@ -179,7 +186,7 @@ def _read_outcome(path: Path) -> dict | None:
         raise ProvisionError(
             "read provisioning outcome",
             f"{path} holds no outcome this CLI understands",
-            "the manager log above says why",
+            hint="the manager log above says why",
         )
     return outcome
 
@@ -230,7 +237,7 @@ def wait_ready(
     raise ProvisionError(
         "wait for manager",
         f"/ready never went green within {timeout_s:.0f}s (last: {last})",
-        "the manager log above says why; `qod status` reports what is up",
+        hint="the manager log above says why; `qod status` reports what is up",
     )
 
 
@@ -289,7 +296,7 @@ def ensure_database(client: RestClient, tenant: str, target: ServeTarget) -> boo
         raise ProvisionError(
             "ensure database",
             detail,
-            f"{ANOTHER_NAME}: qod serve <target> --name <other>",
+            hint=f"{ANOTHER_NAME}: qod serve <target> --name <other>",
         )
     try:
         client.request("POST", "/api/database/create", body=database_body(tenant, target))
@@ -365,7 +372,7 @@ def ensure_pool(client: RestClient, tenant: str, db_full: str, pool: str, size: 
         raise ProvisionError(
             "ensure pool",
             f"pool {pool!r} already serves database {row.get('tenantDb')!r}",
-            f"{ANOTHER_NAME}: qod serve <target> --pool <other>",
+            hint=f"{ANOTHER_NAME}: qod serve <target> --pool <other>",
         )
     try:
         client.request("POST", "/api/pool/create", body=pool_body(tenant, db_full, pool, size))

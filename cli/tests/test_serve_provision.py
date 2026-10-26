@@ -42,9 +42,12 @@ def test_wait_ready_returns_once_ready_is_200(client, respx_mock):
 def test_wait_ready_raises_on_timeout(client, respx_mock):
     respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(503))
     ticks = iter([0.0, 1.0, 2.0, 99.0])
-    with pytest.raises(ProvisionError, match="never went green"):
+    with pytest.raises(ProvisionError, match="never went green") as ei:
         wait_ready(client, timeout_s=5, interval_s=0, sleep=lambda _s: None,
                    now=lambda: next(ticks))
+    # Where to look is no command to finish by hand.
+    assert ei.value.manual == ""
+    assert "qod status" in ei.value.hint
 
 
 def test_ensure_tenant_creates_when_absent(client, respx_mock):
@@ -107,7 +110,9 @@ def test_ensure_database_refuses_a_name_collision_on_different_data(client, resp
     )
     with pytest.raises(ProvisionError, match="--name") as ei:
         ensure_database(client, "default", _target())
-    assert "--name" in ei.value.manual
+    # The way out is advice, not a command to finish by hand: a create would collide again.
+    assert ei.value.manual == ""
+    assert ei.value.hint == "serve it under another name: qod serve <target> --name <other>"
 
 
 def test_ensure_database_refuses_a_memory_target_reusing_a_different_directory(client, respx_mock):
@@ -120,7 +125,8 @@ def test_ensure_database_refuses_a_memory_target_reusing_a_different_directory(c
                       metastore={})
     with pytest.raises(ProvisionError, match="--name") as ei:
         ensure_database(client, "default", target)
-    assert "--name" in ei.value.manual
+    assert ei.value.manual == ""
+    assert "--name" in ei.value.hint
 
 
 def test_ensure_database_reuses_a_matching_memory_row(client, respx_mock):
@@ -289,6 +295,32 @@ def test_write_spec_is_owner_only_and_replaces_an_earlier_file(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_write_spec_leaves_no_temporary_file_when_the_write_fails(tmp_path, monkeypatch):
+    # The spec can carry object-store credentials: a failed write must not leave them behind.
+    from qod_cli import serve_provision
+
+    def failing_dump(obj, out, **kw):
+        out.write('{"database": {"objectStore": ')
+        raise OSError("disk full")
+
+    monkeypatch.setattr(serve_provision.json, "dump", failing_dump)
+    path = tmp_path / "serve-provision.json"
+    with pytest.raises(OSError, match="disk full"):
+        serve_provision.write_spec(path, {"database": {}})
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_an_unreadable_outcome_names_where_to_look_as_advice(tmp_path):
+    from qod_cli.serve_provision import wait_outcome
+
+    path = tmp_path / "serve-provision.outcome.json"
+    path.write_text("not json")
+    with pytest.raises(ProvisionError, match="holds no outcome") as ei:
+        wait_outcome(path, timeout_s=1, sleep=lambda _s: None)
+    assert ei.value.manual == ""
+    assert ei.value.hint == "the manager log above says why"
+
+
 def test_wait_outcome_returns_once_the_manager_wrote_it(tmp_path):
     from qod_cli.serve_provision import wait_outcome
 
@@ -366,5 +398,6 @@ def test_ensure_pool_refuses_a_pool_name_serving_another_database(client, respx_
     create = respx_mock.post(f"{BASE}/api/pool/create")
     with pytest.raises(ProvisionError, match="already serves database 'default_other'") as ei:
         ensure_pool(client, "default", "default_sales", "bi", 1)
-    assert ei.value.manual == "serve it under another name: qod serve <target> --pool <other>"
+    assert ei.value.manual == ""
+    assert ei.value.hint == "serve it under another name: qod serve <target> --pool <other>"
     assert not create.called

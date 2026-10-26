@@ -350,13 +350,23 @@ def _failure_tail(attached: bool) -> str:
     return "  the manager is still running; re-run qod serve to resume, or Ctrl-C to stop."
 
 
+# The release the launcher expects: the CLI and the manager share a version number.
+_MATCHING_RELEASE = (
+    "the manager release matching this CLI (`qod --version` shows it; drop an older "
+    "`--jar` or `--version`)"
+)
+
+
 def _report_failure(exc: Exception, echo, attached: bool) -> None:
-    """Both provisioning paths' failure arm: the step and its hand-run commands (one
-    line each) when there are any, then where the manager stands."""
+    """Both provisioning paths' failure arm: the step, its hand-run commands (one
+    `finish by hand:` line each) when there are any, and its advice (where to look,
+    a collision's way out) on plain lines, then where the manager stands."""
     if isinstance(exc, ProvisionError):
         echo(f"\nqod serve: {exc.step} failed: {exc.detail}")
         for command in exc.manual.splitlines():
             echo(f"  finish by hand: {command}")
+        for line in exc.hint.splitlines():
+            echo(f"  {line}")
     elif isinstance(exc, ApiError):
         echo(f"\nqod serve: provisioning failed: {exc}")
     else:
@@ -377,7 +387,7 @@ def _finish(
     # On a RESTART the pool row exists but a respawned node may still be
     # seconds from healthy; wait for one before printing connect strings
     # that would otherwise briefly fail. Never fails provisioning over it, and
-    # without a credential (a later boot) there is no listing to wait on.
+    # without a working credential there is no listing to wait on.
     if not token or not wait_node_routable(
         client, tenant, db_full, pool,
         timeout_s=node_timeout, sleep=node_sleep, now=node_now,
@@ -482,7 +492,7 @@ def _provision(
 def _provision_at_boot(
     *, manager_url: str, spec_path: Path, tenant: str, target, pool: str, size: int,
     profile: str, ready_timeout: float, pg_port: int, pg_data_dir: str, echo,
-    password: str | None = None, first_boot: bool = False,
+    password: str | None = None, token: str = "", first_boot: bool = False,
     admin_names: list[str] | None = None, sleep=time.sleep, now=time.monotonic,
     node_timeout: float = 60.0, node_sleep=time.sleep, node_now=time.monotonic,
 ) -> bool:
@@ -494,7 +504,9 @@ def _provision_at_boot(
 
     On a first boot (PASSWORD given) it logs in as the seeded admin, saves the
     session to the profile and uses it to wait for a routable node. A later boot
-    holds no credential: the banner carries the node-warming note instead.
+    waits with TOKEN instead (QOD_TOKEN, or the profile's unexpired session) when
+    it lists pools, and saves nothing; with none that does, the banner carries the
+    node-warming note.
 
     Never raises, like _provision: it runs on a background thread whose
     exception would be invisible, and the manager stays up either way."""
@@ -510,8 +522,8 @@ def _provision_at_boot(
                 "provisioning",
                 "the manager answers /ready but wrote no provisioning outcome within "
                 f"--ready-timeout ({ready_timeout:.0f}s): this manager release does not "
-                "provision at boot. Run a release matching this CLI (check qod serve "
-                "--version), or provision by hand after qod login",
+                f"provision at boot. Run {_MATCHING_RELEASE}, "
+                "or provision by hand after qod login",
                 provision_by_hand(tenant, target, pool, size),
             )
         # Consumed: the database body can carry object-store credentials, which
@@ -524,7 +536,7 @@ def _provision_at_boot(
                 raise ProvisionError(
                     "provisioning",
                     "the manager could not read the provisioning file the launcher wrote: "
-                    f"{reason} (a launcher/manager version mismatch: check qod serve --version)",
+                    f"{reason} (a launcher/manager version mismatch: run {_MATCHING_RELEASE})",
                 )
             # A collision's reason already names its fix (another --name or --pool), and a
             # create-by-hand command would collide again.
@@ -533,12 +545,13 @@ def _provision_at_boot(
                 else finish_by_hand(step, tenant, target, pool, size)
             )
             raise ProvisionError(f"create {step}" if step else "provisioning", reason, manual)
-        token = ""
         if password is not None:
             login = client.request(
                 "POST", "/api/auth/login", body={"username": _ADMIN_USER, "password": password}
             )
             token = login["token"]
+        elif not _lists_pools(manager_url, token):
+            token = ""
         _finish(
             client=RestClient(Settings(manager_url=manager_url, token=token)),
             manager_url=manager_url, tenant=tenant, target=target, pool=pool, size=size,
@@ -551,6 +564,18 @@ def _provision_at_boot(
     except Exception as exc:  # noqa: BLE001 - never raises, see the docstring above.
         _report_failure(exc, echo, attached=False)
         return False
+
+
+def _lists_pools(manager_url: str, token: str) -> bool:
+    """Whether TOKEN can list pools, the listing the node wait polls: one look,
+    so a refused or under-privileged credential costs no wait."""
+    if not token:
+        return False
+    try:
+        RestClient(Settings(manager_url=manager_url, token=token)).request("GET", "/api/pool/list")
+    except ApiError:
+        return False
+    return True
 
 
 def _spawn_provisioning(**kwargs) -> None:
@@ -853,6 +878,10 @@ def serve(
     # will seed the admin row from this password, once. It is never stored.
     first_boot = not (Path(effective_pg_dir) / "pgdata").is_dir()
     password = None
+    # A later boot waits for a routable node with the caller's own credential
+    # (QOD_TOKEN, else the profile's session), as attach mode provisions with
+    # it; an expired session counts as none.
+    restart_token = ""
     if first_boot:
         password = admin_password.first_boot_password(
             os.environ.get(admin_password.KEY), admin_password.is_interactive()
@@ -860,6 +889,8 @@ def serve(
         if password is None:
             typer.echo(admin_password.refusal("qod serve"), err=True)
             raise typer.Exit(1)
+    else:
+        restart_token = admin_password.usable_session_token(load_settings(ctx.obj.profile).token)
 
     env = launcher.runtime_env(
         base_env, duckdb_bin, spawn_sh, spawn_ps1, libduckdb_lib=libduckdb, qod_node_bin=node_bin
@@ -873,9 +904,9 @@ def serve(
     if sf_plan is not None:
         env.update(starflow.manager_env(sf_plan.url, sf_plan.secret))
     # The manager provisions the tenant, database and pool itself, at boot
-    # (ServeProvisionHook), from this spec: no credential is needed for it, so a
-    # later boot holds none. An outcome left by an earlier boot is deleted first,
-    # or the provisioning thread could read it as this boot's.
+    # (ServeProvisionHook), from this spec: no credential is needed for it. An
+    # outcome left by an earlier boot is deleted first, or the provisioning thread
+    # could read it as this boot's.
     spec_path = state_dir / SPEC_FILE
     write_spec(spec_path, provision_spec(tenant, resolved, pool, size))
     outcome_path(spec_path).unlink(missing_ok=True)
@@ -908,6 +939,7 @@ def serve(
         pg_data_dir=effective_pg_dir,
         echo=lambda line: typer.echo(line, err=True),
         password=password,
+        token=restart_token,
         first_boot=first_boot,
         admin_names=admin_password.admin_usernames(env),
     )
@@ -923,9 +955,16 @@ def serve(
             ready_timeout=ready_timeout,
         )
 
-    _exec(
-        launcher.build_jar_command(
-            java, str(jar_path), list(ctx.args), java_opts=env.get("JAVA_OPTS")
-        ),
-        env,
-    )
+    try:
+        _exec(
+            launcher.build_jar_command(
+                java, str(jar_path), list(ctx.args), java_opts=env.get("JAVA_OPTS")
+            ),
+            env,
+        )
+    finally:
+        # The spec can carry object-store credentials. The provisioning thread
+        # deletes it once the manager reported; whatever else ended the run
+        # (Ctrl-C, a refused boot, a release that never reads it, a ready
+        # timeout), it does not outlive the manager.
+        spec_path.unlink(missing_ok=True)
