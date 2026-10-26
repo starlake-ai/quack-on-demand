@@ -12,22 +12,21 @@ import java.net.http.HttpResponse
   */
 class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
-  private val ApiKey = "k"
-  private val t      = SecurityFixtures.TenantId
-  private val pool   = SecurityFixtures.PoolName
-  private val user   = SecurityFixtures.BobUsername
+  private val t    = SecurityFixtures.TenantId
+  private val pool = SecurityFixtures.PoolName
+  private val user = SecurityFixtures.BobUsername
 
   private def withHarness(addTenantB: Boolean = false)(
       body: ManagerServerHarness.Harness => Unit
   ): Unit =
     val fix = SecurityFixtures.freshStore()
     if addTenantB then SecurityFixtures.addTenantB(fix)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = Some(ApiKey))
+    val h = ManagerServerHarness.boot(fix.store)
     try body(h)
     finally h.shutdown()
 
   private def postJson(h: ManagerServerHarness.Harness, path: String, json: String) =
-    post(h.httpClient, s"${h.baseUrl}$path", json, apiKey = Some(ApiKey))
+    post(h.httpClient, s"${h.baseUrl}$path", json, apiKey = Some(h.superuserSession()))
 
   private def code(r: HttpResponse[String]): String =
     withClue(s"body: ${r.body()}")(errorCode(r.body()).getOrElse(""))
@@ -62,7 +61,8 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       cursor(r3).get[Boolean]("opaTokenSet") shouldBe Right(false)
 
       // The listing carries the same write-only shape.
-      val list = get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(ApiKey))
+      val list =
+        get(h.httpClient, s"${h.baseUrl}/api/tenant/list", apiKey = Some(h.superuserSession()))
       list.body() should not include "s3cr3t-tok"
 
       // mode "" clears back to the manager default (qod in the harness).
@@ -72,7 +72,7 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   it should "persist the acl, and keep it through a later setAuth of the same tenant" in {
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some(ApiKey))
+    val h   = ManagerServerHarness.boot(fix.store)
     try
       cursor(
         postJson(h, "/api/tenant/setAcl", s"""{"name":"$t","mode":"opa","opaUrl":"http://opa"}""")
@@ -210,7 +210,7 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     ) shouldBe "not_found"
   }
 
-  it should "give a tenant admin a generic transport error and the static key the detail" in
+  it should "give a tenant admin a generic transport error and a superuser the detail" in
     withHarness() { h =>
       cursor(
         postJson(
@@ -220,10 +220,10 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
         )
       )
       val body = s"""{"tenant":"$t","pool":"$pool","user":"$user"}"""
-      // Static key (trusted operator): the transport detail, for debugging.
-      val keyed = cursor(postJson(h, "/api/tenant/opaTest", body))
-      keyed.get[String]("outcome") shouldBe Right("error")
-      keyed.get[String]("reason").toOption.get should not be OpaDryRun.GenericTransportError
+      // A superuser: the transport detail, for debugging.
+      val detailed = cursor(postJson(h, "/api/tenant/opaTest", body))
+      detailed.get[String]("outcome") shouldBe Right("error")
+      detailed.get[String]("reason").toOption.get should not be OpaDryRun.GenericTransportError
       // A tenant admin chooses the URL, so a detailed error would make opaTest a network probe.
       val aliceToken = h.mintToken(
         SecurityFixtures.AliceUsername,

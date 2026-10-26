@@ -252,7 +252,9 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
           IO.pure(Right(QueryResult(emptyReader(), () => closed = true, "node-1", 1L)))
         }
 
-      val callers  = RestCaller(patOf = t => Option.when(t == AgentRaw)(AgentPat))
+      val callers = RestCaller(patOf =
+        t => Option.when(t == AgentRaw)(AgentPat).orElse(McpSuperuserPat.patOf(t))
+      )
       val restoreH = new CatalogRestoreHandlers(
         sup,
         store,
@@ -280,7 +282,8 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       val cfgH     = new ConfigHandlers(ConfigFactory.load(), liveConfigEntries)
       val historyH = new HistoryHandlers(NoopTelemetryStore)
       val usageH   = new UsageHandlers(NoopTelemetryStore)
-      val scopeOf: SessionScope.Resolver = _ => SessionScope.Superuser
+      val scopeOf: SessionScope.Resolver =
+        t => if t.contains(AgentRaw) then AgentPat.scope else McpSuperuserPat.scopeOf(t)
 
       val tools = new McpPlatformTools(
         restoreH,
@@ -312,7 +315,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
     val out = call(
       tools,
       "list_recoverable",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb)
     )
@@ -326,7 +329,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
     val out = call(
       tools,
       "restore_snapshot",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString("tpch1"),
@@ -340,7 +343,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
     val out = call(
       tools,
       "restore_snapshot",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString("tpch1"),
@@ -359,7 +362,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
     val out = call(
       tools,
       "undrop_table",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "schema"   -> Json.fromString("tpch1"),
@@ -422,18 +425,4 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       withClue(out)(out.isRight shouldBe true)
       seen.toList.map((leg, c) => (leg, ownerShape(c))) shouldBe
         List(("undrop", ("agent-owner", AgentRestriction, Some("pat-agent"), false)))
-    }
-
-  "the static key" should "run restore and undrop as the system caller" in
-    withRecordingTools { (tools, seen) =>
-      call(
-        tools,
-        "undrop_table",
-        McpPrincipal.StaticKey,
-        "tenant"   -> Json.fromString(Tenant0),
-        "database" -> Json.fromString(TenantDb),
-        "schema"   -> Json.fromString("tpch1"),
-        "table"    -> Json.fromString("doomed")
-      ).isRight shouldBe true
-      seen.toList.map((leg, c) => (leg, c.system)) shouldBe List(("undrop", true))
     }

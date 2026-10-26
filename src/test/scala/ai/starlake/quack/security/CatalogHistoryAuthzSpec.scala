@@ -18,8 +18,8 @@ import java.net.http.HttpResponse
   * `GET /api/catalog/tenant/{tenant}/database/{tenantDb}/schemas/{schema}/tables/{table}/history`
   * is session-gated exactly like the other catalog browser GETs pinned by [[CatalogAuthzSpec]]:
   * `apiKeyGuard` at the perimeter plus the handler-level TenantScopeCheck gate. This spec pins:
-  * credential-less 401 (static key set), cross-tenant 403 tenant_forbidden, superuser pass-through,
-  * 404 on an unknown tenant (no existence leak), and 400 invalid_filter on malformed filter params.
+  * credential-less 401, cross-tenant 403 tenant_forbidden, superuser pass-through, 404 on an
+  * unknown tenant (no existence leak), and 400 invalid_filter on malformed filter params.
   */
 class CatalogHistoryAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
@@ -49,14 +49,11 @@ class CatalogHistoryAuthzSpec extends AnyFlatSpec with Matchers with SecurityHtt
       errorCode(resp.body()) shouldBe Some("tenant_forbidden")
     }
 
-  private def bootWithTwoTenants(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def bootWithTwoTenants(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addTenantB(fix)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       catalogReader = Some((_, _) => emptyReader)
     )
     (h, fix)
@@ -70,8 +67,8 @@ class CatalogHistoryAuthzSpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   // ---------- Spec ------------------------------------------------------------
 
-  "the history endpoint" should "reject a credential-less GET with 401 when a static key is set" in {
-    val (h, _) = bootWithTwoTenants(staticApiKey = Some("static-key-for-history-authz"))
+  "the history endpoint" should "reject a credential-less GET with 401" in {
+    val (h, _) = bootWithTwoTenants()
     try
       get(h.httpClient, historyUrl(h, SecurityFixtures.TenantId, SecurityFixtures.TenantDbName))
         .statusCode() shouldBe 401

@@ -1,5 +1,8 @@
 package ai.starlake.quack.security
 
+import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
+import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
 import io.circe.parser.parse
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpec
@@ -8,17 +11,29 @@ import org.scalatest.matchers.should.Matchers
 import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
+import scala.util.Try
 
 /** End-to-end SCIM 2.0 provisioning over the real ManagerServer: bearer-token auth (the SCIM
   * transport), user and group lifecycle, filters, PATCH semantics, and the tenant perimeter.
+  *
+  * The cases act as the fixture superuser, whose login session rides the Bearer (the guard admits a
+  * session there as it does on X-API-Key), so they need no database. One case presents the
+  * credential an IdP connector is documented to hold, a tenant admin's personal access token; it
+  * runs only where the test Postgres is reachable (`qodstate_pat` has an FK to `qodstate_user`).
   */
 class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with BeforeAndAfterAll:
   import ManagerServerHarness.*
   import SecurityFixtures.*
 
-  private val StaticKey        = "scim-spec-static-key"
+  TestPostgres.dropStrayTestDatabases("qodscim")
+
+  private val dbName           = s"qodscim_test_${System.nanoTime()}"
+  private var users: UserStore = null
+  private var pats: PatStore   = null
   private var fix: Fixture     = scala.compiletime.uninitialized
   private var harness: Harness = scala.compiletime.uninitialized
+  // The fixture superuser's login session: the default Bearer.
+  private var session: String = scala.compiletime.uninitialized
 
   override def beforeAll(): Unit =
     fix = freshStore()
@@ -31,9 +46,24 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       at.favre.lib.crypto.bcrypt.BCrypt.withDefaults().hashToString(10, "ginapw".toCharArray),
       "admin"
     )
-    harness = boot(fix.store, staticApiKey = Some(StaticKey))
+    harness = boot(fix.store)
+    session = harness.superuserSession()
+    // The tenant-admin PAT case's store; without Postgres that case cancels.
+    if TestPostgres.reachable then
+      TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
+      val url = TestPostgres.dbUrl(dbName)
+      new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
+      users = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      pats = new PatStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      // The PAT's owner, mirrored from the login fixture: qodstate_pat's FK is on this row.
+      users.upsertUser(Some(TenantId), AliceUsername, AlicePassword, "admin")
 
-  override def afterAll(): Unit = if harness != null then harness.shutdown()
+  override def afterAll(): Unit =
+    if harness != null then harness.shutdown()
+    if pats != null then pats.close()
+    if users != null then users.close()
+    if users != null then Try(TestPostgres.dropDatabase(dbName))
+    ()
 
   private def scimUrl(rest: String, tenant: String = TenantId): String =
     s"${harness.baseUrl}/api/scim/v2/$tenant/$rest"
@@ -43,7 +73,7 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       method: String,
       url: String,
       body: Option[String] = None,
-      bearer: Option[String] = Some(StaticKey)
+      bearer: Option[String] = Some(session)
   ): HttpResponse[String] =
     val b = HttpRequest.newBuilder(URI.create(url)).timeout(RequestTimeout)
     bearer.foreach(t => b.header("Authorization", s"Bearer $t"))
@@ -63,7 +93,7 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
     val r = scim("GET", scimUrl("Users"), bearer = None)
     r.statusCode() shouldBe 401
 
-  it should "accept the static key as an OAuth bearer token" in:
+  it should "accept a superuser session as an OAuth bearer token" in:
     val r = scim("GET", scimUrl("ServiceProviderConfig"))
     r.statusCode() shouldBe 200
     r.body() should include("urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig")
@@ -82,7 +112,7 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
   it should "accept a lowercase bearer scheme (RFC 7235)" in:
     val b = HttpRequest
       .newBuilder(URI.create(scimUrl("ServiceProviderConfig")))
-      .header("Authorization", s"bearer $StaticKey")
+      .header("Authorization", s"bearer $session")
       .GET()
       .timeout(RequestTimeout)
     val r = harness.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
@@ -109,6 +139,41 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       .timeout(RequestTimeout)
     val r = harness.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
     r.statusCode() shouldBe 200
+
+  it should "pin a tenant-admin PAT presented as the bearer to its own tenant" in:
+    // What an IdP connector is documented to hold: a tenant admin's personal access token.
+    TestPostgres.ensureReachable()
+    val uid = users
+      .userIdOf(Some(TenantId), AliceUsername)
+      .getOrElse(fail(s"fixture user $AliceUsername not found"))
+    val (_, raw) = pats.mint(uid, "scim-connector", TokenRestriction.Unrestricted, None, 0)
+    // Its own harness and fixture store, with the PAT wiring Main has when Postgres is configured;
+    // the other cases' store is left alone.
+    val patFix = freshStore()
+    addTenantB(patFix)
+    val h = boot(
+      patFix.store,
+      patStore = Some(pats),
+      patUserOf =
+        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
+      patAuth =
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+    )
+    def listUsers(tenant: String): HttpResponse[String] =
+      val b = HttpRequest
+        .newBuilder(URI.create(s"${h.baseUrl}/api/scim/v2/$tenant/Users"))
+        .header("Authorization", s"Bearer $raw")
+        .GET()
+        .timeout(RequestTimeout)
+      h.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
+    try
+      val own = listUsers(TenantId)
+      withClue(own.body())(own.statusCode() shouldBe 200)
+      own.body() should include("urn:ietf:params:scim:api:messages:2.0:ListResponse")
+      // Another tenant's base URL: the PAT carries its owner's tenant scope and nothing more.
+      val crossed = listUsers(GlobexTenantName)
+      withClue(crossed.body())(crossed.statusCode() shouldBe 403)
+    finally h.shutdown()
 
   // ---------------- users ----------------
 

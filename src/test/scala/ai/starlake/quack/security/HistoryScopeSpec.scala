@@ -30,7 +30,6 @@ import java.time.Instant
   *   5. Statements: ?status=denied filter works; ?q= substring filter works.
   *   6. Statements: limit=1 paginates without overlap; page-2 ids are strictly older; nextBefore
   *      round-trip produces the next page.
-  *   7. Statements: static-key caller sees all 4 rows.
   */
 class HistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers {
 
@@ -131,13 +130,12 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     parse(body).toOption
       .flatMap(_.hcursor.get[Option[String]]("nextBefore").toOption.flatten)
 
-  private def bootHarness(staticApiKey: Option[String] = None) = {
+  private def bootHarness() = {
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
     SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       telemetryStore = ts
     )
     seedAll(ts)
@@ -351,21 +349,6 @@ class HistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       ids1.intersect(ids2) shouldBe empty
       // Page 2 id is strictly older (smaller row id) than page 1 id.
       ids2.head.toLong < ids1.head.toLong shouldBe true
-    } finally h.shutdown()
-  }
-
-  it should "return all 4 statements for a static-key call (superuser semantics)" in {
-    val (h, _, _) = bootHarness(staticApiKey = Some("test-static-key"))
-    try {
-      val resp = get(
-        h.httpClient,
-        s"${h.baseUrl}/api/history/statements",
-        apiKey = Some("test-static-key")
-      )
-      withClue(s"static-key statements body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        statementsOf(resp.body()) should have size 4
-      }
     } finally h.shutdown()
   }
 }

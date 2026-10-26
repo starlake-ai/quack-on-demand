@@ -15,7 +15,6 @@ import java.net.http.HttpResponse
   */
 class TenantAuthApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
-  private val ApiKey = "k"
   private val t      = SecurityFixtures.TenantId
   private val Issuer = "https://idp.example.com/realms/acme"
   private val Secret = "kc-s3cr3t-value"
@@ -25,7 +24,7 @@ class TenantAuthApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
       body: (ManagerServerHarness.Harness, SecurityFixtures.Fixture) => Unit
   ): Unit =
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(fix.store, staticApiKey = Some(ApiKey))
+    val h   = ManagerServerHarness.boot(fix.store)
     try body(h, fix)
     finally h.shutdown()
 
@@ -138,17 +137,18 @@ class TenantAuthApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
   it should
     "answer 400 to a blank secret, a clientSecret config key, and a value plus a new reference" in
     withHarness { (h, _) =>
-      val blank = setAuth(h, ApiKey, Oidc, Some("   "))
+      val su    = root(h)
+      val blank = setAuth(h, su, Oidc, Some("   "))
       blank.statusCode() shouldBe 400
       code(blank) shouldBe "invalid_client_secret"
 
-      val inConfig = setAuth(h, ApiKey, Oidc + ("clientSecret" -> Secret))
+      val inConfig = setAuth(h, su, Oidc + ("clientSecret" -> Secret))
       inConfig.statusCode() shouldBe 400
       code(inConfig) shouldBe "invalid_auth_config"
       inConfig.body() should not include Secret
 
-      // The static key counts as a superuser, so the reference itself is admitted.
-      val both = setAuth(h, ApiKey, Oidc + ("clientSecretRef" -> "env:X"), Some(Secret))
+      // A superuser session, so the reference itself is admitted.
+      val both = setAuth(h, su, Oidc + ("clientSecretRef" -> "env:X"), Some(Secret))
       both.statusCode() shouldBe 400
       code(both) shouldBe "secret_conflict"
     }
@@ -158,7 +158,7 @@ class TenantAuthApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
       h.httpClient,
       s"${h.baseUrl}/api/tenant/setAuth",
       """{"name":"nope","authProvider":"db"}""",
-      apiKey = Some(ApiKey)
+      apiKey = Some(root(h))
     )
     r.statusCode() shouldBe 404
     code(r) shouldBe "not_found"
@@ -178,8 +178,8 @@ class TenantAuthApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpe
           )
         )
         .noSpaces
-      // The static key is a superuser caller: the create gate admits it, the config rule does not.
-      val r = post(h.httpClient, s"${h.baseUrl}/api/tenant/create", body, apiKey = Some(ApiKey))
+      // A superuser session: the create gate admits it, the config rule does not.
+      val r = post(h.httpClient, s"${h.baseUrl}/api/tenant/create", body, apiKey = Some(root(h)))
       r.statusCode() shouldBe 400
       code(r) shouldBe "invalid_auth_config"
       r.body() should not include Secret

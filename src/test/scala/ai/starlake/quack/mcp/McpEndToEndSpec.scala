@@ -62,14 +62,12 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     pats.mint(uid, s"mcp-$username", TokenRestriction.Unrestricted, None, 0)._2
 
   private def withHarness(
-      staticApiKey: Option[String] = Some("static-key-1"),
       mcpEnabled: Boolean = true
   )(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
@@ -207,8 +205,8 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     postMcp(h, rpc("ping"), Some(session)).statusCode() shouldBe 401
   }
 
-  it should "401 any non-PAT bearer when no static key is configured" in
-    withHarness(staticApiKey = None) { h =>
+  it should "401 any non-PAT bearer, and a missing one" in
+    withHarness() { h =>
       postMcp(h, rpc("ping"), Some("some-random-value")).statusCode() shouldBe 401
       postMcp(h, rpc("ping"), None).statusCode() shouldBe 401
     }

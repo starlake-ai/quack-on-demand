@@ -38,14 +38,13 @@ import scala.util.Try
   * 23210-23219, against a throwaway control-plane database; never the default ports. Teardown stops
   * the manager fiber, then any node of this manager by its marker (kill-quack-nodes.sh --port
   * 20952), then drops the database. Cancelled (not failed) when the test Postgres (SL_TEST_PG_*) is
-  * unreachable.
+  * unreachable. REST calls ride a login session of the seeded admin (admin / admin).
   */
 class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   import Main.given
 
   private val RestPort   = 20952
   private val FlightPort = 31352
-  private val ApiKey     = "local-smoke-key"
   private val Tenant     = "smoke"
   private val TenantDb   = "smoke_db"
   private val Pool       = "bi"
@@ -61,6 +60,10 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     else None
 
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
+
+  // The seeded admin's session, minted once the manager answers /health (bootManager). Every
+  // REST call sends it as X-API-Key.
+  private var session: String = ""
 
   private var manager: FiberIO[Either[Throwable, ExitCode]]              = null
   @volatile private var bootOutcome: Option[Either[Throwable, ExitCode]] = None
@@ -99,7 +102,7 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     val b = HttpRequest
       .newBuilder(URI.create(s"http://127.0.0.1:$RestPort$path"))
       .timeout(Duration.ofSeconds(20))
-      .header("X-API-Key", ApiKey)
+      .header("X-API-Key", session)
       .header("Content-Type", "application/json")
     val req = body match
       case Some(json) => b.method(method, HttpRequest.BodyPublishers.ofString(json)).build()
@@ -111,6 +114,21 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     val (code, body) = request("POST", path, Some(json))
     withClue(s"POST $path -> $code $body: ")(code should (be >= 200 and be < 300))
     if body.isBlank then Json.Null else parse(body).fold(e => fail(e.getMessage), identity)
+
+  private def login(): String =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$RestPort/api/auth/login"))
+        .timeout(Duration.ofSeconds(20))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString("""{"username":"admin","password":"admin"}"""))
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    withClue("POST /api/auth/login: ")(r.statusCode() shouldBe 200)
+    parse(r.body()).toOption
+      .flatMap(_.hcursor.get[String]("token").toOption)
+      .getOrElse(fail("no token field in the login response"))
 
   private def poolNodes(): List[Json] =
     val (code, body) = request("GET", "/api/pool/list", None)
@@ -132,7 +150,6 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
          |quack-on-demand {
          |  host = "127.0.0.1"
          |  port = $RestPort
-         |  apiKey = "$ApiKey"
          |  runtimeType = "local"
          |  minPort = 23210
          |  maxPort = 23219
@@ -201,6 +218,7 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
       )
       Option.when(r.statusCode() == 200)(())
     }
+    session = login()
 
   private def selectFortyTwo(): String =
     val allocator         = new RootAllocator()

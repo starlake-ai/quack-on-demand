@@ -16,10 +16,7 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.util.Try
 
 /** End-to-end contract of a PAT presented as the `/api` bearer credential (`X-API-Key` header): the
-  * guard admits it exactly as it would the owning user's login session.
-  *
-  * The static key is ALWAYS configured in these cases, so what admits a PAT is the guard's own PAT
-  * arm, never the open-mode fallback. Pinned here:
+  * guard admits it exactly as it would the owning user's login session. Pinned here:
   *   - an admin-owned PAT reaches the admin surface;
   *   - a role=user PAT is demoted to the profile allowlist (`403 admin_required` elsewhere), and
   *     the profile handlers resolve its identity, so `/api/profile/usage` answers 200;
@@ -84,15 +81,14 @@ class PatApiAdmissionSpec
     val (rec, raw) = pats.mint(uid, s"spec-$username", TokenRestriction.Unrestricted, None, 0)
     (rec.id, raw)
 
-  /** Static key configured in every case: reaching a handler with a PAT proves the guard's PAT arm
-    * admitted it, not the open-mode fallback (which Task 5 removes outright).
+  /** The guard admits only a session or a PAT, so reaching a handler with a PAT proves its PAT arm
+    * admitted it.
     */
   private def withHarness(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some("static-key-1"),
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
@@ -256,7 +252,6 @@ class PatApiAdmissionSpec
         }
       val h = ManagerServerHarness.boot(
         fix.store,
-        staticApiKey = Some("static-key-1"),
         patStore = Some(pats),
         patUserOf =
           Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),

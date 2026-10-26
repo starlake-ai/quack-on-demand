@@ -17,8 +17,7 @@ import java.time.Instant
   * tenant's queries. The fix filters by `manageableTenants`. This spec pins down:
   *   - superuser sees all
   *   - tenant-A admin sees only A's rows
-  *   - static-key bypass sees all
-  *   - a keyless call with no static key configured is 401 (the former open mode is gone)
+  *   - a keyless call is 401 (the former open mode is gone)
   *   - records carrying either the id or the display-name form pass the filter (mirrors the
   *     FlightSQL handshake convention; the router records the display name today but future changes
   *     might switch)
@@ -82,10 +81,10 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityH
       .getOrElse(Nil)
       .flatMap(_.hcursor.get[String]("tenant").toOption)
 
-  private def bootTwoTenants(staticApiKey: Option[String] = None) =
+  private def bootTwoTenants() =
     val fix = SecurityFixtures.freshStore()
     SecurityFixtures.addGlobexTenant(fix.store)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey)
+    val h = ManagerServerHarness.boot(fix.store)
     seed(h)
     (h, fix)
 
@@ -128,19 +127,8 @@ class StatementHistoryScopeSpec extends AnyFlatSpec with Matchers with SecurityH
     finally h.shutdown()
   }
 
-  it should "return all rows for a static-key call" in {
-    val (h, _) = bootTwoTenants(staticApiKey = Some("static-key"))
-    try
-      val resp = get(h.httpClient, s"${h.baseUrl}/api/node/statements", apiKey = Some("static-key"))
-      withClue(s"static-key body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        tenantsOf(resp.body()).size shouldBe 4
-      }
-    finally h.shutdown()
-  }
-
-  it should "refuse a keyless call even with no api key configured (open mode is gone)" in {
-    val (h, _) = bootTwoTenants(staticApiKey = None)
+  it should "refuse a keyless call (open mode is gone)" in {
+    val (h, _) = bootTwoTenants()
     try
       val resp = get(h.httpClient, s"${h.baseUrl}/api/node/statements")
       withClue(s"keyless body: ${resp.body()}") {

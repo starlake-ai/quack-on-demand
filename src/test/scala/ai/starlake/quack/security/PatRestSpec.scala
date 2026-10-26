@@ -81,14 +81,11 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
     * presented as the credential would die at the guard's 401 instead of reaching the handler's
     * session-only gate that case 4 pins.
     */
-  private def withHarness(
-      staticApiKey: Option[String] = None
-  )(body: ManagerServerHarness.Harness => Unit): Unit =
+  private def withHarness()(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       patStore = Some(pats),
       // Whole row, as Main wires it: `enabled` is part of the handler's decision.
       patUserOf =
@@ -448,7 +445,7 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
   // ------------------------------------------------------------------
 
   "an anonymous caller" should "be refused 401 on every PAT route" in
-    withHarness(staticApiKey = Some("k1")) { h =>
+    withHarness() { h =>
       List("create", "list", "revoke", "delete").foreach { verb =>
         // Empty body on purpose: the guard rejects before any decode, and a body
         // it never reads would poison the next request on the same connection.
@@ -464,9 +461,9 @@ class PatRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers wit
   // ------------------------------------------------------------------
 
   "a role=user session" should "create, list and revoke its own PATs through the profile allowlist" in
-    withHarness(staticApiKey = Some("k1")) { h =>
-      // Static key set, so the guard is enforcing: reaching the handler at all
-      // proves the three paths are on the non-admin profile allowlist.
+    withHarness() { h =>
+      // The guard demands a credential: reaching the handler at all proves the
+      // three paths are on the non-admin profile allowlist.
       val session = tenantSession(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword)
 
       // Same session on an admin route stays sealed -- the allowlist widened by

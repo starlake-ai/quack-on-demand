@@ -222,6 +222,39 @@ object ManagerServerHarness:
         .map(_.group(1))
         .getOrElse(throw new RuntimeException(s"no token in response: $bodyStr"))
 
+    /** A session for the fixture superuser (`SecurityFixtures.RootUsername`, which
+      * `SecurityFixtures.freshStore()` seeds), minted by a real login. Every call logs in again.
+      */
+    def superuserSession(): String =
+      mintToken(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword)
+
+    /** A personal access token owned by the fixture superuser, minted through the real
+      * `POST /api/auth/pat/create` with a [[superuserSession]]. Needs a harness booted with the PAT
+      * routes: `patStore`, a `patUserOf` that resolves the superuser to its row in that store (the
+      * `qodstate_pat` FK), and `patAuth` so the guard admits the token. Throws otherwise.
+      */
+    def superuserPat(): String =
+      val req = HttpRequest
+        .newBuilder(URI.create(s"$baseUrl/api/auth/pat/create"))
+        .header("Content-Type", "application/json")
+        .header("X-API-Key", superuserSession())
+        .POST(
+          HttpRequest.BodyPublishers
+            .ofString("""{"name":"harness-superuser"}""", StandardCharsets.UTF_8)
+        )
+        .build()
+      val resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString())
+      if resp.statusCode() != 200 then
+        throw new RuntimeException(
+          s"superuser PAT mint failed (${resp.statusCode()}): ${resp.body()} -- boot the " +
+            "harness with patStore, patUserOf and patAuth"
+        )
+      val tokenRe = """"token"\s*:\s*"([^"]+)"""".r
+      tokenRe
+        .findFirstMatchIn(resp.body())
+        .map(_.group(1))
+        .getOrElse(throw new RuntimeException("no token field in the PAT create response"))
+
   /** Boot a ManagerServer on an ephemeral port backed by the supplied
     * [[InMemoryControlPlaneStore]].
     *

@@ -32,12 +32,11 @@ class IcebergCatalogEndpointsSpec extends AnyFlatSpec with Matchers with Securit
     config = Some("{}")
   )
 
-  private def boot(staticApiKey: Option[String] = None): ManagerServerHarness.Harness =
+  private def boot(): ManagerServerHarness.Harness =
     val fix = SecurityFixtures.freshStore()
     addTenantB(fix)
     ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       icebergSourcesOf =
         Some(id => if id == SecurityFixtures.TenantDbId then List(lakeSource) else Nil)
     )
@@ -98,7 +97,7 @@ class IcebergCatalogEndpointsSpec extends AnyFlatSpec with Matchers with Securit
   }
 
   it should "reject a credential-less request with 401" in {
-    val h = boot(staticApiKey = Some("static-key-for-iceberg-endpoints"))
+    val h = boot()
     try
       routes(Alias).foreach { (name, url) =>
         withClue(s"$name: ")(get(h.httpClient, h.baseUrl + url).statusCode() shouldBe 401)

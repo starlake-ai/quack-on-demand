@@ -85,7 +85,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       t =>
         if t.contains(patToken) then
           SessionScope(superuser = false, manageableTenants = Set(Tenant0))
-        else SessionScope.Superuser
+        else McpSuperuserPat.scopeOf(t)
 
     val pools      = new PoolHandlers(sup, tracker, audit = auditRecorder)
     val nodes      = new NodeHandlers(sup, tracker, store, StateChangePublisher.noop)
@@ -113,7 +113,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "scale_pool",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool),
@@ -128,13 +128,13 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     f.pools
       .setPoolAutoscale(
         SetPoolAutoscaleRequest(Tenant0, TenantDb, Pool, minNodes = Some(1), maxNodes = Some(2)),
-        None
+        Some(McpSuperuserPat.Token)
       )(f.scopeOf)
       .unsafeRunSync()
       .isRight shouldBe true
     val out = f.call(
       "scale_pool",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool),
@@ -188,30 +188,6 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     (e.actor, e.patId) shouldBe ("alice", Some("pat-1"))
   }
 
-  it should "leave the static key's audit row with a NULL pat_id (not the PAT owner's)" in {
-    val (recorder, telemetry) = attributingAuditRecorder()
-    val f                     = new Fixture(recorder)
-    f.call(
-      "scale_pool",
-      McpPrincipal.StaticKey,
-      "tenant"   -> Json.fromString(Tenant0),
-      "database" -> Json.fromString(TenantDb),
-      "pool"     -> Json.fromString(Pool),
-      "dual"     -> Json.fromInt(2)
-    ).isRight shouldBe true
-    val e =
-      telemetry.events.find(_.action == "pool.scale").getOrElse(fail("no pool.scale audit row"))
-    // McpPrincipal.StaticKey carries rawToken = None by design (its docstring: "the handlers'
-    // own static-key arm is not re-entered from here"), so no bearer reaches AuditRecorder at
-    // all here and actorOf(None) resolves the pre-existing "anonymous" branch rather than
-    // "static-key" (that label is for a REAL non-empty, non-PAT, non-session bearer -- see
-    // AuditRecorderSpec's "leave pat_id at None for a static-key bearer" case for that path).
-    // The one fact this test exists to pin is the one the review flagged: patId must stay None,
-    // never leak the PAT owner's id onto an unrelated caller.
-    e.patId shouldBe None
-    e.actor should not be "alice"
-  }
-
   "suspend_pool / resume_pool" should "round-trip the suspended flag" in {
     val f = new Fixture
     f.call(
@@ -245,7 +221,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.call(
       "create_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"      -> Json.fromString(Tenant0),
       "database"    -> Json.fromString(TenantDb),
       "name"        -> Json.fromString("v1"),
@@ -254,7 +230,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
 
     f.call(
       "protect_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"       -> Json.fromString(Tenant0),
       "database"     -> Json.fromString(TenantDb),
       "name"         -> Json.fromString("v1"),
@@ -267,7 +243,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f  = new Fixture
     val up = f.call(
       "upsert_maintenance_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"         -> Json.fromString(Tenant0),
       "database"       -> Json.fromString(TenantDb),
       "scope_kind"     -> Json.fromString("tenantdb"),
@@ -276,13 +252,13 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     up.isRight shouldBe true
     val listed = f.call(
       "get_maintenance_policy",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb)
     )
     listed.isRight shouldBe true
     val id = up.toOption.get.hcursor.get[String]("id").toOption.get
-    f.call("delete_maintenance_policy", McpPrincipal.StaticKey, "id" -> Json.fromString(id))
+    f.call("delete_maintenance_policy", McpSuperuserPat.principal, "id" -> Json.fromString(id))
       .isRight shouldBe true
   }
 
@@ -290,7 +266,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.call(
       "create_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"      -> Json.fromString(Tenant0),
       "database"    -> Json.fromString(TenantDb),
       "name"        -> Json.fromString("v1"),
@@ -298,7 +274,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     ).isRight shouldBe true
     f.call(
       "delete_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "name"     -> Json.fromString("v1")
@@ -309,7 +285,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.call(
       "create_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"      -> Json.fromString(Tenant0),
       "database"    -> Json.fromString(TenantDb),
       "name"        -> Json.fromString("v1"),
@@ -317,7 +293,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     ).isRight shouldBe true
     val on = f.call(
       "protect_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"       -> Json.fromString(Tenant0),
       "database"     -> Json.fromString(TenantDb),
       "name"         -> Json.fromString("v1"),
@@ -328,7 +304,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     on.toOption.get.hcursor.get[Boolean]("protected").toOption.get shouldBe true
     val off = f.call(
       "protect_tag",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"       -> Json.fromString(Tenant0),
       "database"     -> Json.fromString(TenantDb),
       "name"         -> Json.fromString("v1"),
@@ -337,11 +313,11 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     off.toOption.get.hcursor.get[Boolean]("protected").toOption.get shouldBe false
   }
 
-  "audit_search" should "map filters through and admit the static key" in {
+  "audit_search" should "map filters through and admit a superuser PAT" in {
     val f   = new Fixture
     val out = f.call(
       "audit_search",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "actor" -> Json.fromString("alice"),
       "q"     -> Json.fromString("pool"),
       "limit" -> Json.fromInt(10)
@@ -349,12 +325,12 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     withClue(out)(out.isRight shouldBe true)
   }
 
-  "list_pools and get_pool_status" should "answer for the static key" in {
+  "list_pools and get_pool_status" should "answer for a superuser PAT" in {
     val f = new Fixture
-    f.call("list_pools", McpPrincipal.StaticKey).isRight shouldBe true
+    f.call("list_pools", McpSuperuserPat.principal).isRight shouldBe true
     val status = f.call(
       "get_pool_status",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool)
@@ -366,7 +342,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "create_pool",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString("etl"),
@@ -380,7 +356,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "set_pool_disabled",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool),
@@ -394,7 +370,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "delete_pool",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool),
@@ -408,7 +384,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "set_node_max_concurrent",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"   -> Json.fromString(Tenant0),
       "database" -> Json.fromString(TenantDb),
       "pool"     -> Json.fromString(Pool),
@@ -422,7 +398,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f       = new Fixture
     val created = f.call(
       "create_database",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant" -> Json.fromString(Tenant0),
       "name"   -> Json.fromString("scratch"),
       "kind"   -> Json.fromString("memory")
@@ -435,7 +411,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     fullName shouldBe s"${Tenant0}_scratch"
     val listed = f.call(
       "list_databases_admin",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant" -> Json.fromString(Tenant0)
     )
     listed.toOption.get.hcursor
@@ -445,7 +421,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       .size should be >= 2 // fixture's + scratch
     f.call(
       "delete_database",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant" -> Json.fromString(Tenant0),
       "name"   -> Json.fromString(fullName)
     ).isRight shouldBe true
@@ -455,7 +431,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f       = new Fixture
     val created = f.call(
       "create_database",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"    -> Json.fromString(Tenant0),
       "name"      -> Json.fromString("secure"),
       "kind"      -> Json.fromString("duckdb-file"),
@@ -475,7 +451,7 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     val f   = new Fixture
     val out = f.call(
       "create_database",
-      McpPrincipal.StaticKey,
+      McpSuperuserPat.principal,
       "tenant"         -> Json.fromString(Tenant0),
       "name"           -> Json.fromString("secure2"),
       "kind"           -> Json.fromString("ducklake"),

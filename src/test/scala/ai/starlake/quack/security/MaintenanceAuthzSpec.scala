@@ -24,12 +24,10 @@ class MaintenanceAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
       errorCode(resp.body()) shouldBe Some("tenant_forbidden")
     }
 
-  private def bootWithTwoTenants(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def bootWithTwoTenants(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addTenantB(fix)
-    val h = ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey)
+    val h = ManagerServerHarness.boot(fix.store)
     (h, fix)
 
   private def upsertPolicyBody(tenant: String, tenantDb: String): String =
@@ -41,9 +39,9 @@ class MaintenanceAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHe
   // ---------- Spec ----------------------------------------------------------
 
   "maintenance endpoints" should "reject a credential-less GET policy list with 401" in {
-    // Static key configured -> apiKeyGuard enforces; no X-API-Key, no cookie -> 401.
+    // No X-API-Key, no cookie -> apiKeyGuard answers 401.
     val (h, _) =
-      bootWithTwoTenants(staticApiKey = Some("static-key-for-maintenance-authz"))
+      bootWithTwoTenants()
     try
       val resp = get(
         h.httpClient,

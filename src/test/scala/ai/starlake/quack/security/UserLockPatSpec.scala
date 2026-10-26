@@ -74,8 +74,8 @@ class UserLockPatSpec
     val (_, raw) = pats.mint(uid, s"spec-$username", TokenRestriction.Unrestricted, None, 0)
     raw
 
-  /** Static key is always configured: reaching the handler with a PAT proves the guard's PAT arm
-    * admitted it, exactly like PatApiAdmissionSpec.
+  /** The guard admits only a session or a PAT, so reaching the handler with a PAT proves its PAT
+    * arm admitted it, exactly like PatApiAdmissionSpec.
     */
   private def withHarness(
       body: (ManagerServerHarness.Harness, SecurityFixtures.Fixture) => Unit
@@ -84,7 +84,6 @@ class UserLockPatSpec
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = Some("lock-pat-key"),
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),

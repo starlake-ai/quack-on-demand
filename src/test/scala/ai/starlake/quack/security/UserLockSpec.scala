@@ -12,7 +12,7 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   private def boot() =
     val fix = SecurityFixtures.freshStore()
-    (ManagerServerHarness.boot(fix.store, staticApiKey = Some("lock-spec-key")), fix)
+    (ManagerServerHarness.boot(fix.store), fix)
 
   private def updateBody(id: String, enabled: Option[Boolean]): String =
     enabled match
@@ -192,32 +192,6 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         viaGhost.statusCode() shouldBe 400
         errorCode(viaGhost.body()) should contain("last_superuser")
       }
-      // ...and neither may the identity-less static key.
-      val viaKey = post(
-        h.httpClient,
-        s"${h.baseUrl}/api/user/update",
-        updateBody(fix.rootUserId, Some(false)),
-        apiKey = Some("lock-spec-key")
-      )
-      withClue(s"static-key lock body: ${viaKey.body()}") {
-        viaKey.statusCode() shouldBe 400
-        errorCode(viaKey.body()) should contain("last_superuser")
-      }
-    finally h.shutdown()
-  }
-
-  it should "let the static key lock a tenant user (no identity, no self-check)" in {
-    val (h, fix) = boot()
-    try
-      val locked = post(
-        h.httpClient,
-        s"${h.baseUrl}/api/user/update",
-        updateBody(fix.bobUserId, Some(false)),
-        apiKey = Some("lock-spec-key")
-      )
-      withClue(s"static-key lock body: ${locked.body()}")(locked.statusCode() shouldBe 200)
-      locked.body() should include(""""enabled":false""")
-      login(h, SecurityFixtures.BobUsername, SecurityFixtures.BobPassword) shouldBe 401
     finally h.shutdown()
   }
 
@@ -263,19 +237,8 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         self.statusCode() shouldBe 400
         errorCode(self.body()) should contain("cannot_delete_self")
       }
-      // Root is the fixture's only superuser: the identity-less static key may not
-      // delete it either (the floor, not the self-check, is what refuses here).
-      val viaKey = post(
-        h.httpClient,
-        s"${h.baseUrl}/api/user/delete",
-        s"""{"id":"${fix.rootUserId}"}""",
-        apiKey = Some("lock-spec-key")
-      )
-      withClue(s"static-key delete-last body: ${viaKey.body()}") {
-        viaKey.statusCode() shouldBe 400
-        errorCode(viaKey.body()) should contain("last_superuser")
-      }
-      // A second enabled superuser lifts the floor.
+      // A second superuser whose session outlives its own lock: root is then the last enabled
+      // superuser, so the floor (not the self-check) refuses root2's delete of it.
       fix.store.upsertUserWithHash(
         tenant = None,
         username = "root2",
@@ -285,7 +248,31 @@ class UserLockSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         kind = "admin"
       )
       val root2Id = fix.store.findUser(None, "root2").get.id
-      val lifted  = post(
+      val root2   = h.mintToken("root2", "root2pw")
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(root2Id, Some(false)),
+        apiKey = Some(root)
+      ).statusCode() shouldBe 200
+      val viaGhost = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/delete",
+        s"""{"id":"${fix.rootUserId}"}""",
+        apiKey = Some(root2)
+      )
+      withClue(s"ghost-session delete-last body: ${viaGhost.body()}") {
+        viaGhost.statusCode() shouldBe 400
+        errorCode(viaGhost.body()) should contain("last_superuser")
+      }
+      // A second enabled superuser lifts the floor.
+      post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/update",
+        updateBody(root2Id, Some(true)),
+        apiKey = Some(root)
+      ).statusCode() shouldBe 200
+      val lifted = post(
         h.httpClient,
         s"${h.baseUrl}/api/user/delete",
         s"""{"id":"$root2Id"}""",

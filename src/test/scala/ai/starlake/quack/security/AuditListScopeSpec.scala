@@ -22,7 +22,6 @@ import java.time.Instant
   *     `?noTenant=true` returns only the null-tenant rows and wins over `?tenant=`.
   *   - Tenant-A admin sees only e1 (no globex, no null-tenant); `?tenant=t-globex01` and
   *     `?noTenant=true` are pinned back to acme (cross-tenant no-leak).
-  *   - Static-key callers get superuser semantics, including `?noTenant=true`.
   *   - `?family=` filtering, `limit=1` + `before=<nextBefore>` keyset paging without overlap.
   *   - Invalid `?from=not-a-date` returns 400 `invalid_time`; `GET /api/audit/actions` serves the
   *     sorted vocabulary behind the API-key perimeter.
@@ -89,13 +88,12 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
     parse(body).toOption
       .flatMap(_.hcursor.get[Option[String]]("nextBefore").toOption.flatten)
 
-  private def bootHarness(staticApiKey: Option[String] = None) =
+  private def bootHarness() =
     val ts  = new RecordingTelemetryStore
     val fix = SecurityFixtures.freshStore()
     SecurityFixtures.addGlobexTenant(fix.store)
     val h = ManagerServerHarness.boot(
       fix.store,
-      staticApiKey = staticApiKey,
       telemetryStore = ts
     )
     seedEvents(ts)
@@ -153,36 +151,6 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
         val tens = tenantsOf(resp.body())
         // Falls back to full manageable set (acme only) because globex not in manageableTenants
         tens shouldBe List(Some(AcmeTenantId))
-      }
-    finally h.shutdown()
-  }
-
-  it should "return all 3 events for a static-key call (superuser semantics)" in {
-    val (h, _, _) = bootHarness(staticApiKey = Some("test-static-key"))
-    try
-      val resp = get(
-        h.httpClient,
-        s"${h.baseUrl}/api/audit/list",
-        apiKey = Some("test-static-key")
-      )
-      withClue(s"static-key body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        eventsOf(resp.body()) should have size 3
-      }
-    finally h.shutdown()
-  }
-
-  it should "return only null-tenant rows for a static-key call with ?noTenant=true" in {
-    val (h, _, _) = bootHarness(staticApiKey = Some("test-static-key"))
-    try
-      val resp = get(
-        h.httpClient,
-        s"${h.baseUrl}/api/audit/list?noTenant=true",
-        apiKey = Some("test-static-key")
-      )
-      withClue(s"static-key noTenant body: ${resp.body()}") {
-        resp.statusCode() shouldBe 200
-        tenantsOf(resp.body()) shouldBe List(None)
       }
     finally h.shutdown()
   }
@@ -322,7 +290,7 @@ class AuditListScopeSpec extends AnyFlatSpec with Matchers with SecurityHttpHelp
   }
 
   it should "be guarded by the API-key perimeter like audit/list" in {
-    val (h, _, _) = bootHarness(staticApiKey = Some("perimeter-key"))
+    val (h, _, _) = bootHarness()
     try
       val resp = get(h.httpClient, s"${h.baseUrl}/api/audit/actions", apiKey = None)
       resp.statusCode() shouldBe 401

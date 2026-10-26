@@ -53,18 +53,16 @@ class RestoreAuthzSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       )
     )
 
-  private def boot(
-      staticApiKey: Option[String] = None
-  ): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
+  private def boot(): (ManagerServerHarness.Harness, SecurityFixtures.Fixture) =
     val fix = SecurityFixtures.freshStore()
     addFixtures(fix)
-    (ManagerServerHarness.boot(fix.store, staticApiKey = staticApiKey), fix)
+    (ManagerServerHarness.boot(fix.store), fix)
 
   private def restoreBody(tenant: String, tenantDb: String): String =
     s"""{"tenant":"$tenant","tenantDb":"$tenantDb","schema":"main","table":"region","to":"5"}"""
 
   "restore endpoint" should "reject a credential-less POST with 401" in {
-    val (h, _) = boot(staticApiKey = Some("static-key-for-restore-authz"))
+    val (h, _) = boot()
     try
       val resp = post(
         h.httpClient,

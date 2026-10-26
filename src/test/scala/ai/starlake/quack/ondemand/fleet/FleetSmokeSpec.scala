@@ -36,7 +36,8 @@ import scala.util.Try
   *
   * Steps (each one timed and printed):
   *   1. boot the manager on 20950 (REST) / 31350 (FlightSQL, plain gRPC), native front door off,
-  *      against a throwaway control-plane database;
+  *      against a throwaway control-plane database, and log in as its seeded admin (admin / admin):
+  *      every REST call sends that session;
   *   2. create tenant acme, a memory database, pool bi of size 1: the pool is pending (no server);
   *   3. start the join process (server s1, node port 23100), joins pending approval (autoApprove is
   *      empty), is approved over REST,
@@ -67,7 +68,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   private val RestPort   = 20950
   private val FlightPort = 31350
   private val NodePort   = 23100
-  private val ApiKey     = "smoke-key"
   private val JoinToken  = "smoke"
   private val Server     = "s1"
   private val Tenant     = "acme"
@@ -94,6 +94,10 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     else None
 
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
+
+  // The seeded admin's session, minted once the manager answers /health (bootManager). Every
+  // REST call sends it as X-API-Key.
+  private var session: String = ""
 
   private var stateDir: Path                                             = null
   private var manager: FiberIO[Either[Throwable, ExitCode]]              = null
@@ -143,7 +147,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     val b = HttpRequest
       .newBuilder(URI.create(s"http://127.0.0.1:$RestPort$path"))
       .timeout(Duration.ofSeconds(20))
-      .header("X-API-Key", ApiKey)
+      .header("X-API-Key", session)
       .header("Content-Type", "application/json")
     val req = body match
       case Some(json) => b.method(method, HttpRequest.BodyPublishers.ofString(json)).build()
@@ -160,6 +164,21 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     val (code, body) = request("GET", path, None)
     withClue(s"GET $path -> $code $body: ")(code shouldBe 200)
     parse(body).fold(e => fail(e.getMessage), identity)
+
+  private def login(): String =
+    val r = http.send(
+      HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$RestPort/api/auth/login"))
+        .timeout(Duration.ofSeconds(20))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString("""{"username":"admin","password":"admin"}"""))
+        .build(),
+      HttpResponse.BodyHandlers.ofString()
+    )
+    withClue("POST /api/auth/login: ")(r.statusCode() shouldBe 200)
+    parse(r.body()).toOption
+      .flatMap(_.hcursor.get[String]("token").toOption)
+      .getOrElse(fail("no token field in the login response"))
 
   private final case class PoolView(nodes: List[Json], pending: Int, reason: Option[String])
 
@@ -287,7 +306,6 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
          |quack-on-demand {
          |  host = "127.0.0.1"
          |  port = $RestPort
-         |  apiKey = "$ApiKey"
          |  runtimeType = "fleet"
          |  reconcileIntervalSec = 2
          |  ha.enabled = false
@@ -366,6 +384,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       )
       Option.when(r.statusCode() == 200)(())
     }
+    session = login()
 
   // ---------------------------------------------------------------- FlightSQL
 
