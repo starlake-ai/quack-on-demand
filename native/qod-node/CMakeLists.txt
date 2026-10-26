@@ -107,11 +107,41 @@ if(NOT duckdb_version MATCHES "^v?[0-9]+\\.[0-9]+\\.[0-9]+" OR NOT duckdb_source
 endif()
 message(STATUS "qod-node: build marker protocol=${QOD_NODE_PROTOCOL} duckdb=${duckdb_version} duckdb_source=${duckdb_source}")
 
+# ---- function lists the parse screen and the describer embed ----------------------------------------
+# file-functions.txt (class File) and admitted-table-functions.txt (classes Allowed and Listing), written
+# with the Scala classification by scripts/dev/gen-qod-node-classification.sh, become constant arrays in
+# generated/file_functions.hpp. Each line must be a lowercase function name, the lines sorted.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/file-functions.txt ${CMAKE_CURRENT_SOURCE_DIR}/admitted-table-functions.txt)
+function(qod_node_name_array file out)
+  file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/${file} names)
+  set(previous "")
+  set(entries "")
+  foreach(name IN LISTS names)
+    if(NOT "${name}" MATCHES "^[a-z_][a-z0-9_]*$")
+      message(FATAL_ERROR "${file}: '${name}' is not a lowercase function name")
+    endif()
+    if(NOT "${previous}" STREQUAL "" AND NOT "${previous}" STRLESS "${name}")
+      message(FATAL_ERROR "${file}: '${name}' is out of order or repeated")
+    endif()
+    string(APPEND entries "    \"${name}\",\n")
+    set(previous "${name}")
+  endforeach()
+  if("${entries}" STREQUAL "")
+    message(FATAL_ERROR "${file} is empty")
+  endif()
+  set(${out} "${entries}" PARENT_SCOPE)
+endfunction()
+qod_node_name_array(file-functions.txt QOD_NODE_FILE_FUNCTIONS)
+qod_node_name_array(admitted-table-functions.txt QOD_NODE_ADMITTED_TABLE_FUNCTIONS)
+configure_file(cmake/file_functions.hpp.in ${CMAKE_BINARY_DIR}/generated/file_functions.hpp @ONLY)
+
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
   src/authz.cpp
   src/build_info.cpp
   src/crypto.cpp
+  src/functions_list.cpp
   src/handle.cpp
   src/init_runner.cpp
   src/json.cpp
@@ -128,7 +158,7 @@ if(QOD_NODE_DUCKDB_STATIC)
   list(APPEND QOD_NODE_CORE_SOURCES src/static_extensions.cpp)
 endif()
 add_library(qod_node_core STATIC ${QOD_NODE_CORE_SOURCES})
-target_include_directories(qod_node_core PUBLIC src)
+target_include_directories(qod_node_core PUBLIC src ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(qod_node_core PUBLIC qod_node_duckdb)
 if(WIN32)
   # CommandLineToArgvW (utf8_args.cpp).
@@ -191,6 +221,8 @@ if(QOD_NODE_TESTS)
   add_test(NAME json_writer COMMAND json_writer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/canonical-json-v1.txt)
   qod_node_test(node_config_test)
   add_test(NAME node_config COMMAND node_config_test)
+  qod_node_test(functions_list_test)
+  add_test(NAME functions_list COMMAND functions_list_test)
   qod_node_test(handle_tool)
   find_program(BASH bash)
   if(BASH AND NOT WIN32)

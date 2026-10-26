@@ -25,4 +25,9 @@ JsonValue JsonObject(std::map<std::string, JsonValue> members);
 //! would decode alike.
 std::string CanonicalJson(const JsonValue &value);
 
+//! A JSON array of `elements` (each already canonical JSON), sorted by their bytes with exact
+//! duplicates dropped, one element per line, ending in a newline: what the --list-* modes print, so a
+//! committed listing diffs line by line.
+std::string SortedJsonLines(std::vector<std::string> elements);
+
 } // namespace qod

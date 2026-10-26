@@ -11,6 +11,7 @@
 #include "authz.hpp"
 #include "build_info.hpp"
 #include "duckdb.hpp"
+#include "functions_list.hpp"
 #include "init_runner.hpp"
 #include "lifetime.hpp"
 #include "node_config.hpp"
@@ -45,6 +46,19 @@ int ListSettingsMode(const NodeOptions &options) {
 	duckdb::Connection con(db);
 	RunInitFiles(con, options);
 	ListSettings(duckdb::DBConfig::GetConfig(*db.instance), std::cout);
+	return 0;
+}
+
+int ListFunctionsMode(const NodeOptions &options) {
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
+	// qod_session and qod_screen are functions every node has. The id and key are never used: no
+	// handle is verified in this mode.
+	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>("qod-node-list", std::string(32, '\0')));
+	duckdb::Connection con(db);
+	RunInitFiles(con, options);
+	ListFunctions(con, std::cout);
 	return 0;
 }
 
@@ -140,6 +154,9 @@ int main(int argc, char **argv) {
 #endif
 		if (options.mode == NodeOptions::Mode::LIST_SETTINGS) {
 			return ListSettingsMode(options);
+		}
+		if (options.mode == NodeOptions::Mode::LIST_FUNCTIONS) {
+			return ListFunctionsMode(options);
 		}
 		return Serve(options);
 	} catch (std::exception &error) {

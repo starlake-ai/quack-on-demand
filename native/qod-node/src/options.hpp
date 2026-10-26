@@ -19,7 +19,7 @@ struct ExtensionPolicy {
 
 //! What qod-node was asked to do, from its command line.
 struct NodeOptions {
-	enum class Mode { SERVE, BUILD_INFO, LIST_SETTINGS };
+	enum class Mode { SERVE, BUILD_INFO, LIST_SETTINGS, LIST_FUNCTIONS };
 
 	Mode mode = Mode::SERVE;
 	//! quack_serve's port and bind address.

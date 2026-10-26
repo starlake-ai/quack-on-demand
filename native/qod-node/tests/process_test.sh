@@ -99,6 +99,19 @@ status=$?
 [[ $status -eq 2 ]] || fail "no --node-id: exit $status, expected 2"
 grep -q -- '--node-id is required' "$work/no-id.out" || fail "no --node-id: missing '--node-id is required'"
 
+# --- listings: every function and setting a node resolves, one JSON element per line --------------
+"$node_bin" --list-functions > "$work/functions.json" 2> "$work/functions.err"
+status=$?
+[[ $status -eq 0 ]] || fail "--list-functions: exit $status"
+[[ "$(head -1 "$work/functions.json")" == "[" ]] || fail "--list-functions: not one element per line"
+grep -qF '{"aliasOf":null,"name":"qod_session","schema":"main","type":"table"}' "$work/functions.json" ||
+  fail "--list-functions: qod_session is not listed"
+"$node_bin" --list-settings > "$work/settings.json" 2> "$work/settings.err"
+status=$?
+[[ $status -eq 0 ]] || fail "--list-settings: exit $status"
+grep -qF '{"kind":"alias","name":"memory_limit","target":"max_memory"}' "$work/settings.json" ||
+  fail "--list-settings: the memory_limit alias is not listed"
+
 # --- missing or malformed secrets -----------------------------------------------------------------
 mkdir -p "$work/empty-secrets"
 "$node_bin" --port "$(port)" --secrets-dir "$work/empty-secrets" --secret-directory "$work/secret-dir" \

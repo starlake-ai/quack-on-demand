@@ -1,5 +1,6 @@
 #include "json_writer.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -171,6 +172,21 @@ JsonValue JsonObject(std::map<std::string, JsonValue> members) {
 std::string CanonicalJson(const JsonValue &value) {
 	std::string out;
 	Write(value, out);
+	return out;
+}
+
+std::string SortedJsonLines(std::vector<std::string> elements) {
+	std::sort(elements.begin(), elements.end());
+	elements.erase(std::unique(elements.begin(), elements.end()), elements.end());
+	if (elements.empty()) {
+		return "[]\n";
+	}
+	std::string out = "[\n";
+	for (size_t i = 0; i < elements.size(); i++) {
+		out += elements[i];
+		out += i + 1 < elements.size() ? ",\n" : "\n";
+	}
+	out += "]\n";
 	return out;
 }
 
