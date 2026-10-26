@@ -186,8 +186,9 @@
   stores it in the control-plane database (new table `qodstate_boot_secret`, Liquibase `0049`, row
   `session_jwt`); every later boot and every HA replica reads the same row (replicas booting
   together converge on one value). The banner is gone: boot prints one line naming the source,
-  `session secret: from QOD_SESSION_JWT_SECRET`, `session secret: generated and stored in the
-  control plane` or `session secret: stored in the control plane`, never the value. A non-empty
+  `session secret: from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)`,
+  `session secret: generated and stored in the control plane` or `session secret: stored in the
+  control plane`, never the value. A non-empty
   `QOD_SESSION_JWT_SECRET` still wins and is never written to the database (the stored row is left
   as it is, so unsetting the variable falls back to it); `qod start --with-starflow` and Compose's
   Starflow profile keep pinning one, since Starflow verifies the manager's tokens with it. HA no
@@ -195,9 +196,16 @@
   `existingSessionJwtSecret` are optional at any `replicaCount` (when set, the chart now passes
   them with one replica too, where it used to ignore them). Rotate the stored secret with
   `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and a restart of every replica:
-  every session and outstanding reset link ends. Whoever can read the control-plane database can
-  forge sessions with it; that reader already holds every password hash and can rewrite
-  `qodstate_user`, so the trust boundary is unchanged.
+  every session and outstanding reset link ends. Trust boundary: a writer of the control-plane
+  database (its admin, or anyone holding the control-plane login, nodes that inherit it included)
+  gains nothing new, since it can already rewrite `qodstate_user`. A read-only holder (a `pg_dump`
+  backup, a snapshot, a read replica, a SELECT-only role) now also gets the management plane: on an
+  install with no `QOD_SESSION_JWT_SECRET` it can forge a superuser session. That comes on top of
+  the data credentials the same database already stores (tenant catalog `pgPassword` and
+  duckdb-file encryption keys, object-store keys, inline federation secrets, the node-key secret,
+  tenant OIDC client secrets). Protect control-plane backups and replicas like the secret itself;
+  when they are less trusted than the manager, pin `QOD_SESSION_JWT_SECRET` from an external secret
+  store: nothing is persisted then, and backups never carry it.
 
 - **REST and MCP data statements run as their caller.** Preview, data diff, undrop, restore,
   Iceberg views, branch counts requested over REST and MCP `run_sql` go through the FlightSQL
