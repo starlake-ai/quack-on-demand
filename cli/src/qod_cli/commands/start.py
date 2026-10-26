@@ -9,7 +9,7 @@ import typer
 from .. import admin_password, launcher, starflow
 from ..config import config_path, load_start_env
 from . import _starflow
-from ._launch import _exec, resolve_jar, resolve_java
+from ._launch import _exec, refuse_a_static_api_key, resolve_jar, resolve_java
 
 # Tenant-db Postgres databases created by the bundled demo manifests; NUKE=1
 # drops them alongside the control-plane DB, mirroring run-jar.sh.
@@ -179,8 +179,10 @@ def start(
     without the checkout). Postgres is assumed reachable (QOD_PG_* env vars);
     supports run-jar's LOAD_TPCH/LOAD_TPCDS/LOAD_SSB/LOAD_TPC, DEMO, NUKE,
     JAVA_OPTS, JAVA_BIN, JAR_CACHE_DIR, DUCKDB_VERSION, and DUCKDB_CACHE_DIR.
-    Run `qod setup` once to persist QOD_PG_*/admin/API-key/TLS settings so you
+    Run `qod setup` once to persist QOD_PG_*/admin/auth/TLS settings so you
     don't have to export them every time - a real env var still overrides it.
+    Refuses to launch while QOD_API_KEY is set in the shell or stored by qod
+    setup: the static API key was removed.
     With --demo, runs the self-contained demo instead (no Postgres needed,
     and qod setup's stored config is not applied - see qod setup --help).
     Ctrl-C tears the manager and its nodes down gracefully (same as qod stop).
@@ -200,6 +202,9 @@ def start(
             typer.echo(hint, err=True)
     except Exception:
         pass  # purely decorative; must never block a start
+
+    # Before anything is installed or launched, the demo alias included.
+    refuse_a_static_api_key()
 
     sf_request = _starflow.request(
         with_starflow, starflow_home, starflow_version, starflow_port, starflow_url,

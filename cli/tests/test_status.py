@@ -240,3 +240,18 @@ def test_status_omits_the_embedded_line_for_an_external_postgres(
     payload = json.loads(result.stdout)
     assert "embeddedPostgres" not in payload
     assert "embeddedPostgresDir" not in payload
+
+
+def test_status_never_lists_pools_with_a_qod_api_key(runner, respx_mock, monkeypatch):
+    from qod_cli.main import app
+
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    _mock_healthy(respx_mock)
+    _quiet_local(monkeypatch)
+    pools = respx_mock.get(f"{BASE}/api/pool/list").mock(
+        return_value=httpx.Response(200, json={"pools": []})
+    )
+    result = runner.invoke(app, ["--json", "status"])
+    assert result.exit_code == 0, result.output
+    assert not pools.called
+    assert "poolDetail" not in json.loads(result.stdout)

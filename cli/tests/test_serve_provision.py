@@ -22,7 +22,7 @@ BASE = "http://localhost:20900"
 
 @pytest.fixture
 def client():
-    return RestClient(Settings(manager_url=BASE, api_key="k"))
+    return RestClient(Settings(manager_url=BASE, token="k"))
 
 
 def _target(**kw):

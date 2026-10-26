@@ -31,7 +31,6 @@ else:
 
 ENV_VARS = {
     "manager_url": "QOD_MANAGER_URL",
-    "api_key": "QOD_API_KEY",
     "token": "QOD_TOKEN",
     "edge_host": "QOD_HOST",
     "edge_port": "QOD_PORT",
@@ -45,15 +44,17 @@ ENV_VARS = {
     "superuser": "QOD_SUPERUSER",
 }
 
-# The static API key this release removes. Named once for the code that keeps a stale value
-# away from what the CLI launches.
+# The static API key this release removes: no setting of this CLI. Named once for the code
+# that keeps a stale value away from what the CLI launches: the Starflow pairing drops it,
+# the launchers refuse it (commands/_launch.py), and `qod setup` will not store it.
 REMOVED_API_KEY = "QOD_API_KEY"
 
 
 @dataclass
 class Settings:
     manager_url: str = "http://localhost:20900"
-    api_key: str = ""
+    # The CLI's only REST credential, sent as X-API-Key: the session `qod login`
+    # writes, or a personal access token (QOD_TOKEN).
     token: str = ""
     edge_host: str = "localhost"
     edge_port: int = 31338

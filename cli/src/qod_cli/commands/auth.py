@@ -1,3 +1,4 @@
+import sys
 from urllib.parse import urlparse
 
 import typer
@@ -18,7 +19,28 @@ def mode(ctx: typer.Context, tenant: str = typer.Option(None, "--tenant", help="
     call(ctx, "GET", "/api/auth/mode", params={"tenant": tenant})
 
 
-@covers("POST", "/api/auth/login", {"username": "--username", "password": "(prompted)", "tenant": "--tenant"})
+def _password_from_stdin() -> str:
+    """The first line of stdin with its line ending stripped (a CRLF too, as a file
+    saved with Windows line endings delivers it). An empty line is refused before any
+    request: nothing else is consulted, since no flag or env var ever carries a password."""
+    password = sys.stdin.readline().removesuffix("\n").removesuffix("\r")
+    if not password:
+        typer.echo(
+            "error: --password-stdin read no password from the first line of stdin", err=True
+        )
+        raise typer.Exit(1)
+    return password
+
+
+@covers(
+    "POST",
+    "/api/auth/login",
+    {
+        "username": "--username",
+        "password": "(prompted, or the first line of stdin with --password-stdin)",
+        "tenant": "--tenant",
+    },
+)
 @covers("GET", "/api/config/client")
 def login(
     ctx: typer.Context,
@@ -28,11 +50,20 @@ def login(
         None, "--tenant", help="Tenant for tenant-scoped logins (admins and regular users)."
     ),
     pool: str = typer.Option(None, "--pool", help="Default pool for qod sql; stored in the profile."),
+    password_stdin: bool = typer.Option(
+        False,
+        "--password-stdin",
+        help="Read the password from the first line of stdin instead of prompting (CI and "
+        "scripts). No flag or environment variable ever carries a password.",
+    ),
 ):
     """Mint a session, store it and the edge settings in the active profile."""
     settings = ctx.obj.settings
     manager_url = url or settings.manager_url
-    password = typer.prompt("Password", hide_input=True)
+    if password_stdin:
+        password = _password_from_stdin()
+    else:
+        password = typer.prompt("Password", hide_input=True)
     settings.manager_url = manager_url
     client = RestClient(settings)
     body = {"username": username, "password": password}

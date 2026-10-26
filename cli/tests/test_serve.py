@@ -1403,3 +1403,54 @@ def test_serve_migrates_a_stored_admin_password_out_of_the_config(runner, wired,
     assert "Your current admin password is: old-stored" in result.output
     assert "QOD_ADMIN_PASSWORD" not in load_start_env()
     assert "QOD_ADMIN_PASSWORD" not in wired["env"]
+
+
+@pytest.mark.parametrize("demo", [False, True])
+def test_serve_refuses_a_static_api_key_in_the_shell(
+    runner, wired, tmp_path, monkeypatch, demo
+):
+    # `qod serve --demo` goes through the same check before anything launches.
+    from qod_cli.commands import serve as serve_cmd
+
+    ran = []
+    monkeypatch.setattr(serve_cmd, "run_demo", lambda *a, **kw: ran.append(1))
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, *(["--demo"] if demo else [str(f)]))
+    assert result.exit_code == 1
+    assert "your shell: run `unset QOD_API_KEY`" in result.output
+    assert "stale-key-value" not in result.output
+    assert "cmd" not in wired
+    assert "provision" not in wired
+    assert ran == []
+
+
+def test_serve_refuses_a_static_api_key_in_the_start_table(runner, wired, tmp_path):
+    from qod_cli.config import config_path, save_start_env
+
+    save_start_env({"QOD_API_KEY": "stale-key-value"})
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 1
+    assert f"the [start] table of {config_path()}: delete its QOD_API_KEY line" in result.output
+    assert "cmd" not in wired
+
+
+def test_serve_attach_mode_refuses_a_static_api_key_too(
+    runner, wired, respx_mock, tmp_path, monkeypatch
+):
+    from qod_cli.commands import serve as serve_cmd
+
+    respx_mock.get(f"{BASE}/ready").mock(return_value=httpx.Response(200, json={}))
+    called = []
+    monkeypatch.setattr(serve_cmd, "_provision", lambda **kw: called.append(1) or True)
+    monkeypatch.setenv("QOD_TOKEN", "qod_pat_k")
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    f = tmp_path / "sales.duckdb"
+    f.write_bytes(b"")
+    result = _invoke(runner, wired, str(f))
+    assert result.exit_code == 1
+    assert "unset QOD_API_KEY" in result.output
+    assert called == []

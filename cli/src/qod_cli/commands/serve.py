@@ -53,7 +53,7 @@ from ..serve_provision import (
 )
 from ..serve_target import TargetError, composed_db_name
 from ..serve_target import resolve as resolve_target
-from ._launch import _exec, resolve_jar, resolve_java
+from ._launch import _exec, refuse_a_static_api_key, resolve_jar, resolve_java
 from . import _starflow
 from .demo import run_demo
 
@@ -650,6 +650,9 @@ def serve(
             typer.echo(hint, err=True)
     except Exception:
         pass  # purely decorative; must never block a serve
+
+    # Before anything launches: the boot path, attach mode and --demo alike.
+    refuse_a_static_api_key()
 
     manager_url = ctx.obj.settings.manager_url
 

@@ -12,10 +12,43 @@ import typer
 
 from .. import launcher
 from .._manager_version import MANAGER_VERSION
+from ..config import REMOVED_API_KEY, config_path, load_start_env
 
 
 def _is_win32() -> bool:
     return sys.platform == "win32"
+
+
+def refuse_a_static_api_key() -> None:
+    """Exit 1 when a non-empty QOD_API_KEY sits in the shell or in the profile
+    file's [start] table, naming each source and its fix.
+
+    The static API key was removed, so the CLI never launches a manager with
+    one: launcher.runtime_env copies both sources into the manager's
+    environment, and this check runs before anything launches. An empty value
+    passes. Never prints the value."""
+    sources = []
+    if (os.environ.get(REMOVED_API_KEY) or "").strip():
+        sources.append(f"  - your shell: run `unset {REMOVED_API_KEY}`")
+    if (load_start_env().get(REMOVED_API_KEY) or "").strip():
+        sources.append(
+            f"  - the [start] table of {config_path()}: delete its {REMOVED_API_KEY} line, "
+            f"or run qod setup --unset {REMOVED_API_KEY} --non-interactive"
+        )
+    if sources:
+        typer.echo(
+            "\n".join(
+                [
+                    f"error: {REMOVED_API_KEY} is set, but the static API key was removed and "
+                    "qod no longer launches a manager with one. Remove it from:",
+                    *sources,
+                    "Then use qod login, or a personal access token (qod auth pat create) "
+                    "in QOD_TOKEN.",
+                ]
+            ),
+            err=True,
+        )
+        raise typer.Exit(1)
 
 
 def _exec(cmd: list[str], env: dict) -> None:

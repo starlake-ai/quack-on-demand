@@ -125,9 +125,19 @@ def test_start_env_roundtrip():
 def test_start_env_merges_and_removes():
     from qod_cli.config import load_start_env, save_start_env
 
-    save_start_env({"QOD_PG_HOST": "a", "QOD_API_KEY": "k1"})
-    save_start_env({"QOD_PG_HOST": "b"}, remove=["QOD_API_KEY"])
+    save_start_env({"QOD_PG_HOST": "a", "QOD_MIN_PORT": "21900"})
+    save_start_env({"QOD_PG_HOST": "b"}, remove=["QOD_MIN_PORT"])
     assert load_start_env() == {"QOD_PG_HOST": "b"}
+
+
+def test_qod_api_key_is_not_a_setting(monkeypatch):
+    from qod_cli.config import ENV_VARS
+
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
+    st = load_settings()
+    assert not hasattr(st, "api_key")
+    assert "QOD_API_KEY" not in ENV_VARS.values()
+    assert st.token == ""
 
 
 def test_start_env_is_separate_from_profiles():

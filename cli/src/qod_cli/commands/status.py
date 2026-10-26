@@ -10,8 +10,8 @@ tier rather than failing:
      uses, plus the public `/api/config/client` FlightSQL coordinates and a
      TCP probe of that edge port.
   3. Authenticated detail - per-pool healthy/total node rows from
-     `/api/pool/list` when an API key or session token is available;
-     silently omitted otherwise.
+     `/api/pool/list` when a token (a qod login session or a personal
+     access token) is available; silently omitted otherwise.
   4. Stored `qod setup` config - how many vars, and where.
   5. Embedded control plane - filesystem ground truth from the pgdata
      directory `qod serve` provisions: presence, the port from its
@@ -132,7 +132,7 @@ def status(ctx: typer.Context):
             out["localEdgePid"] = edge_pid
 
     pool_rows: list[dict] = []
-    if out["manager"] == "up" and (settings.api_key or settings.token):
+    if out["manager"] == "up" and settings.token:
         try:
             from ..rest import RestClient
 

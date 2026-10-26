@@ -23,10 +23,14 @@ def test_get_json_with_token_header():
 
 
 @respx.mock
-def test_api_key_wins_over_token():
+def test_a_qod_api_key_in_the_environment_is_never_sent(monkeypatch):
+    from qod_cli.config import load_settings
+
+    monkeypatch.setenv("QOD_API_KEY", "stale-key-value")
     route = respx.get(f"{BASE}/health").mock(return_value=httpx.Response(200, json={}))
-    client(api_key="static", token="jwt").request("GET", "/health")
-    assert route.calls.last.request.headers["X-API-Key"] == "static"
+    RestClient(load_settings(overrides={"manager_url": BASE})).request("GET", "/health")
+    sent = "X-API-Key" in route.calls.last.request.headers
+    assert not sent
 
 
 @respx.mock
@@ -88,6 +92,17 @@ def test_401_with_token_hints_login():
     with pytest.raises(ApiError) as exc:
         client(token="old").request("GET", "/api/auth/whoami")
     assert "run qod login" in exc.value.message
+
+
+@pytest.mark.parametrize("token", ["expired-session", "qod_pat_revoked", ""])
+@respx.mock
+def test_401_hint_names_qod_login_and_qod_token(token):
+    respx.get(f"{BASE}/api/tenant/list").mock(
+        return_value=httpx.Response(401, json={"error": "unauthorized", "message": "nope"})
+    )
+    with pytest.raises(ApiError) as exc:
+        client(token=token).request("GET", "/api/tenant/list")
+    assert exc.value.message == "run qod login, or set QOD_TOKEN to a personal access token"
 
 
 @pytest.mark.parametrize(
