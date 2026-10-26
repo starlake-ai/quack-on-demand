@@ -57,7 +57,7 @@ class ProfilePoolsSpec extends AnyFlatSpec with Matchers:
         )
       )
 
-    private def pool(tenantId: String, dbName: String, name: String, disabled: Boolean = false) =
+    def pool(tenantId: String, dbName: String, name: String, disabled: Boolean = false) =
       store.upsertPool(
         Pool(
           id = s"p-$name",
@@ -226,6 +226,18 @@ class ProfilePoolsSpec extends AnyFlatSpec with Matchers:
       .toOption
       .map((status, err) => (status, err.error, err.message)) shouldBe
       Some((StatusCode.ServiceUnavailable, "authz_unavailable", "opa at http://opa: refused"))
+  }
+
+  it should "stop asking OPA at the first unavailable decision" in {
+    val f = new Fixture
+    f.pool("initech", "initech_main", "iy")
+    f.pool("initech", "initech_main", "iz")
+    f.sup.restore()
+    val down = StubOpa(Left(HandshakeDenial.Unavailable("opa at http://opa: refused")))
+    f.sup.wireOpa(down)
+    f.list(f.session("dave", Some("initech"))).left.map(_._1) shouldBe
+      Left(StatusCode.ServiceUnavailable)
+    down.edges should have size 1
   }
 
   it should "list every pool of every enabled tenant for a superuser session or data-only PAT" in {

@@ -15,8 +15,8 @@ import sttp.tapir.json.circe._
   * for a session whose `manageableTenants` is empty (every non-admin session). Admin sessions may
   * call these too and likewise see only themselves.
   *
-  * Both routes take the token through the shared [[Endpoints.authToken]] input (X-API-Key header OR
-  * `qod_session` cookie), so the browser path works without the SPA reading the HttpOnly cookie.
+  * Every route takes the token through the shared [[Endpoints.authToken]] input (X-API-Key header
+  * OR `qod_session` cookie), so the browser path works without the SPA reading the HttpOnly cookie.
   */
 object ProfileEndpoints:
 

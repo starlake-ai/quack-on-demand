@@ -260,8 +260,8 @@ object ManagerServerHarness:
     * The returned [[Harness]] holds `baseUrl`, `tokens` (for direct test introspection), and
     * `shutdown()` to stop the server.
     *
-    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`,
-    *     driving the `auth_disabled` 503 branch in [[AuthHandlers.login]].
+    *   - `enableProviders = false` makes [[AuthenticationService.hasProviders]] report `false`: the
+    *     basic chain then verifies no password.
     *
     * Call [[Harness.shutdown]] in `afterAll` / `afterEach` to release the port.
     */

@@ -447,7 +447,9 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
-  it should "return 503 with code auth_disabled when no providers are configured" in {
+  it should "refuse a password login as invalid credentials when no provider is configured" in {
+    // A booted manager always has a provider (boot refuses an empty chain): a service without one
+    // takes no password, like any password nobody verifies.
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store, enableProviders = false)
     try
@@ -455,8 +457,8 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         s"""{"username":"${SecurityFixtures.RootUsername}","password":"${SecurityFixtures.RootPassword}"}"""
       val resp = post(h.httpClient, s"${h.baseUrl}/api/auth/login", body)
       withClue(s"POST /api/auth/login body: ${resp.body()}") {
-        resp.statusCode() shouldBe 503
-        errorCode(resp.body()) should contain("auth_disabled")
+        resp.statusCode() shouldBe 401
+        errorCode(resp.body()) should contain("invalid_credentials")
       }
     finally h.shutdown()
   }

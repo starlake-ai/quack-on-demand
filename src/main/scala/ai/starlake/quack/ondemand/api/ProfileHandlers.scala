@@ -16,8 +16,8 @@ import java.time.temporal.ChronoUnit
   * pools they may use.
   *
   * **Self-scoping is the whole security story.** The `(tenant, username)` pair comes from the
-  * verified session and from nowhere else -- neither route accepts a tenant or user input -- so
-  * these endpoints cannot be aimed at another principal. Rows are matched on:
+  * verified session and from nowhere else -- no route accepts a tenant or user input -- so these
+  * endpoints cannot be aimed at another principal. Rows are matched on:
   *   - `username`, exactly as recorded by the FlightSQL router, and
   *   - the session tenant's ALIAS SET (`{id, displayName}`), because telemetry and the statement
   *     ring carry whichever shape the router held at execution time. This mirrors the allow-set
@@ -147,7 +147,10 @@ final class ProfileHandlers(
   private def clamp(requested: Option[Int], default: Int, max: Int): Int =
     math.max(1, math.min(max, requested.getOrElse(default)))
 
-  /** The pools of `tenants` (None: every tenant) that `principal` may connect to. */
+  /** The pools of `tenants` (None: every tenant) that `principal` may connect to. Decided lazily
+    * and in order: the first unavailable decision answers for the whole listing, so no later pool
+    * is asked about (each OPA-mode decision is a round trip).
+    */
   private def listFor(
       principal: RestCaller.Principal,
       tenants: Option[Set[String]]
@@ -161,12 +164,13 @@ final class ProfileHandlers(
           caller.restriction.allowsPool(p.key.pool)
       )
       .sortBy(_.key.toString)
+      .to(LazyList)
       .map(p => p -> sup.authorizeHandshakeDetailed(caller.authzRequest(p.key)))
     decided.collectFirst { case (_, Left(HandshakeDenial.Unavailable(msg))) => msg } match
       case Some(msg) =>
         Left((StatusCode.ServiceUnavailable, ErrorResponse("authz_unavailable", msg)))
       case None =>
-        Right(ProfilePoolsResponse(decided.collect { case (p, Right(_)) =>
+        Right(ProfilePoolsResponse(decided.toList.collect { case (p, Right(_)) =>
           ProfilePool(p.key.tenant, p.key.tenantDb, p.key.pool, PoolHandlers.statusOf(p))
         }))
 

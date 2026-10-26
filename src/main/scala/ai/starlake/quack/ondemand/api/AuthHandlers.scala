@@ -405,16 +405,6 @@ final class AuthHandlers(
           ErrorResponse("invalid_credentials", "username and password are required")
         )
       )
-    else if !authService.hasProviders then
-      Left(
-        (
-          StatusCode.ServiceUnavailable,
-          ErrorResponse(
-            "auth_disabled",
-            "no auth backends configured; set auth.database.enabled=true (or another)"
-          )
-        )
-      )
     else
       // The tenant as the caller typed it (trimmed): sso_required names it this way.
       val named            = req.tenant.map(_.trim).filter(_.nonEmpty)
