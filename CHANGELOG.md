@@ -6,9 +6,10 @@
   trusted.** A manager where tenant admins are not fully trusted, and where tenants could set their
   own sign-in configuration, should upgrade to this release promptly and then rotate every secret
   held in the manager's environment, in particular `QOD_SESSION_JWT_SECRET` (which also ends every
-  open session), `QOD_API_KEY`, `QOD_PG_PASSWORD` and the cloud credentials. Also review the
-  personal access tokens owned by superuser rows and the recent superuser sign-ins in the audit
-  log.
+  open session), `QOD_PG_PASSWORD` and the cloud credentials. `QOD_API_KEY` is not rotated but
+  unset: this release removes the static API key, and a manager with it set refuses to boot (see
+  below). Also review the personal access tokens owned by superuser rows and the recent superuser
+  sign-ins in the audit log.
 
 - **Security: BREAKING: a tenant's sign-in stays inside that tenant.** Management sign-in and the
   tenant sign-in settings now hold these rules:
@@ -144,9 +145,96 @@
     in that state change behavior as soon as this release runs). Its own admins can turn this on,
     since the override needs no superuser-only reference.
 
+- **BREAKING: the static API key is gone.** The manager no longer accepts `QOD_API_KEY` /
+  `quack-on-demand.apiKey`: every REST, MCP and SCIM caller is a session or a personal access
+  token (PAT), and every admin action is attributed to a user. A non-empty `QOD_API_KEY` in the
+  environment, or a non-empty `quack-on-demand.apiKey` in an operator's config file, stops the
+  boot with "QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a
+  static API key. Use a personal access token (qod auth pat create) or a qod login session, and
+  unset QOD_API_KEY."; an empty value passes (older Compose files render `API_KEY=` as one). Boot
+  no longer generates a key, its banner shows only a generated `QOD_SESSION_JWT_SECRET`, and it
+  refuses to start when nothing could create a session: no password backend
+  (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in
+  (`QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL` and `QOD_MGMT_OIDC_CLIENT_ID`
+  set). What replaces each use of the key:
+  - an operator's CLI or curl: a `qod login` session, or a PAT in `QOD_TOKEN`, sent as
+    `X-API-Key` (the header keeps its name); a 401 from the CLI says "run qod login, or set
+    QOD_TOKEN to a personal access token";
+  - CI and IaC: a PAT an admin mints once (`qod auth pat create`), or `qod login
+    --password-stdin` inside the job (the password on the first line of stdin, never in a flag or
+    an env var);
+  - MCP clients: a PAT as `Authorization: Bearer`, the only credential `/mcp` admits (a superuser
+    PAT still passes `tenant` explicitly);
+  - SCIM connectors: a tenant-admin PAT as `Authorization: Bearer`, pinned to its tenant;
+  - Starflow's pool listing: the user's own session against `GET /api/profile/pools` (below);
+  - recovery: `qod admin reset-password`, which now re-enables a disabled superuser when
+    `--username` names it (its personal access tokens then work again; a reset of the configured
+    admin names without `--username` leaves a disabled account disabled and says so); a deleted
+    superuser row comes back at the next boot with `QOD_ADMIN_PASSWORD` set.
+
+- **REST and MCP data statements run as their caller.** Preview, data diff, undrop, restore,
+  Iceberg views, branch counts requested over REST and MCP `run_sql` go through the FlightSQL
+  handshake's gate (tenant and pool kill switches, user registered and enabled, pool access) and
+  run in-engine as that user's principal, never as `System`, which stays for the manager's own
+  work. A superuser known only through OIDC, with no `qodstate_user` row, is refused there, as on
+  FlightSQL. The self-lock and self-delete guards now apply to every caller, the audit and the
+  telemetry no longer record a `static-key` actor, and `qod fleet approve` records the approving
+  user in `approved_by`.
+
+- **BREAKING for the CLI and its launchers.** `api_key` and its `QOD_API_KEY` env name leave the
+  CLI settings; `token` (`QOD_TOKEN`, a session or a PAT) is its only credential, and `qod status`
+  lists pools with it. `qod setup` loses its key prompt and `--api-key`. `qod start` and
+  `qod serve` (with or without `--demo`) refuse to launch while `QOD_API_KEY` is set in the shell
+  or stored in the profile's `[start]` table, naming where it is and how to remove it
+  (`unset QOD_API_KEY`, or delete the line from the `[start]` table of the named profile file).
+  `qod serve` no longer hands its manager a per-boot key: it writes a spec file and the manager
+  provisions the tenant, database and pool itself (`QOD_SERVE_PROVISION`, an add-only boot hook
+  that never updates or deletes, reporting to `serve-provision.outcome.json`), so later boots
+  need no credential. An existing database whose kind, data path or init SQL differ, or a pool
+  name already serving another database, is refused with the way out
+  (`qod serve <target> --name <other>` or `--pool <other>`); any other refused step is printed
+  with its `finish by hand:` command. Attach mode (a manager already running) provisions with
+  `QOD_TOKEN`, the profile's session or a password prompt, and otherwise refuses with "run qod
+  login, set QOD_TOKEN, or run qod serve in a terminal". `--with-starflow` now shares only the
+  session secret with Starflow.
+
+- **BREAKING for Helm, Compose and Docker.** The chart drops `apiKey.*`, its `<fullname>-apikey`
+  Secret and the `QOD_API_KEY` env it rendered; it fails on an `apiKey` value with "apiKey was
+  removed: the manager no longer accepts a static API key; use a personal access token" (an
+  all-empty block left from an older values file passes) and requires `admin.password` or
+  `admin.existingSecret`, since nobody could log in without an admin. `docker-compose.yml`
+  passes no `API_KEY` to the manager or to Starflow, `starflow-db-init` needs only
+  `SESSION_JWT_SECRET`, and `scripts/docker/run-docker-compose.sh` and `run-docker.sh` stop
+  generating and forwarding it (each warns about a leftover `API_KEY`). `AUTH=false` now refuses
+  to boot unless system-scope OIDC sign-in is configured (neither file passes it). The kind rig
+  and `test-api.sh` log in as the seeded admin.
+
+- **`GET /api/profile/pools`: the pools you may connect to.** Any session or PAT (the endpoint
+  joins the profile allowlist) gets
+  `{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}`, the field names and
+  `status` values (`ready`, `disabled`) of `/api/pool/list` and nothing else: the pools of the
+  caller's tenants (every tenant for a superuser) that the FlightSQL handshake's own decision
+  admits (kill switches, user enabled, then the pool grant or the tenant's OPA; a superuser skips
+  the pool step), narrowed by a PAT's `databases` and `pools`. A denied pool is omitted; an
+  unavailable decision (the tenant's OPA unreachable) answers `503 authz_unavailable`. CLI:
+  `qod profile pools`.
+
+- **Starflow lists pools as the user.** A separate starlake-api change lists pools through
+  `GET /api/profile/pools` with the user's own QoD session and drops its `QOD_API_KEY`,
+  `QOD_SERVICE_USERNAME` and `QOD_SERVICE_PASSWORD` settings, so QoD, not Starflow, decides which
+  pools a user sees. Until it ships, an older Starflow still lists pools for admins (its fallback
+  to the user's session reaches `/api/pool/list`); non-admins get 403, as they do today without
+  a key.
+
 - **Manager modules must be recompiled against this core** (`Tenant` gained a field, and
   `AuthzRequest`, `ExecCaller` and `PoolSupervisor.authorizeHandshake` take
   `superuserAdmissible` with no default: a module that builds one or calls it passes it).
+  `ManagerContext.scopeOf` resolves every credential to a `SessionScope`, and an absent or
+  unresolved one is `NoAccess`, never trusted.
+
+- **Upgrading:** mint PATs for automation before upgrading (`qod login`, then
+  `qod auth pat create`), point MCP clients and SCIM connectors at them, then remove
+  `QOD_API_KEY` from every environment, chart value and Compose file.
 
 ## 0.10.1
 

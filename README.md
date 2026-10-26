@@ -132,7 +132,8 @@ Unlike `--demo`, this keeps the normal secure posture: TLS on, database auth on,
 ACL on, and an admin password you choose on the first run (prompted, or taken
 from `QOD_ADMIN_PASSWORD`) and never stored; `qod admin reset-password` recovers it.
 If a gateway is already running locally, `qod serve` provisions straight into it
-instead of booting a second one; `qod stop` still stops it.
+with your own credential (`QOD_TOKEN`, the session `qod login` saved, or a
+password prompt) instead of booting a second one; `qod stop` still stops it.
 
 An existing `.duckdb` file is attached read-write and served by a single node.
 Parquet and CSV targets become views (`read_parquet` / `read_csv`), so nothing is
@@ -203,7 +204,7 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 | Pluggable authenticators | Postgres / any JDBC backend (BCrypt passwords), external JWT (HS256 / RS256 / PEM), or OIDC (Keycloak with ROPC, Google, Azure AD, AWS Cognito) | DuckDB has no users. QoD ties every connection to an identity from your IdP |
 | OIDC SSO for the admin console | Browser SSO, JWT session in an HttpOnly cookie | Admin access follows corporate identity |
 | Personal access tokens | Self-scoped, tenant-inferred tokens with restrictions such as read-only, one database, or branch-only | Least-privilege credentials for agents and CI |
-| SCIM 2.0 provisioning | Users and groups pushed by Okta / Entra | Joiner-mover-leaver lifecycle drives RBAC membership automatically |
+| SCIM 2.0 provisioning | Users and groups pushed by Okta / Entra, authenticated with a tenant-admin personal access token | Joiner-mover-leaver lifecycle drives RBAC membership automatically |
 | Account lockout and self-service reset | Opt-in lockout after N failed attempts (`QOD_AUTH_LOCKOUT_ENABLED`), single-use emailed reset link over SMTP. Database users can carry an email; an email-format username is its own email | Standard account hygiene the engine cannot provide |
 | Forced password change | `mustChangePassword` blocks both the REST login and the FlightSQL handshake until the password is rotated | Onboarding and rotation policies enforced on the wire |
 | Revocation kills statements | Revoking a grant or token cancels that principal's in-flight statements | Access removal is immediate, not "at next connect" |
@@ -280,9 +281,9 @@ Each table lists what Quack on Demand adds on top of a bare DuckDB process plus 
 |---|---|---|
 | React admin console | `http://localhost:20900/ui/`: left sidebar with a tenant switcher, tenant-scoped pages with bookmarkable URLs (`/ui/t/acme/pools`), tenant / pool / user CRUD, per-user "Effective permissions" drilldown, live node dashboard (in-flight, total served, EWMA latency), incident-response actions | Ops visibility DuckDB never had |
 | Python CLI `qod` | Full REST parity with a pytest gate, profiles, install via `uvx` and PyPI | Scriptable operations, same contract as the API |
-| Admin REST API | Every operation guarded by an `X-API-Key` static key OR a session token from `/api/auth/login`, tenant scope checked on every RBAC endpoint | Automation hook for IaC and portals |
+| Admin REST API | Every operation guarded by a session from `/api/auth/login` (`qod login`) or a personal access token, sent as `X-API-Key` (the browser rides an HttpOnly cookie), tenant scope checked on every RBAC endpoint | Automation hook for IaC and portals |
 | SQL admin dialect | Administer users, grants and pools over FlightSQL itself | DBA tools become admin tools |
-| MCP server for AI agents | `POST /mcp`: agents authenticate with a personal access token (self-scoped, tenant-inferred) or the static key, and reach the full admin control plane (identity, access, pools and nodes, databases, maintenance and tags, time travel, federation, manifest, PATs, telemetry) gated by the same server-side guards as REST. See `skills/quack-on-demand/SKILL.md` ("Administering over MCP") | Agent-native administration and querying |
+| MCP server for AI agents | `POST /mcp`: agents authenticate with a personal access token (self-scoped, tenant-inferred), and reach the full admin control plane (identity, access, pools and nodes, databases, maintenance and tags, time travel, federation, manifest, PATs, telemetry) gated by the same server-side guards as REST. See `skills/quack-on-demand/SKILL.md` ("Administering over MCP") | Agent-native administration and querying |
 | Manifest YAML export / import | Whole-perimeter config as YAML with round-trip and fragments | GitOps for tenants, pools, grants and federation |
 | Observability | Prometheus `/metrics`, or push to CloudWatch / Azure Monitor / GCP. Ships two Grafana dashboards: [single-node](observability/grafana-dashboard-single.json) and [Kubernetes](observability/grafana-dashboard-k8s.json). Statement history and trends in the console | Per-node latency, in-flight and served counters that an embedded engine does not expose |
 | Usage accounting and metering | Per-tenant and per-user usage, statement history | Chargeback and hosted billing inputs |
@@ -329,11 +330,13 @@ Every scalar in `application.conf` accepts a matching `QOD_*` env-var override. 
 
 | Setting | Env var | Default |
 |---|---|---|
-| Static admin key | `QOD_API_KEY` | unset: a random key is generated and printed at each boot (none under HA) |
 | Session JWT secret | `QOD_SESSION_JWT_SECRET` | unset: a random secret is generated and printed at each boot, so sessions die on restart (HA refuses to boot without one) |
 | Admin password | `QOD_ADMIN_PASSWORD` | none; used on first boot only (`qod start` / `qod serve` prompt for it). The Docker launchers default it to `admin` (`ADMIN_PASSWORD`) |
 | Metastore password | `QOD_PG_PASSWORD` | `azizam` (change!) |
 | Enable per-statement RBAC | `QOD_ACL_ENABLED` | `false` |
+
+There is no static API key: a set `QOD_API_KEY` refuses boot. People log in (`qod login`,
+the admin UI) and automation uses personal access tokens (`qod auth pat create`).
 
 Full reference: [Configuration](https://docs.starlake.ai/qod/reference/configuration).
 

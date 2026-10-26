@@ -67,8 +67,8 @@ SIGKILL after `FORCE_AFTER` seconds).
 
 Run `qod setup` before your first `qod start` so you don't have to export
 the same env vars every time. With no flags on a terminal it prompts for
-Postgres coordinates, admin credentials, the static API key, and the
-auth/TLS toggles, and writes them to the CLI config file (same file/path as
+Postgres coordinates, admin credentials and the auth/TLS toggles, and writes
+them to the CLI config file (same file/path as
 the connection profiles below, under a separate `[start]` table - see
 `qod setup --help`):
 
@@ -77,7 +77,7 @@ qod setup                                    # guided prompts
 qod setup --pg-host db.internal --pg-password hunter2 --no-tls --non-interactive
 qod setup --set QOD_MIN_PORT=21900           # any other QOD_*/PROXY_* var
 qod setup --show                             # inspect what is stored (secrets redacted)
-qod setup --unset QOD_API_KEY --non-interactive
+qod setup --unset QOD_API_KEY --non-interactive  # the fix qod start / qod serve suggest for a stored key
 ```
 
 `qod start` merges this file UNDER the real process env, so an actual shell
@@ -85,6 +85,11 @@ qod setup --unset QOD_API_KEY --non-interactive
 haven't exported. `qod serve --demo` (and its deprecated alias `qod start --demo`) ignores it:
 the demo is intentionally self-contained (embedded ephemeral Postgres), so a
 stored external-Postgres config would be surprising there.
+
+The manager has no static API key: `qod start` and `qod serve` (with or without
+`--demo`) refuse to launch while `QOD_API_KEY` is set in your shell or stored in
+this `[start]` table, and the message says which. `unset QOD_API_KEY`, or drop a
+stored one with the last `qod setup` line above.
 
 ## Quick start
 
@@ -98,6 +103,19 @@ qod sql "SELECT 1" --tenant acme --pool bi
 never lands in shell history), mints a session, and stores the session token
 plus the edge host/port/TLS settings in the active profile - one login
 configures both the REST plane and the SQL plane.
+
+For CI and scripts, `qod login --password-stdin` reads the password from the
+first line of stdin instead of prompting (no flag or env var ever carries a
+password):
+
+```bash
+printf '%s\n' "$QOD_CI_PASSWORD" | qod login --url https://qod.example.com --username ci-bot --password-stdin
+```
+
+Or skip the login: set `QOD_TOKEN` to a personal access token, minted once from a
+session with `qod auth pat create --name ci` (it is printed once). There is no
+static API key; a 401 says "run qod login, or set QOD_TOKEN to a personal access
+token".
 
 ## Configuration
 
@@ -120,8 +138,7 @@ named `default`.
 | Setting | Env var | Default | Notes |
 |---|---|---|---|
 | `manager_url` | `QOD_MANAGER_URL` | `http://localhost:20900` | REST plane base URL. |
-| `api_key` | `QOD_API_KEY` | `""` | Static API key; wins over `token` when both are set. |
-| `token` | `QOD_TOKEN` | `""` | Session JWT, normally written by `qod login`, not set by hand. |
+| `token` | `QOD_TOKEN` | `""` | The only credential, sent as `X-API-Key`: the session `qod login` writes, or a personal access token (`qod auth pat create`), usually through `QOD_TOKEN`. |
 | `edge_host` | `QOD_HOST` | `localhost` | FlightSQL edge host. |
 | `edge_port` | `QOD_PORT` | `31338` | FlightSQL edge port. |
 | `edge_tls` | `QOD_TLS` | `true` | TLS to the edge. |
@@ -141,14 +158,14 @@ for the full flag list of any command.
 
 | Command | Purpose |
 |---|---|
-| `qod login` | Mint a session, store it and the edge settings in the active profile. |
+| `qod login` | Mint a session, store it and the edge settings in the active profile (`--password-stdin` reads the password from stdin, for CI). |
 | `qod logout` | Revoke the current session token. |
 | `qod whoami` | Verify the current session. |
 | `qod health` | Liveness plus pool/node counts (open endpoint). |
 | `qod usage` | Usage accounting rollups. |
 | `qod sql` | Run SQL against the FlightSQL edge; one-shot or interactive REPL. |
 
-### auth - mode discovery and self-service password change
+### auth - mode discovery, self-service password change, personal access tokens
 
 | Verb | Purpose |
 |---|---|
@@ -156,6 +173,10 @@ for the full flag list of any command.
 | `change-password` | Change your own password (works pre-login; prompts for current and new). |
 | `forgot-password` | Request a password-reset link (always answers 200; account existence stays hidden). |
 | `reset-password` | Redeem a single-use reset link token and set a new password (prompts for both). |
+| `pat create` | Mint a personal access token (printed once); scope flags narrow it below your own grants. |
+| `pat list` | List your PATs (never shows token values). |
+| `pat revoke` | Revoke a PAT immediately. |
+| `pat delete` | Delete a revoked or expired PAT from the listing. |
 
 ### config - server-published configuration
 
@@ -331,12 +352,13 @@ for the full flag list of any command.
 | `statements` | List past statements with filters. |
 | `trends` | Aggregate statement trends over time. |
 
-### profile - your own profile: usage and recent statements (any session)
+### profile - your own profile: usage, recent statements and pools (any session or PAT)
 
 | Verb | Purpose |
 |---|---|
 | `usage` | Your own daily statement counts. |
 | `statements` | Your own most recent statements. |
+| `pools` | The pools you may connect to (tenant, database, pool, status). |
 
 ## REST parity gate
 

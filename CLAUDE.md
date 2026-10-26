@@ -288,13 +288,41 @@ See docs/superpowers/specs/2026-08-11-demand-scale-out-policy-design.md.
 `QOD_HA_ENABLED=true` (helm: `replicaCount > 1`) runs N active-active managers.
 All replicas serve REST + FlightSQL; one holds a Postgres session advisory lock
 (`HaCoordinator`) and runs the singleton duties (reconcile respawns, bootstrap,
-DuckLake init, revoked-jti purge). Pool mutations serialize across replicas via
+`qod serve` provisioning, DuckLake init, revoked-jti purge). Pool mutations serialize across replicas via
 per-pool advisory locks (`PoolLocker`; a single non-HA manager serializes them in-process
 through `PoolLocker.inProcess()`, so pool mutations are per-pool serialized on every runtime); caches propagate via LISTEN/NOTIFY on
 `qod_topology` / `qod_rbac` / `qod_revocation` with a periodic snapshot-refresh
 fallback. JWT revocations persist in `qodstate_revoked_jti`. HA with the local
 backend is refused at config load. See
 docs/superpowers/specs/2026-07-02-manager-ha-zero-downtime-design.md.
+
+### `qod serve` boot provisioning (`ServeProvisionHook`)
+
+`qod serve` has the manager provision its tenant, database and pool, so it holds no credential
+for it: it writes `serve-provision.json` (owner-only: the database body can carry object-store
+credentials) in its data dir, `{"tenant","database","pool"}`, the bodies of
+`POST /api/tenant/create`, `/api/database/create` and `/api/pool/create`, deletes any earlier
+outcome, and passes the spec's absolute path as `QOD_SERVE_PROVISION` (read like
+`QOD_BOOTSTRAP_YAML`: env, else a JVM system property; unset or blank does nothing).
+`ServeProvisionHook` (`ondemand/bootstrap/`) runs in the leader duties (`LeaderDuties`, `boot/`)
+after `restore()` and before the DuckLake init and `reconcile()`, so a new database is
+initialized and its pool spawned in the same boot; a single manager runs it before the REST
+server binds, an HA follower only once promoted. It calls the REST create functions
+(`createTenantAs` / `createTenantDbAs` / `createPoolAs`, every check and quota included) as
+`SessionScope.Superuser`, audited with the actor `system`. Add-only: an object that exists and
+matches is left alone; one that differs is refused and never updated (a database whose kind,
+`dataPath` or `initSql` differ, or a pool name already serving another database, each reason
+naming the way out: `qod serve <target> --name <other>` / `--pool <other>`), and nothing is ever
+deleted. It stops at the first refusal and writes `serve-provision.outcome.json` beside the
+spec, atomically: `{"status":"ok","created":[...]}` or
+`{"status":"failed","step":"spec|tenant|database|pool","reason":"..."}` (`spec`: the file could
+not be read). A failure never stops the boot, and no log line, audit row or outcome carries a
+body or a secret. The launcher waits for `/ready`, then for the outcome within
+`--ready-timeout`, deletes the spec once it has the outcome, and prints its banner or the failed
+step with its hand-run command (`finish by hand:`). Attach mode (a manager already running)
+still provisions over REST, with the caller's own credential. `DemoBootstrapHook`
+(`QOD_BOOTSTRAP_YAML`) is unrelated: its manifest import replaces rows wholesale and runs only on
+an empty store.
 
 ### Edge config + catalog ([quack.edge.config](src/main/scala/ai/starlake/quack/edge/config/), [quack.edge.catalog](src/main/scala/ai/starlake/quack/edge/catalog/))
 
@@ -319,7 +347,7 @@ Starter policy and operator guide: [examples/opa/](examples/opa/README.md). Desi
 
 ### REST authZ - tenant scope on every RBAC endpoint
 
-Every handler in `api/{User,Role,Group,Membership,PoolPermission}Handlers.scala` calls `TenantScopeCheck.{reject,rejectForResource,rejectForUser}` before mutating. Id-only endpoints (e.g. `POST /api/role/delete {id}`) resolve the owning tenant via 5 supervisor lookup helpers (`tenantForUser`, `tenantForRole`, `tenantForGroup`, `tenantForRolePermission`, `tenantForPoolPermission`) before applying the gate. Tenant-A admin sessions get `403 tenant_forbidden` on any tenant-B resource; superuser and static-key callers bypass. Missing ids 404 (no cross-tenant existence leak via differential error codes). See `RbacTenantScopeSpec` for the 14 cases that pin the contract.
+Every handler in `api/{User,Role,Group,Membership,PoolPermission}Handlers.scala` calls `TenantScopeCheck.{reject,rejectForResource,rejectForUser}` before mutating. Id-only endpoints (e.g. `POST /api/role/delete {id}`) resolve the owning tenant via 5 supervisor lookup helpers (`tenantForUser`, `tenantForRole`, `tenantForGroup`, `tenantForRolePermission`, `tenantForPoolPermission`) before applying the gate. Tenant-A admin sessions and PATs get `403 tenant_forbidden` on any tenant-B resource; superusers bypass. Every caller is a session or a PAT (the static API key is gone), and the scope resolver is total (`SessionScope.resolver`): no credential, or one that stopped resolving, is `NoAccess`, never trusted. Missing ids 404 (no cross-tenant existence leak via differential error codes). See `RbacTenantScopeSpec` for the 14 cases that pin the contract.
 
 ### Tenant sign-in
 
@@ -336,9 +364,9 @@ over the RBAC store for IdP connectors (Okta, Entra): CRUD, `eq` filters
 (userName/externalId/displayName), pagination, PATCH (active toggle incl. Entra's string
 booleans, member add/remove/replace), plus ServiceProviderConfig/ResourceTypes/Schemas.
 Bodies are raw strings (SCIM clients send `application/scim+json`, and errors must be the
-SCIM envelope, not `ErrorResponse`). Auth: `Authorization: Bearer` (static key or PAT) is
+SCIM envelope, not `ErrorResponse`). Auth: a tenant-admin PAT as `Authorization: Bearer`,
 accepted by `apiKeyGuard` for the `/api/scim/` prefix ONLY, alongside the usual
-header/cookie. Mapping: userName=username (immutable), active=enabled, primary
+header/cookie; a tenant-scoped PAT reaches only its own tenant's base URL. Mapping: userName=username (immutable), active=enabled, primary
 email=email (EmailPolicy applies), externalId=new `external_id` columns (Liquibase
 `0036`, written only by SCIM). The superuser realm is invisible to SCIM; passwordless
 creates get a random password (users sign in via tenant OIDC). SCIM routes are excluded
@@ -349,8 +377,8 @@ from CLI parity (`cli/tests/test_rest_parity.py`) as machine-to-machine. See `Sc
 `SessionTokenStore` is a stateless JWT signer/verifier (HS256, secret from `manager.auth.management.sessionJwtSecret`). `mintWithScope` returns the compact JWT; `get` parses + verifies + reconstructs the `Session` from claims. Revocation: bounded in-process jti denylist (lost on restart; the documented trade-off for going stateless).
 
 On the wire:
-- `AuthHandlers.login` returns the JWT both in the JSON body (`LoginResponse.token`, for CLI / static-key callers) AND as `Set-Cookie: qod_session=<jwt>; HttpOnly; Secure; SameSite=Lax; Path=/api`.
-- `ManagerServer.apiKeyGuard` admits on either path: `X-API-Key` header (CLI / static key) OR `qod_session` cookie (browser).
+- `AuthHandlers.login` returns the JWT both in the JSON body (`LoginResponse.token`, for the CLI and scripts, which send it as `X-API-Key`) AND as `Set-Cookie: qod_session=<jwt>; HttpOnly; Secure; SameSite=Lax; Path=/api`.
+- `ManagerServer.apiKeyGuard` admits a session or a live PAT and nothing else, on the `X-API-Key` header (CLI, scripts; the name is historical) OR the `qod_session` cookie (browser), plus `Authorization: Bearer` on `/api/scim/**`. `/mcp`, outside the guard, admits only a live PAT as `Authorization: Bearer` (sessions are refused there).
 - UI does not stash a token in localStorage; fetch's same-origin credentials policy auto-attaches the cookie.
 
 Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. When `QOD_SESSION_JWT_SECRET` is unset, `BootPreflight.withGeneratedBootSecrets` generates a fresh random secret at boot and prints it to stdout (println, not the logger, so the default ERROR level can't swallow it); sessions then die on restart, and HA refuses to boot on an empty secret. Pin a stable random >=32-char value for production.
@@ -367,21 +395,31 @@ is the credential; new must differ; clears the flag). The auth queries MUST proj
 `kind=user` principal can log in through their tenant (the blank/system login and OIDC SSO
 stay admin-only). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
 principal holding a grant on `t`, not just an admin, and mints a non-admin, profile-only
-session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions to
-a fixed allowlist (`isProfileApi`: `/api/auth/whoami`, `/api/auth/logout`,
-`/api/profile/usage`, `/api/profile/statements`) and answers `403 admin_required` on
-everything else; the UI mounts only the `/profile` route (own password change; own
-usage/statements) for them.
+session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions (and
+a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
+`/api/auth/logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools`, the
+caller's own `/api/auth/pat/{create,list,revoke,delete}`, and `/api/auth/sso/ticket` when the
+Starlake integration is on) and answers `403 admin_required` on everything else; the UI mounts
+only the `/profile` route (own password change; own usage/statements) for them.
+`GET /api/profile/pools` (`qod profile pools`) answers
+`{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}` (the field names and
+`status` values of `/api/pool/list`, `ready` or `disabled`, nothing else) for the pools of the
+caller's tenants (every tenant for a superuser) that it may connect to, each decided by the
+FlightSQL handshake's own `PoolSupervisor.authorizeHandshakeDetailed` for the request
+`ExecCaller.authzRequest` builds, and narrowed by a PAT's `databases` / `pools`; a denied
+pool is omitted, and an unavailable decision (the tenant's OPA unreachable) answers
+`503 authz_unavailable`. Starflow lists pools through it with the user's own session (a
+starlake-api change), so it holds no QoD credential of its own.
 
 ### Account lockout, SMTP, and self-service password reset
 
 `qodstate_user` carries an optional `email` column (Liquibase `0029-user-email`). A row with an email can use the public self-service reset flow and is eligible for lockout; a row with a non-email username and no email cannot reset by email and is never subject to lockout.
 
-When the username itself is in email format, `email` is auto-set to it and immutable - `user/create` / `user/update`, manifest import, AND boot seeding (`BootPreflight.seedAdminUsers` derives `email = username` for an email-format admin, matching the 0031 backfill so fresh and upgraded installs agree) all follow the rule; a conflicting value is rejected with `400 invalid_email`; pre-existing rows are backfilled by Liquibase `0031-user-email-from-username`. This means the default seeded admin `admin@localhost.local` carries `email = admin@localhost.local`, so it IS lockable when lockout is on and reset-eligible. A locked or forgotten superuser password is recovered with `qod admin reset-password` (writes the new hash straight into the control-plane database and clears `failed_attempts` / `locked_at`; works with the manager down against an external control plane; it never starts Postgres, so for the `qod serve` embedded one that Postgres must be running and a stopped one is refused), or by another superuser / the static `X-API-Key` through `qod user update --password`. A restart does NOT reset it: the admin is seeded only when its row is missing, and `QOD_ADMIN_PASSWORD` is used on that first boot only (`qod start` / `qod serve` prompt for it then and never store it). With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one). Because `admin@localhost.local` is not a routable mailbox, its self-service email reset does not deliver by default - set `QOD_ADMIN_USERNAME` to a real address for email self-recovery.
+When the username itself is in email format, `email` is auto-set to it and immutable - `user/create` / `user/update`, manifest import, AND boot seeding (`BootPreflight.seedAdminUsers` derives `email = username` for an email-format admin, matching the 0031 backfill so fresh and upgraded installs agree) all follow the rule; a conflicting value is rejected with `400 invalid_email`; pre-existing rows are backfilled by Liquibase `0031-user-email-from-username`. This means the default seeded admin `admin@localhost.local` carries `email = admin@localhost.local`, so it IS lockable when lockout is on and reset-eligible. A locked or forgotten superuser password is recovered with `qod admin reset-password` (writes the new hash straight into the control-plane database and clears `failed_attempts` / `locked_at`, for every configured admin name or the one `--username` names; it re-enables a disabled superuser only when `--username` names it, which also revives that account's personal access tokens, while a reset without `--username` leaves a disabled account disabled and says so; works with the manager down against an external control plane; it never starts Postgres, so for the `qod serve` embedded one that Postgres must be running and a stopped one is refused), or by another superuser through `qod user update --password`; a deleted superuser row comes back at the next boot with `QOD_ADMIN_PASSWORD` set (`BootPreflight.seedAdminUsers` creates any configured admin whose row is missing). A restart does NOT reset it: the admin is seeded only when its row is missing, and `QOD_ADMIN_PASSWORD` is used on that first boot only (`qod start` / `qod serve` prompt for it then and never store it). With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one). Because `admin@localhost.local` is not a routable mailbox, its self-service email reset does not deliver by default - set `QOD_ADMIN_USERNAME` to a real address for email self-recovery.
 
 **SMTP** (`quack-on-demand.smtp`, env `QOD_SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` / `_STARTTLS`): when `host` is unset (default), Main wires `LogMailSender` (logs recipient/subject, never actually sends); setting `QOD_SMTP_HOST` switches to `SmtpMailSender` (Jakarta Mail). `QOD_PUBLIC_BASE_URL` (`quack-on-demand.publicBaseUrl`, default `""`) is the externally-visible origin used to build the mailed reset link (`$publicBaseUrl/ui/reset-password?token=...`); left empty the link is host-relative and Main logs a boot warning.
 
-**Self-service reset**: `POST /api/auth/forgot-password {tenant?, username}` is a public endpoint (no API key) that always returns 200 regardless of whether the account exists or has an email - anti-enumeration is load-bearing, and the lookup + send are decoupled so response timing doesn't leak account existence either. `POST /api/auth/reset-password {token, newPassword}` (also public) redeems the token. The token (`ResetTokenStore`) is a stateless, single-use, 1-hour HS256 JWT signed with the same secret as `QOD_SESSION_JWT_SECRET`; single-use is enforced not by a redemption ledger but by embedding a fingerprint of the password hash at mint time, so any password change invalidates every outstanding link. `qod auth forgot-password` / `qod auth reset-password` are the CLI equivalents; `qod user create/update --email` sets the column.
+**Self-service reset**: `POST /api/auth/forgot-password {tenant?, username}` is a public endpoint (no credential) that always returns 200 regardless of whether the account exists or has an email - anti-enumeration is load-bearing, and the lookup + send are decoupled so response timing doesn't leak account existence either. `POST /api/auth/reset-password {token, newPassword}` (also public) redeems the token. The token (`ResetTokenStore`) is a stateless, single-use, 1-hour HS256 JWT signed with the same secret as `QOD_SESSION_JWT_SECRET`; single-use is enforced not by a redemption ledger but by embedding a fingerprint of the password hash at mint time, so any password change invalidates every outstanding link. `qod auth forgot-password` / `qod auth reset-password` are the CLI equivalents; `qod user create/update --email` sets the column.
 
 **Account lockout** (`quack-on-demand.auth.lockout`, env `QOD_AUTH_LOCKOUT_ENABLED` default `false`, `QOD_AUTH_LOCKOUT_MAX_FAILURES` default `10`) is opt-in. Enabling it requires a working SMTP relay - `BootPreflight.checkLockoutSmtp` refuses to start otherwise, naming `QOD_SMTP_HOST` in the error - because a locked-out user with no mail path would have no way back in. Lockout only ever applies to rows with a non-null `email`; a row with a non-email username and no email can never be locked no matter how many failed attempts, whereas the seeded superuser `admin@localhost.local` carries `email = username` and so is lockable. `DatabaseAuthenticator` checks the lock before bcrypt and, on a locked row, returns `AuthFailure.AccountLocked` -> REST `401 {"error":"account_locked","message":"account locked - use forgot password to reset your credentials"}` (same failure wins the FlightSQL handshake too). Failures accumulate atomically per row and reset to zero on any successful login. Recovery is either the self-service reset above or an admin password reset (`user/update` with a new `password`, or the CLI equivalent) - both unconditionally clear `failed_attempts` and `locked_at` as part of the password write.
 
@@ -395,7 +433,7 @@ When the username itself is in email format, `email` is auto-set to it and immut
 - **Per-pod object-store Secret** `qod-store-${nodeId}` when `spec.objectStoreSql` is non-empty.
 - **Per-pool node-env Secret** `qod-nodeenv-${tenant}-${tenantDb}-${pool}` (all three segments hyphenized for RFC-1123: a slug may carry `_`). Holds the sensitive metastore values, `TenantDb.NodeSecretEnvKeys` = `pgPassword` + `encryptionKey`, plus the manager's own object-store credentials (`NodeSecretFiles.CloudCredKeys`, formerly forwarded as plain env). The Secret keeps a key's spelling (`PgPassword`); the volume item maps it to the canonical file name. The volume items and the Secret's contents derive from ONE filtered map. GC'd with the last pod of the pool.
 
-All referenced Secrets must exist BEFORE pod create (kubelet will not start a pod whose volume references a missing Secret), so `start(spec)` runs `ensureTokenSecret`, `ensureFederationSecret`, `ensureNodeEnvSecret` and `ensureObjectStoreSecret` first, then creates the pod. The node image entrypoint passes only the port. The mounted files stay readable inside the pod by a node user with unrestricted SQL (superuser, or ACL off without lockdown), and nothing bounds what that credential reaches yet: a database without its own metastore credentials inherits `QOD_PG_USER` / `QOD_PG_PASSWORD`, the control plane's login, so one read opens the `qod` database and every tenant's catalog (and the Postgres server itself when that login is a superuser). The per-database least-privilege Postgres role (docs/superpowers/specs/2026-10-11-node-least-privilege-pg-role-design.md) would bound it, but is design only. Interim mitigation in the Helm chart: `security.nodeLockdown` defaults to true (`QOD_NODE_LOCKDOWN`), and `postgres.user` has no default (the chart `required`s it and documents a non-superuser `CREATEDB` role).
+All referenced Secrets must exist BEFORE pod create (kubelet will not start a pod whose volume references a missing Secret), so `start(spec)` runs `ensureTokenSecret`, `ensureFederationSecret`, `ensureNodeEnvSecret` and `ensureObjectStoreSecret` first, then creates the pod. The node image entrypoint passes only the port. The mounted files stay readable inside the pod by a node user with unrestricted SQL (superuser, or ACL off without lockdown), and nothing bounds what that credential reaches yet: a database without its own metastore credentials inherits `QOD_PG_USER` / `QOD_PG_PASSWORD`, the control plane's login, so one read opens the `qod` database and every tenant's catalog (and the Postgres server itself when that login is a superuser). The per-database least-privilege Postgres role (docs/superpowers/specs/2026-10-11-node-least-privilege-pg-role-design.md) would bound it, but is design only. Interim mitigation in the Helm chart: `security.nodeLockdown` defaults to true (`QOD_NODE_LOCKDOWN`), and `postgres.user` has no default (the chart `required`s it and documents a non-superuser `CREATEDB` role). The chart also `required`s `admin.password` or `admin.existingSecret` (nobody could log in otherwise: the manager has no static API key) and `fail`s on a non-empty `apiKey` value (an all-empty block left in an older values file passes).
 
 **Upgrading:** pods created by an earlier manager keep their old env shape and are NOT migrated in place. Restart every node after upgrading, for example by scaling each pool down and back up.
 
@@ -442,7 +480,7 @@ Admin approve refuses `409 source_unknown` while the server's latest heartbeat h
 (`ApproveResult.SourceUnknown`), so an approval never starts unbound. The drain window is closed: no re-address while the row still holds
 an assignment (drain flips unschedulable, then releases), and the heartbeat never returns an
 assignment to an unapproved row or to a source the row is not bound to. `qod fleet approve` /
-`POST /api/fleet/server/approve` approves by hand; `remove` forgets approval and also accepts a
+`POST /api/fleet/server/approve` approves by hand (recording the approving user in `approved_by`); `remove` forgets approval and also accepts a
 live pending server. Existing rows were backfilled `approved_by = 'upgrade'`. Design:
 docs/superpowers/specs/2026-09-26-fleet-join-approval-design.md.
 A known name reporting a new address is refused unless drained and unassigned (shared-token takeover guard).
@@ -471,7 +509,7 @@ behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
 
 Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `QOD_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin users `admin@localhost.local` and `admin` with NO built-in password (chosen at the first `qod start` / `qod serve`, or `QOD_ADMIN_PASSWORD` on first boot; `scripts/run-jar.sh` exports `admin` for dev only). `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
 
-Two security-critical knobs should be pinned before any non-localhost deploy: `QOD_API_KEY` and `QOD_SESSION_JWT_SECRET`. When either is unset, boot generates a random value and prints it to stdout in an unmissable banner (`BootPreflight.withGeneratedBootSecrets`); the values change on every restart, so sessions and API-key callers die with the process. Under HA nothing is generated: an empty session secret refuses boot, an unset API key just disables the static-key arm.
+One boot secret should be pinned before any non-localhost deploy: `QOD_SESSION_JWT_SECRET`. When it is unset, boot generates a random value and prints it to stdout in an unmissable banner (`BootPreflight.withGeneratedBootSecrets`); it changes on every restart, so sessions die with the process. Under HA nothing is generated: an empty session secret refuses boot. The static API key is gone: a non-empty `QOD_API_KEY`, or `quack-on-demand.apiKey` in an operator's config file, refuses boot with a message naming the replacements (a PAT from `qod auth pat create`, or a `qod login` session), and an empty value passes. Boot also refuses when nothing could ever create a session (`BootPreflight.checkLoginAvailable`): no password backend (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure password backend) and no system-scope OIDC sign-in, which counts only with `QOD_MGMT_IDENTITY_SOURCE=oidc` and both `QOD_MGMT_OIDC_ISSUER_URL` and `QOD_MGMT_OIDC_CLIENT_ID` set. Automation uses PATs, and `qod admin reset-password` recovers a superuser (`--username <name>` also re-enables a disabled one).
 
 `federation.secretStore` defaults to `dispatch` (route per secret by externalRef prefix). The `aws-sm` / `gcp-sm` / `azure-kv` / `vault` single-backend modes are refused at config load -- their resolvers are stubs that `NotImplementedError` at node spawn. Under `dispatch` mode the stubs stay wired but the runtime error spells out the supported alternatives (`postgres` inline value, `env:` prefix).
 

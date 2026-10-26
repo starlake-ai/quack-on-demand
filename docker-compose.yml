@@ -133,9 +133,11 @@ services:
 
       # ----- Auth + TLS toggles (defaults match a fast smoke test) -----
       # AUTH=false leaves no password login: nobody can sign in unless
-      # system-scope OIDC sign-in (QOD_MGMT_OIDC_ISSUER_URL) is configured, which
-      # this file does not pass. No static API key is passed either: people log
-      # in, and automation uses a personal access token.
+      # system-scope OIDC sign-in is configured (QOD_MGMT_IDENTITY_SOURCE=oidc
+      # with QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID), which this
+      # file does not pass, and with neither the manager refuses to boot. No
+      # static API key is passed either: people log in, and automation uses a
+      # personal access token.
       QOD_AUTH_DB_ENABLED: ${AUTH:-true}
       # Either name works: the manager's own QOD_ADMIN_* wins, then the short
       # .env alias, then `admin`. The long name must win because .env.example

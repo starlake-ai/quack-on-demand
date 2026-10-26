@@ -28,9 +28,10 @@
 #   PG_SCHEMA        DuckLake schema                        (default main)
 #
 #   AUTH             "true" to enable DB auth: FlightSQL and the admin login
-#                    (default true). "false" leaves no password login: nobody
-#                    can sign in without system-scope OIDC sign-in, which this
-#                    script does not pass.
+#                    (default true). "false" leaves no password login, and
+#                    this script passes no system-scope OIDC sign-in
+#                    (QOD_MGMT_IDENTITY_SOURCE=oidc with an issuer and a client
+#                    id), so the manager refuses to boot: nobody could log in.
 #   ADMIN_USERNAME   admin login (when AUTH=true)           (default admin)
 #   ADMIN_PASSWORD   admin password (when AUTH=true)        (default admin - rotate!)
 #                    QOD_ADMIN_USERNAME / QOD_ADMIN_PASSWORD are accepted too and
@@ -209,7 +210,7 @@ echo "container:    $CONTAINER_NAME"
 echo "remote pg:    $PG_USER@$PG_HOST:$PG_PORT/$PG_DBNAME (schema: $PG_SCHEMA)"
 echo "manager:      http://localhost:$MANAGER_PORT/ui/"
 echo "flightsql:    localhost:$EDGE_PORT  (TLS=$TLS)"
-echo "auth:         AUTH=$AUTH$([[ "$AUTH" == "true" ]] && echo " (admin: $ADMIN_USERNAME)" || echo " (no password login: nobody can sign in without system-scope OIDC)")"
+echo "auth:         AUTH=$AUTH$([[ "$AUTH" == "true" ]] && echo " (admin: $ADMIN_USERNAME)" || echo " (no password login and no OIDC sign-in passed: the manager refuses to boot)")"
 echo "ducklake:     $DATA_PATH  (host) -> /app/ducklake  (container)"
 echo "certs:        $CERTS_DIR  (host) -> /app/certs     (container)"
 echo ""

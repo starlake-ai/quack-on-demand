@@ -73,8 +73,11 @@ qod login --username alice --tenant acme    # tenant-scoped principal
 `qod login` mints a session and stores the token plus the FlightSQL edge
 settings in the active CLI profile file (mode 0600; `QOD_CONFIG_FILE`
 overrides the path), so subsequent commands need no flags. Non-interactive
-alternative: set `QOD_API_KEY` (static key) or `QOD_TOKEN` (session or PAT
-token) in the environment - each command sends it as `X-API-Key`. Use
+alternatives: `qod login --password-stdin` reads the password from the first
+line of stdin (CI; no flag or env var ever carries a password), or set
+`QOD_TOKEN` to a personal access token (or a session token) in the
+environment - each command sends it as `X-API-Key`. There is no static API
+key; a 401 says "run qod login, or set QOD_TOKEN to a personal access token". Use
 `--profile <name>` (or `QOD_PROFILE`) to keep several managers side by side,
 `QOD_MANAGER_URL` for a non-default manager URL, and `qod --json ...`
 anywhere you need raw JSON for scripting.
@@ -91,15 +94,16 @@ Not sure which command you want?
 
 On Kubernetes, the Helm chart is published as an OCI artifact per release:
 `helm install qod oci://ghcr.io/starlake-ai/charts/quack-on-demand --version <release>`
-(external Postgres required, and `postgres.user` must be set to a dedicated
-non-superuser role; the chart turns node lockdown on, so tenant users cannot
+(external Postgres required, `postgres.user` must be set to a dedicated
+non-superuser role, and `admin.password` or `admin.existingSecret` is required,
+since nobody could log in without an admin; the chart turns node lockdown on, so tenant users cannot
 read the node's mounted catalog password; see https://docs.starlake.ai/qod). Locally,
 `qod start` supervises the released uber-jar, downloaded and cached on first
 use (Java 21+ required; the `duckdb` CLI and node spawn scripts are
 provisioned automatically):
 
 ```bash
-# One-time: persist Postgres coordinates, API key, TLS prefs so a bare
+# One-time: persist Postgres coordinates and TLS prefs so a bare
 # `qod start` works afterwards (a real env var still wins). The admin password
 # is not stored: the first `qod start` asks for it
 qod setup
@@ -111,10 +115,13 @@ qod start
 qod start --version 0.8.3
 qod start --jar /path/to/quack-on-demand-assembly.jar
 
-# Disable DB auth (UI then skips the login screen)
-QOD_AUTH_DB_ENABLED=false qod start
+# QOD_AUTH_DB_ENABLED=false (no password login) is refused at boot unless
+# system-scope OIDC sign-in is configured (QOD_MGMT_IDENTITY_SOURCE=oidc with
+# QOD_MGMT_OIDC_ISSUER_URL and QOD_MGMT_OIDC_CLIENT_ID): nobody could log in
+# otherwise
 
-# Is anything running, and what is it serving?
+# Is anything running, and what is it serving? (pools need a qod login
+# session or QOD_TOKEN)
 qod status
 
 # Stop everything (manager + quack nodes)
@@ -125,8 +132,9 @@ qod stop
 also runs Starflow (the Starlake API + UI), installing it on first use (into
 `STARLAKE_HOME`, else an existing `~/starlake`, else the qod cache). Starflow
 stores its metadata in a `starlake` database on the manager's own Postgres
-server, and qod pairs the two for SSO, REST and FlightSQL (shared API key and
-session secret, generated once and kept in the CLI config).
+server, and qod pairs the two for SSO, REST and FlightSQL (a shared session
+secret, generated once and kept in the CLI config; there is no shared API key:
+Starflow calls the manager with the signed-in user's own session).
 
 ```bash
 qod start --with-starflow
@@ -158,9 +166,17 @@ qod serve s3://bucket/wh/ --table orders=s3://bucket/wh/orders/**/*.parquet
 
 Every step is ensure-semantics (create only what is missing, never delete), so
 re-running is safe and adds a second database beside the first rather than
-replacing it. If a manager is already running locally (loopback only), `qod
-serve` provisions straight into it instead of booting a second JVM; a manager
-at a non-loopback URL is refused rather than attached to. Credentials for a
+replacing it. On its own boot the manager provisions the tenant, database and
+pool itself, from a spec file `qod serve` hands it, and reports the outcome in
+`serve-provision.outcome.json` beside that spec, in qod's data dir: an object
+that exists and matches is left alone, one that differs is refused, nothing is
+ever updated or deleted, and later runs need no credential (see "Typical failure
+modes" for a refused step). If a manager is already running locally (loopback
+only), `qod serve` provisions straight into it instead of booting a second JVM,
+with your own credential: `QOD_TOKEN`, the session that `qod login` saved, else a
+password prompt on a terminal; with none it refuses ("run qod login, set
+QOD_TOKEN, or run qod serve in a terminal"). A manager at a non-loopback URL is
+refused rather than attached to. Credentials for a
 remote prefix come from `--access-key-id` /
 `--secret-access-key`, plus `--region` and (s3 only) `--endpoint` (flag-only,
 no env fallback); for an `s3://`/`s3a://`/`r2://` prefix these fall back to
@@ -173,8 +189,10 @@ Posture, unlike `qod serve --demo` (`qod start --demo` still works too, as a
 deprecated alias): TLS on, DB auth on, ACL on, and an admin password you
 choose on the first run (prompted twice, or taken from `QOD_ADMIN_PASSWORD` in
 your shell). It is never stored by the CLI, and later runs do not ask again.
-Rotate with `qod auth change-password`; if it is lost or the account is locked,
-run `qod admin reset-password` (works with the manager down against an external control plane; it never starts Postgres, so the `qod serve` embedded one must be running, else add `--external` or start `qod serve` first). With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one).
+Rotate with `qod auth change-password`; if it is lost, or the account is locked
+or disabled, run `qod admin reset-password` (a disabled superuser is re-enabled,
+and its personal access tokens work again, only when `--username` names it; a
+reset without `--username` leaves it disabled and says so; works with the manager down against an external control plane; it never starts Postgres, so the `qod serve` embedded one must be running, else add `--external` or start `qod serve` first). With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one).
 
 The embedded control plane lives at `<user-data-dir>/pg` on a fixed port
 (25432 by default, `--pg-port`), persists across restarts, and is never deleted.
@@ -215,7 +233,7 @@ still works too, as a deprecated alias:
 qod serve --demo
 ```
 
-It creates a demo home under `/tmp/qod-demo` (override `QOD_DEMO_HOME`) holding the embedded PG data dir + the DuckLake data path, runs the whole demo config overlay (TLS off, REST open, ACL/RLS/CLS on) - a posture produced ONLY on this code path, never on a normal `qod start` boot - seeds tenant `acme` (`acme_tpch.tpch1`) with TPC-H at SF 0.1, and prints a connect banner. Seeded principals: `alice`/`demo-alice` (analyst - sees `c_phone` masked + only `BUILDING` rows), `acme-admin`/`demo-acme-admin` (full), and any ungranted table is denied. Ctrl-C stops the manager, stops the embedded PG, and deletes the demo home. Insecure by design; not for production.
+It creates a demo home under `/tmp/qod-demo` (override `QOD_DEMO_HOME`) holding the embedded PG data dir + the DuckLake data path, runs the whole demo config overlay (TLS off, ACL/RLS/CLS on) - a posture produced ONLY on this code path, never on a normal `qod start` boot - seeds tenant `acme` (`acme_tpch.tpch1`) with TPC-H at SF 0.1, and prints a connect banner. Seeded principals: `alice`/`demo-alice` (analyst - sees `c_phone` masked + only `BUILDING` rows), `acme-admin`/`demo-acme-admin` (full), and any ungranted table is denied. Ctrl-C stops the manager, stops the embedded PG, and deletes the demo home. Insecure by design; not for production.
 
 Bootstrap is driven by `QOD_BOOTSTRAP_YAML` - a path (or `classpath:` reference) to a YAML manifest. Bootstrap runs only when you request demo data: pass `LOAD_TPCH=1` or `LOAD_TPCDS=1` (or `LOAD_SSB=1`, or `LOAD_TPC=1` for all) in the environment of `qod start`, which seeds the benchmark in the background and sets `QOD_BOOTSTRAP_YAML` to the bundled demo manifest (`classpath:bootstrap-demo.yaml`). A bare `qod start` does NOT bootstrap. The demo manifest imports two tenants (`acme` with pools `bi` and `etl`, `globex` with pool `bi`), 2 nodes per pool, and a starter RBAC role graph. The import is idempotent: it is skipped when the demo tenants already exist, so restarting the manager is safe. (`LOAD_*` seeding is not yet supported on Windows through `qod start` - the bundled loaders are bash.)
 
@@ -238,34 +256,46 @@ this profile).
 
 ## Auth flow (REST + UI)
 
-The REST API has three acceptable credentials:
-1. **Static** `X-API-Key` header matching `QOD_API_KEY` (if set; not set by default)
-2. **UI session token** minted via `POST /api/auth/login`
-3. **Personal access token** (`qod_pat_...`), sent the same way as a session token
+The REST API accepts two credentials, sent as `X-API-Key` (the header keeps its
+historical name) or, from the browser, as the `qod_session` cookie:
+1. **Session token** minted via `POST /api/auth/login` (`qod login`)
+2. **Personal access token** (`qod_pat_...`), minted from a session
    (see "Personal access tokens and the MCP server" below)
 
 ```bash
 # Mint a session and store it in the CLI profile (admin role required)
 qod login --username admin        # prompts for the password
 
+# CI and scripts: the password on stdin instead of a prompt
+printf '%s\n' "$ADMIN_PASSWORD" | qod login --username admin --password-stdin
+
 # Every subsequent command rides that session
 qod pool list
 ```
 
-If `QOD_API_KEY` is unset (or empty), only the static-key arm is disabled: every non-public `/api/...` call still requires a session or PAT, and a keyless call answers 401. There is no open mode; keyless dev scripts must log in first.
+There is no static API key and no open mode: every non-public `/api/...` call needs a session or a PAT, and a call without one answers 401. The manager refuses to boot while `QOD_API_KEY` is set (see "Typical failure modes"). For automation, mint a PAT once from a session (`qod auth pat create`) and hand it over as `QOD_TOKEN`.
 
 ### Regular-user login (profile only)
 
-The admin UI isn't admin-exclusive: a tenant-scoped `kind=user` principal can log in too, with the same `/api/auth/login` call plus a `tenant` (the blank/system login and OIDC SSO still require an admin grant). The resulting session is demoted to a fixed allowlist - `whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements` - and gets `403 admin_required` on everything else; the UI lands such a session straight on `/profile` (change own password; view own usage + recent statements).
+The admin UI isn't admin-exclusive: a tenant-scoped `kind=user` principal can log in too, with the same `/api/auth/login` call plus a `tenant` (the blank/system login and OIDC SSO still require an admin grant). The resulting session is demoted to a fixed allowlist - `whoami`, `logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools` and its own PATs - and gets `403 admin_required` on everything else; the UI lands such a session straight on `/profile` (change own password; view own usage + recent statements).
 
 ```bash
 # Log in as a regular tenant user (demo credentials from the bootstrap manifest)
 qod login --username alice --tenant acme    # prompts for the password (demo-alice)
 
-# Own usage and recent statements - the only data endpoints this session can reach
+# Own usage, recent statements and the pools this user may connect to - the only
+# data endpoints this session can reach
 qod profile usage --days 7
 qod profile statements --limit 20
+qod profile pools
 ```
+
+`qod profile pools` (`GET /api/profile/pools`, any session or PAT, admin or not) lists the
+`tenant`, `tenantDb`, `pool` and `status` (`ready` or `disabled`) of every pool of the caller's
+tenants that it may connect to (every tenant's for a superuser), decided like a FlightSQL
+handshake (kill switches, account enabled, then the pool grant or the tenant's OPA) and narrowed
+by a PAT's `--database` / `--pool` restrictions. A denied pool is simply absent; an OPA outage
+answers `503 authz_unavailable`.
 
 ### Personal access tokens and the MCP server
 
@@ -327,8 +357,8 @@ qod auth pat revoke --id pat-...
 same rule as the REST body above.
 
 The MCP server lives at `POST /mcp` on the manager port (`QOD_MCP_ENABLED`, default
-true). Auth is `Authorization: Bearer <PAT or QOD_API_KEY>`; session JWTs are refused
-there. Point Claude Code at it with:
+true). Auth is `Authorization: Bearer <PAT>`, and nothing else: session JWTs are
+refused there. Point Claude Code at it with:
 
 ```bash
 claude mcp add --transport http qod http://localhost:20900/mcp \
@@ -336,17 +366,17 @@ claude mcp add --transport http qod http://localhost:20900/mcp \
 ```
 
 MCP troubleshooting:
-- **401 on every call**: the bearer is a session JWT (refused by design) or a dead PAT
-  (revoked, expired, owner disabled). Mint a fresh PAT.
-- **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT or
-  the static key.
+- **401 on every call**: the bearer is a session JWT (refused by design), a former
+  static API key (removed), or a dead PAT (revoked, expired, owner disabled). Mint a
+  fresh PAT.
+- **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT.
 - **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
 ### Administering over MCP
 
-An agent holding an admin PAT (or the static `QOD_API_KEY`) can drive the entire
+An agent holding an admin PAT can drive the entire
 control plane through `POST /mcp`, not just data tools - the same surface as the
 admin REST API, gated by the same server-side guards (superuser checks, tenant scope,
 self/floor guards, mutation gates, audit). Tool families, one line each:
@@ -368,9 +398,8 @@ self/floor guards, mutation gates, audit). Tool families, one line each:
 - **Telemetry** - statement history, usage trends/report, server config, audit search
 
 Tenant inference: a tenant-scoped PAT acts in its own tenant automatically (omit
-`tenant` from tool arguments). Superuser credentials (a superuser PAT or the static
-key) are cross-tenant and must pass `tenant` explicitly on every tool call that needs
-one. Exception: `create_user` always requires an explicit `tenant` -- omitting it
+`tenant` from tool arguments). A superuser PAT is cross-tenant and must pass `tenant`
+explicitly on every tool call that needs one. Exception: `create_user` always requires an explicit `tenant` -- omitting it
 attempts SUPERUSER creation, which only superuser credentials may do.
 
 ### Account lockout and self-service password reset
@@ -399,7 +428,7 @@ qod auth reset-password
 
 Lockout only ever applies to rows with an `email` set (`qod user create/update --email`). A user with a non-email username and no email is never locked and has no self-service path - recover it with an admin password reset instead:
 
-An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically. This includes the seeded admin (`admin@localhost.local` by default): because its username is email-format, it is auto-assigned `email = username`, so it IS eligible for lockout when lockout is on, and for self-service reset. A locked or forgotten superuser password is recovered with `qod admin reset-password` (writes the new hash straight into the control-plane database and clears `failed_attempts` / `locked_at`; works with the manager down against an external control plane; it never starts Postgres, so for the `qod serve` embedded one that Postgres must be running and a stopped one is refused), or by another superuser / the static `X-API-Key` through `qod user update --password`. A restart does NOT reset it: the admin is seeded only when its row is missing, and `QOD_ADMIN_PASSWORD` is used on that first boot only (`qod start` / `qod serve` prompt for it then and never store it). Because `admin@localhost.local` is not a routable mailbox, its self-service email reset does not deliver by default - set `QOD_ADMIN_USERNAME` to a real address for email self-recovery.
+An email-format username is its own email and cannot be set separately: `qod user create/update --email` with a conflicting value 400s `invalid_email`, and pre-existing such rows were backfilled automatically. This includes the seeded admin (`admin@localhost.local` by default): because its username is email-format, it is auto-assigned `email = username`, so it IS eligible for lockout when lockout is on, and for self-service reset. A locked or forgotten superuser password is recovered with `qod admin reset-password` (writes the new hash straight into the control-plane database and clears `failed_attempts` / `locked_at`; a disabled superuser is re-enabled only when `--username` names it, and a reset without `--username` leaves it disabled and says so; works with the manager down against an external control plane; it never starts Postgres, so for the `qod serve` embedded one that Postgres must be running and a stopped one is refused), or by another superuser through `qod user update --password`; a deleted superuser row comes back at the next boot when `QOD_ADMIN_PASSWORD` is set (the boot seed creates any configured admin whose row is missing). A restart does NOT reset it: the admin is seeded only when its row is missing, and `QOD_ADMIN_PASSWORD` is used on that first boot only (`qod start` / `qod serve` prompt for it then and never store it). Because `admin@localhost.local` is not a routable mailbox, its self-service email reset does not deliver by default - set `QOD_ADMIN_USERNAME` to a real address for email self-recovery.
 
 ```bash
 qod user update <user-id> --password a-new-password
@@ -412,26 +441,27 @@ An admin password reset also unconditionally clears the lock (`failed_attempts` 
 For workforce identity, point an enterprise IdP's SCIM connector (Okta, Entra, Google Workspace) at the per-tenant base URL so users and groups are provisioned, updated and deprovisioned automatically instead of by hand. This complements per-tenant OIDC SSO: SSO authenticates the login, SCIM manages the accounts.
 
 - **Base URL**: `https://qod.example.com/api/scim/v2/<tenant>` (the tenant id or its display name both work).
-- **Auth**: `Authorization: Bearer <token>`, where the token is the static `QOD_API_KEY` or a tenant-admin personal access token. A tenant-scoped token can only touch its own tenant.
+- **Auth**: `Authorization: Bearer <token>`, where the token is a tenant-admin personal access token: log in as an admin of that tenant, mint it once with `qod auth pat create --name scim-okta` (it is printed once), and paste it into the connector. A tenant-scoped token can only touch its own tenant.
 - **Resources**: Users and Groups, plus the discovery endpoints (`ServiceProviderConfig`, `ResourceTypes`, `Schemas`) the connector reads on setup.
 
 ```bash
 SCIM=https://qod.example.com/api/scim/v2/acme
+SCIM_TOKEN=qod_pat_...   # the tenant-admin PAT minted above
 
 # Provision a user (no password needed - the user signs in through the tenant's OIDC SSO;
 # QoD assigns an unguessable random password). active:false creates the row disabled.
-curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Users"   -d '{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+curl -sS -H "Authorization: Bearer $SCIM_TOKEN"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Users"   -d '{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
        "userName":"carol@acme.com","externalId":"okta-123",
        "emails":[{"value":"carol@acme.com","primary":true}],"active":true}'
 
 # Find by the IdP's identifier or by userName (filter: attr eq "value")
-curl -sS -H "Authorization: Bearer $QOD_API_KEY"   "$SCIM/Users?filter=externalId%20eq%20%22okta-123%22"
+curl -sS -H "Authorization: Bearer $SCIM_TOKEN"   "$SCIM/Users?filter=externalId%20eq%20%22okta-123%22"
 
 # Deactivate (cuts BOTH the REST login and the FlightSQL handshake, not just the console)
-curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X PATCH "$SCIM/Users/<id>"   -d '{"Operations":[{"op":"replace","path":"active","value":false}]}'
+curl -sS -H "Authorization: Bearer $SCIM_TOKEN"   -H 'Content-Type: application/scim+json'   -X PATCH "$SCIM/Users/<id>"   -d '{"Operations":[{"op":"replace","path":"active","value":false}]}'
 
 # Group with members; PATCH add/remove members drives RBAC group membership
-curl -sS -H "Authorization: Bearer $QOD_API_KEY"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Groups"   -d '{"displayName":"analysts","members":[{"value":"<user-id>"}]}'
+curl -sS -H "Authorization: Bearer $SCIM_TOKEN"   -H 'Content-Type: application/scim+json'   -X POST "$SCIM/Groups"   -d '{"displayName":"analysts","members":[{"value":"<user-id>"}]}'
 ```
 
 Semantics worth knowing: `userName` and a group's `displayName` are immutable (a rename is refused with scimType `mutability`); `active` maps to the account `enabled` flag; the superuser realm is invisible to SCIM; creates are insert-only, so a connector retry can never rotate an existing user's password. SCIM is machine-to-machine, so it has no `qod` CLI command - manage users and groups by hand with `qod user`/`qod group`/`qod membership` when you are not driving them from an IdP.
@@ -528,7 +558,7 @@ qod pool set-pod-template --tenant acme --db acme_tpch --pool bi --file pod-temp
 
 The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
 
-`pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser sessions and static-`X-API-Key` callers bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
+`pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser callers (a superuser session or PAT) bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
 
 Hosted deployments can cap a tenant's *cumulated* cores and memory across all its pools (dimensions `maxCores` / `maxMemoryGib`, `0` = unlimited). What an operator hitting a 429 needs to know:
 
@@ -1563,20 +1593,21 @@ Limits and differences from the DuckLake views:
 
 ### Export / import as YAML
 
-These two endpoints have no `qod` command yet - call them over REST (the
-static `QOD_API_KEY` or a session/PAT token goes in `X-API-Key`).
+These two endpoints have no `qod` command yet - call them over REST with a
+personal access token in `X-API-Key` (mint one with `qod auth pat create` and
+keep it in `QOD_TOKEN`).
 
 Export (`***REDACTED***` replaces every value-backed secret; `externalRef` is left as-is):
 
 ```bash
-curl -H "X-API-Key: $QOD_API_KEY" \
+curl -H "X-API-Key: $QOD_TOKEN" \
   "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/export" > fed.yaml
 ```
 
 Re-import after editing. Secrets with `value: "***REDACTED***"` (and no `externalRef`) reuse the existing row's value, so a round-trip never requires re-typing passwords:
 
 ```bash
-curl -X POST -H "X-API-Key: $QOD_API_KEY" -H 'Content-Type: text/plain' \
+curl -X POST -H "X-API-Key: $QOD_TOKEN" -H 'Content-Type: text/plain' \
   "http://localhost:20900/api/tenants/acme/tenant-dbs/acme_fed/federated-sources/yaml/import" --data-binary @fed.yaml
 ```
 
@@ -1686,7 +1717,7 @@ qod audit actions
 
 Filters: `family`, `tenant` (superuser: returns only that tenant's rows; null-tenant rows not included when this is set), `noTenant=true` (superuser: only null-tenant rows; wins over `tenant`), `actor`, `action` (exact), `q` (substring on action/target), `from`, `to` (ISO-8601), `limit` (max 500), `before` (keyset cursor). Results are newest-first.
 
-Tenant admins see only their own tenant's rows. Superusers and static-key callers see everything, including null-tenant rows (anonymous failures, node ops, manifest imports).
+Tenant admins see only their own tenant's rows. Superusers see everything, including null-tenant rows (anonymous failures, node ops, manifest imports).
 
 **Retention and the off switch:**
 
@@ -2218,7 +2249,15 @@ opt-in except pod security:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/api/*` returns 401 | No valid credential on the call (missing/wrong key, expired session) | `qod login`, or pass `X-API-Key: <key>` on raw REST calls |
+| `/api/*` returns 401 (the CLI adds "run qod login, or set QOD_TOKEN to a personal access token") | No valid credential on the call: none sent, an expired or revoked session or PAT, or a former static API key | `qod login`, or set `QOD_TOKEN` to a personal access token (`X-API-Key: <token>` on raw REST calls) |
+| Manager refuses to boot: `QOD_API_KEY (quack-on-demand.apiKey) was removed: the manager no longer accepts a static API key. Use a personal access token (qod auth pat create) or a qod login session, and unset QOD_API_KEY.` | `QOD_API_KEY` is set to a non-empty value (shell, container env, chart `env`, or `quack-on-demand.apiKey` in an operator config file); the manager no longer accepts a static API key | Unset it everywhere it is set. Mint a personal access token for automation (`qod login`, then `qod auth pat create`) and point scripts (`QOD_TOKEN`), MCP clients and SCIM connectors at it |
+| `qod start` / `qod serve` (with or without `--demo`) refuse to launch, naming `QOD_API_KEY` | The key is in your shell, or an earlier `qod setup` stored it in the `[start]` table of the CLI profile file | `unset QOD_API_KEY`, or `qod setup --unset QOD_API_KEY --non-interactive` (or delete the line from the `[start]` table of the file the message names) |
+| Manager refuses to boot: `nothing can sign in to this manager: ...`, naming `QOD_AUTH_DB_ENABLED` and `QOD_MGMT_IDENTITY_SOURCE` / `QOD_MGMT_OIDC_ISSUER_URL` / `QOD_MGMT_OIDC_CLIENT_ID` | No password backend (`QOD_AUTH_DB_ENABLED=false` and no Keycloak or Azure one) and no system-scope OIDC sign-in, which counts only with `QOD_MGMT_IDENTITY_SOURCE=oidc` and both the issuer and the client id set: nobody could ever log in | Turn database auth back on (`QOD_AUTH_DB_ENABLED=true`), or configure system-scope OIDC sign-in: `QOD_MGMT_IDENTITY_SOURCE=oidc` with `QOD_MGMT_OIDC_ISSUER_URL`, `QOD_MGMT_OIDC_CLIENT_ID` and `QOD_MGMT_OIDC_CLIENT_SECRET` |
+| `helm install` / `helm upgrade` fails: `apiKey was removed: the manager no longer accepts a static API key; use a personal access token` | The chart values still carry a non-empty `apiKey` (an all-empty block left from an older values file passes) | Delete `apiKey` from the values (and the Secret it named); give automation a personal access token |
+| `helm install` fails: `admin.password or admin.existingSecret is required: ...` | The chart needs an admin: without one nobody can log in | Set `admin.password`, or `admin.existingSecret` naming a Secret that holds the password under `admin.existingSecretKey` (default `adminPassword`) |
+| `qod serve` prints `qod serve: create tenant` / `create database` / `create pool` `failed: <reason>`, then `finish by hand: <command>` | The manager refused that boot provisioning step, for the reason a REST create would give (a name, a quota, encryption); the outcome is also in `serve-provision.outcome.json` in qod's data dir, and the manager log has it at ERROR. Provisioning is add-only, so nothing existing changed, and the manager keeps running | Fix the cause the reason names, then run the printed command, or re-run `qod serve` |
+| The reason says the database `already serves kind=... dataPath=...`, or that its views point at different data (`initSql differs`), or that the pool name already serves another database (no `finish by hand:` line: a create would collide again) | The tenant already has a database (or pool) of that name for other data; `qod serve` never updates or replaces one | Serve the target under another name: `qod serve <target> --name <other>` (a pool: `--pool <other>`) |
+| `qod serve: provisioning failed: the manager answers /ready but wrote no provisioning outcome within --ready-timeout (<N>s)`, then three `finish by hand:` lines; or `... could not read the provisioning file the launcher wrote` | The manager release does not provision at boot, or is not the one this CLI expects (a launcher/manager version mismatch), or it did not reach its boot provisioning in time | Run the manager release matching this CLI (drop an older `--jar` or `--version`), or `qod login` and run the printed commands; a slow first boot needs a larger `--ready-timeout`. The manager log says what it did |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
 | `access denied: missing RO grant on ...` | ACL is enabled and the user has no matching grant | Add the grant via `qod role permission grant` or set `QOD_ACL_ENABLED=false` |
 | `session expired; please reconnect` | Bearer token unknown (manager restarted between calls) | Re-login or pass Basic credentials |
@@ -2239,8 +2278,9 @@ opt-in except pod security:
 
 ## When operating
 
-- There is no built-in admin password: it is chosen at the first `qod start` / `qod serve` and the admin row is never rewritten on restart. Rotate with `qod auth change-password`; recover a lost or locked password with `qod admin reset-password`. With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one).
-- With no `QOD_API_KEY` pinned, boot generates a random one and prints it in a startup banner; it changes on every restart, so pin `QOD_API_KEY` (and `QOD_SESSION_JWT_SECRET`) before any non-localhost deploy.
+- There is no built-in admin password: it is chosen at the first `qod start` / `qod serve` and the admin row is never rewritten on restart. Rotate with `qod auth change-password`; recover a lost or locked password with `qod admin reset-password`, and a disabled superuser with `qod admin reset-password --username <name>`. With the default `QOD_ADMIN_USERNAME` (`admin@localhost.local,admin`) both superusers share that first-boot password: rotate each one (`qod auth change-password --username <name>` per name); `qod admin reset-password` resets every configured admin name by default (`--username` targets one).
+- There is no static API key: people log in (`qod login`, the UI) and automation uses personal access tokens (`qod auth pat create`). Upgrading from a release that had one: mint the PATs first, point MCP clients and SCIM connectors at them, then remove `QOD_API_KEY` from every environment, chart value and Compose file (a set key refuses boot).
+- Pin `QOD_SESSION_JWT_SECRET` before any non-localhost deploy: when it is unset, boot generates a random one and prints it in a startup banner, and it changes on every restart, so sessions die with it.
 - All config scalars have matching `QOD_*` env-var overrides. Prefer env vars over editing `application.conf` (it is bundled into the jar at build time).
 
 ## Common UI URLs
