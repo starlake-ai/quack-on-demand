@@ -159,3 +159,31 @@ class SuperuserPatCompletenessSpec
       }
     finally h.shutdown()
   }
+
+  it should "be answered by whoami as no superuser when minted with dropAdmin" in {
+    TestPostgres.ensureReachable()
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(
+      fix.store,
+      patStore = Some(pats),
+      patUserOf =
+        Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
+      patAuth =
+        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind))))
+    )
+    try
+      val r = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/auth/whoami",
+        apiKey = Some(h.superuserPat(dropAdmin = true))
+      )
+      withClue(s"GET /api/auth/whoami body: ${r.body()}") {
+        r.statusCode() shouldBe 200
+        val body = io.circe.parser.parse(r.body()).toOption.get.hcursor
+        body.get[String]("username") shouldBe Right(SecurityFixtures.RootUsername)
+        // The owner is a superuser, the token is not: whoami answers with the token's scope.
+        body.get[Boolean]("superuser") shouldBe Right(false)
+        body.get[List[String]]("manageableTenants") shouldBe Right(Nil)
+      }
+    finally h.shutdown()
+  }

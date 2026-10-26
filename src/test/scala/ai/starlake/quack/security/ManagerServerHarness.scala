@@ -231,15 +231,19 @@ object ManagerServerHarness:
       * `POST /api/auth/pat/create` with a [[superuserSession]]. Needs a harness booted with the PAT
       * routes: `patStore`, a `patUserOf` that resolves the superuser to its row in that store (the
       * `qodstate_pat` FK), and `patAuth` so the guard admits the token. Throws otherwise.
+      * `dropAdmin` mints it restricted to the profile-only scope.
       */
-    def superuserPat(): String =
+    def superuserPat(dropAdmin: Boolean = false): String =
       val req = HttpRequest
         .newBuilder(URI.create(s"$baseUrl/api/auth/pat/create"))
         .header("Content-Type", "application/json")
         .header("X-API-Key", superuserSession())
         .POST(
           HttpRequest.BodyPublishers
-            .ofString("""{"name":"harness-superuser"}""", StandardCharsets.UTF_8)
+            .ofString(
+              s"""{"name":"harness-superuser","dropAdmin":$dropAdmin}""",
+              StandardCharsets.UTF_8
+            )
         )
         .build()
       val resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString())
