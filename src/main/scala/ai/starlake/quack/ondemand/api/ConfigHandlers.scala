@@ -20,9 +20,9 @@ final class ConfigHandlers(
 ):
 
   def list(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): IO[Either[(StatusCode, ErrorResponse), ConfigListResponse]] = IO.delay {
-    val rejectedByScope = apiKey.flatMap(scopeOf).exists(s => !s.superuser)
+    val rejectedByScope = !scopeOf(apiKey).superuser
     if rejectedByScope then
       Left(
         StatusCode.Forbidden ->

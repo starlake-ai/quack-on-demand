@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.manifest.ConfigManifest
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
@@ -29,7 +30,7 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
 
   "ManifestHandlers.export" should "return a v1 YAML manifest" in {
     val handlers = newHandlers()
-    val yaml     = handlers.exportYaml(None)((_: String) => None).unsafeRunSync().toOption.get
+    val yaml = handlers.exportYaml(None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     yaml should include("apiVersion: quack-on-demand/v1")
     yaml should include("kind: ConfigManifest")
   }
@@ -38,7 +39,7 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
     val store = new InMemoryControlPlaneStore()
     store.upsertTenant(Tenant(id = "acme", displayName = "acme"))
     store.upsertGroup(RbacGroup(id = "g-legacy", tenantId = "acme", name = "qod_readers"))
-    val res           = newHandlers(store).exportYaml(None)((_: String) => None).unsafeRunSync()
+    val res = newHandlers(store).exportYaml(None)(_ => SessionScope.Superuser).unsafeRunSync()
     val (status, err) = res.left.toOption.get
     status.code shouldBe 400
     err.error shouldBe "reserved_name"
@@ -53,7 +54,7 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
         |exportedAt: '2026-06-05T12:00:00Z'
         |exportedFrom: { managerVersion: test, hostname: host }
         |""".stripMargin
-    val res = handlers.importYaml(bad, None)((_: String) => None).unsafeRunSync()
+    val res = handlers.importYaml(bad, None)(_ => SessionScope.Superuser).unsafeRunSync()
     res.isLeft shouldBe true
     res.left.toOption.get._1.code shouldBe 400
   }
@@ -77,6 +78,9 @@ class ManifestHandlersSpec extends AnyFlatSpec with Matchers:
         |  - name: demo
         |""".stripMargin
     sup.listTenants() shouldBe empty
-    handlers.importYaml(yaml, None)((_: String) => None).unsafeRunSync().isRight shouldBe true
+    handlers
+      .importYaml(yaml, None)(_ => SessionScope.Superuser)
+      .unsafeRunSync()
+      .isRight shouldBe true
     sup.listTenants().map(_.displayName) should contain("demo")
   }

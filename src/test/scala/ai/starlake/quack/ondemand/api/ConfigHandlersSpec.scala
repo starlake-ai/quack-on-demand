@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, ValidationConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
+import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.unsafe.implicits.global
 import com.typesafe.config.ConfigFactory
 import org.scalatest.flatspec.AnyFlatSpec
@@ -66,7 +67,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
   "ConfigHandlers.list" should "never leak sensitive values; render plain ones as-is" in {
     val cfg   = ConfigFactory.load()
     val views = new ConfigHandlers(cfg, liveEntries)
-      .list(None)((_: String) => None)
+      .list(None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -86,7 +87,7 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
   it should "render missing optional values as '(unset)'" in {
     val cfg   = ConfigFactory.load()
     val views = new ConfigHandlers(cfg, liveEntries)
-      .list(None)((_: String) => None)
+      .list(None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get

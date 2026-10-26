@@ -32,12 +32,12 @@ final class ManifestHandlers(
     * rejected with 403. Static `QOD_API_KEY` callers (no session row) are admitted.
     */
   private def superuserCheck(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[(StatusCode, ErrorResponse)] =
     SuperuserCheck.reject(apiKey, "manifest export/import is restricted to superusers")(scopeOf)
 
   def exportYaml(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): IO[Either[(StatusCode, ErrorResponse), String]] = IO.blocking {
     superuserCheck(apiKey)(scopeOf) match
       case Some(err) => Left(err)
@@ -50,7 +50,7 @@ final class ManifestHandlers(
   }
 
   def importYaml(body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): IO[Either[(StatusCode, ErrorResponse), ManifestImportSummary]] =
     IO.blocking {
       superuserCheck(apiKey)(scopeOf) match

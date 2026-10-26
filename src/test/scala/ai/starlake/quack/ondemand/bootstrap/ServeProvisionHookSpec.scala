@@ -10,6 +10,7 @@ import ai.starlake.quack.model.{
   TenantDbKind
 }
 import ai.starlake.quack.ondemand.{DuckLakeInitializer, PoolSupervisor}
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.api.{
   CreatePoolRequest,
   PoolHandlers,
@@ -196,7 +197,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     val rest = new Fixture
     rest.sup.createTenant(Tenant("acme")).unsafeRunSync()
     val message = rest.tenantDbs
-      .createTenantDb(refused, None)(_ => None)
+      .createTenantDb(refused, None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .left
       .toOption

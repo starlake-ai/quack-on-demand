@@ -26,7 +26,7 @@ final class RoleHandlers(
     HandlerResolvers.resolveTenantId(sup, raw)
 
   def createRole(req: RoleCreateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RoleResponse] =
     resolveTenantId(req.tenant) match
       case None =>
@@ -74,7 +74,7 @@ final class RoleHandlers(
             }
 
   def deleteRole(req: RoleDeleteRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val roleTenant = sup.tenantForRole(req.id)
     TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
@@ -108,7 +108,7 @@ final class RoleHandlers(
         }
 
   def listRoles(tenant: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RoleListResponse] = IO.blocking {
     resolveTenantId(tenant) match
       case None      => Right(RoleListResponse(Nil))
@@ -120,7 +120,7 @@ final class RoleHandlers(
   }
 
   def grantPermission(req: RolePermissionGrantRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RolePermissionResponse] =
     val roleTenant = sup.tenantForRole(req.roleId)
     TenantScopeCheck.rejectForResource(apiKey, roleTenant)(scopeOf) match
@@ -163,7 +163,7 @@ final class RoleHandlers(
         }
 
   def revokePermission(req: RolePermissionRevokeRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val permTenant = sup.tenantForRolePermission(req.id)
     TenantScopeCheck.rejectForResource(apiKey, permTenant)(scopeOf) match
@@ -197,7 +197,7 @@ final class RoleHandlers(
         }
 
   def listPermissions(roleId: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[RolePermissionListResponse] = IO.blocking {
     TenantScopeCheck.rejectForResource(apiKey, sup.tenantForRole(roleId))(scopeOf) match
       case Some(err) => Left(err)

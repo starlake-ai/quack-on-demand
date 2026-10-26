@@ -8,14 +8,13 @@ import sttp.model.StatusCode
 /** REST handler for `GET /api/audit/list`.
   *
   * Scoping rules:
-  *   - Superuser or unresolvable token (static key / open mode): `noTenant=true` selects exactly
-  *     the null-tenant rows (wins over any `?tenant=` filter); a `?tenant=x` filter selects only
-  *     that tenant's rows (null-tenant rows no longer mixed in); no filter returns everything
-  *     including null-tenant rows.
-  *   - Tenant admin (resolved, not superuser): `tenants` pinned to `manageableTenants`; a requested
-  *     `?tenant=` narrows WITHIN them only (tenant not in manageable set falls back to the full
-  *     manageable set, no error -- no existence leak); `noTenant=true` is ignored;
-  *     `includeNullTenant` = false.
+  *   - Superuser: `noTenant=true` selects exactly the null-tenant rows (wins over any `?tenant=`
+  *     filter); a `?tenant=x` filter selects only that tenant's rows (null-tenant rows no longer
+  *     mixed in); no filter returns everything including null-tenant rows.
+  *   - Anyone else (a tenant admin, or a caller with no resolvable credential, whose manageable set
+  *     is empty): `tenants` pinned to `manageableTenants`; a requested `?tenant=` narrows WITHIN
+  *     them only (tenant not in manageable set falls back to the full manageable set, no error --
+  *     no existence leak); `noTenant=true` is ignored; `includeNullTenant` = false.
   *
   * Pagination: `before` is an opaque cursor string (last row id from a prior response). An invalid
   * cursor is silently ignored (treated as absent). `limit` defaults to 50, clamped to [1, 500].
@@ -35,17 +34,17 @@ final class AuditHandlers(store: TelemetryStore):
       before: Option[String],
       noTenant: Option[Boolean],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[AuditListResponse] = IO.blocking {
-    val scoped                 = apiKey.flatMap(scopeOf)
-    val (tenants, includeNull) = scoped match
-      case Some(s) if !s.superuser =>
+  )(scopeOf: SessionScope.Resolver): Out[AuditListResponse] = IO.blocking {
+    val scope                  = scopeOf(apiKey)
+    val (tenants, includeNull) =
+      if !scope.superuser then
         // Pin to manageable tenants; ?tenant= narrows within them; ?noTenant= is ignored
         // (tenant admins can never see null-tenant rows).
-        (SessionScope.tenantsFilter(scoped, tenant), false)
-      case _ =>
-        // Superuser / static key. noTenant=true wins over any tenant filter and selects
-        // exactly the null-tenant rows; a tenant filter selects that tenant only; no
-        // filter returns everything including null-tenant rows.
+        (SessionScope.tenantsFilter(scope, tenant), false)
+      else
+        // Superuser. noTenant=true wins over any tenant filter and selects exactly the
+        // null-tenant rows; a tenant filter selects that tenant only; no filter returns
+        // everything including null-tenant rows.
         if noTenant.contains(true) then (Some(Set.empty[String]), true)
         else (tenant.map(Set(_)), tenant.isEmpty)
 

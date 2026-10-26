@@ -96,13 +96,13 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
 
   "pool/setLockdown" should "403 a tenant-admin session before any state change" in:
     val (h, sup, _, auditStore) = freshHandlers()
-    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val key = PoolKey("acme", "acme_default", "sales")
     val out = h
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "sales", "on"),
         Some("tok")
-      )(_ => Some(tenantScope("acme")))
+      )(_ => tenantScope("acme"))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
     sup.effectiveLockdown(key) shouldBe false
@@ -116,12 +116,12 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
 
   it should "400 on an invalid tri-state value" in:
     val (h, _, _, _) = freshHandlers()
-    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val out = h
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "sales", "banana"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
@@ -132,13 +132,13 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "missing", "on"),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   it should "persist the override, restart the pool's nodes, and echo it in PoolResponse" in:
     val (h, sup, backend, auditStore) = freshHandlers(lockdownEnabled = false)
-    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val key           = PoolKey("acme", "acme_default", "sales")
     val nodeIdsBefore = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
     nodeIdsBefore should not be empty
@@ -147,7 +147,7 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "sales", "on"),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
 
     out shouldBe a[Right[?, ?]]
@@ -175,12 +175,12 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
 
   it should "map inherit back to the global flag in lockdownEffective" in:
     val (h, sup, _, _) = freshHandlers(lockdownEnabled = true)
-    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val out = h
       .setLockdown(
         SetPoolLockdownRequest("acme", "acme_default", "sales", "inherit"),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     val Right(resp) = out: @unchecked

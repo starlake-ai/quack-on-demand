@@ -9,6 +9,7 @@ import ai.starlake.quack.model.{
   Tenant,
   TenantDbKind
 }
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.{NoFreeServer, QuackBackend}
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.IO
@@ -367,7 +368,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
       fx.holder(id(1)) shouldBe List("a")
       val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.drain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.holder(id(1)) shouldBe List("b")
       fx.rowIds shouldBe List(id(1))
@@ -382,7 +384,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     fx.run {
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
       val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.drain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       // Nothing holds the node any more (the drain released it): no server to keep it for, so
       // the row goes and the slot is pending, unlike a dead server that still holds it.
@@ -390,7 +393,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.pendingCount(fx.key) shouldBe 1
       fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
       fx.inner.get("a").get.assignedNodeId shouldBe None
-      h.undrain(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      h.undrain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("a")
@@ -596,7 +600,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.agents("a").paused = true
       fx.inner.backdate("a", 40) // unreachable (> 30s), inside the 60s grace
       val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
-      h.remove(FleetServerOpRequest("a"), None)(_ => None).unsafeRunSync() shouldBe Right(())
+      h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
+        .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("b")

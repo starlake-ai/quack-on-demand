@@ -78,7 +78,8 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "createPool" should "create a pool and return node info with maxConcurrent" in:
     val h   = freshHandlers
-    val out = h.createPool(req(maxConcurrentPerNode = 4), None)((_: String) => None).unsafeRunSync()
+    val out =
+      h.createPool(req(maxConcurrentPerNode = 4), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     val Right(resp) = out: @unchecked
     resp.nodes.size shouldBe 2
@@ -87,15 +88,17 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   it should "reject mismatched role distribution" in:
     val h   = freshHandlers
     val out = h
-      .createPool(req(size = 3, dist = RoleDistribution(0, 1, 1)), None)((_: String) => None)
+      .createPool(req(size = 3, dist = RoleDistribution(0, 1, 1)), None)(_ =>
+        SessionScope.Superuser
+      )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
 
   it should "return Conflict for duplicate pool" in:
     val h = freshHandlers
     val r = req(size = 1, dist = RoleDistribution(0, 0, 1))
-    h.createPool(r, None)((_: String) => None).unsafeRunSync() shouldBe a[Right[?, ?]]
-    val out = h.createPool(r, None)((_: String) => None).unsafeRunSync()
+    h.createPool(r, None)(_ => SessionScope.Superuser).unsafeRunSync() shouldBe a[Right[?, ?]]
+    val out = h.createPool(r, None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Conflict)
 
   it should "return 404 when the tenant is not registered" in:
@@ -110,7 +113,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
           roleDistribution = RoleDistribution(0, 0, 1)
         ),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error) shouldBe Some("tenant_not_found")
@@ -121,7 +124,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     // No createTenantDb -> the handler should refuse.
     val h   = new PoolHandlers(sup, tracker)
-    val out = h.createPool(req(), None)((_: String) => None).unsafeRunSync()
+    val out = h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error) shouldBe Some("tenant_db_not_found")
 
@@ -138,15 +141,16 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
           force = false
         ),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
 
   it should "return 409 pool_suspended on a suspended pool" in:
     val h = freshHandlers
-    h.createPool(req(), None)((_: String) => None).unsafeRunSync()
-    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), None)(_ => None)
-      .unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), None)(_ =>
+      SessionScope.Superuser
+    ).unsafeRunSync()
       .isRight shouldBe true
     val out = h
       .scalePool(
@@ -159,17 +163,17 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
           force = false
         ),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Conflict)
     out.left.toOption.map(_._2.error) shouldBe Some("pool_suspended")
 
   "stopPool" should "stop a known pool but keep it (scaled to 0)" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
-    h.stopPool(StopPoolRequest("acme", "acme_default", "sales", force = true), None)((_: String) =>
-      None
+    h.stopPool(StopPoolRequest("acme", "acme_default", "sales", force = true), None)(_ =>
+      SessionScope.Superuser
     ).unsafeRunSync() shouldBe Right(())
     // Pool still exists, just with no nodes.
     h.poolStatus("acme", "acme_default", "sales")
@@ -179,10 +183,10 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "deletePool" should "remove a known pool" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
-    h.deletePool(DeletePoolRequest("acme", "acme_default", "sales", force = true), None)(
-      (_: String) => None
+    h.deletePool(DeletePoolRequest("acme", "acme_default", "sales", force = true), None)(_ =>
+      SessionScope.Superuser
     ).unsafeRunSync() shouldBe Right(())
     h.poolStatus("acme", "acme_default", "sales")
       .unsafeRunSync()
@@ -192,13 +196,13 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "listPools" should "return all pools" in:
     val h = freshHandlers
-    h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1)), None)(
-      (_: String) => None
+    h.createPool(req(pool = "sales", size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ =>
+      SessionScope.Superuser
     ).unsafeRunSync()
-    h.createPool(req(pool = "ops", size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) =>
-      None
+    h.createPool(req(pool = "ops", size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ =>
+      SessionScope.Superuser
     ).unsafeRunSync()
-    val out = h.listPools(None)((_: String) => None).unsafeRunSync()
+    val out = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.toOption.get.pools.size shouldBe 2
 
   "poolStatus" should "return 404 for unknown pool" in:
@@ -208,13 +212,13 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "setResources" should "update cpu/memory and return the pool" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "500m", "2Gi"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     val Right(resp) = out: @unchecked
@@ -223,26 +227,26 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "reject invalid cpu quantity with 400" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "2 gigs", "2Gi"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
 
   "setPodTemplate" should "be rejected when podTemplateEnabled is false" in:
     val h = freshHandlers // default podTemplateEnabled=false
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
       .setPodTemplate(
         SetPoolTemplateRequest("acme", "acme_default", "sales", y),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._2.error) shouldBe Some("feature_disabled")
 
@@ -252,14 +256,14 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
       .setPodTemplate(
         SetPoolTemplateRequest("acme", "acme_default", "sales", y),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
@@ -269,14 +273,14 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     // Auth check (SuperuserCheck) must fire before the feature-gate check so
     // a non-superuser can never infer whether the gate is on or off.
     val h = freshHandlers // podTemplateEnabled = false
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
       .setPodTemplate(
         SetPoolTemplateRequest("acme", "acme_default", "sales", y),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
 
@@ -286,14 +290,14 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = false)
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val y   = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     val out = h
       .setPodTemplate(
         SetPoolTemplateRequest("acme", "acme_default", "sales", y),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._2.error) shouldBe Some("feature_disabled")
 
@@ -303,20 +307,20 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker, podTemplateEnabled = true)
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     // Set a template first, then clear it with an empty string.
     val y = "apiVersion: v1\nkind: Pod\nspec:\n  containers:\n    - name: quack\n      image: x"
     h.setPodTemplate(
       SetPoolTemplateRequest("acme", "acme_default", "sales", y),
       Some("tok")
-    )(_ => Some(SessionScope.Superuser))
+    )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setPodTemplate(
         SetPoolTemplateRequest("acme", "acme_default", "sales", ""),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
@@ -324,25 +328,25 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "setResources" should "return 403 for a foreign-tenant admin" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "500m", "2Gi"),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("globex"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("globex")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
 
   it should "return 400 with error code 'invalid' for an invalid cpu quantity" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "not-a-cpu", "2Gi"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
@@ -353,7 +357,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     sup
       .setMutationGates(List {
@@ -368,7 +372,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "16", "64Gi"),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.TooManyRequests)
     out.left.toOption.map(_._2.error) shouldBe Some("quota_exceeded")
@@ -379,7 +383,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     sup
       .setMutationGates(List {
@@ -391,7 +395,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .setResources(
         SetPoolResourcesRequest("acme", "acme_default", "sales", "500m", "2Gi"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
@@ -408,7 +412,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req().copy(podTemplateYaml = y),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
     out.left.toOption.map(_._2.error) shouldBe Some("superuser_required")
@@ -424,7 +428,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req().copy(podTemplateYaml = y),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._2.error) shouldBe Some("feature_disabled")
 
@@ -439,7 +443,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(podTemplateYaml = y),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
@@ -452,7 +456,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req().copy(podTemplateYaml = y),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
 
@@ -462,7 +466,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(cpu = "not-a-cpu"),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
@@ -482,7 +486,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(lockdown = "off"),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
     out.left.toOption.map(_._2.error) shouldBe Some("superuser_required")
@@ -498,7 +502,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(lockdown = "off"),
         Some("tok")
-      )(_ => Some(SessionScope.Superuser))
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     out.toOption.map(_.lockdown) shouldBe Some("off")
@@ -509,7 +513,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 0, 1)),
         Some("tok")
-      )(_ => Some(SessionScope(superuser = false, manageableTenants = Set("acme"))))
+      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     out.toOption.map(_.lockdown) shouldBe Some("inherit")
@@ -521,14 +525,14 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   "suspendPool / resumePool" should "round-trip through the handlers" in:
     val h = freshHandlers
-    h.createPool(req(), None)(_ => None).unsafeRunSync()
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val sReq = SuspendPoolRequest("acme", "acme_default", "sales")
-    h.suspendPool(sReq, None)(_ => None).unsafeRunSync().isRight shouldBe true
-    val afterSuspend = h.listPools(None)(_ => None).unsafeRunSync().toOption.get
+    h.suspendPool(sReq, None)(_ => SessionScope.Superuser).unsafeRunSync().isRight shouldBe true
+    val afterSuspend = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     afterSuspend.pools.find(_.pool == "sales").get.suspended shouldBe true
     val rReq = ResumePoolRequest("acme", "acme_default", "sales")
-    h.resumePool(rReq, None)(_ => None).unsafeRunSync().isRight shouldBe true
-    h.listPools(None)(_ => None)
+    h.resumePool(rReq, None)(_ => SessionScope.Superuser).unsafeRunSync().isRight shouldBe true
+    h.listPools(None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -539,15 +543,16 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "404 on an unknown pool" in:
     val h = freshHandlers
-    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "nope"), None)(_ => None)
-      .unsafeRunSync()
+    h.suspendPool(SuspendPoolRequest("acme", "acme_default", "nope"), None)(_ =>
+      SessionScope.Superuser
+    ).unsafeRunSync()
       .left
       .exists(_._1 == StatusCode.NotFound) shouldBe true
 
   it should "403 for a foreign-tenant session" in:
     val h = freshHandlers
-    h.createPool(req(), None)(_ => None).unsafeRunSync()
-    val foreignScope: String => Option[SessionScope] = _ => Some(tenantScope("globex"))
+    h.createPool(req(), None)(_ => SessionScope.Superuser).unsafeRunSync()
+    val foreignScope: SessionScope.Resolver = _ => tenantScope("globex")
     h.suspendPool(SuspendPoolRequest("acme", "acme_default", "sales"), Some("tok"))(foreignScope)
       .unsafeRunSync()
       .left
@@ -556,7 +561,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   "createPool with startSuspended" should "return a suspended pool with no nodes" in:
     val h    = freshHandlers
     val resp = h
-      .createPool(req().copy(startSuspended = true), None)(_ => None)
+      .createPool(req().copy(startSuspended = true), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -568,8 +573,8 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   "createPool with a band" should "reject a one-sided band on create" in:
     val h   = freshHandlers
     val out = h
-      .createPool(req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1)), None)(
-        (_: String) => None
+      .createPool(req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1)), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
@@ -585,7 +590,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
           )
         )
       )
-    val out = h.createPool(r, None)((_: String) => None).unsafeRunSync()
+    val out = h.createPool(r, None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
 
   it should "create an elastic pool and report its band" in:
@@ -594,7 +599,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .createPool(
         req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.toOption.map(r => (r.minNodes, r.maxNodes)) shouldBe Some((Some(1), Some(3)))
 
@@ -603,11 +608,11 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     h.createPool(
       req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
       None
-    )((_: String) => None)
+    )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
-      .scalePool(scaleReq(targetSize = 5, dist = RoleDistribution(0, 5, 0)), None)((_: String) =>
-        None
+      .scalePool(scaleReq(targetSize = 5, dist = RoleDistribution(0, 5, 0)), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
@@ -619,24 +624,24 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     h.createPool(
       req(size = 1, dist = RoleDistribution(0, 1, 0), minNodes = Some(1), maxNodes = Some(3)),
       None
-    )((_: String) => None)
+    )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
-      .scalePool(scaleReq(targetSize = 3, dist = RoleDistribution(0, 3, 0)), None)((_: String) =>
-        None
+      .scalePool(scaleReq(targetSize = 3, dist = RoleDistribution(0, 3, 0)), None)(_ =>
+        SessionScope.Superuser
       )
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
 
   "setPoolAutoscale" should "set and clear the band" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val set = h
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     set.toOption.flatMap(_.minNodes) shouldBe Some(1)
     set.toOption.flatMap(_.maxNodes) shouldBe Some(4)
@@ -644,20 +649,20 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "sales", None, None),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     cleared.toOption.flatMap(_.minNodes) shouldBe None
     cleared.toOption.flatMap(_.maxNodes) shouldBe None
 
   it should "reject a band that does not cover the pool's current size" in:
     val h = freshHandlers
-    h.createPool(req(size = 2, dist = RoleDistribution(0, 2, 0)), None)((_: String) => None)
+    h.createPool(req(size = 2, dist = RoleDistribution(0, 2, 0)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(3), Some(5)),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
@@ -674,13 +679,13 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
         )
       ),
       None
-    )((_: String) => None)
+    )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid_band")
@@ -691,20 +696,20 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "nope", Some(1), Some(4)),
         None
-      )((_: String) => None)
+      )(_ => SessionScope.Superuser)
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.NotFound)
     out.left.toOption.map(_._2.error) shouldBe Some("not_found")
 
   it should "403 for a foreign-tenant session" in:
     val h = freshHandlers
-    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)((_: String) => None)
+    h.createPool(req(size = 1, dist = RoleDistribution(0, 1, 0)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     val out = h
       .setPoolAutoscale(
         SetPoolAutoscaleRequest("acme", "acme_default", "sales", Some(1), Some(4)),
         Some("tok")
-      )(_ => Some(tenantScope("globex")))
+      )(_ => tenantScope("globex"))
       .unsafeRunSync()
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
 
@@ -735,7 +740,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
         List(CatalogAttachFailureDto(s"$nodeId@${startedAt.toEpochMilli}", "boom", "t0", 3))
     )
     val out = h
-      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ =>
+        SessionScope.Superuser
+      )
       .unsafeRunSync()
     val Right(resp) = out: @unchecked
     val running     = sup.get(PoolKey("acme", "acme_default", "sales")).get.nodes.head
@@ -753,7 +760,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   it should "default to no attach failures when no lookup is wired" in:
     val h   = freshHandlers
     val out = h
-      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)((_: String) => None)
+      .createPool(req(size = 1, dist = RoleDistribution(0, 0, 1)), None)(_ =>
+        SessionScope.Superuser
+      )
       .unsafeRunSync()
     val Right(resp) = out: @unchecked
     resp.nodes.map(_.catalogAttachFailures) shouldBe List(Nil)
@@ -770,7 +779,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
     val h = new PoolHandlers(sup, tracker)
-    h.createPool(req(size = 2, dist = RoleDistribution(0, 1, 1)), None)((_: String) => None)
+    h.createPool(req(size = 2, dist = RoleDistribution(0, 1, 1)), None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
     (sup, h)
 
@@ -802,7 +811,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     sup.serverLivenessAll = () =>
       calls += 1
       FleetHandlers.livenessByName(fleet, backend)
-    val Right(list) = h.listPools(None)((_: String) => None).unsafeRunSync(): @unchecked
+    val Right(list) = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync(): @unchecked
     list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
       List.fill(2)((Some("srv-1"), Some("dead")))
     calls shouldBe 1
@@ -812,7 +821,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
   it should "degrade to no server state, never fail, when the lookup throws" in:
     val (sup, h) = fleetPool()
     sup.serverLivenessAll = () => throw new IllegalStateException("postgres unreachable")
-    val Right(list) = h.listPools(None)((_: String) => None).unsafeRunSync(): @unchecked
+    val Right(list) = h.listPools(None)(_ => SessionScope.Superuser).unsafeRunSync(): @unchecked
     list.pools.flatMap(_.nodes).map(n => (n.serverName, n.serverState)) shouldBe
       List.fill(2)((Some("srv-1"), None))
     h.poolStatus("acme", "acme_default", "sales").unsafeRunSync().map(_.nodes.size) shouldBe

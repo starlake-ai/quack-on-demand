@@ -28,8 +28,8 @@ import java.time.Instant
 
 class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                   = None
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val NoKey: Option[String]                 = None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** One-row IntVector "id" Arrow stream, reused as a canned successful QueryResult payload. */
   private def oneRowReader(): org.apache.arrow.vector.ipc.ArrowReader =
@@ -227,8 +227,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         limit: Option[Int] = None,
         apiKey: Option[String] = NoKey
     ) =
-      h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, apiKey)(NoScope)
-        .unsafeRunSync()
+      h.preview(tenant, tenantDb, schema, table, asOf, asOfTag, asOfTs, limit, apiKey)(
+        SuperuserScope
+      ).unsafeRunSync()
 
     def schemaDiff(
         h: CatalogPreviewHandlers,
@@ -240,7 +241,8 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         to: String = "42",
         apiKey: Option[String] = NoKey
     ) =
-      h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(NoScope).unsafeRunSync()
+      h.schemaDiff(tenant, tenantDb, schema, table, from, to, apiKey)(SuperuserScope)
+        .unsafeRunSync()
 
     def dataDiff(
         h: CatalogPreviewHandlers,
@@ -256,7 +258,7 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
         apiKey: Option[String] = NoKey
     ) =
       h.dataDiff(tenant, tenantDb, schema, table, from, to, limit, cursor, changeType, apiKey)(
-        NoScope
+        SuperuserScope
       ).unsafeRunSync()
 
     def queueDiffResults(
@@ -274,9 +276,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
 
   it should "403 a cross-tenant caller" in new Stubs:
-    val h                                            = handlers()
-    val foreignScope: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("other")))
+    val h                                   = handlers()
+    val foreignScope: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     val out = h
       .preview("acme", "acme_tpch1", "tpch1", "region", None, None, None, None, Some("tok"))(
         foreignScope
@@ -422,9 +424,9 @@ class CatalogPreviewHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
 
   it should "403 a cross-tenant caller" in new Stubs:
-    val h                                            = handlers()
-    val foreignScope: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("other")))
+    val h                                   = handlers()
+    val foreignScope: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     val out = h
       .schemaDiff("acme", "acme_tpch1", "tpch1", "region", "12", "42", Some("tok"))(foreignScope)
       .unsafeRunSync()

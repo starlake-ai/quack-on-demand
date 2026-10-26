@@ -82,7 +82,7 @@ final class IcebergCatalogHandlers(
       tenantDb: String,
       alias: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Either[Err, Target] =
+  )(scopeOf: SessionScope.Resolver): Either[Err, Target] =
     TenantDbGate(sup, tenant, tenantDb, apiKey)(scopeOf).flatMap { (tid, db) =>
       val wanted = FederatedAlias.fold(alias)
       sup
@@ -163,7 +163,7 @@ final class IcebergCatalogHandlers(
       tenantDb: String,
       alias: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope])(read: Target => Out[T]): Out[T] =
+  )(scopeOf: SessionScope.Resolver)(read: Target => Out[T]): Out[T] =
     resolve(tenant, tenantDb, alias, apiKey)(scopeOf) match
       case Left(e) =>
         if cfg.auditCatalogReads then
@@ -192,7 +192,7 @@ final class IcebergCatalogHandlers(
     * tables on expand anyway.
     */
   def schemas(tenant: String, tenantDb: String, alias: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[List[CatalogSchemaEntry]] =
     metaRead("iceberg.schemas", tenant, tenantDb, alias, apiKey)(scopeOf) { t =>
       runMeta(t, IcebergCatalogSql.schemas(t.alias)).map(
@@ -206,7 +206,7 @@ final class IcebergCatalogHandlers(
       alias: String,
       schema: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[List[String]] =
+  )(scopeOf: SessionScope.Resolver): Out[List[String]] =
     metaRead("iceberg.tables", tenant, tenantDb, alias, apiKey)(scopeOf) { t =>
       runMeta(t, IcebergCatalogSql.tables(t.alias, schema)).map(
         _.map(_.flatMap(_.headOption).map(str))
@@ -220,7 +220,7 @@ final class IcebergCatalogHandlers(
       schema: String,
       table: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[IcebergTableDetailResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[IcebergTableDetailResponse] =
     metaRead("iceberg.detail", tenant, tenantDb, alias, apiKey)(scopeOf) { t =>
       runMeta(t, IcebergCatalogSql.columns(t.alias, schema, table)).andThen { colRows =>
         runMeta(t, IcebergCatalogSql.files(t.alias, schema, table)).andThen { fileRows =>
@@ -272,7 +272,7 @@ final class IcebergCatalogHandlers(
       before: Option[String],
       operation: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[IcebergHistoryResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[IcebergHistoryResponse] =
     metaRead("iceberg.history", tenant, tenantDb, alias, apiKey)(scopeOf) { t =>
       val lim = limit.getOrElse(DefaultHistoryLimit).max(1).min(MaxHistoryLimit)
       if operation.exists(o => !IcebergSnapshots.Operations.contains(o)) then
@@ -406,7 +406,7 @@ final class IcebergCatalogHandlers(
       asOfTs: Option[Instant],
       limit: Option[Int],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[IcebergPreviewResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[IcebergPreviewResponse] =
     resolve(tenant, tenantDb, alias, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogPreviewRead, "denied")
@@ -478,7 +478,7 @@ final class IcebergCatalogHandlers(
       limit: Option[Int],
       changeType: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[IcebergDiffResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[IcebergDiffResponse] =
     resolve(tenant, tenantDb, alias, apiKey)(scopeOf) match
       case Left(e) =>
         audit.rest(apiKey, "control-plane", AuditActions.CatalogDataDiffRead, "denied")

@@ -217,7 +217,7 @@ final class FleetHandlers(
     )
 
   def listServers(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[FleetServerListResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
@@ -234,7 +234,7 @@ final class FleetHandlers(
     * audit row.
     */
   private def serverOp(req: FleetServerOpRequest, apiKey: Option[String], action: String)(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   )(f: (FleetQuackBackend, FleetServerRow) => Out[Unit]): Out[Unit] =
     def auditAs(outcome: String): Unit =
       audit.rest(apiKey, "control-plane", action, outcome, target = Some(req.name))
@@ -259,7 +259,7 @@ final class FleetHandlers(
     * reconcile tick drops it (up to `reconcileIntervalSec`).
     */
   def drain(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetDrain)(scopeOf) { (_, row) =>
       IO.blocking {
@@ -272,7 +272,7 @@ final class FleetHandlers(
     }
 
   def undrain(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetUndrain)(scopeOf) { (_, row) =>
       // Published like drain: the server is schedulable again, peers should see it.
@@ -285,7 +285,7 @@ final class FleetHandlers(
     * latest heartbeat has no known source address: the approval is bound to that source.
     */
   def approve(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetApprove)(scopeOf) { (_, row) =>
       IO.blocking(store.approve(row.name, audit.actorOf(apiKey)._1)).flatMap {
@@ -304,7 +304,7 @@ final class FleetHandlers(
     * it is stopped).
     */
   def remove(req: FleetServerOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     serverOp(req, apiKey, AuditActions.FleetRemove)(scopeOf) { (b, row) =>
       if row.approved && b.livenessOf(row) == ServerLiveness.Reachable && !row.unschedulable

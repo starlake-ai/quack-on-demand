@@ -29,7 +29,7 @@ object TenantDbGate:
       apiKey: Option[String],
       requireDuckLake: Option[String] = None
   )(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     def err(code: StatusCode, error: String, msg: String) =
       Left((code, ErrorResponse(error, msg)))

@@ -31,7 +31,7 @@ final class McpAccessTools(
     columnPolicies: RoleColumnPolicyHandlers,
     rowPolicies: RoleRowPolicyHandlers,
     poolPermissions: PoolPermissionHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._

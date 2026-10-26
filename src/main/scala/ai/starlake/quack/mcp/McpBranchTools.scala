@@ -13,7 +13,7 @@ import Dtos.given
   * the CLI. Each tool curries `principal.rawToken` into the REST handler's `apiKey` seam, so the
   * handler resolves the same PAT principal this route did.
   */
-final class McpBranchTools(branches: BranchHandlers, scopeOf: String => Option[SessionScope]):
+final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resolver):
 
   import McpToolArgs._
 

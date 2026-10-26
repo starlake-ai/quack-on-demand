@@ -35,7 +35,7 @@ final class BranchHandlers(
     (StatusCode(f.status), ErrorResponse(f.code, f.message))
 
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -47,7 +47,7 @@ final class BranchHandlers(
 
   /** [[gate]], then the actor: an unresolvable token is a 401 and never reaches the service. */
   private def gatedActor(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String, BranchActor)] =
     for
       (tid, db) <- gate(rawTenant, tenantDb, apiKey)(scopeOf)
@@ -110,7 +110,7 @@ final class BranchHandlers(
     )
 
   def create(req: BranchCreateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchEntry] =
     gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))
@@ -125,7 +125,7 @@ final class BranchHandlers(
       includeTerminal: Option[Boolean],
       apiKey: Option[String]
   )(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchListResponse] = IO.blocking {
     gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db) =>
       service
@@ -137,7 +137,7 @@ final class BranchHandlers(
   }
 
   def get(tenant: String, tenantDb: String, branch: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchDetailResponse] = IO.blocking {
     gate(tenant, tenantDb, apiKey)(scopeOf).flatMap { case (tid, db) =>
       service.get(tid, db, branch).left.map(toErr).map { case (b, merges) =>
@@ -152,7 +152,7 @@ final class BranchHandlers(
       branch: String,
       counts: Option[Boolean],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[BranchChangesResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[BranchChangesResponse] =
     gatedActor(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))
       case Right((tid, db, actor)) =>
@@ -171,7 +171,7 @@ final class BranchHandlers(
       cursor: Option[String],
       changeType: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[DataDiffResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[DataDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e)          => IO.pure(Left(e))
       case Right((tid, db)) =>
@@ -200,7 +200,7 @@ final class BranchHandlers(
       schema: String,
       table: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[SchemaDiffResponse] =
+  )(scopeOf: SessionScope.Resolver): Out[SchemaDiffResponse] =
     gate(tenant, tenantDb, apiKey)(scopeOf) match
       case Left(e)          => IO.pure(Left(e))
       case Right((tid, db)) =>
@@ -225,7 +225,7 @@ final class BranchHandlers(
     }
 
   def propose(req: BranchOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchProposeResponse] =
     gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))
@@ -237,7 +237,7 @@ final class BranchHandlers(
           })
 
   def merge(req: BranchMergeRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchMergeResponse] =
     gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))
@@ -249,7 +249,7 @@ final class BranchHandlers(
           })
 
   def discard(req: BranchOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[BranchEntry] =
     gatedActor(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e)                 => IO.pure(Left(e))

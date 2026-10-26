@@ -78,7 +78,15 @@ class FederatedSourceHandlersSpec
 
   private def withHandlers(test: (FederatedSourceHandlers, String) => Unit): Unit =
     withEnv((fs, resolver, tdId) =>
-      test(new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None), tdId)
+      test(
+        new FederatedSourceHandlers(
+          fs,
+          resolver,
+          scopeOf = _ => SessionScope.Superuser,
+          catalogAliasOf = _ => None
+        ),
+        tdId
+      )
     )
 
   // 1. POST source -> 200, GET it back, alias matches
@@ -189,16 +197,18 @@ class FederatedSourceHandlersSpec
   // resolves from the MANAGER's own trust domain at spawn), while a superuser
   // and a value-backed tenant secret both stay allowed.
 
-  private val AdminTok                               = "admin-token"
-  private val SuperTok                               = "super-token"
-  private val scopes: String => Option[SessionScope] = {
-    case `AdminTok` => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
-    case `SuperTok` => Some(SessionScope.Superuser)
-    case _          => None
-  }
+  private val AdminTok = "admin-token"
+  private val SuperTok = "super-token"
+  // Through the production resolver, so an absent or unknown credential is NoAccess.
+  private val scopes: SessionScope.Resolver = SessionScope.resolver(
+    Map(
+      AdminTok -> SessionScope(superuser = false, manageableTenants = Set("acme")),
+      SuperTok -> SessionScope.Superuser
+    ).get
+  )
 
   private def seedSource(fs: FederatedSourceStore, resolver: (String, String) => Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): FederatedSourceHandlers =
     val h = new FederatedSourceHandlers(fs, resolver, scopeOf = scopeOf, catalogAliasOf = _ => None)
     h.createSource(
@@ -268,10 +278,11 @@ class FederatedSourceHandlersSpec
       r.isRight shouldBe true
     }
 
-  it should "allow an externalRef secret for a static-key / open-mode caller (no resolvable scope)" in
+  it should "refuse every secret from a caller with no credential (no trusted arm)" in
     withEnv { (fs, resolver, _) =>
-      // Default scopeOf resolves nothing -> perimeter is the gate, handler admits.
-      val h = seedSource(fs, resolver)(_ => None)
+      // No credential resolves to NoAccess, never to an operator: the tenant gate refuses it
+      // before the externalRef rule is reached, and nothing is written.
+      val h = seedSource(fs, resolver)(scopes)
       val r = h
         .upsertSecret(
           "acme",
@@ -281,7 +292,13 @@ class FederatedSourceHandlersSpec
           None
         )
         .unsafeRunSync()
-      r.isRight shouldBe true
+      r.left.toOption.map((code, err) => (code.code, err.error)) shouldBe
+        Some((403, "tenant_forbidden"))
+      h.listSecrets("acme", "acme_prod", "fedpg")
+        .unsafeRunSync()
+        .toOption
+        .value
+        .secrets shouldBe empty
     }
 
   it should "reject a blank inline value with a 400 naming the secret" in withHandlers { (h, _) =>
@@ -396,6 +413,7 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
         catalogAliasOf = _ => Some("acme_db")
       )
       val (code, err) = h
@@ -489,7 +507,12 @@ class FederatedSourceHandlersSpec
 
   it should "rewrite a legacy mixed-case row in place when re-POSTed under its own alias" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-1",
@@ -515,7 +538,12 @@ class FederatedSourceHandlersSpec
 
   it should "rewrite a legacy mixed-case row in place when re-POSTed under a DIFFERENT case" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-2",
@@ -551,7 +579,12 @@ class FederatedSourceHandlersSpec
 
   it should "update a legacy hyphenated row in place, keeping its stored alias" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-hyphen",
@@ -582,7 +615,12 @@ class FederatedSourceHandlersSpec
 
   it should "keep the STORED spelling when a legacy invalid alias is re-POSTed in another case" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-hyphen-2",
@@ -609,7 +647,12 @@ class FederatedSourceHandlersSpec
     withEnv { (fs, resolver, _) =>
       // The sibling of the iceberg case above, on the `sql` path this branch changed for
       // everybody: the grandfather clause must not have reopened the rule for new rows.
-      val h             = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       val (code, error) = h
         .createSource(
           "acme",
@@ -634,7 +677,12 @@ class FederatedSourceHandlersSpec
       // behaviour is deliberate (declarative replacement) and is pinned here rather than left to
       // be discovered; the handler WARNs on this exact transition, which is the audit line the
       // manifest path already had for its own version of the same downgrade.
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-ro",
@@ -660,7 +708,12 @@ class FederatedSourceHandlersSpec
 
   it should "keep readOnly when the upsert passes it explicitly" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-ro-2",
@@ -688,7 +741,12 @@ class FederatedSourceHandlersSpec
 
   it should "400 naming the sourceType clash (not the reserved-alias rule) for a legacy row" in
     withEnv { (fs, resolver, tdId) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       fs.upsertSource(
         FederatedSource(
           id = "fs-legacy-3",
@@ -716,7 +774,12 @@ class FederatedSourceHandlersSpec
     "upsert a legacy mixed-case iceberg_rest row in place under its own alias " +
     "(self-reservation by id, not by alias)" in
     withEnv { (fs, resolver, tdId) =>
-      val h   = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => None)
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => None
+      )
       val cfg = IcebergRestConfig(
         uri = "https://catalog.example.com/api/catalog",
         warehouse = "sales",
@@ -773,6 +836,7 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, alias) =>
           if tenantDbId == tdId && alias == "sales_lake" then Some("failed on 1 of 2 nodes")
@@ -791,6 +855,7 @@ class FederatedSourceHandlersSpec
       val h = new FederatedSourceHandlers(
         fedStore = fs,
         resolver = resolver,
+        scopeOf = _ => SessionScope.Superuser,
         catalogAliasOf = _ => None,
         attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
       )
@@ -926,7 +991,12 @@ class FederatedSourceHandlersSpec
 
   it should "400 on an alias that collides with a sibling or the tenant-db's own alias" in
     withEnv { (fs, resolver, _) =>
-      val h = new FederatedSourceHandlers(fs, resolver, catalogAliasOf = _ => Some("acme_db"))
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        catalogAliasOf = _ => Some("acme_db")
+      )
       h.createSource("acme", "acme_prod", pgReq(alias = "acme_db"), None)
         .unsafeRunSync()
         .left
@@ -955,6 +1025,7 @@ class FederatedSourceHandlersSpec
     val h = new FederatedSourceHandlers(
       fedStore = fs,
       resolver = resolver,
+      scopeOf = _ => SessionScope.Superuser,
       catalogAliasOf = _ => None,
       attachStatusOf = (tenantDbId, _) => if tenantDbId == tdId then Some("unknown") else None
     )

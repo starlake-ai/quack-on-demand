@@ -120,7 +120,7 @@ final class ScimHandlers(
   private def admit(
       tenantRaw: String,
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Either[(StatusCode, String), String] =
+  )(scopeOf: SessionScope.Resolver): Either[(StatusCode, String), String] =
     HandlerResolvers.resolveTenantId(sup, tenantRaw) match
       case None     => Left(scimError(StatusCode.NotFound, s"tenant not found: $tenantRaw"))
       case Some(id) =>
@@ -216,7 +216,7 @@ final class ScimHandlers(
       startIndex: Option[Int],
       count: Option[Int],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[String] = IO.blocking {
+  )(scopeOf: SessionScope.Resolver): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).flatMap { tenantId =>
       val all      = sup.listUsers(Some(tenantId)).sortBy(_.username)
       val filtered = filter match
@@ -235,7 +235,7 @@ final class ScimHandlers(
   }
 
   def getUser(tenantRaw: String, id: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).flatMap { tenantId =>
       userInTenant(tenantId, id)
@@ -245,7 +245,7 @@ final class ScimHandlers(
   }
 
   def createUser(tenantRaw: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -306,7 +306,7 @@ final class ScimHandlers(
       }
 
   def replaceUser(tenantRaw: String, id: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -345,7 +345,7 @@ final class ScimHandlers(
     * that have no QoD backing, and failing the whole operation would wedge their retry loops.
     */
   def patchUser(tenantRaw: String, id: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -443,7 +443,7 @@ final class ScimHandlers(
       }
 
   def deleteUser(tenantRaw: String, id: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf)).flatMap {
       case Left(err)       => IO.pure(Left(err))
@@ -475,7 +475,7 @@ final class ScimHandlers(
       startIndex: Option[Int],
       count: Option[Int],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[String] = IO.blocking {
+  )(scopeOf: SessionScope.Resolver): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).flatMap { tenantId =>
       val all      = sup.listGroups(tenantId).sortBy(_.name)
       val filtered = filter match
@@ -513,7 +513,7 @@ final class ScimHandlers(
   }
 
   def getGroup(tenantRaw: String, id: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).flatMap { tenantId =>
       groupInTenant(tenantId, id)
@@ -523,7 +523,7 @@ final class ScimHandlers(
   }
 
   def createGroup(tenantRaw: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -565,7 +565,7 @@ final class ScimHandlers(
       }
 
   def replaceGroup(tenantRaw: String, id: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -596,7 +596,7 @@ final class ScimHandlers(
       }
 
   def patchGroup(tenantRaw: String, id: String, body: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf).flatMap(t => parseBody(body).map((t, _))))
       .flatMap {
@@ -679,7 +679,7 @@ final class ScimHandlers(
       }
 
   def deleteGroup(tenantRaw: String, id: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     IO.blocking(admit(tenantRaw, apiKey)(scopeOf)).flatMap {
       case Left(err)       => IO.pure(Left(err))
@@ -761,7 +761,7 @@ final class ScimHandlers(
   // ---------------- Discovery ----------------
 
   def serviceProviderConfig(tenantRaw: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).map { _ =>
       Json
@@ -799,7 +799,7 @@ final class ScimHandlers(
   }
 
   def resourceTypes(tenantRaw: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).map { _ =>
       Json
@@ -812,7 +812,7 @@ final class ScimHandlers(
   }
 
   def schemas(tenantRaw: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[String] = IO.blocking {
     admit(tenantRaw, apiKey)(scopeOf).map { _ =>
       // Minimal but valid: IdPs use this to discover attribute support.

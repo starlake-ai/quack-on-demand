@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.ondemand.runtime.QuackBackend
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
@@ -13,10 +14,10 @@ import sttp.model.StatusCode
 
 class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
-  // Key-less caller (open mode): TenantScopeCheck admits, the gate still
+  // Key-less caller over a superuser fixture: TenantScopeCheck admits, the gate still
   // resolves tenant + tenant-db against the supervisor.
-  private val NoKey: Option[String]              = None
-  private val NoScope: String => Option[Nothing] = _ => None
+  private val NoKey: Option[String]                 = None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
@@ -58,10 +59,10 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
       filesRemoved = 0,
       affectedTables = List(CatalogTableRef("tpch1", "region"))
     )
-    var seenAsOf: Option[Long]                  = None
-    var seenLimit: Option[Int]                  = None
-    var seenBefore: Option[Long]                = None
-    var seenTable: Option[(String, String)]     = None
+    var seenAsOf: Option[Long]              = None
+    var seenLimit: Option[Int]              = None
+    var seenBefore: Option[Long]            = None
+    var seenTable: Option[(String, String)] = None
 
     // Subclass `DuckLakeCatalogReader` for the stub. The base class wants
     // a HikariDataSource - we pass null since none of the methods we
@@ -84,31 +85,33 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
         if schema == "tpch1" && table == "region" then
           Some(CatalogTableDetailResponse(region, List(column), List(file)))
         else None
-      override def snapshotExists(id: Long): Boolean = id == 3L
-      override def maxSnapshotId(): Option[Long] = Some(3L)
+      override def snapshotExists(id: Long): Boolean                       = id == 3L
+      override def maxSnapshotId(): Option[Long]                           = Some(3L)
       override def snapshotAtOrBefore(ts: java.time.Instant): Option[Long] = Some(3L)
 
-    val (sup, store)  = supervisor()
-    val handlers = new CatalogHandlers((_, _) => reader, sup, store)
+    val (sup, store) = supervisor()
+    val handlers     = new CatalogHandlers((_, _) => reader, sup, store)
 
     def getTable(table: String, asOf: Option[Long] = None) =
-      handlers.getTable("acme", "acme_default", "tpch1", table, asOf, None, None, NoKey)(NoScope)
+      handlers.getTable("acme", "acme_default", "tpch1", table, asOf, None, None, NoKey)(
+        SuperuserScope
+      )
 
   "listSchemas" should "return what the reader returns" in new Stubs:
-    handlers.listSchemas("acme", "acme_default", NoKey)(NoScope) shouldBe Right(schemas)
+    handlers.listSchemas("acme", "acme_default", NoKey)(SuperuserScope) shouldBe Right(schemas)
 
   "listSchemas" should "404 an unknown tenant" in new Stubs:
-    val out = handlers.listSchemas("nope", "acme_default", NoKey)(NoScope)
+    val out = handlers.listSchemas("nope", "acme_default", NoKey)(SuperuserScope)
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
 
   "listSchemas" should "404 an unknown tenant-db" in new Stubs:
-    val out = handlers.listSchemas("acme", "ghost_db", NoKey)(NoScope)
+    val out = handlers.listSchemas("acme", "ghost_db", NoKey)(SuperuserScope)
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
 
   "listTables" should "filter by schema" in new Stubs:
-    handlers.listTables("acme", "acme_default", "tpch1", NoKey)(NoScope) shouldBe
+    handlers.listTables("acme", "acme_default", "tpch1", NoKey)(SuperuserScope) shouldBe
       Right(List(region))
-    handlers.listTables("acme", "acme_default", "main", NoKey)(NoScope) shouldBe Right(Nil)
+    handlers.listTables("acme", "acme_default", "main", NoKey)(SuperuserScope) shouldBe Right(Nil)
 
   "getTable" should "return the detail when present" in new Stubs:
     val detail = getTable("region").toOption.get
@@ -119,29 +122,31 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
     getTable("ghost").left.toOption.get._1 shouldBe StatusCode.NotFound
 
   "listSnapshots" should "return what the reader returns" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope) shouldBe
+    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(SuperuserScope) shouldBe
       Right(List(snapshot))
 
   "listSnapshots" should "return Nil for non-DuckLake tenant-dbs" in new Stubs:
     val gated =
       new CatalogHandlers((_, _) => reader, sup, store, (_, _) => Some(TenantDbKind.InMemory))
-    gated.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope) shouldBe Right(Nil)
+    gated.listSnapshots("acme", "acme_default", None, None, None, NoKey)(
+      SuperuserScope
+    ) shouldBe Right(Nil)
 
   "listSnapshots" should "default limit to 200 when None" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", None, None, None, NoKey)(SuperuserScope)
     seenLimit shouldBe Some(200)
     seenBefore shouldBe None
 
   "listSnapshots" should "clamp limit 5000 to 1000" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(5000), None, None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(5000), None, None, NoKey)(SuperuserScope)
     seenLimit shouldBe Some(1000)
 
   "listSnapshots" should "clamp limit 0 to 1" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(0), None, None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(0), None, None, NoKey)(SuperuserScope)
     seenLimit shouldBe Some(1)
 
   "listSnapshots" should "pass before through unchanged" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", Some(10), Some(42L), None, NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", Some(10), Some(42L), None, NoKey)(SuperuserScope)
     seenLimit shouldBe Some(10)
     seenBefore shouldBe Some(42L)
 
@@ -151,16 +156,20 @@ class CatalogHandlersSpec extends AnyFlatSpec with Matchers:
 
   "listSnapshots" should "parse and pass valid schema.table through" in new Stubs:
     handlers.listSnapshots("acme", "acme_default", None, None, Some("tpch1.region"), NoKey)(
-      NoScope
+      SuperuserScope
     )
     seenTable shouldBe Some(("tpch1", "region"))
 
   "listSnapshots" should "ignore dotless table filter" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, Some("nodot"), NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", None, None, Some("nodot"), NoKey)(SuperuserScope)
     seenTable shouldBe None
 
   "listSnapshots" should "ignore table filter with empty parts" in new Stubs:
-    handlers.listSnapshots("acme", "acme_default", None, None, Some(".suffix"), NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", None, None, Some(".suffix"), NoKey)(
+      SuperuserScope
+    )
     seenTable shouldBe None
-    handlers.listSnapshots("acme", "acme_default", None, None, Some("prefix."), NoKey)(NoScope)
+    handlers.listSnapshots("acme", "acme_default", None, None, Some("prefix."), NoKey)(
+      SuperuserScope
+    )
     seenTable shouldBe None

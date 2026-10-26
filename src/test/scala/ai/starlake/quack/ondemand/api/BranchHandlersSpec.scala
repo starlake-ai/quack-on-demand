@@ -34,7 +34,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
   import IdentityFixtures.*
 
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private final class Fixture:
     val store = new InMemoryControlPlaneStore()
@@ -105,7 +105,7 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
     def merge(key: Option[String]) =
       handlers
-        .merge(BranchMergeRequest("acme", parent.name, "feature"), key)(NoScope)
+        .merge(BranchMergeRequest("acme", parent.name, "feature"), key)(SuperuserScope)
         .unsafeRunSync()
 
   private def unauthorized[A](r: Either[(StatusCode, ErrorResponse), A]) =
@@ -117,22 +117,24 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
     unauthorized(f.merge(Some("qod_pat_unknown")))
     unauthorized(
       f.handlers
-        .create(BranchCreateRequest("acme", f.parent.name, "feature"), Some("expired-jwt"))(NoScope)
+        .create(BranchCreateRequest("acme", f.parent.name, "feature"), Some("expired-jwt"))(
+          SuperuserScope
+        )
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(NoScope)
+        .propose(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .discard(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(NoScope)
+        .discard(BranchOpRequest("acme", f.parent.name, "feature"), Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     unauthorized(
       f.handlers
-        .changes("acme", f.parent.name, "feature", None, Some("garbage"))(NoScope)
+        .changes("acme", f.parent.name, "feature", None, Some("garbage"))(SuperuserScope)
         .unsafeRunSync()
     )
     f.serviceAudit.events shouldBe empty

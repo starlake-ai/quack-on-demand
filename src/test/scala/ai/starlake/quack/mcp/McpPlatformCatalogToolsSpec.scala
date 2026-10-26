@@ -280,7 +280,7 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       val cfgH     = new ConfigHandlers(ConfigFactory.load(), liveConfigEntries)
       val historyH = new HistoryHandlers(NoopTelemetryStore)
       val usageH   = new UsageHandlers(NoopTelemetryStore)
-      val scopeOf: String => Option[SessionScope] = _ => None
+      val scopeOf: SessionScope.Resolver = _ => SessionScope.Superuser
 
       val tools = new McpPlatformTools(
         restoreH,

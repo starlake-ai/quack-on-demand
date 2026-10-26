@@ -87,9 +87,11 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     val store        = new RecordingTelemetryStore
     val audit        = new AuditRecorder(store, _ => None)
     val (roles, tid) = buildRoleHandlers(audit)
-    // Static-key token: scopeOf returns None (no session row) => TenantScopeCheck admits.
+    // Superuser fixture: the scope resolves to a superuser => TenantScopeCheck admits.
     roles
-      .createRole(RoleCreateRequest(tid, "auditors", None), Some("any-static-key"))(_ => None)
+      .createRole(RoleCreateRequest(tid, "auditors", None), Some("any-static-key"))(_ =>
+        SessionScope.Superuser
+      )
       .unsafeRunSync()
     store.events should not be empty
     val e = store.events.head
@@ -112,7 +114,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       .createRole(
         RoleCreateRequest(tid, "auditors", None),
         Some("alice-session-token")
-      )(_ => Some(foreignScope))
+      )(_ => foreignScope)
       .unsafeRunSync()
     store.events should not be empty
     val e = store.events.head
@@ -135,8 +137,11 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
         Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
         clientSecret = Some("kc-s3cr3t")
       )
-      // Static-key token: scopeOf returns None (no session row), so the caller is a superuser.
-      tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+      // Superuser fixture: the scope resolves to a superuser, so the caller is one.
+      tenants
+        .setTenantAuth(req, Some("any-static-key"))(_ => SessionScope.Superuser)
+        .unsafeRunSync()
+        .isRight shouldBe
         true
       val e = store.events.find(_.action == "tenant.auth.update").value
       e.outcome shouldBe "ok"
@@ -159,7 +164,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     )
     val tenantAdmin =
       SessionScope(superuser = false, manageableTenants = Set(SecurityFixtures.TenantId))
-    val out = tenants.setTenantAuth(req, Some("alice-session"))(_ => Some(tenantAdmin))
+    val out = tenants.setTenantAuth(req, Some("alice-session"))(_ => tenantAdmin)
     out.unsafeRunSync().left.map(_._1.code) shouldBe Left(403)
     val rows = store.events.filter(_.action == "tenant.auth.update")
     rows.map(_.outcome) shouldBe List("denied")
@@ -196,7 +201,10 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     sup.restore()
     val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, _ => None))
     val req     = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
-    tenants.setTenantAuth(req, Some("any-static-key"))(_ => None).unsafeRunSync().isRight shouldBe
+    tenants
+      .setTenantAuth(req, Some("any-static-key"))(_ => SessionScope.Superuser)
+      .unsafeRunSync()
+      .isRight shouldBe
       true
     val rows = store.events.filter(_.action == "tenant.auth.update")
     rows.size shouldBe 1
@@ -275,6 +283,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       resolver,
       tenantIdResolver,
       audit,
+      scopeOf = _ => SessionScope.Superuser,
       catalogAliasOf = _ => None
     )
 

@@ -19,7 +19,7 @@ final class GroupHandlers(
     HandlerResolvers.resolveTenantId(sup, raw)
 
   def createGroup(req: GroupCreateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[GroupResponse] =
     resolveTenantId(req.tenant) match
       case None =>
@@ -67,7 +67,7 @@ final class GroupHandlers(
             }
 
   def deleteGroup(req: GroupDeleteRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val groupTenant = sup.tenantForGroup(req.id)
     TenantScopeCheck.rejectForResource(apiKey, groupTenant)(scopeOf) match
@@ -101,7 +101,7 @@ final class GroupHandlers(
         }
 
   def listGroups(tenant: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[GroupListResponse] = IO.blocking {
     resolveTenantId(tenant) match
       case None      => Right(GroupListResponse(Nil))

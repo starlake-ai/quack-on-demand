@@ -139,10 +139,11 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
 
-    val scopeOf: String => Option[SessionScope] =
+    val scopeOf: SessionScope.Resolver =
       t =>
-        if t == patToken then Some(SessionScope(superuser = false, manageableTenants = Set(Tenant)))
-        else None
+        if t.contains(patToken) then
+          SessionScope(superuser = false, manageableTenants = Set(Tenant))
+        else SessionScope.Superuser
 
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
     val history = new CatalogHistoryHandlers((_, _) => stubReader, sup)
@@ -333,15 +334,16 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       cfg = CatalogConfig(previewMaxRows = 100, previewTimeoutSec = 30)
     )
 
-    // Fail-closed like Main's mcpScopeOf: only the static key (none here) is "unrestricted";
-    // every other token resolves to its own scope, or to NoAccess when unknown.
-    val scopeOf: String => Option[SessionScope] = SessionScope.failClosed(
-      None,
+    // Like Main's MCP wiring: no token is the static-key principal (still a superuser until the
+    // key goes), and every token resolves to its own scope, or to NoAccess when unknown.
+    val tokenScope = SessionScope.resolver(
       Map(
         patToken       -> SessionScope(superuser = false, manageableTenants = Set(Tenant)),
         NonAdminPatTok -> SessionScope.NoAccess
       ).get
     )
+    val scopeOf: SessionScope.Resolver =
+      t => if t.isEmpty then SessionScope.Superuser else tokenScope(t)
     val catalog = new CatalogHandlers((_, _) => stubReader, sup, store)
     val history = new CatalogHistoryHandlers((_, _) => stubReader, sup)
     val tags    = new TagHandlers(

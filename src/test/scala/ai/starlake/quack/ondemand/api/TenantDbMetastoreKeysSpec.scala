@@ -24,7 +24,7 @@ import org.scalatest.matchers.should.Matchers
   */
 class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionValues:
 
-  private val noScope: String => Option[SessionScope] = _ => None
+  private val superuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** Names bash, the dynamic loader or the launcher act on, a manager-owned variable, the manager's
     * own encryption stamp, a secret spelled otherwise, and a name nothing reads.
@@ -85,12 +85,12 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
         encrypted = encrypted
       ),
       None
-    )(noScope)
+    )(superuserScope)
       .unsafeRunSync()
 
   private def update(h: TenantDbHandlers, metastore: Map[String, String]) =
     h.update(UpdateTenantDbRequest("acme", "acme_lake", metastore = Some(metastore)), None)(
-      noScope
+      superuserScope
     ).unsafeRunSync()
 
   /** Stores `metastore` on `acme_lake`, like a row written before the refusal existed. */
@@ -249,7 +249,7 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
       store: InMemoryControlPlaneStore
   ): (Either[(sttp.model.StatusCode, ErrorResponse), String], List[ILoggingEvent]) =
     LogCapture.logged(ManifestExporter.getClass.getName)(
-      manifestHandlers(store).exportYaml(None)(noScope).unsafeRunSync()
+      manifestHandlers(store).exportYaml(None)(superuserScope).unsafeRunSync()
     )
 
   "a manifest import" should "refuse a key outside KnownMetastoreKeys, writing nothing" in:
@@ -257,7 +257,9 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
       withClue(s"$key: ") {
         val store = new InMemoryControlPlaneStore()
         val res   =
-          manifestHandlers(store).importYaml(manifestYaml(key), None)(noScope).unsafeRunSync()
+          manifestHandlers(store)
+            .importYaml(manifestYaml(key), None)(superuserScope)
+            .unsafeRunSync()
         assertRefused(res, key)
         store.listTenants() shouldBe empty
         store.snapshot().tenantDbs shouldBe empty
@@ -268,7 +270,7 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
     val store = new InMemoryControlPlaneStore()
     val res   =
       manifestHandlers(store)
-        .importYaml(manifestOf(allKnown, encrypted = true), None)(noScope)
+        .importYaml(manifestOf(allKnown, encrypted = true), None)(superuserScope)
         .unsafeRunSync()
     res.isRight shouldBe true
     store.snapshot().tenantDbs.map(_.metastore) shouldBe List(allKnown)
@@ -326,7 +328,10 @@ class TenantDbMetastoreKeysSpec extends AnyFlatSpec with Matchers with OptionVal
         "'s3_secret_access_key' set to an empty value"
     ) shouldBe true
     val replay = new InMemoryControlPlaneStore()
-    manifestHandlers(replay).importYaml(yaml, None)(noScope).unsafeRunSync().isRight shouldBe true
+    manifestHandlers(replay)
+      .importYaml(yaml, None)(superuserScope)
+      .unsafeRunSync()
+      .isRight shouldBe true
     replay.snapshot().tenantDbs.map(d => d.name -> d.metastore).toMap shouldBe
       Map("acme_lake" -> fileMeta, "acme_files" -> filesMeta)
 

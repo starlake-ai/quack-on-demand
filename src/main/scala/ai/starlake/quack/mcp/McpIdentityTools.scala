@@ -39,7 +39,7 @@ final class McpIdentityTools(
     groups: GroupHandlers,
     roles: RoleHandlers,
     memberships: MembershipHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._

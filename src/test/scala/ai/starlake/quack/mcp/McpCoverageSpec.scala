@@ -204,7 +204,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     finally c.close()
     new UserStore(jdbcUrl, "", "")
 
-  private val noScope: String => Option[SessionScope] = _ => None
+  private val superuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   /** identity/access/admin tools, built exactly as McpIdentityToolsSpec / McpAccessToolsSpec /
     * McpAdminToolsSpec's own Fixtures build them.
@@ -221,7 +221,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
-    new McpIdentityTools(tenants, users, groups, roles, memberships, noScope)
+    new McpIdentityTools(tenants, users, groups, roles, memberships, superuserScope)
 
   private def accessTools: McpAccessTools =
     val store   = new InMemoryControlPlaneStore()
@@ -236,7 +236,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     val columnPolicies  = new RoleColumnPolicyHandlers(sup)
     val rowPolicies     = new RoleRowPolicyHandlers(sup)
     val poolPermissions = new PoolPermissionHandlers(sup, users)
-    new McpAccessTools(roleHandlers, columnPolicies, rowPolicies, poolPermissions, noScope)
+    new McpAccessTools(roleHandlers, columnPolicies, rowPolicies, poolPermissions, superuserScope)
 
   private def adminTools: McpAdminTools =
     val store    = new InMemoryControlPlaneStore()
@@ -285,7 +285,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     )
     val audit     = new AuditHandlers(NoopTelemetryStore)
     val tenantDbs = new TenantDbHandlers(sup, requireEncryption = false)
-    new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, noScope)
+    new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, superuserScope)
 
   /** Builds a bare McpPlatformTools over a fresh throwaway (migrated) Postgres database: `pats` is
     * a real handler backed by that database (PatStore's Hikari pool fails fast at CONSTRUCTION
@@ -370,7 +370,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
         cfgH,
         historyH,
         usageH,
-        noScope
+        superuserScope
       )
       test(tools)
     finally
@@ -387,7 +387,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     withPlatformTools { platformTools =>
       // Branch tools only touch their handlers inside `run`, so a null handler is enough to
       // enumerate the registered names.
-      val branchTools             = new McpBranchTools(null, noScope)
+      val branchTools             = new McpBranchTools(null, superuserScope)
       val registered: Set[String] =
         (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools ++
           branchTools.tools)

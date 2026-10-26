@@ -108,14 +108,17 @@ final class ManagerServer(
   // without the qod_pat_ prefix before touching the store, so the composition
   // costs a session caller nothing and a PAT caller one prefix check.
   //
-  // `scopeOfToken` is what every handler gate receives. It is fail-closed: `None` only for the
-  // static key, never for a token that stopped resolving between the guard and the handler (see
-  // SessionScope.failClosed). The guard itself does not use it; it resolves once through
-  // `sessionOfToken`.
-  private val scopeOfToken: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-    ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-      cfg.apiKey,
-      t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+  // `scopeOfToken` is what every handler gate receives. It is total: no credential, or a token
+  // that stopped resolving between the guard and the handler, is SessionScope.NoAccess (see
+  // SessionScope.resolver). TRANSITIONAL: the static key resolves to a superuser through
+  // SessionScope.staticKeyLookup until the key is removed. The guard itself does not use it; it
+  // resolves once through `sessionOfToken`.
+  private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+    ai.starlake.quack.ondemand.auth.SessionScope.resolver(
+      ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
+        cfg.apiKey,
+        t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+      )
     )
   private val sessionOfToken: String => Option[SessionTokenStore.Session] =
     t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))

@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                   = None
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val NoKey: Option[String]                 = None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
     val allocator = new RootAllocator()
@@ -138,26 +138,27 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
         apiKey: Option[String] = NoKey
     ) =
       h.undrop(UndropRequest(tenant, tenantDb, schema, table, asName, fromSnapshot), apiKey)(
-        NoScope
+        SuperuserScope
       ).unsafeRunSync()
 
   "recoverable" should "return the reader's dropped tables" in new Stubs:
-    val out = handlers().recoverable("acme", "acme_tpch1", None, NoKey)(NoScope).unsafeRunSync()
-    val r   = out.toOption.get
+    val out =
+      handlers().recoverable("acme", "acme_tpch1", None, NoKey)(SuperuserScope).unsafeRunSync()
+    val r = out.toOption.get
     r.tables.map(_.table) shouldBe List("doomed")
     r.tables.head.lastLiveSnapshot shouldBe 39L
     r.tables.head.recoverable shouldBe true
 
   it should "404 an unknown tenant and 403 a cross-tenant caller" in new Stubs:
     val h = handlers()
-    h.recoverable("nope", "acme_tpch1", None, NoKey)(NoScope)
+    h.recoverable("nope", "acme_tpch1", None, NoKey)(SuperuserScope)
       .unsafeRunSync()
       .left
       .toOption
       .get
       ._1 shouldBe StatusCode.NotFound
-    val foreign: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("other")))
+    val foreign: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("other"))
     h.recoverable("acme", "acme_tpch1", None, Some("tok"))(foreign)
       .unsafeRunSync()
       .left
@@ -272,9 +273,9 @@ class CatalogUndropHandlersSpec extends AnyFlatSpec with Matchers:
   "recoverable limit" should "clamp into [1, 200]" in new Stubs:
     val sink = new AtomicInteger(-1)
     val h    = handlers(readerOverride = stubReader(limitSink = sink))
-    h.recoverable("acme", "acme_tpch1", Some(500), NoKey)(NoScope).unsafeRunSync()
+    h.recoverable("acme", "acme_tpch1", Some(500), NoKey)(SuperuserScope).unsafeRunSync()
     sink.get shouldBe 200
-    h.recoverable("acme", "acme_tpch1", Some(0), NoKey)(NoScope).unsafeRunSync()
+    h.recoverable("acme", "acme_tpch1", Some(0), NoKey)(SuperuserScope).unsafeRunSync()
     sink.get shouldBe 1
 
   // ---------- executor identity (PAT regression) ----------

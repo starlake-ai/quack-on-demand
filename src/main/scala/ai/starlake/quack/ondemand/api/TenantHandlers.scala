@@ -50,11 +50,11 @@ final class TenantHandlers(
     * so it is restricted to superusers. Static `QOD_API_KEY` callers (no session row) are admitted.
     */
   def createTenant(req: TenantRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantResponse] =
     createTenantAs(
       req,
-      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      scopeOf(apiKey),
       AuditActor.Bearer(apiKey)
     )
 
@@ -146,13 +146,12 @@ final class TenantHandlers(
             }
 
   def listTenants(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantListResponse] = IO.delay {
     val all      = sup.listTenants().map(toResponse)
-    val filtered = apiKey.flatMap(scopeOf) match
-      case None                   => all
-      case Some(s) if s.superuser => all
-      case Some(s)                => all.filter(r => s.manageableTenants.contains(r.id))
+    val scope    = scopeOf(apiKey)
+    val filtered =
+      if scope.superuser then all else all.filter(r => scope.manageableTenants.contains(r.id))
     Right(TenantListResponse(filtered))
   }
 
@@ -162,7 +161,7 @@ final class TenantHandlers(
     * admitted.
     */
   def deleteTenant(req: TenantOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) =>
@@ -193,7 +192,7 @@ final class TenantHandlers(
         }
 
   def setTenantDisabled(req: SetTenantDisabledRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) =>
@@ -229,11 +228,11 @@ final class TenantHandlers(
     * superuser adds or changes a `clientSecretRef`, one secret source) and a refusal stores
     * nothing. The secret is write-only: responses carry only `clientSecretSet`, and the audit row
     * records only that the stored secret changed (`clientKey -> changed`, never the value), set,
-    * replaced or removed, a drop by an issuer change or a new reference included. Static-key and
-    * no-key callers count as superusers, as in [[SuperuserCheck]].
+    * replaced or removed, a drop by an issuer change or a new reference included. Static-key
+    * callers count as superusers, as in [[SuperuserCheck]].
     */
   def setTenantAuth(req: SetTenantAuthRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantResponse] =
     def denied(detail: Map[String, String]): Unit =
       audit.rest(
@@ -303,7 +302,7 @@ final class TenantHandlers(
     * never logged, and the audit row only records that it changed.
     */
   def setTenantAcl(req: SetTenantAclRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantResponse] =
     TenantScopeCheck.reject(apiKey, req.name)(scopeOf) match
       case Some(err) =>
@@ -349,7 +348,7 @@ final class TenantHandlers(
 
   /** OPA dry run (see [[OpaDryRun]]): returns the exact input and the tenant OPA's answer. */
   def opaTest(req: OpaTestRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[OpaTestResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -362,8 +361,8 @@ final class TenantHandlers(
         )
         IO.pure(Left(err))
       case None =>
-        // No resolvable scope = the static key; a session keeps the detail only as a superuser.
-        val detailedErrors = apiKey.flatMap(scopeOf).forall(_.superuser)
+        // Only a superuser keeps the transport detail (see OpaDryRun.run).
+        val detailedErrors = scopeOf(apiKey).superuser
         IO.blocking(OpaDryRun.run(sup, opa, req, detailedErrors)).map {
           case Left(("not_found", msg)) =>
             Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))

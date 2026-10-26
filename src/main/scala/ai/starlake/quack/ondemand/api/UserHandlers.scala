@@ -79,20 +79,19 @@ final class UserHandlers(
     * `t`. The `req.tenant` value here is a display name OR id (the supervisor normalizes).
     */
   def createUser(req: UserCreateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[UserResponse] =
     val scopeGate: Option[(StatusCode, ErrorResponse)] = req.tenant match
       case None =>
         // Creating a superuser: only a superuser session may do this.
-        apiKey.flatMap(scopeOf) match
-          case Some(s) if !s.superuser =>
-            Some(
-              StatusCode.Forbidden -> ErrorResponse(
-                "tenant_forbidden",
-                "only a superuser session may create a superuser account"
-              )
+        if scopeOf(apiKey).superuser then None
+        else
+          Some(
+            StatusCode.Forbidden -> ErrorResponse(
+              "tenant_forbidden",
+              "only a superuser session may create a superuser account"
             )
-          case _ => None
+          )
       case Some(raw) =>
         // Map raw (display-name or id) onto the canonical tenant id so the
         // check matches `manageableTenants`.
@@ -228,7 +227,7 @@ final class UserHandlers(
   // ---------- /user/update ----------
 
   def updateUser(req: UserUpdateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[UserResponse] =
     val userTenant = sup.tenantForUser(req.id)
     TenantScopeCheck.rejectForUser(apiKey, userTenant)(scopeOf) match
@@ -313,7 +312,7 @@ final class UserHandlers(
   // ---------- /user/delete ----------
 
   def deleteUser(req: UserDeleteRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     val userTenant     = sup.tenantForUser(req.id)
     val usernameLookup = sup.effectiveSetForUser(req.id).map(_.user.username)
@@ -387,29 +386,23 @@ final class UserHandlers(
       */
     case Empty
 
-  private def planListUsers(
-      tenant: Option[String],
-      sessionScope: Option[SessionScope]
-  ): UserListPlan =
-    sessionScope match
-      case None                   => UserListPlan.Query(tenant)
-      case Some(s) if s.superuser => UserListPlan.Query(tenant)
-      case Some(s)                =>
-        tenant match
-          case Some(t) if s.manageableTenants.contains(t) => UserListPlan.Query(Some(t))
-          case Some(_)                                    => UserListPlan.Empty
-          case None => UserListPlan.QueryAllFilterTo(s.manageableTenants)
+  private def planListUsers(tenant: Option[String], scope: SessionScope): UserListPlan =
+    if scope.superuser then UserListPlan.Query(tenant)
+    else
+      tenant match
+        case Some(t) if scope.manageableTenants.contains(t) => UserListPlan.Query(Some(t))
+        case Some(_)                                        => UserListPlan.Empty
+        case None => UserListPlan.QueryAllFilterTo(scope.manageableTenants)
 
   def listUsers(tenant: Option[String], apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[UserListResponse] = IO.blocking {
-    // Superuser / static-key: honour the query param. Multi-tenant admin:
-    // clamp to the requested tenant if it is in `manageableTenants`,
-    // otherwise constrain the listing to the union of manageable tenants
-    // (collected after the listUsers call below).
-    val sessionScope = apiKey.flatMap(scopeOf)
-    val plan         = planListUsers(tenant, sessionScope)
-    val tenantMap    = tenantNameMap
+    // Superuser: honour the query param. Anyone else: clamp to the requested tenant if it is in
+    // `manageableTenants`, otherwise constrain the listing to the union of manageable tenants
+    // (none for a caller with no resolvable credential), collected after the listUsers call
+    // below.
+    val plan      = planListUsers(tenant, scopeOf(apiKey))
+    val tenantMap = tenantNameMap
 
     def mappedRows(effectiveTenant: Option[String]): List[UserResponse] =
       val users = sup.listUsers(effectiveTenant)
@@ -432,7 +425,7 @@ final class UserHandlers(
   // ---------- /user/{id}/effective ----------
 
   def effective(id: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[EffectivePermissionsResponse] =
     TenantScopeCheck.rejectForUser(apiKey, sup.tenantForUser(id))(scopeOf) match
       case Some(err) => IO.pure(Left(err))

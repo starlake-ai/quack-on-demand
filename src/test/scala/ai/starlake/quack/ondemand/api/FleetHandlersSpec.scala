@@ -428,9 +428,9 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       "",
       ""
     )
-  private val superuser: String => Option[SessionScope]   = _ => Some(SessionScope.Superuser)
-  private val tenantAdmin: String => Option[SessionScope] =
-    _ => Some(SessionScope(false, Set("acme")))
+  private val superuser: SessionScope.Resolver   = _ => SessionScope.Superuser
+  private val tenantAdmin: SessionScope.Resolver =
+    _ => SessionScope(false, Set("acme"))
 
   "listServers" should "carry the node's suggested action from the heartbeat" in {
     val (_, h) = adminFixture()

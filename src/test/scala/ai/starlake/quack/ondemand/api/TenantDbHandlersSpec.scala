@@ -67,7 +67,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         "schemaName" -> "main"
       ),
       dataPath  = "/data/acme_prod"
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.tenant   shouldBe "acme"
@@ -82,7 +82,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "", name = "", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
 
@@ -90,7 +90,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "ghost", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 404
 
@@ -98,10 +98,10 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val again = h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     again.isLeft shouldBe true
     again.swap.toOption.get._1.code shouldBe 409
 
@@ -109,25 +109,25 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod",  kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "stage", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
-    val out = h.listTenantDbs("acme", None)((_: String) => None).unsafeRunSync().toOption.get
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
+    val out = h.listTenantDbs("acme", None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     out.tenantDbs.map(_.name).sorted shouldBe List("acme_prod", "acme_stage")
 
   it should "return an empty list for an unknown tenant" in:
     val h = freshHandlers()
-    val out = h.listTenantDbs("ghost", None)((_: String) => None).unsafeRunSync().toOption.get
+    val out = h.listTenantDbs("ghost", None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     out.tenantDbs shouldBe Nil
 
   "TenantDbHandlers.deleteTenantDb" should "remove a database with no pools" in:
     val h = freshHandlers()
     h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "prod", kind = "memory", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
-    h.deleteTenantDb(TenantDbOpRequest("acme", "acme_prod"), None)((_: String) => None).unsafeRunSync().isRight shouldBe true
-    h.listTenantDbs("acme", None)((_: String) => None)
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
+    h.deleteTenantDb(TenantDbOpRequest("acme", "acme_prod"), None)(_ => SessionScope.Superuser).unsafeRunSync().isRight shouldBe true
+    h.listTenantDbs("acme", None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -135,7 +135,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "404 when the database doesn't exist" in:
     val h = freshHandlers()
-    val out = h.deleteTenantDb(TenantDbOpRequest("acme", "acme_ghost"), None)((_: String) => None).unsafeRunSync()
+    val out = h.deleteTenantDb(TenantDbOpRequest("acme", "acme_ghost"), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 404
 
@@ -148,7 +148,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map.empty,
       dataPath  = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.kind shouldBe "memory"
@@ -161,7 +161,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map("dbName" -> "tpch"),
       dataPath  = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
     out.swap.toOption.get._2.message should include("empty metastore")
@@ -175,7 +175,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       metastore   = Map.empty,
       dataPath    = "s3://bucket/sales/",
       objectStore = Map("s3_access_key_id" -> "AK", "s3_secret_access_key" -> "SK")
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isRight shouldBe true
     out.toOption.get.dataPath shouldBe "s3://bucket/sales/"
 
@@ -187,7 +187,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map("dbName" -> "x"),
       dataPath  = "s3://bucket/sales/"
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._2.message should include("empty metastore")
 
@@ -199,7 +199,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "memory",
       metastore = Map.empty,
       dataPath  = "s3://bucket/x'; DROP TABLE t; --"
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
 
@@ -212,7 +212,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       kind      = "duckdb-file",
       metastore = Map("dbName" -> "mydata", "schemaName" -> "main"),
       dataPath  = "/tmp/foo.duckdb"
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isRight shouldBe true
     val td = out.toOption.get
     td.kind shouldBe "duckdb-file"
@@ -222,7 +222,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val h = freshHandlers()
     val out = h.createTenantDb(TenantDbRequest(
       tenant = "acme", name = "bad", kind = "postgres", metastore = Map.empty, dataPath = ""
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     out.swap.toOption.get._1.code shouldBe 400
     out.swap.toOption.get._2.message should include("unknown TenantDbKind")
@@ -238,7 +238,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       dataPath        = "",
       defaultDatabase = Some("fedpg"),
       defaultSchema   = Some("public")
-    ), None)((_: String) => None).unsafeRunSync()
+    ), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val td = out.toOption.get
     td.defaultDatabase shouldBe Some("fedpg")
     td.defaultSchema   shouldBe Some("public")
@@ -248,34 +248,26 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "mem3", kind = "memory", initSql = "SET threads = 4;"),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.toOption.get.initSql shouldBe "SET threads = 4;"
 
   "TenantDbHandlers.update" should "set and clear initSql (migrated from setInitSql)" in:
     val h = freshHandlers()
-    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem4", kind = "memory"), None)(
-      (_: String) => None
-    ).unsafeRunSync()
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem4", kind = "memory"), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val set = h.update(
       UpdateTenantDbRequest("acme", "acme_mem4", initSql = Some("SET memory_limit = '1GB';")),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     set.toOption.get.db.initSql shouldBe "SET memory_limit = '1GB';"
-    val cleared = h.update(UpdateTenantDbRequest("acme", "acme_mem4", initSql = Some("")), None)(
-      (_: String) => None
-    ).unsafeRunSync()
+    val cleared = h.update(UpdateTenantDbRequest("acme", "acme_mem4", initSql = Some("")), None)(_ => SessionScope.Superuser).unsafeRunSync()
     cleared.toOption.get.db.initSql shouldBe ""
 
   it should "404 on unknown db and 403 for a foreign tenant session" in:
     val h = freshHandlers()
-    h.update(UpdateTenantDbRequest("acme", "acme_nope", initSql = Some("x")), None)(
-      (_: String) => None
-    ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.NotFound
-    val foreign: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("globex")))
-    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem5", kind = "memory"), None)(
-      (_: String) => None
-    ).unsafeRunSync()
+    h.update(UpdateTenantDbRequest("acme", "acme_nope", initSql = Some("x")), None)(_ => SessionScope.Superuser).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.NotFound
+    val foreign: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("globex"))
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem5", kind = "memory"), None)(_ => SessionScope.Superuser).unsafeRunSync()
     h.update(UpdateTenantDbRequest("acme", "acme_mem5", initSql = Some("x")), Some("tok"))(
       foreign
     ).unsafeRunSync().left.toOption.get._1 shouldBe StatusCode.Forbidden
@@ -287,23 +279,21 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         metastore = Map("pgPassword" -> "s3cret", "schemaName" -> "main", "dbName" -> "pg1"),
         dataPath = "/tmp/pg1.duckdb"),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     val out = h.update(
       UpdateTenantDbRequest("acme", "acme_pg1", defaultSchema = Some("s2")), None
-    )((_: String) => None).unsafeRunSync().toOption.get
+    )(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     out.db.metastore.contains("pgPassword") shouldBe false        // redacted in response
     // preserved in store: verified via a follow-up update replacing the map without the key
     val out2 = h.update(
       UpdateTenantDbRequest("acme", "acme_pg1", metastore = Some(Map("schemaName" -> "s3", "dbName" -> "pg1"))), None
-    )((_: String) => None).unsafeRunSync().toOption.get
+    )(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     out2.db.metastore.contains("pgPassword") shouldBe false
     // supervisor-level preservation is pinned by PoolSupervisorSpec; here we pin non-echo
 
   it should "reject an update whose objectStore value contains ';' (400, names the key)" in:
     val h = freshHandlers()
-    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "os3", kind = "memory"), None)(
-      (_: String) => None
-    ).unsafeRunSync()
+    h.createTenantDb(TenantDbRequest(tenant = "acme", name = "os3", kind = "memory"), None)(_ => SessionScope.Superuser).unsafeRunSync()
     val out = h.update(
       UpdateTenantDbRequest(
         "acme",
@@ -311,7 +301,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         objectStore = Some(Map("azure_account_key" -> "key;BlobEndpoint=https://evil"))
       ),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -327,11 +317,11 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         objectStore = Map("s3_access_key_id" -> "k", "s3_secret_access_key" -> "sk")
       ),
       None
-    )((_: String) => None).unsafeRunSync().toOption.get
+    )(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     created.objectStore.get("s3_access_key_id") shouldBe Some("k")
     created.objectStore.contains("s3_secret_access_key") shouldBe false
     created.metastore.contains("pgPassword") shouldBe false
-    val listed = h.listTenantDbs("acme", None)((_: String) => None)
+    val listed = h.listTenantDbs("acme", None)(_ => SessionScope.Superuser)
       .unsafeRunSync()
       .toOption
       .get
@@ -351,7 +341,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         objectStore = Map("azure_account" -> "acct;BlobEndpoint=https://evil")
       ),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -360,9 +350,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "report effectiveDataPath and a None tableCount for memory kind" in:
     val h = freshHandlers()
-    val td = h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem6", kind = "memory"), None)(
-      (_: String) => None
-    ).unsafeRunSync().toOption.get
+    val td = h.createTenantDb(TenantDbRequest(tenant = "acme", name = "mem6", kind = "memory"), None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     td.tableCount shouldBe None
     td.effectiveDataPath shouldBe ""
 
@@ -370,8 +358,8 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     "map a gate refusal to 429 quota_exceeded for tenant sessions" in:
     val (sup, h) = freshHandlersWithSupervisor()
     sup.setMutationGates(List(denyingGate)).unsafeRunSync()
-    val tenantAdminScopeOf: String => Option[SessionScope] =
-      _ => Some(SessionScope(superuser = false, manageableTenants = Set("acme")))
+    val tenantAdminScopeOf: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("acme"))
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "gated", kind = "memory"),
       Some("tenant-admin-key")
@@ -385,7 +373,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
   it should "bypass gates for superuser sessions" in:
     val (sup, h) = freshHandlersWithSupervisor()
     sup.setMutationGates(List(denyingGate)).unsafeRunSync()
-    val superuserScopeOf: String => Option[SessionScope] = _ => Some(SessionScope.Superuser)
+    val superuserScopeOf: SessionScope.Resolver = _ => SessionScope.Superuser
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "gated2", kind = "memory"),
       Some("root-key")
@@ -398,7 +386,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "mgd1", kind = "ducklake", managedStorage = true),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -416,7 +404,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         dataPath       = "/data/acme_mgd2"
       ),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -434,7 +422,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         objectStore    = Map("s3_access_key_id" -> "k")
       ),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -446,7 +434,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "mgd4", kind = "memory", managedStorage = true),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -459,7 +447,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
     val out = h.createTenantDb(
       TenantDbRequest(tenant = "acme", name = "mgd5", kind = "garbage", managedStorage = true),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isLeft shouldBe true
     val (code, err) = out.swap.toOption.get
     code shouldBe StatusCode.BadRequest
@@ -480,7 +468,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       )
     )
     val h   = new TenantDbHandlers(sup, requireEncryption = false)
-    val out = h.metastoreDefaults(None)((_: String) => None).unsafeRunSync()
+    val out = h.metastoreDefaults(None)(_ => SessionScope.Superuser).unsafeRunSync()
     out shouldBe Right(MetastoreDefaultsResponse("localhost", "5432", "postgres", "main"))
 
   it should "fall back to empty strings when no defaults are configured" in:
@@ -490,7 +478,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryControlPlaneStore(),
       defaultMetastore = Map.empty
     )
-    new TenantDbHandlers(sup, requireEncryption = false).metastoreDefaults(None)((_: String) => None).unsafeRunSync() shouldBe
+    new TenantDbHandlers(sup, requireEncryption = false).metastoreDefaults(None)(_ => SessionScope.Superuser).unsafeRunSync() shouldBe
       Right(MetastoreDefaultsResponse())
 
   "TenantDbHandlers.createTenantDb" should
@@ -518,7 +506,7 @@ class TenantDbHandlersSpec extends AnyFlatSpec with Matchers:
         dataPath = "/data/acme_prod"
       ),
       None
-    )((_: String) => None).unsafeRunSync()
+    )(_ => SessionScope.Superuser).unsafeRunSync()
     out.isRight shouldBe true
     // Response metastore is the sparse stored row (dbName only), password-free.
     out.toOption.get.metastore shouldBe Map("dbName" -> "acme_prod")

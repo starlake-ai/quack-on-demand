@@ -11,10 +11,10 @@ import java.time.{Instant, ZoneOffset}
   * rollup ledger.
   *
   * Scoping rules (identical to HistoryHandlers):
-  *   - Superuser or unresolvable token (static key / open mode): `tenants` = requested tenant
-  *     filter (or None).
-  *   - Tenant admin: `tenants` pinned to `manageableTenants`; a requested `?tenant=` narrows WITHIN
-  *     them only (silent fallback, no existence leak).
+  *   - Superuser: `tenants` = requested tenant filter (or None).
+  *   - Anyone else (a tenant admin, or a caller with no resolvable credential): `tenants` pinned to
+  *     `manageableTenants`; a requested `?tenant=` narrows WITHIN them only (silent fallback, no
+  *     existence leak).
   *
   * Defaults: `from`/`to` default to the current calendar month (UTC, half-open); `groupBy` defaults
   * to "tenant". `now` is injectable for tests.
@@ -29,7 +29,7 @@ final class UsageHandlers(store: TelemetryStore, now: () => Instant = () => Inst
       tenant: Option[String],
       pool: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Out[UsageResponse] = IO.blocking {
+  )(scopeOf: SessionScope.Resolver): Out[UsageResponse] = IO.blocking {
     val gb = groupBy.getOrElse("tenant")
     if gb != "tenant" && gb != "pool" && gb != "user" then
       Left(
@@ -39,7 +39,7 @@ final class UsageHandlers(store: TelemetryStore, now: () => Instant = () => Inst
         )
       )
     else
-      val tenants = SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), tenant)
+      val tenants = SessionScope.tenantsFilter(scopeOf(apiKey), tenant)
 
       for
         f <- QueryParams.instant(from, "from")

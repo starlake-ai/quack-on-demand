@@ -120,11 +120,11 @@ final class PoolHandlers(
     }
 
   def createPool(req: CreatePoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     createPoolAs(
       req,
-      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      scopeOf(apiKey),
       AuditActor.Bearer(apiKey)
     )
 
@@ -337,7 +337,7 @@ final class PoolHandlers(
                     }
 
   def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -440,7 +440,7 @@ final class PoolHandlers(
                     }
 
   def stopPool(req: StopPoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -473,7 +473,7 @@ final class PoolHandlers(
               )
 
   def deletePool(req: DeletePoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -506,14 +506,14 @@ final class PoolHandlers(
               )
 
   def suspendPool(req: SuspendPoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     poolAction(apiKey, req.tenant, AuditActions.PoolSuspend, scopeOf)(
       PoolKey(req.tenant, req.tenantDb, req.pool)
     )(key => sup.suspendPool(key, "rest"))
 
   def resumePool(req: ResumePoolRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     poolAction(apiKey, req.tenant, AuditActions.PoolResume, scopeOf)(
       PoolKey(req.tenant, req.tenantDb, req.pool)
@@ -524,7 +524,7 @@ final class PoolHandlers(
       apiKey: Option[String],
       tenant: String,
       action: String,
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   )(key: PoolKey)(
       run: PoolKey => IO[Either[SupervisorError, ai.starlake.quack.model.Pool]]
   ): Out[Unit] =
@@ -553,17 +553,17 @@ final class PoolHandlers(
             }
 
   def listPools(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolListResponse] = serverLiveness.map { liveness =>
     val all      = sup.list().flatMap(p => respond(p.key, liveness))
-    val filtered = apiKey.flatMap(scopeOf) match
-      case None                   => all // no session => static-key trusted admin
-      case Some(s) if s.superuser => all
-      case Some(s)                =>
+    val scope    = scopeOf(apiKey)
+    val filtered =
+      if scope.superuser then all
+      else
         // PoolResponse.tenant carries the tenant id (PoolKey.tenant), so filter
         // directly against the manageable tenant-id set. Display names are
         // free-form labels and may differ from the id.
-        all.filter(p => s.manageableTenants.contains(p.tenant))
+        all.filter(p => scope.manageableTenants.contains(p.tenant))
     Right(PoolListResponse(filtered))
   }
 
@@ -576,7 +576,7 @@ final class PoolHandlers(
     }
 
   def setPoolDisabled(req: SetPoolDisabledRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -617,7 +617,7 @@ final class PoolHandlers(
         }
 
   def setResources(req: SetPoolResourcesRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -681,7 +681,7 @@ final class PoolHandlers(
           }
 
   def setPodTemplate(req: SetPoolTemplateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>
@@ -742,7 +742,7 @@ final class PoolHandlers(
               }
 
   def setLockdown(req: SetPoolLockdownRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     SuperuserCheck.reject(apiKey)(scopeOf) match
       case Some(err) =>
@@ -826,7 +826,7 @@ final class PoolHandlers(
     * The write itself does NOT move any node: the sweep converges the pool on its next tick.
     */
   def setPoolAutoscale(req: SetPoolAutoscaleRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[PoolResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>

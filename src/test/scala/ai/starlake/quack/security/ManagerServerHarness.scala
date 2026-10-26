@@ -560,16 +560,22 @@ object ManagerServerHarness:
     val metricsEndpoint = new MetricsEndpoint(prometheus = None, beforeScrape = () => ())
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
-    // Main's wiring (composed scopeOf; PAT resolution via patAuth; static key shared
+    // Main's wiring (total scopeOf; PAT resolution via patAuth; static key shared
     // with the api-key guard).
     val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
       if !mcpEnabled then None
       else
-        val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-          ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-            staticApiKey,
-            t => sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-          )
+        // TRANSITIONAL, like Main until the static key goes: McpPrincipal.StaticKey curries no
+        // token into the handlers, so on this wiring an absent credential is the static key
+        // McpRoutes admitted.
+        val mcpTokenScope = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+          sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
+        )
+        val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+          t =>
+            if t.isEmpty && staticApiKey.exists(_.nonEmpty) then
+              ai.starlake.quack.ondemand.auth.SessionScope.Superuser
+            else mcpTokenScope(t)
         val mcpCatalog = catalogHandlers.getOrElse(
           new CatalogHandlers((_, _) => noSnapshotReader, sup, store)
         )

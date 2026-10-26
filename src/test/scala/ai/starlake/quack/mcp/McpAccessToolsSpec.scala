@@ -67,10 +67,10 @@ class McpAccessToolsSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     sup.createTenant(Tenant(Tenant0)).unsafeRunSync()
 
-    // Every test in this spec calls tools as McpPrincipal.StaticKey, so no PAT ever resolves
-    // through this seam; the handler-level calls below (newRoleId, newUserId) that need a
-    // SessionScope => Option resolver reuse it as the "no session" default.
-    val scopeOf: String => Option[SessionScope] = _ => None
+    // Every test in this spec calls tools as McpPrincipal.StaticKey (no token: a superuser, like
+    // Main's transitional MCP wiring), and the handler-level calls below (newRoleId, newUserId)
+    // pass no credential either, so every gate sees a superuser.
+    val scopeOf: SessionScope.Resolver = _ => SessionScope.Superuser
 
     val userStore       = makeDuckDbUserStore()
     val users           = new UserHandlers(sup, userStore)

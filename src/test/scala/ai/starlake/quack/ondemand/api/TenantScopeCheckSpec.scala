@@ -8,39 +8,48 @@ import sttp.model.StatusCode
 
 class TenantScopeCheckSpec extends AnyFlatSpec, Matchers:
 
-  private val store = new SessionTokenStore
+  private val store   = new SessionTokenStore
+  private val scopeOf = SessionScope.resolver(store.scopeOf)
   private val profile = AuthenticatedProfile(
-    username   = "alice",
-    role       = "admin",
-    groups     = Set.empty,
-    claims     = Map.empty,
+    username = "alice",
+    role = "admin",
+    groups = Set.empty,
+    claims = Map.empty,
     authMethod = "db",
-    tenant     = None
+    tenant = None
   )
 
-  "reject" should "pass through a static-key (unknown token) call" in {
-    TenantScopeCheck.reject(Some("static-key"), "t-x")(store.scopeOf) shouldBe None
+  private val Forbidden = Some((StatusCode.Forbidden, "tenant_forbidden"))
+
+  private def codes(out: Option[(StatusCode, ErrorResponse)]) = out.map((c, e) => (c, e.error))
+
+  "reject" should "refuse a token that resolves to no session (NoAccess, never trusted)" in {
+    codes(TenantScopeCheck.reject(Some("not-a-session"), "t-x")(scopeOf)) shouldBe Forbidden
   }
 
-  it should "pass through an absent api key" in {
-    TenantScopeCheck.reject(None, "t-x")(store.scopeOf) shouldBe None
+  it should "refuse an absent credential" in {
+    codes(TenantScopeCheck.reject(None, "t-x")(scopeOf)) shouldBe Forbidden
   }
 
   it should "pass through a superuser session for any tenant" in {
     val tok = store.mintWithScope(profile, SessionScope.Superuser)
-    TenantScopeCheck.reject(Some(tok), "t-x")(store.scopeOf) shouldBe None
+    TenantScopeCheck.reject(Some(tok), "t-x")(scopeOf) shouldBe None
   }
 
   it should "pass through a multi-tenant admin for a managed tenant" in {
     val tok = store.mintWithScope(profile, SessionScope(false, Set("t-a", "t-b")))
-    TenantScopeCheck.reject(Some(tok), "t-a")(store.scopeOf) shouldBe None
+    TenantScopeCheck.reject(Some(tok), "t-a")(scopeOf) shouldBe None
   }
 
   it should "reject a multi-tenant admin for a non-managed tenant" in {
     val tok = store.mintWithScope(profile, SessionScope(false, Set("t-a")))
-    val out = TenantScopeCheck.reject(Some(tok), "t-c")(store.scopeOf)
-    out shouldBe defined
-    val (code, err) = out.get
-    code      shouldBe StatusCode.Forbidden
-    err.error shouldBe "tenant_forbidden"
+    codes(TenantScopeCheck.reject(Some(tok), "t-c")(scopeOf)) shouldBe Forbidden
+  }
+
+  "rejectForResource" should "refuse an absent credential on a resource of a known tenant" in {
+    codes(TenantScopeCheck.rejectForResource(None, Some("t-a"))(scopeOf)) shouldBe Forbidden
+  }
+
+  "rejectForUser" should "refuse an absent credential on a superuser account" in {
+    codes(TenantScopeCheck.rejectForUser(None, Some(None))(scopeOf)) shouldBe Forbidden
   }

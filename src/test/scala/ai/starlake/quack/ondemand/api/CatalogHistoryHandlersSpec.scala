@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.catalog.{
   DuckLakeCatalogReader,
   HistoryOperation,
@@ -21,8 +22,8 @@ import java.time.Instant
 
 class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]              = None
-  private val NoScope: String => Option[Nothing] = _ => None
+  private val NoKey: Option[String]                 = None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def stubBackend: QuackBackend = StubQuackBackend.noop()
 
@@ -118,7 +119,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
         None,
         NoKey
       )(
-        NoScope
+        SuperuserScope
       )
     res match
       case Right(r) =>
@@ -145,7 +146,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
       Some(HistoryOperation.Delete),
       Some("tenant:acme/user:alice"),
       NoKey
-    )(NoScope)
+    )(SuperuserScope)
     reader.seenLimit shouldBe Some(200)
     reader.seenBefore shouldBe Some(77L)
     reader.seenFilter shouldBe Some(
@@ -173,7 +174,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
         Some("merge"),
         None,
         NoKey
-      )(NoScope)
+      )(SuperuserScope)
     res.left.toOption.map(e => (e._1, e._2.error)) shouldBe
       Some((StatusCode.BadRequest, "invalid_filter"))
   }
@@ -192,7 +193,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
       None,
       None,
       NoKey
-    )(NoScope)
+    )(SuperuserScope)
     res.left.toOption.map(e => (e._1, e._2.error)) shouldBe
       Some((StatusCode.BadRequest, "invalid_filter"))
   }
@@ -214,13 +215,13 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
       Some("merge"),
       None,
       NoKey
-    )(NoScope)
+    )(SuperuserScope)
     unknownTenant.left.toOption.map(e => (e._1, e._2.error)) shouldBe
       Some((StatusCode.NotFound, "not_found"))
 
     // Cross-tenant session + invalid operation filter: the gate's 403 must win.
-    val otherTenantScope: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-      _ => Some(ai.starlake.quack.ondemand.auth.SessionScope(false, Set("globex")))
+    val otherTenantScope: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+      _ => ai.starlake.quack.ondemand.auth.SessionScope(false, Set("globex"))
     val crossTenant = h.history(
       "acme",
       "acme_default",
@@ -254,10 +255,10 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
         None,
         NoKey
       )(
-        NoScope
+        SuperuserScope
       ),
       h.history("acme", "no_db", "tpch1", "nation", None, None, None, None, None, None, NoKey)(
-        NoScope
+        SuperuserScope
       ),
       handlers(new StubReader(None))
         .history(
@@ -273,7 +274,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
           None,
           NoKey
         )(
-          NoScope
+          SuperuserScope
         )
     ).foreach { res =>
       res.left.toOption.map(e => (e._1, e._2.error)) shouldBe
@@ -298,7 +299,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
         None,
         NoKey
       )(
-        NoScope
+        SuperuserScope
       )
     off.events shouldBe empty
 
@@ -317,7 +318,7 @@ class CatalogHistoryHandlersSpec extends AnyFlatSpec with Matchers:
         None,
         NoKey
       )(
-        NoScope
+        SuperuserScope
       )
     val recorded = on.events.filter(_.action == AuditActions.CatalogHistoryRead)
     recorded should have size 1

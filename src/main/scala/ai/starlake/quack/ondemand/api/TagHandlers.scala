@@ -41,7 +41,7 @@ final class TagHandlers(
     * (tenantId, tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -52,7 +52,7 @@ final class TagHandlers(
     )(scopeOf)
 
   def create(req: TagCreateRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[CatalogTagEntry] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
@@ -97,7 +97,7 @@ final class TagHandlers(
   }
 
   def delete(req: TagDeleteRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
@@ -125,7 +125,7 @@ final class TagHandlers(
   }
 
   def protect(req: TagProtectRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[CatalogTagEntry] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
@@ -158,7 +158,7 @@ final class TagHandlers(
   }
 
   def list(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[List[CatalogTagEntry]] = IO.blocking {
     gate(rawTenant, tenantDb, apiKey)(scopeOf).map { case (tid, db) =>
       val tags     = store.listSnapshotTags(tid, db)

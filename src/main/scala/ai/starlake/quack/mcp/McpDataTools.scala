@@ -44,7 +44,7 @@ final class McpDataTools(
     tags: TagHandlers,
     tenantDbs: TenantDbHandlers,
     profile: ProfileHandlers,
-    scopeOf: String => Option[SessionScope],
+    scopeOf: SessionScope.Resolver,
     /** Branch targeting (Epic 1): `(tenant, database, branch)` -> `(branch catalog tenant-db name,
       * branch pool key)`, or a caller-facing reason. The default refuses every `branch` argument,
       * for callers that do not wire branching.

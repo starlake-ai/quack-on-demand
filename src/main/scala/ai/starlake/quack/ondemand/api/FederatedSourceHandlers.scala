@@ -45,7 +45,7 @@ final class FederatedSourceHandlers(
     resolver: (String, String) => Option[String],
     tenantIdResolver: String => Option[String] = _ => None,
     audit: AuditRecorder = AuditRecorder.noop,
-    scopeOf: String => Option[SessionScope] = _ => None,
+    scopeOf: SessionScope.Resolver,
     catalogAliasOf: String => Option[String],
     attachStatusOf: (String, String) => Option[String] = (_, _) => None
 ) extends LazyLogging:
@@ -247,9 +247,8 @@ final class FederatedSourceHandlers(
       }
     }
 
-  /** True when a RESOLVED session is present and it is not a superuser. Mirrors
-    * [[SuperuserCheck.reject]]: static-key and open-mode callers (no resolvable scope) are admitted
-    * here -- the perimeter (apiKeyGuard) is their gate.
+  /** True when the caller is not a superuser: a tenant admin, or a caller with no resolvable
+    * credential. Same rule as [[SuperuserCheck.reject]].
     */
   private def superuserDenied(apiKey: Option[String]): Boolean =
     SuperuserCheck.reject(apiKey)(scopeOf).isDefined

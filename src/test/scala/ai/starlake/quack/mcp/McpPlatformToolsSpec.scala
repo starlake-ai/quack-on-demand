@@ -118,11 +118,11 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       // Shared by McpPlatformTools' own scopeOf and FederatedSourceHandlers' own scopeOf below,
       // so the PAT-aware gates (SuperuserCheck, TenantScopeCheck) inside FederatedSourceHandlers
       // see the same principal MCP resolved.
-      val scopeOf: String => Option[SessionScope] =
+      val scopeOf: SessionScope.Resolver =
         t =>
-          if t == patToken then
-            Some(SessionScope(superuser = false, manageableTenants = Set(Tenant0)))
-          else None
+          if t.contains(patToken) then
+            SessionScope(superuser = false, manageableTenants = Set(Tenant0))
+          else SessionScope.Superuser
 
       val federated =
         if withFederation then

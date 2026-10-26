@@ -128,11 +128,11 @@ final class TenantDbHandlers(
     )
 
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantDbResponse] =
     createTenantDbAs(
       req,
-      apiKey.flatMap(scopeOf).getOrElse(SessionScope.Superuser),
+      scopeOf(apiKey),
       AuditActor.Bearer(apiKey)
     )
 
@@ -246,13 +246,12 @@ final class TenantDbHandlers(
                     }
 
   def listTenantDbs(tenant: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[TenantDbListResponse] =
     // Resolve to the tenant id before the scope check (the query param may be a
     // display name); an unknown tenant falls through on the raw value, so an
     // out-of-scope session gets the same 403 whether the tenant exists or not
-    // (no existence leak) while superuser / static-key / open callers keep
-    // today's empty-list response.
+    // (no existence leak) while a superuser keeps the empty-list response.
     val tid = sup.getTenantById(tenant).orElse(sup.getTenant(tenant)).map(_.id).getOrElse(tenant)
     TenantScopeCheck.reject(apiKey, tid)(scopeOf) match
       case Some(err) => IO.pure(Left(err))
@@ -272,7 +271,7 @@ final class TenantDbHandlers(
     * absent from the response type by construction.
     */
   def metastoreDefaults(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[MetastoreDefaultsResponse] =
     IO.pure {
       val d = sup.metastoreDefaults
@@ -287,7 +286,7 @@ final class TenantDbHandlers(
     }
 
   def deleteTenantDb(req: TenantDbOpRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>
@@ -318,7 +317,7 @@ final class TenantDbHandlers(
         }
 
   def update(req: UpdateTenantDbRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[UpdateTenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
       case Some(err) =>

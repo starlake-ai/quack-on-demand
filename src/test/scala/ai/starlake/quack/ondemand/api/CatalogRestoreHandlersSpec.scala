@@ -28,8 +28,8 @@ import java.time.Instant
 
 class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
 
-  private val NoKey: Option[String]                   = None
-  private val NoScope: String => Option[SessionScope] = _ => None
+  private val NoKey: Option[String]                 = None
+  private val SuperuserScope: SessionScope.Resolver = _ => SessionScope.Superuser
 
   private def emptyReader(): org.apache.arrow.vector.ipc.ArrowReader =
     val allocator = new RootAllocator()
@@ -195,7 +195,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       h.restore(
         RestoreRequest("acme", "acme_tpch1", schema, table, to, dryRun, expected),
         apiKey
-      )(NoScope)
+      )(SuperuserScope)
         .unsafeRunSync()
 
   "restore" should "404 an unknown tenant" in new Stubs:
@@ -204,7 +204,7 @@ class CatalogRestoreHandlersSpec extends AnyFlatSpec with Matchers:
       .restore(
         RestoreRequest("nope", "acme_tpch1", "tpch1", "orders", "39"),
         NoKey
-      )(NoScope)
+      )(SuperuserScope)
       .unsafeRunSync()
     out.left.toOption.get._1 shouldBe StatusCode.NotFound
     out.left.toOption.get._2.error shouldBe "not_found"

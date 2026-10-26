@@ -77,11 +77,11 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, store)
     sup.restore()
 
-    val scopeOf: String => Option[SessionScope] =
+    val scopeOf: SessionScope.Resolver =
       t =>
-        if t == patToken then
-          Some(SessionScope(superuser = false, manageableTenants = Set(Tenant0)))
-        else None
+        if t.contains(patToken) then
+          SessionScope(superuser = false, manageableTenants = Set(Tenant0))
+        else SessionScope.Superuser
 
     val userStore   = makeDuckDbUserStore()
     val users       = new UserHandlers(sup, userStore)

@@ -37,7 +37,7 @@ final class McpPlatformTools(
     serverConfig: ConfigHandlers,
     history: HistoryHandlers,
     usage: UsageHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._

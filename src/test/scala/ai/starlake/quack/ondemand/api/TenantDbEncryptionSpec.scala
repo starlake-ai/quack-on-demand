@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.PoolSupervisor
+import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.unsafe.implicits.global
@@ -82,7 +83,8 @@ class TenantDbEncryptionSpec extends AnyFlatSpec with Matchers:
         metastore = Map("dbName" -> "sales", "schemaName" -> "main"),
         dataPath = "/var/s.duckdb"
       )
-    val resp = handlers.createTenantDb(body, None)((_: String) => None).unsafeRunSync().toOption.get
+    val resp =
+      handlers.createTenantDb(body, None)(_ => SessionScope.Superuser).unsafeRunSync().toOption.get
     resp.encrypted shouldBe true
     resp.metastore.keySet should not contain "encryptionKey"
     resp.toString should not include "s3cr3tk3y"

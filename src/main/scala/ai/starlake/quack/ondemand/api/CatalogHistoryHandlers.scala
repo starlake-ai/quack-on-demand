@@ -36,7 +36,7 @@ final class CatalogHistoryHandlers(
     kindOf(tenant, tenantDb).contains(TenantDbKind.DuckLake)
 
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(sup, rawTenant, tenantDb, apiKey)(scopeOf)
 
@@ -52,7 +52,7 @@ final class CatalogHistoryHandlers(
       operation: Option[String],
       author: Option[String],
       apiKey: Option[String]
-  )(scopeOf: String => Option[SessionScope]): Res[CatalogHistoryResponse] =
+  )(scopeOf: SessionScope.Resolver): Res[CatalogHistoryResponse] =
     // Gate first so the tenant-scope 403/404 wins over filter-validation 400s,
     // consistent with the sibling gated handlers.
     gate(tenant, tenantDb, apiKey)(scopeOf) match

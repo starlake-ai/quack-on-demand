@@ -639,11 +639,14 @@ object Main extends IOApp with LazyLogging:
       rawConfig = com.typesafe.config.ConfigFactory.load(),
       audit = auditRecorder,
       singleton = singletonTasks,
-      // Fail-closed like the REST handlers' lookup, and PAT-aware like it: a module gate
-      // reading None as "static key" must never see None for an expired or unknown token.
-      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-        mgrCfg.apiKey,
-        t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+      // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or an
+      // expired or unknown token, is NoAccess. TRANSITIONAL: the static key is a superuser
+      // through SessionScope.staticKeyLookup until the key is removed.
+      scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(
+        ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
+          mgrCfg.apiKey,
+          t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+        )
       ),
       sessionOf = sessionTokens.get
     )
@@ -1485,9 +1488,12 @@ object Main extends IOApp with LazyLogging:
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-              mgrCfg.apiKey,
-              t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+            // TRANSITIONAL: staticKeyLookup goes with the static key.
+            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(
+              ai.starlake.quack.ondemand.auth.SessionScope.staticKeyLookup(
+                mgrCfg.apiKey,
+                t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+              )
             ),
             catalogAliasOf = catalogAliasOf,
             attachStatusOf = attachStatusOf
@@ -1690,11 +1696,18 @@ object Main extends IOApp with LazyLogging:
       val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
         if !mgrCfg.mcp.enabled then None
         else
-          val mcpScopeOf: String => Option[ai.starlake.quack.ondemand.auth.SessionScope] =
-            ai.starlake.quack.ondemand.auth.SessionScope.failClosed(
-              mgrCfg.apiKey,
-              t => sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-            )
+          // TRANSITIONAL (removed with McpPrincipal.StaticKey): that principal curries no token
+          // into the REST handlers, so on this wiring alone an absent credential is the static
+          // key McpRoutes admitted. Every PAT curries its own token and resolves through the
+          // total resolver.
+          val mcpTokenScope = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
+            sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
+          )
+          val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
+            t =>
+              if t.isEmpty && mgrCfg.apiKey.exists(_.nonEmpty) then
+                ai.starlake.quack.ondemand.auth.SessionScope.Superuser
+              else mcpTokenScope(t)
           for
             cat      <- catalogHandlers
             hist     <- catalogHistoryHandlers

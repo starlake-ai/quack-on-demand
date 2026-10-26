@@ -81,11 +81,11 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     sup.createPool(Key, RoleDistribution(0, 0, 1)).unsafeRunSync()
 
-    val scopeOf: String => Option[SessionScope] =
+    val scopeOf: SessionScope.Resolver =
       t =>
-        if t == patToken then
-          Some(SessionScope(superuser = false, manageableTenants = Set(Tenant0)))
-        else None
+        if t.contains(patToken) then
+          SessionScope(superuser = false, manageableTenants = Set(Tenant0))
+        else SessionScope.Superuser
 
     val pools      = new PoolHandlers(sup, tracker, audit = auditRecorder)
     val nodes      = new NodeHandlers(sup, tracker, store, StateChangePublisher.noop)

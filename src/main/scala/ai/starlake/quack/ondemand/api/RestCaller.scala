@@ -11,7 +11,7 @@ import java.security.MessageDigest
   * is the one place the catalog preview / data-diff / undrop / restore handlers learn who is
   * running their statement, so it mirrors the credentials `ManagerServer.apiKeyGuard` admits:
   *
-  *   - the configured static key (constant-time compare, like `SessionScope.failClosed`): the
+  *   - the configured static key (constant-time compare, like `SessionScope.staticKeyLookup`): the
   *     synthetic superuser, unrestricted;
   *   - a session JWT: its username, unrestricted (a login session carries no token restriction),
   *     superuser-admissible exactly when the session is a superuser's (`scope.superuser`);
@@ -24,9 +24,8 @@ import java.security.MessageDigest
   *     handler): 401 `unauthorized`. Never the superuser: the executor must not be called.
   *
   * `None` is the static key. Over REST the guard never lets a credential-less request through, and
-  * the MCP layer curries `None` for its own static-key principal (`McpPrincipal.rawToken`), which
-  * is exactly how every handler gate ([[TenantScopeCheck]], [[TenantDbGate]]) already reads it. A
-  * token string is never mistaken for `None`: an unresolvable one is refused.
+  * the MCP layer curries `None` for its own static-key principal (`McpPrincipal.rawToken`). A token
+  * string is never mistaken for `None`: an unresolvable one is refused.
   */
 final class RestCaller(
     staticKey: Option[String],

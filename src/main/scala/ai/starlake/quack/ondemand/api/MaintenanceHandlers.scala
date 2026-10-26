@@ -32,7 +32,7 @@ final class MaintenanceHandlers(
     * tenantDbName).
     */
   private def gate(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Either[(StatusCode, ErrorResponse), (String, String)] =
     TenantDbGate(
       sup,
@@ -158,7 +158,7 @@ final class MaintenanceHandlers(
     )
 
   def upsertPolicy(req: MaintenancePolicyUpsertRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[MaintenancePolicyEntry] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>
@@ -206,7 +206,7 @@ final class MaintenanceHandlers(
   }
 
   def deletePolicy(req: MaintenancePolicyDeleteRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[Unit] = IO.blocking {
     store.findMaintenancePolicy(req.id) match
       case None =>
@@ -230,7 +230,7 @@ final class MaintenanceHandlers(
   }
 
   def listPolicies(rawTenant: String, tenantDb: String, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[MaintenancePolicyListResponse] = IO.blocking {
     gate(rawTenant, tenantDb, apiKey)(scopeOf).map { case (tid, db) =>
       val rows      = store.listMaintenancePolicies(tid, db)
@@ -259,7 +259,7 @@ final class MaintenanceHandlers(
       before: Option[Long],
       apiKey: Option[String]
   )(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[List[MaintenanceRunEntry]] = IO.blocking {
     gate(rawTenant, tenantDb, apiKey)(scopeOf).map { case (tid, db) =>
       store
@@ -292,7 +292,7 @@ final class MaintenanceHandlers(
   }
 
   def triggerRun(req: MaintenanceRunRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[MaintenanceRunResponse] = IO.blocking {
     gate(req.tenant, req.tenantDb, apiKey)(scopeOf) match
       case Left(e) =>

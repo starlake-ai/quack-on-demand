@@ -56,7 +56,7 @@ final class McpAdminTools(
     tags: TagHandlers,
     auditH: AuditHandlers,
     tenantDbs: TenantDbHandlers,
-    scopeOf: String => Option[SessionScope]
+    scopeOf: SessionScope.Resolver
 ):
 
   import McpToolArgs._

@@ -17,9 +17,9 @@ import sttp.model.StatusCode
 
 import java.time.{Duration, Instant}
 
-/** qod_kill NOTIFY payload. `tenants = None` means an unrestricted (superuser or static-key) kill;
-  * `Some(list)` restricts the kill to statements owned by one of those tenants, carrying the
-  * broadcaster's scope to the owning replica.
+/** qod_kill NOTIFY payload. `tenants = None` means an unrestricted (superuser) kill; `Some(list)`
+  * restricts the kill to statements owned by one of those tenants, carrying the broadcaster's scope
+  * to the owning replica.
   */
 final case class KillBroadcast(id: String, tenants: Option[List[String]])
 
@@ -66,14 +66,14 @@ final class ActiveStatementHandlers(
 
   private def tenantFilter(
       apiKey: Option[String],
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Option[Set[String]] =
-    // No ?tenant= param on this surface: admins pin to their manageable set,
-    // superuser / static key / no key stay unrestricted.
-    SessionScope.tenantsFilter(apiKey.flatMap(scopeOf), requested = None)
+    // No ?tenant= param on this surface: admins pin to their manageable set (a caller with
+    // no resolvable credential to none), a superuser stays unrestricted.
+    SessionScope.tenantsFilter(scopeOf(apiKey), requested = None)
 
   def list(apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[ActiveStatementsResponse] =
     IO.delay {
       val filter = tenantFilter(apiKey, scopeOf)
@@ -97,7 +97,7 @@ final class ActiveStatementHandlers(
     }
 
   def kill(req: KillStatementRequest, apiKey: Option[String])(
-      scopeOf: String => Option[SessionScope]
+      scopeOf: SessionScope.Resolver
   ): Out[KillStatementResponse] =
     IO.blocking {
       val filter = tenantFilter(apiKey, scopeOf)
