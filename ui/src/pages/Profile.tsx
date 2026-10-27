@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { api, ApiError, errorMessage } from '../api/client';
 import type { UsageDayEntry, StatementHistoryEntry, PatEntry, PatScope } from '../api/types';
+import { S3CredentialsSection } from '../components/S3CredentialsSection';
 
 const VERB_CEILINGS = ['RO', 'RW', 'DDL', 'ALL'] as const;
 
@@ -518,6 +519,8 @@ export default function Profile() {
           </table>
         )}
       </div>
+
+      <S3CredentialsSection />
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">Usage (last 30 days)</div>

@@ -396,6 +396,37 @@ export interface TenantLocationChangeResponse {
   location: TenantLocation;
 }
 
+/** One of a user's own S3 credentials (`/api/profile/s3/*`, `/api/user/s3/*`). The secret and the
+  * session token never come back: `secretSet` is always true, `sessionTokenSet` says whether a
+  * token is stored. `endpoint` null is AWS's own. Times are epoch milliseconds. */
+export interface S3Credential {
+  id: string;
+  userId: string;
+  scope: string;
+  accessKeyId: string;
+  secretSet: boolean;
+  sessionTokenSet: boolean;
+  region?: string | null;
+  endpoint?: string | null;
+  urlStyle?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface S3CredentialListResponse {
+  credentials: S3Credential[];
+}
+
+export interface ProfileS3AddRequest {
+  scope: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+  region?: string;
+  endpoint?: string;
+  urlStyle?: string;
+}
+
 export interface TenantListResponse {
   tenants: TenantResponse[];
 }

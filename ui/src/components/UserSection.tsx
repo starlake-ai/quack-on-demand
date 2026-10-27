@@ -5,6 +5,7 @@ import type {
   GroupResponse, PoolResponse, RoleResponse, TenantResponse, UserResponse,
 } from '../api/types';
 import EffectivePermsCard from './EffectivePermsCard';
+import UserS3CredentialsCard from './UserS3CredentialsCard';
 import MultiSelectDropdown from './MultiSelectDropdown';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
@@ -396,6 +397,7 @@ export default function UserSection({
                 <tr key={u.id + '-perms'} className="expanded-row">
                   <td colSpan={8}>
                     <EffectivePermsCard userId={u.id} tenants={tenants} pools={pools} />
+                    <UserS3CredentialsCard userId={u.id} />
                   </td>
                 </tr>
               )] : [];

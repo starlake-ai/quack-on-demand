@@ -16,6 +16,9 @@ import type {
   RemoveTenantLocationRequest,
   TenantLocationChangeResponse,
   TenantLocationListResponse,
+  ProfileS3AddRequest,
+  S3Credential,
+  S3CredentialListResponse,
   SetTenantDisabledRequest,
   PoolResponse,
   FleetServerListResponse,
@@ -227,6 +230,14 @@ export const api = {
   revokePat: (id: string) => post<void>('/auth/pat/revoke', { id }),
   // Only dead (revoked/expired) tokens are deletable; a live id answers 400 pat_live.
   deletePat: (id: string) => post<void>('/auth/pat/delete', { id }),
+  // ----- the caller's own S3 credentials (decision 23) -----
+  // Self-scoped like the PAT routes: no tenant or user param; the secret is write-only.
+  listMyS3Credentials:  () => post<S3CredentialListResponse>('/profile/s3/list', {}),
+  addMyS3Credential:    (req: ProfileS3AddRequest) => post<S3Credential>('/profile/s3/add', req),
+  removeMyS3Credential: (id: string) => post<S3Credential>('/profile/s3/remove', { id }),
+  // An admin's view of one user's credentials: list and remove, never add.
+  listUserS3Credentials:  (userId: string) => post<S3CredentialListResponse>('/user/s3/list', { userId }),
+  removeUserS3Credential: (userId: string, id: string) => post<S3Credential>('/user/s3/remove', { userId, id }),
   // Per-tenant login mode (unauthenticated). Drives the password-form vs. SSO-redirect branch.
   authMode: (tenant?: string) =>
     get<AuthModeResponse>('/auth/mode' + (tenant ? `?tenant=${encodeURIComponent(tenant)}` : '')),
