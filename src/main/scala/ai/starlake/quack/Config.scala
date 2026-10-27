@@ -574,6 +574,7 @@ final case class ManagerConfig(
     mcp: McpConfig = McpConfig(),
     pat: PatConfig = PatConfig(),
     tenantFiles: TenantFilesConfig = TenantFilesConfig(),
+    userS3: UserS3Config = UserS3Config(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     @field @ConfigField(
@@ -640,6 +641,34 @@ object TenantFilesConfig:
     val body = r.stripPrefix("/").stripSuffix("/")
     r.startsWith("/") && body.nonEmpty &&
     body.split("/", -1).forall(s => s.nonEmpty && s != "." && s != "..")
+
+/** The S3-compatible endpoints a user may name for their own S3 credentials (in-engine
+  * authorization, decision 23). Empty: AWS's own endpoint only. A node signs a user's requests to
+  * the endpoint the user named, so the operator lists the hosts that may be named at all.
+  */
+final case class UserS3Config(
+    @field @ConfigField(
+      envVar = "QOD_USER_S3_ALLOWED_ENDPOINTS",
+      description =
+        "S3-compatible endpoints users may name for their own S3 credentials, comma separated: " +
+          "host[:port] (TLS) or http://host[:port] (plain HTTP). Empty: AWS's own endpoint only."
+    )
+    allowedEndpoints: String = ""
+):
+  require(
+    ai.starlake.quack.model.UserS3CredentialRules.parseAllowedEndpoints(allowedEndpoints).isRight,
+    "userS3.allowedEndpoints (QOD_USER_S3_ALLOWED_ENDPOINTS): " +
+      ai.starlake.quack.model.UserS3CredentialRules
+        .parseAllowedEndpoints(allowedEndpoints)
+        .left
+        .getOrElse("")
+  )
+
+  /** The allowed endpoints, normalized (UserS3CredentialRules.normalizeEndpoint). */
+  def endpoints: List[String] =
+    ai.starlake.quack.model.UserS3CredentialRules
+      .parseAllowedEndpoints(allowedEndpoints)
+      .getOrElse(Nil)
 
 /** In-engine authorization: node keys and the URL nodes reach this replica on. */
 final case class NodeAuthzConfig(

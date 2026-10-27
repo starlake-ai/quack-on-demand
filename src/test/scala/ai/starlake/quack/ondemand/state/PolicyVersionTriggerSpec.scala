@@ -239,8 +239,11 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
   "applying 0050 to a control plane that already holds tenants" should
     "give each existing tenant its own version, below the next one issued" in withDb { (c, _) =>
       // Undo 0050 on the populated database, then let Liquibase apply it again: the upgrade path.
-      // 0051's table carries triggers on 0050's function, so it goes first and comes back too.
+      // 0051's and 0052's tables carry triggers on 0050's function, so they go first and come back
+      // too (0052 also replaces the function, with its user_id arm).
       exec(c)(
+        "DROP TABLE qodstate_user_s3_credential",
+        "DELETE FROM databasechangelog WHERE id LIKE '0052-%'",
         "DROP TABLE qodstate_tenant_location",
         "DELETE FROM databasechangelog WHERE id LIKE '0051-%'"
       )
@@ -289,4 +292,42 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
     exec(c)("INSERT INTO qodstate_role (id, tenant_id, name) VALUES ('r-3', 'acme', 'z')")
     store.policyVersions() shouldBe versions(c)
     store.policyVersions()("acme") should be > store.policyVersions()("globex")
+  }
+
+  "a user's S3 credential" should "bump exactly its user's tenant, and a superuser's nothing" in
+    withDb { (c, _) =>
+      val id = "a" * 32
+      delta(c)(
+        "INSERT INTO qodstate_user_s3_credential (id, user_id, scope, access_key_id, " +
+          s"secret_access_key) VALUES ('$id', 'u-a', 's3://acme-etl/', 'k', 's')"
+      ) shouldBe AcmeOnce
+      delta(c)(
+        s"UPDATE qodstate_user_s3_credential SET secret_access_key = 't' WHERE id = '$id'"
+      ) shouldBe AcmeOnce
+      delta(c)(
+        s"UPDATE qodstate_user_s3_credential SET secret_access_key = 't' WHERE id = '$id'"
+      ) shouldBe Nothing
+      delta(c)(s"DELETE FROM qodstate_user_s3_credential WHERE id = '$id'") shouldBe AcmeOnce
+      exec(c)(
+        "INSERT INTO qodstate_user (id, tenant, username, password_hash) " +
+          "VALUES ('u-root', NULL, 'root', 'x')"
+      )
+      delta(c)(
+        "INSERT INTO qodstate_user_s3_credential (id, user_id, scope, access_key_id, " +
+          s"secret_access_key) VALUES ('${"b" * 32}', 'u-root', 's3://root-etl/', 'k', 's')"
+      ) shouldBe Nothing
+    }
+
+  it should "go with its user, the user's own delete bumping the tenant" in withDb { (c, _) =>
+    exec(c)(
+      "INSERT INTO qodstate_user_s3_credential (id, user_id, scope, access_key_id, " +
+        s"secret_access_key) VALUES ('${"c" * 32}', 'u-g', 's3://globex-etl/', 'k', 's')"
+    )
+    delta(c)("DELETE FROM qodstate_user WHERE id = 'u-g'")._1 shouldBe Set("globex")
+    val st = c.createStatement()
+    try
+      val rs = st.executeQuery("SELECT count(*) FROM qodstate_user_s3_credential")
+      rs.next()
+      rs.getInt(1) shouldBe 0
+    finally st.close()
   }

@@ -107,3 +107,5 @@ databaseChangeLog:
       file: db/changelog/0050-policy-version.yaml
   - include:
       file: db/changelog/0051-tenant-location.yaml
+  - include:
+      file: db/changelog/0052-user-s3-credential.yaml

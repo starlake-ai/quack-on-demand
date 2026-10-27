@@ -13,7 +13,8 @@ import ai.starlake.quack.model.{
   Tenant,
   TenantAcl,
   TenantDb,
-  TenantLocation
+  TenantLocation,
+  UserS3Credential
 }
 
 /** Per-entity persistence for the normalized control plane (`qodstate_tenant`,
@@ -171,6 +172,26 @@ trait ControlPlaneStore:
 
   /** Every tenant's locations, by tenant then location. */
   def listAllTenantLocations(): List[TenantLocation]
+
+  // ---------------- Users' own S3 credentials (Liquibase 0052) ----------------
+
+  /** Store `c` for its user and scope: a new row with `c`'s id, or, when the user already holds
+    * that scope, the existing row with `c`'s keys, its id and `createdAt` kept and its `updatedAt`
+    * moved strictly forward (at least 1 ms, so a session handle's digest always changes). Returns
+    * the stored row; `c`'s own times are ignored.
+    */
+  def putUserS3Credential(c: UserS3Credential): UserS3Credential
+
+  /** Delete credential `id` of user `userId` and return it; None when that user has no such
+    * credential (an id of another user included: nothing is deleted).
+    */
+  def deleteUserS3Credential(userId: String, id: String): Option[UserS3Credential]
+
+  /** `userId`'s credentials, by scope. */
+  def listUserS3Credentials(userId: String): List[UserS3Credential]
+
+  /** Every user's credentials, by user then scope. */
+  def listAllUserS3Credentials(): List[UserS3Credential]
 
   /** Insert/update a running node under the given pool surrogate id. `RunningNode.poolKey` is a
     * natural key (tenant/pool) carried by the runtime and does not always match a single Postgres

@@ -22,7 +22,8 @@ import ai.starlake.quack.model.{
   TenantAcl,
   TenantDb,
   TenantDbKind,
-  TenantLocation
+  TenantLocation,
+  UserS3Credential
 }
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -3210,6 +3211,98 @@ final class PostgresControlPlaneStore(
       objectStore = jsonToMap(rs.getString("object_store")),
       createdAt = rs.getTimestamp("created_at").getTime,
       createdBy = Option(rs.getString("created_by"))
+    )
+
+  // ---------------- Users' own S3 credentials ----------------
+
+  private val UserS3Columns: String =
+    "id, user_id, scope, access_key_id, secret_access_key, session_token, region, endpoint, " +
+      "url_style, created_at, updated_at"
+
+  def putUserS3Credential(c: UserS3Credential): UserS3Credential = withConn { conn =>
+    val ps = conn.prepareStatement(
+      s"""INSERT INTO qodstate_user_s3_credential
+         |  (id, user_id, scope, access_key_id, secret_access_key, session_token, region, endpoint,
+         |   url_style)
+         |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         |ON CONFLICT (user_id, scope) DO UPDATE SET
+         |  access_key_id = EXCLUDED.access_key_id,
+         |  secret_access_key = EXCLUDED.secret_access_key,
+         |  session_token = EXCLUDED.session_token,
+         |  region = EXCLUDED.region,
+         |  endpoint = EXCLUDED.endpoint,
+         |  url_style = EXCLUDED.url_style,
+         |  updated_at = GREATEST(NOW(),
+         |    qodstate_user_s3_credential.updated_at + INTERVAL '1 millisecond')
+         |RETURNING $UserS3Columns""".stripMargin
+    )
+    try
+      ps.setString(1, c.id)
+      ps.setString(2, c.userId)
+      ps.setString(3, c.scope)
+      ps.setString(4, c.accessKeyId)
+      ps.setString(5, c.secretAccessKey)
+      setNullable(ps, 6, c.sessionToken)
+      setNullable(ps, 7, c.region)
+      setNullable(ps, 8, c.endpoint)
+      setNullable(ps, 9, c.urlStyle)
+      val rs = ps.executeQuery()
+      try
+        rs.next()
+        readUserS3Credential(rs)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def deleteUserS3Credential(userId: String, id: String): Option[UserS3Credential] = withConn {
+    conn =>
+      val ps = conn.prepareStatement(
+        s"DELETE FROM qodstate_user_s3_credential WHERE user_id = ? AND id = ? RETURNING $UserS3Columns"
+      )
+      try
+        ps.setString(1, userId)
+        ps.setString(2, id)
+        val rs = ps.executeQuery()
+        try if rs.next() then Some(readUserS3Credential(rs)) else None
+        finally rs.close()
+      finally ps.close()
+  }
+
+  def listUserS3Credentials(userId: String): List[UserS3Credential] = withConn { conn =>
+    val ps = conn.prepareStatement(
+      s"SELECT $UserS3Columns FROM qodstate_user_s3_credential WHERE user_id = ? ORDER BY scope"
+    )
+    try
+      ps.setString(1, userId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readUserS3Credential)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listAllUserS3Credentials(): List[UserS3Credential] = withConn { conn =>
+    val rs = conn
+      .createStatement()
+      .executeQuery(
+        s"SELECT $UserS3Columns FROM qodstate_user_s3_credential ORDER BY user_id, scope"
+      )
+    try drain(rs)(readUserS3Credential)
+    finally rs.close()
+  }
+
+  private def readUserS3Credential(rs: ResultSet): UserS3Credential =
+    UserS3Credential(
+      id = rs.getString("id"),
+      userId = rs.getString("user_id"),
+      scope = rs.getString("scope"),
+      accessKeyId = rs.getString("access_key_id"),
+      secretAccessKey = rs.getString("secret_access_key"),
+      sessionToken = Option(rs.getString("session_token")),
+      region = Option(rs.getString("region")),
+      endpoint = Option(rs.getString("endpoint")),
+      urlStyle = Option(rs.getString("url_style")),
+      createdAt = rs.getTimestamp("created_at").getTime,
+      updatedAt = rs.getTimestamp("updated_at").getTime
     )
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =
