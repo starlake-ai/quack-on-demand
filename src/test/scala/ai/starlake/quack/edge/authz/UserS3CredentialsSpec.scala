@@ -59,6 +59,8 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     c.refresh()
     c.current("u-1") shouldBe Left(UserS3CredentialCache.StaleReason)
     c.of("u-1") shouldBe List(A)
+    // A user the last sets hold nothing of: none, not unavailable (an outage refuses nobody else).
+    c.current("u-9") shouldBe Right(Nil)
     // The store is back: the next read past RetryMs reloads, with no RBAC mutation to ask for it.
     fails.set(false)
     c.current("u-1") shouldBe Left(UserS3CredentialCache.StaleReason)
@@ -75,7 +77,7 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
       () => clock.get()
     )
     c.refresh()
-    (1 to 5).foreach(_ => c.current("u-1").isLeft shouldBe true)
+    (1 to 5).foreach(_ => c.current("u-1"))
     loads.get() shouldBe 1L
     clock.addAndGet(UserS3CredentialCache.RetryMs)
     (1 to 5).foreach(_ => c.digest("u-1"))

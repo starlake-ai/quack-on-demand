@@ -56,9 +56,11 @@ object UserS3Credentials:
 /** [[UserS3Credentials]] over a loader, refreshed by the supervisor together with the policy
   * versions (after every local RBAC mutation, credential writes included, and on every restore,
   * which HA peers run on the rbac NOTIFY). A failed refresh marks the cache stale: [[current]]
-  * answers Left until a refresh succeeds, so a credential removed meanwhile is never served or
-  * admitted from the last sets. While stale, every read retries the load, at most once per
-  * [[UserS3CredentialCache.RetryMs]]. Never logs a credential.
+  * answers Left until a refresh succeeds for a user the last sets hold credentials of, so a
+  * credential removed meanwhile is never served or admitted from them. A user they hold none of is
+  * still answered with none: a credential added meanwhile is missing, which only grants less, and a
+  * store outage does not refuse the statements of every user. While stale, every read retries the
+  * load, at most once per [[UserS3CredentialCache.RetryMs]]. Never logs a credential.
   */
 final class UserS3CredentialCache(
     load: () => List[UserS3Credential],
@@ -78,7 +80,8 @@ final class UserS3CredentialCache(
 
   override def current(userId: String): Either[String, List[UserS3Credential]] =
     retryIfStale()
-    if stale then Left(UserS3CredentialCache.StaleReason) else Right(of(userId))
+    if stale && byUser.contains(userId) then Left(UserS3CredentialCache.StaleReason)
+    else Right(of(userId))
 
   def refresh(): Unit = synchronized {
     lastAttempt = clock()
@@ -118,8 +121,9 @@ object UserS3CredentialCache:
   * own lands at `parent(default)/<name>`) would otherwise let the user's keys sign that database's
   * files. [[current]] is Left while either the base or the deny set cannot be read; [[digest]] is
   * the served set's, so a handle names exactly what the credentials endpoint answers, and
-  * [[UserS3Credentials.UnavailableDigest]] while there is none. Each withheld credential is named
-  * once in a WARN (its user and id, never a key).
+  * [[UserS3Credentials.UnavailableDigest]] while there is none. A user the base holds no credential
+  * of is always served the empty set (digest ""), whatever can be read: nothing to withhold. Each
+  * withheld credential is named once in a WARN (its user and id, never a key).
   */
 final class ServedUserS3Credentials(
     base: UserS3Credentials,

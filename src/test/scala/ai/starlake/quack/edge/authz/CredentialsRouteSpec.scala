@@ -283,3 +283,29 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     f.clock.addAndGet(UserS3CredentialCache.RetryMs)
     f.call(body(f.handle()))._1 shouldBe Status.Ok
   }
+
+  "a user with no credential" should "be served the empty set under \"\" whatever cannot be read" in {
+    def emptyAnswer(f: Fixture): Unit =
+      val handle = f.handle(Bob)
+      HandleInspector.payload(handle).hcursor.get[String]("creds") shouldBe Right("")
+      val (st, text, _) = f.call(body(handle))
+      st shouldBe Status.Ok
+      val (_, c) = answer(text)
+      c.get[String]("creds") shouldBe Right("")
+      c.downField("credentials").focus shouldBe Some(Json.arr())
+    // An unreadable deny set: Bob holds nothing, Alice still gets the sentinel and a 503.
+    val down = new Fixture
+    down.folders.set(Left("the database data folders could not be read"))
+    emptyAnswer(down)
+    HandleInspector.payload(down.handle()).hcursor.get[String]("creds") shouldBe
+      Right(UserS3Credentials.UnavailableDigest)
+    down.call(body(down.handle()))._1 shouldBe Status.ServiceUnavailable
+    // A stale cache: the same.
+    val stale = new Fixture
+    stale.fails.set(true)
+    stale.cache.refresh()
+    emptyAnswer(stale)
+    HandleInspector.payload(stale.handle()).hcursor.get[String]("creds") shouldBe
+      Right(UserS3Credentials.UnavailableDigest)
+    stale.call(body(stale.handle()))._1 shouldBe Status.ServiceUnavailable
+  }
