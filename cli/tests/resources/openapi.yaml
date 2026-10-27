@@ -6798,6 +6798,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/add:
+    post:
+      operationId: postApiTenantLocationAdd
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddTenantLocationRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationChangeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/list:
+    post:
+      operationId: postApiTenantLocationList
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantLocationListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/tenant/location/remove:
+    post:
+      operationId: postApiTenantLocationRemove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveTenantLocationRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantLocationChangeResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/tenant/opaTest:
     post:
       operationId: postApiTenantOpatest
@@ -7114,6 +7234,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ActiveStatementInfo'
+    AddTenantLocationRequest:
+      title: AddTenantLocationRequest
+      type: object
+      required:
+      - tenant
+      - location
+      properties:
+        tenant:
+          type: string
+        location:
+          type: string
+        objectStore:
+          $ref: '#/components/schemas/Map_String'
     AuditActionsResponse:
       title: AuditActionsResponse
       type: object
@@ -9639,6 +9772,17 @@ components:
           type: string
         recoverable:
           type: boolean
+    RemoveTenantLocationRequest:
+      title: RemoveTenantLocationRequest
+      type: object
+      required:
+      - tenant
+      - id
+      properties:
+        tenant:
+          type: string
+        id:
+          type: string
     ResetPasswordRequest:
       title: ResetPasswordRequest
       type: object
@@ -10443,6 +10587,67 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TenantResponse'
+    TenantLocationChangeResponse:
+      title: TenantLocationChangeResponse
+      type: object
+      required:
+      - location
+      - nodesUpdated
+      properties:
+        location:
+          $ref: '#/components/schemas/TenantLocationDto'
+        nodesUpdated:
+          type: integer
+          format: int32
+        nodesFailed:
+          type: array
+          items:
+            type: string
+    TenantLocationDto:
+      title: TenantLocationDto
+      type: object
+      required:
+      - id
+      - tenant
+      - kind
+      - location
+      - objectStore
+      - secretSet
+      - createdAt
+      properties:
+        id:
+          type: string
+        tenant:
+          type: string
+        kind:
+          type: string
+        location:
+          type: string
+        objectStore:
+          $ref: '#/components/schemas/Map_String'
+        secretSet:
+          type: boolean
+        createdAt:
+          type: integer
+          format: int64
+        createdBy:
+          type: string
+    TenantLocationListRequest:
+      title: TenantLocationListRequest
+      type: object
+      required:
+      - tenant
+      properties:
+        tenant:
+          type: string
+    TenantLocationListResponse:
+      title: TenantLocationListResponse
+      type: object
+      properties:
+        locations:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantLocationDto'
     TenantOpRequest:
       title: TenantOpRequest
       type: object

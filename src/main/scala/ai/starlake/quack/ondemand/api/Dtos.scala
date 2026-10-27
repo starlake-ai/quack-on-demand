@@ -507,6 +507,50 @@ final case class SetTenantAclRequest(
     sendStatementText: Option[Boolean] = None
 )
 
+/** One authorized location of a tenant (`POST /api/tenant/location/{list,add,remove}`).
+  * `objectStore` never carries `s3_secret_access_key` (TenantLocation.SecretKeys): `secretSet` says
+  * whether one is stored. `createdAt` is epoch milliseconds.
+  */
+final case class TenantLocationDto(
+    id: String,
+    tenant: String,
+    kind: String,
+    location: String,
+    objectStore: Map[String, String],
+    secretSet: Boolean,
+    createdAt: Long,
+    createdBy: Option[String]
+)
+
+final case class TenantLocationListRequest(tenant: String)
+
+final case class TenantLocationListResponse(locations: List[TenantLocationDto])
+
+/** Authorize `location` for `tenant`: `s3://<bucket>/` with `objectStore` holding the bucket's own
+  * credentials (`s3_access_key_id` and `s3_secret_access_key` required; `s3_region`, `s3_endpoint`,
+  * `s3_url_style` optional), or an absolute folder under `<QOD_TENANT_FILES_ROOT>/<tenant>/`. The
+  * secret is write-only: no response carries it back.
+  */
+final case class AddTenantLocationRequest(
+    tenant: String,
+    location: String,
+    objectStore: Option[Map[String, String]] = None
+):
+  override def toString: String =
+    s"AddTenantLocationRequest(tenant=$tenant,location=$location," +
+      s"objectStore=${objectStore.map(ai.starlake.quack.model.TenantLocation.redacted)})"
+
+final case class RemoveTenantLocationRequest(tenant: String, id: String)
+
+/** The location added or removed, and how the change reached the tenant's running nodes:
+  * `nodesFailed` names the nodes that did not take it (they do at their next restart).
+  */
+final case class TenantLocationChangeResponse(
+    location: TenantLocationDto,
+    nodesUpdated: Int,
+    nodesFailed: List[String]
+)
+
 /** OPA dry run: builds the exact input the edge would send for `user` on `pool` (a `connect`
   * decision without `sql`, a `statement` decision with it) and evaluates it against the tenant's
   * OPA. Nothing is executed and the decision cache is not touched.
@@ -1655,52 +1699,58 @@ object Dtos:
   // drift from its case class. DtosWireContractSpec pins the wire contract.
   private given Configuration = Configuration.default.withDefaults
 
-  given Codec[RoleDistribution]         = deriveCodec
-  given Codec[NodeTolerationDto]        = ConfiguredCodec.derived
-  given Codec[NodePlacementDto]         = ConfiguredCodec.derived
-  given Codec[PoolCohortDto]            = ConfiguredCodec.derived
-  given Codec[CreatePoolRequest]        = ConfiguredCodec.derived
-  given Codec[ScalePoolRequest]         = ConfiguredCodec.derived
-  given Codec[StopPoolRequest]          = ConfiguredCodec.derived
-  given Codec[DeletePoolRequest]        = ConfiguredCodec.derived
-  given Codec[SuspendPoolRequest]       = deriveCodec
-  given Codec[ResumePoolRequest]        = deriveCodec
-  given Codec[CatalogAttachFailureDto]  = deriveCodec
-  given Codec[NodeInfo]                 = ConfiguredCodec.derived
-  given Codec[PoolResponse]             = deriveCodec
-  given Codec[SetPoolResourcesRequest]  = deriveCodec
-  given Codec[SetPoolTemplateRequest]   = deriveCodec
-  given Codec[SetPoolLockdownRequest]   = deriveCodec
-  given Codec[SetPoolAutoscaleRequest]  = ConfiguredCodec.derived
-  given Codec[PoolListResponse]         = deriveCodec
-  given Codec[ProfilePool]              = deriveCodec
-  given Codec[ProfilePoolsResponse]     = deriveCodec
-  given Codec[HealthResponse]           = deriveCodec
-  given Codec[SetMaxConcurrentRequest]  = deriveCodec
-  given Codec[NodeOpRequest]            = deriveCodec
-  given Codec[FleetNodeReportDto]       = deriveCodec
-  given Codec[FleetHeartbeatRequest]    = deriveCodec
-  given Codec[FleetPoolKeyDto]          = deriveCodec
-  given Codec[FleetNodeExtensionsDto]   = deriveCodec
-  given Codec[FleetAssignmentDto]       = deriveCodec
-  given Codec[FleetHeartbeatResponse]   = deriveCodec
-  given Codec[FleetServerDto]           = deriveCodec
-  given Codec[FleetServerListResponse]  = deriveCodec
-  given Codec[FleetServerOpRequest]     = deriveCodec
-  given Codec[TenantRequest]            = ConfiguredCodec.derived
-  given Codec[TenantResponse]           = deriveCodec
-  given Codec[TenantListResponse]       = deriveCodec
-  given Codec[TenantOpRequest]          = deriveCodec
-  given Codec[SetTenantDisabledRequest] = deriveCodec
-  given Codec[SetTenantAuthRequest]     = ConfiguredCodec.derived
-  given Codec[SetTenantAclRequest]      = ConfiguredCodec.derived
-  given Codec[OpaTestRequest]           = ConfiguredCodec.derived
-  given Codec[OpaTestResponse]          = deriveCodec
-  given Codec[SetPoolDisabledRequest]   = deriveCodec
-  given Codec[ClientConfigResponse]     = deriveCodec
-  given Codec[ConfigEntryView]          = deriveCodec
-  given Codec[ConfigListResponse]       = deriveCodec
-  given Codec[ManifestImportSummary]    = deriveCodec
+  given Codec[RoleDistribution]             = deriveCodec
+  given Codec[NodeTolerationDto]            = ConfiguredCodec.derived
+  given Codec[NodePlacementDto]             = ConfiguredCodec.derived
+  given Codec[PoolCohortDto]                = ConfiguredCodec.derived
+  given Codec[CreatePoolRequest]            = ConfiguredCodec.derived
+  given Codec[ScalePoolRequest]             = ConfiguredCodec.derived
+  given Codec[StopPoolRequest]              = ConfiguredCodec.derived
+  given Codec[DeletePoolRequest]            = ConfiguredCodec.derived
+  given Codec[SuspendPoolRequest]           = deriveCodec
+  given Codec[ResumePoolRequest]            = deriveCodec
+  given Codec[CatalogAttachFailureDto]      = deriveCodec
+  given Codec[NodeInfo]                     = ConfiguredCodec.derived
+  given Codec[PoolResponse]                 = deriveCodec
+  given Codec[SetPoolResourcesRequest]      = deriveCodec
+  given Codec[SetPoolTemplateRequest]       = deriveCodec
+  given Codec[SetPoolLockdownRequest]       = deriveCodec
+  given Codec[SetPoolAutoscaleRequest]      = ConfiguredCodec.derived
+  given Codec[PoolListResponse]             = deriveCodec
+  given Codec[ProfilePool]                  = deriveCodec
+  given Codec[ProfilePoolsResponse]         = deriveCodec
+  given Codec[HealthResponse]               = deriveCodec
+  given Codec[SetMaxConcurrentRequest]      = deriveCodec
+  given Codec[NodeOpRequest]                = deriveCodec
+  given Codec[FleetNodeReportDto]           = deriveCodec
+  given Codec[FleetHeartbeatRequest]        = deriveCodec
+  given Codec[FleetPoolKeyDto]              = deriveCodec
+  given Codec[FleetNodeExtensionsDto]       = deriveCodec
+  given Codec[FleetAssignmentDto]           = deriveCodec
+  given Codec[FleetHeartbeatResponse]       = deriveCodec
+  given Codec[FleetServerDto]               = deriveCodec
+  given Codec[FleetServerListResponse]      = deriveCodec
+  given Codec[FleetServerOpRequest]         = deriveCodec
+  given Codec[TenantRequest]                = ConfiguredCodec.derived
+  given Codec[TenantResponse]               = deriveCodec
+  given Codec[TenantListResponse]           = deriveCodec
+  given Codec[TenantOpRequest]              = deriveCodec
+  given Codec[SetTenantDisabledRequest]     = deriveCodec
+  given Codec[SetTenantAuthRequest]         = ConfiguredCodec.derived
+  given Codec[SetTenantAclRequest]          = ConfiguredCodec.derived
+  given Codec[OpaTestRequest]               = ConfiguredCodec.derived
+  given Codec[OpaTestResponse]              = deriveCodec
+  given Codec[TenantLocationDto]            = deriveCodec
+  given Codec[TenantLocationListRequest]    = deriveCodec
+  given Codec[TenantLocationListResponse]   = deriveCodec
+  given Codec[AddTenantLocationRequest]     = ConfiguredCodec.derived
+  given Codec[RemoveTenantLocationRequest]  = deriveCodec
+  given Codec[TenantLocationChangeResponse] = deriveCodec
+  given Codec[SetPoolDisabledRequest]       = deriveCodec
+  given Codec[ClientConfigResponse]         = deriveCodec
+  given Codec[ConfigEntryView]              = deriveCodec
+  given Codec[ConfigListResponse]           = deriveCodec
+  given Codec[ManifestImportSummary]        = deriveCodec
 
   given Codec[TenantDbRequest]           = ConfiguredCodec.derived
   given Codec[TenantDbResponse]          = deriveCodec

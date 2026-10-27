@@ -596,6 +596,14 @@ object ManagerServerHarness:
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
     // Main's wiring (total scopeOf; PAT resolution via patAuth).
+    val tenantLocationHandlers = new TenantLocationHandlers(
+      sup,
+      None,
+      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
+        _ => Nil,
+        (_, _) => IO.pure(Right(()))
+      )
+    )
     val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
       if !mcpEnabled then None
       else
@@ -636,7 +644,8 @@ object ManagerServerHarness:
           groupHandlers,
           roleHandlers,
           membershipHandlers,
-          mcpScopeOf
+          mcpScopeOf,
+          tenantLocationHandlers
         )
         val accessTools = new ai.starlake.quack.mcp.McpAccessTools(
           roleHandlers,
@@ -728,6 +737,7 @@ object ManagerServerHarness:
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes,
+      tenantLocations = Some(tenantLocationHandlers),
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,

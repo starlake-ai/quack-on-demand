@@ -1,11 +1,13 @@
 package ai.starlake.quack.mcp
 
 import ai.starlake.quack.ondemand.api.{
+  AddTenantLocationRequest,
   GroupCreateRequest,
   GroupDeleteRequest,
   GroupHandlers,
   GroupRoleMembershipRequest,
   MembershipHandlers,
+  RemoveTenantLocationRequest,
   RoleCreateRequest,
   RoleDeleteRequest,
   RoleHandlers,
@@ -13,6 +15,8 @@ import ai.starlake.quack.ondemand.api.{
   SetTenantAuthRequest,
   SetTenantDisabledRequest,
   TenantHandlers,
+  TenantLocationHandlers,
+  TenantLocationListRequest,
   TenantOpRequest,
   TenantRequest,
   UserCreateRequest,
@@ -39,7 +43,8 @@ final class McpIdentityTools(
     groups: GroupHandlers,
     roles: RoleHandlers,
     memberships: MembershipHandlers,
-    scopeOf: SessionScope.Resolver
+    scopeOf: SessionScope.Resolver,
+    locations: TenantLocationHandlers
 ):
 
   import McpToolArgs._
@@ -49,6 +54,9 @@ final class McpIdentityTools(
     createTenantTool,
     deleteTenantTool,
     setTenantAclTool,
+    listTenantLocationsTool,
+    addTenantLocationTool,
+    removeTenantLocationTool,
     setTenantAuthTool,
     setTenantDisabledTool,
     listUsersTool,
@@ -168,6 +176,76 @@ final class McpIdentityTools(
               ),
               keyOf(principal)
             )(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
+  // ---------- tenant authorized locations ----------
+
+  private val listTenantLocationsTool = McpToolDef(
+    name = "list_tenant_locations",
+    description = "List the S3 buckets and local folders a tenant authorized for its users' file " +
+      "access. A bucket's secret access key is never returned (secretSet says one is stored).",
+    inputSchema =
+      objectSchema(required = List("tenant"), props = "tenant" -> strProp("Tenant id.")),
+    adminOnly = true,
+    run = (principal, args) =>
+      required(args, "tenant") match
+        case Left(err)     => IO.pure(Left(err))
+        case Right(tenant) =>
+          locations
+            .list(TenantLocationListRequest(tenant), keyOf(principal))(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
+  private val addTenantLocationTool = McpToolDef(
+    name = "add_tenant_location",
+    description =
+      "Authorize a location for a tenant's non-superuser users: s3://<bucket>/ (a bucket only) " +
+        "with that bucket's own credentials in object_store (s3_access_key_id and " +
+        "s3_secret_access_key required; s3_region, s3_endpoint, s3_url_style optional), or an " +
+        "absolute folder under <QOD_TENANT_FILES_ROOT>/<tenant>/. A database's data folder stays " +
+        "unreachable whatever is authorized. The tenant's running nodes receive the change at once.",
+    inputSchema = objectSchema(
+      required = List("tenant", "location"),
+      props = "tenant" -> strProp("Tenant id."),
+      "location"     -> strProp("s3://<bucket>/ or an absolute local folder."),
+      "object_store" -> objProp("The bucket's credentials (s3 only; the secret is write-only).")
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      (for
+        tenant   <- required(args, "tenant")
+        location <- required(args, "location")
+      yield (tenant, location)) match
+        case Left(err)                 => IO.pure(Left(err))
+        case Right((tenant, location)) =>
+          locations
+            .add(
+              AddTenantLocationRequest(tenant, location, mapArgOpt(args, "object_store")),
+              keyOf(principal)
+            )(scopeOf)
+            .map(res => bridge(res).map(_.asJson))
+  )
+
+  private val removeTenantLocationTool = McpToolDef(
+    name = "remove_tenant_location",
+    description = "Remove an authorized location of a tenant by id (from list_tenant_locations). " +
+      "The tenant's running nodes drop the bucket's secret at once.",
+    inputSchema = objectSchema(
+      required = List("tenant", "id"),
+      props = "tenant" -> strProp("Tenant id."),
+      "id" -> strProp("Location id.")
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      (for
+        tenant <- required(args, "tenant")
+        id     <- required(args, "id")
+      yield (tenant, id)) match
+        case Left(err)           => IO.pure(Left(err))
+        case Right((tenant, id)) =>
+          locations
+            .remove(RemoveTenantLocationRequest(tenant, id), keyOf(principal))(scopeOf)
             .map(res => bridge(res).map(_.asJson))
   )
 

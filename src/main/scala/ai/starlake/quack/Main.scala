@@ -1121,6 +1121,30 @@ object Main extends IOApp with LazyLogging:
         opa = Some(opaAuthorizer),
         opaCfg = opaCfg
       )
+      // A tenant's authorized locations: changes reach its running nodes as system statements.
+      // The statements carry credentials; the push never logs them, nor a node's answer.
+      val tenantLocationPush = new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
+        nodesOf = sup.liveNodesOfTenant,
+        run = (n, sql) =>
+          adapter
+            .send(
+              n,
+              sql,
+              ai.starlake.quack.edge.authz.NodePrincipal.System,
+              session = None,
+              recordLoad = false
+            )
+            .map {
+              case QuackResponse.Ok(_, _, close) => close(); Right(())
+              case QuackResponse.Failed(_, _)    => Left("failed")
+            }
+      )
+      val tenantLocationHandlers = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
+        sup,
+        mgrCfg.tenantFiles.rootOpt,
+        tenantLocationPush,
+        auditRecorder
+      )
       val aclValidator: StatementValidator =
         BootFactories.aclValidator(aclCfg, mgrCfg, sup, opaCfg, opaAuthorizer)
       // Runs after sup.restore() (tenants are loaded by then): an OPA-mode tenant with no URL
@@ -1807,7 +1831,8 @@ object Main extends IOApp with LazyLogging:
               groupHandlers,
               roleHandlers,
               membershipHandlers,
-              mcpScopeOf
+              mcpScopeOf,
+              tenantLocationHandlers
             )
             val accessTools = new ai.starlake.quack.mcp.McpAccessTools(
               roleHandlers,
@@ -1905,7 +1930,8 @@ object Main extends IOApp with LazyLogging:
           ai.starlake.quack.ondemand.api.HandlerResolvers.resolveTenantId(sup, t),
         mcpRoutes = mcpRoutes,
         quackCfg = Some(quackCfgResolved),
-        icebergCatalog = icebergCatalogHandlers
+        icebergCatalog = icebergCatalogHandlers,
+        tenantLocations = Some(tenantLocationHandlers)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

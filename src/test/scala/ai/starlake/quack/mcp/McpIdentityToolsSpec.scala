@@ -90,7 +90,16 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
 
-    val tools = new McpIdentityTools(tenants, users, groups, roles, memberships, scopeOf)
+    val locations = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
+      sup,
+      Some("/srv/qod"),
+      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
+        _ => Nil,
+        (_, _) => cats.effect.IO.pure(Right(()))
+      )
+    )
+    val tools =
+      new McpIdentityTools(tenants, users, groups, roles, memberships, scopeOf, locations)
 
     def call(name: String, principal: McpPrincipal, args: (String, Json)*): Either[String, Json] =
       val tool = tools.tools.find(_.name == name).getOrElse(fail(s"tool $name not defined"))
@@ -598,4 +607,47 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
       "enabled" -> Json.False
     )
     out.isLeft shouldBe true
+  }
+
+  "add_tenant_location" should "authorize a bucket for its tenant's admin, never echoing its secret" in {
+    val f     = new Fixture
+    f.call("create_tenant", McpSuperuserPat.principal, "id" -> Json.fromString("acme"))
+    val added = f.call(
+      "add_tenant_location",
+      adminPat(),
+      "tenant"       -> Json.fromString("acme"),
+      "location"     -> Json.fromString("s3://acme-etl/"),
+      "object_store" -> Json.obj(
+        "s3_access_key_id"     -> Json.fromString("AKIAEXAMPLE"),
+        "s3_secret_access_key" -> Json.fromString("mcp-sekr3t")
+      )
+    )
+    added.isRight shouldBe true
+    added.toOption.get.noSpaces should not include "mcp-sekr3t"
+    val listed = f.call("list_tenant_locations", adminPat(), "tenant" -> Json.fromString("acme"))
+    listed.toOption.get.noSpaces should include("s3://acme-etl/")
+    listed.toOption.get.noSpaces should not include "mcp-sekr3t"
+    val id = added.toOption.get.hcursor.downField("location").get[String]("id").toOption.get
+    f.call(
+      "remove_tenant_location",
+      adminPat(),
+      "tenant" -> Json.fromString("acme"),
+      "id"     -> Json.fromString(id)
+    ).isRight shouldBe true
+  }
+
+  it should "refuse an admin of another tenant" in {
+    val f   = new Fixture
+    f.call("create_tenant", McpSuperuserPat.principal, "id" -> Json.fromString("globex"))
+    val out = f.call(
+      "add_tenant_location",
+      adminPat(),
+      "tenant"   -> Json.fromString("globex"),
+      "location" -> Json.fromString("/srv/qod/globex/")
+    )
+    out.left.toOption.get should include("tenant_forbidden")
+    f.call("list_tenant_locations", adminPat(), "tenant" -> Json.fromString("globex"))
+      .left
+      .toOption
+      .get should include("tenant_forbidden")
   }

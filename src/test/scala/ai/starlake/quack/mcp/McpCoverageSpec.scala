@@ -104,6 +104,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/statement/kill"               -> "kill_statement",
     "POST /api/tenant/create"                -> "create_tenant",
     "POST /api/tenant/delete"                -> "delete_tenant",
+    "POST /api/tenant/location/add"          -> "add_tenant_location",
+    "POST /api/tenant/location/list"         -> "list_tenant_locations",
+    "POST /api/tenant/location/remove"       -> "remove_tenant_location",
     "POST /api/tenant/setAcl"                -> "set_tenant_acl",
     "POST /api/tenant/setAuth"               -> "set_tenant_auth",
     "POST /api/tenant/setDisabled"           -> "set_tenant_disabled",
@@ -221,7 +224,15 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
-    new McpIdentityTools(tenants, users, groups, roles, memberships, superuserScope)
+    val locations   = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
+      sup,
+      None,
+      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
+        _ => Nil,
+        (_, _) => cats.effect.IO.pure(Right(()))
+      )
+    )
+    new McpIdentityTools(tenants, users, groups, roles, memberships, superuserScope, locations)
 
   private def accessTools: McpAccessTools =
     val store   = new InMemoryControlPlaneStore()

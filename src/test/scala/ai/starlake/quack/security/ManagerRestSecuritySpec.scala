@@ -172,6 +172,27 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "keep a tenant's authorized locations to admins: 403 for a profile session" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val body = s"""{"tenant":"${SecurityFixtures.TenantId}"}"""
+      val url  = s"${h.baseUrl}/api/tenant/location/list"
+      val su   = post(h.httpClient, url, body, apiKey = Some(h.superuserSession()))
+      withClue(s"superuser body: ${su.body()}")(su.statusCode() shouldBe 200)
+      val bob = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val denied = post(h.httpClient, url, body, apiKey = Some(bob))
+      withClue(s"profile session body: ${denied.body()}") {
+        denied.statusCode() shouldBe 403
+        errorCode(denied.body()) should contain("admin_required")
+      }
+      post(h.httpClient, url, body).statusCode() shouldBe 401
+    finally h.shutdown()
+  }
   it should "let a non-admin session reach both /api/profile routes" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)

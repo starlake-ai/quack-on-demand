@@ -29,15 +29,17 @@ object AuditActions:
   val AuthSsoTicketMint   = "auth.sso.ticket.mint"
   val AuthSsoTicketRedeem = "auth.sso.ticket.redeem"
   // tenant + database
-  val TenantCreate      = "tenant.create"
-  val TenantDelete      = "tenant.delete"
-  val TenantSetDisabled = "tenant.setDisabled"
-  val TenantAuthUpdate  = "tenant.auth.update"
-  val TenantAclUpdate   = "tenant.acl.update"
-  val TenantOpaTest     = "tenant.opa.test"
-  val DatabaseCreate    = "database.create"
-  val DatabaseDelete    = "database.delete"
-  val DatabaseUpdate    = "database.update"
+  val TenantCreate         = "tenant.create"
+  val TenantDelete         = "tenant.delete"
+  val TenantSetDisabled    = "tenant.setDisabled"
+  val TenantAuthUpdate     = "tenant.auth.update"
+  val TenantAclUpdate      = "tenant.acl.update"
+  val TenantOpaTest        = "tenant.opa.test"
+  val TenantLocationAdd    = "tenant.location.add"
+  val TenantLocationRemove = "tenant.location.remove"
+  val DatabaseCreate       = "database.create"
+  val DatabaseDelete       = "database.delete"
+  val DatabaseUpdate       = "database.update"
   // pool
   val PoolCreate           = "pool.create"
   val PoolScale            = "pool.scale"
@@ -152,6 +154,8 @@ object AuditActions:
     TenantAuthUpdate,
     TenantAclUpdate,
     TenantOpaTest,
+    TenantLocationAdd,
+    TenantLocationRemove,
     DatabaseCreate,
     DatabaseDelete,
     DatabaseUpdate,
