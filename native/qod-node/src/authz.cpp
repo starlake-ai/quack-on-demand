@@ -53,7 +53,7 @@ std::string RefreshRefusal(const Installed *current, const Handle &next) {
 
 NodeAuthz::NodeAuthz(std::string node_id, std::string node_key, Clock clock, AuthzLimits limits)
     : node_id_(std::move(node_id)), node_key_(std::move(node_key)), clock_(std::move(clock)),
-      decider_(node_id_, node_key_, limits, clock_) {
+      decider_(node_id_, node_key_, limits, clock_), credentials_(node_id_, node_key_, limits, clock_) {
 }
 
 Handle NodeAuthz::Verify(const std::string &text) const {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "credentials.hpp"
 #include "decide_client.hpp"
 #include "handle.hpp"
 
@@ -86,6 +87,12 @@ public:
 		return decider_;
 	}
 
+	//! The S3 credential client of this node (its key, its clock, the decide timeout), shared by every
+	//! connection: qod_session installs each principal's own credentials with it (decision 23).
+	CredentialClient &Credentials() {
+		return credentials_;
+	}
+
 private:
 	//! Drops the records whose handles expired, at most every 10 s. Called with lock_ held.
 	void Sweep(int64_t now_ms);
@@ -95,6 +102,7 @@ private:
 	Clock clock_;
 	//! After the three above: initialized from them.
 	DecideClient decider_;
+	CredentialClient credentials_;
 	NonceLedger ledger_;
 	std::mutex lock_;
 	std::unordered_map<std::string, Installed> connections_;

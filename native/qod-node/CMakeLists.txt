@@ -140,6 +140,7 @@ configure_file(cmake/file_functions.hpp.in ${CMAKE_BINARY_DIR}/generated/file_fu
 set(QOD_NODE_CORE_SOURCES
   src/authz.cpp
   src/build_info.cpp
+  src/credentials.cpp
   src/crypto.cpp
   src/decide_client.cpp
   src/functions_list.cpp
@@ -234,6 +235,12 @@ if(QOD_NODE_TESTS)
   qod_node_test(decide_client_test)
   target_link_libraries(decide_client_test PRIVATE qod_node_test_http)
   add_test(NAME decide_client COMMAND decide_client_test)
+  qod_node_test(credentials_test)
+  target_link_libraries(credentials_test PRIVATE qod_node_test_http)
+  add_test(NAME credentials COMMAND credentials_test)
+  qod_node_test(credentials_engine_test)
+  target_link_libraries(credentials_engine_test PRIVATE qod_node_test_http)
+  add_test(NAME credentials_engine COMMAND credentials_engine_test)
   qod_node_test(json_writer_test)
   add_test(NAME json_writer COMMAND json_writer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/canonical-json-v1.txt)
   qod_node_test(node_config_test)
