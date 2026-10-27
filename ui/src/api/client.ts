@@ -12,6 +12,10 @@ import type {
   SetPoolLockdownRequest,
   SetTenantAuthRequest,
   SetTenantAclRequest,
+  AddTenantLocationRequest,
+  RemoveTenantLocationRequest,
+  TenantLocationChangeResponse,
+  TenantLocationListResponse,
   SetTenantDisabledRequest,
   PoolResponse,
   FleetServerListResponse,
@@ -280,6 +284,12 @@ export const api = {
   setTenantDisabled:(req: SetTenantDisabledRequest) => post<TenantResponse>('/tenant/setDisabled', req),
   setTenantAuth:    (req: SetTenantAuthRequest)     => post<TenantResponse>('/tenant/setAuth',     req),
   setTenantAcl:     (req: SetTenantAclRequest)      => post<TenantResponse>('/tenant/setAcl',      req),
+  listTenantLocations:  (tenant: string) =>
+    post<TenantLocationListResponse>('/tenant/location/list', { tenant }),
+  addTenantLocation:    (req: AddTenantLocationRequest) =>
+    post<TenantLocationChangeResponse>('/tenant/location/add', req),
+  removeTenantLocation: (req: RemoveTenantLocationRequest) =>
+    post<TenantLocationChangeResponse>('/tenant/location/remove', req),
 
   // Tenant databases
   listTenantDbs:  (tenant: string)       =>
