@@ -102,5 +102,9 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     folders.set(Left("the database data folders could not be read"))
     served.current("u-1") shouldBe Left("the database data folders could not be read")
     served.of("u-1") shouldBe Nil
+    // No digest a connection could already hold: it refetches, and the fetch is refused.
+    served.digest("u-1") shouldBe UserS3Credentials.UnavailableDigest
+    served.digest("u-1") should not be cache.digest("u-1")
+    served.digest("u-1") should fullyMatch regex "[0-9a-f]{64}"
     served.current("nobody") shouldBe Right(Nil)
   }

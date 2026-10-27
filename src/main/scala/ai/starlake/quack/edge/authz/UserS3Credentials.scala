@@ -45,6 +45,14 @@ object UserS3Credentials:
   def digestOf(creds: List[UserS3Credential]): String =
     if creds.isEmpty then "" else CanonicalJson.sha256Hex(digestJson(creds))
 
+  /** A handle's `creds` while the principal's set cannot be served: 64 hex digits, as the node
+    * requires, that no [[digestOf]] produces (a SHA-256 of all zeros has no known preimage). A node
+    * connection never holds secrets fetched at it, so it always refetches, and the credentials
+    * endpoint's 503 fails the statement closed instead of letting the connection keep a set the
+    * replica no longer serves.
+    */
+  val UnavailableDigest: String = "0" * 64
+
 /** [[UserS3Credentials]] over a loader, refreshed by the supervisor together with the policy
   * versions (after every local RBAC mutation, credential writes included, and on every restore,
   * which HA peers run on the rbac NOTIFY). A failed refresh marks the cache stale: [[current]]
@@ -109,8 +117,9 @@ object UserS3CredentialCache:
   * afterwards at that scope or at an ancestor of it (a DuckLake database with no data path of its
   * own lands at `parent(default)/<name>`) would otherwise let the user's keys sign that database's
   * files. [[current]] is Left while either the base or the deny set cannot be read; [[digest]] is
-  * the served set's, so a handle names exactly what the credentials endpoint answers. Each withheld
-  * credential is named once in a WARN (its user and id, never a key).
+  * the served set's, so a handle names exactly what the credentials endpoint answers, and
+  * [[UserS3Credentials.UnavailableDigest]] while there is none. Each withheld credential is named
+  * once in a WARN (its user and id, never a key).
   */
 final class ServedUserS3Credentials(
     base: UserS3Credentials,
@@ -123,7 +132,7 @@ final class ServedUserS3Credentials(
   def of(userId: String): List[UserS3Credential] = current(userId).getOrElse(Nil)
 
   def digest(userId: String): String =
-    current(userId).fold(_ => base.digest(userId), UserS3Credentials.digestOf)
+    current(userId).fold(_ => UserS3Credentials.UnavailableDigest, UserS3Credentials.digestOf)
 
   override def current(userId: String): Either[String, List[UserS3Credential]] =
     for

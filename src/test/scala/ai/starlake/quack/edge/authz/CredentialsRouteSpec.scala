@@ -257,10 +257,17 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       Right(UserS3Credentials.digestOf(kept))
   }
 
-  it should "answer 503 while the deny set cannot be read" in {
+  it should "answer 503 while the deny set cannot be read, under a digest no connection holds" in {
     val f = new Fixture
+    // A connection that fetched before the outage holds the real digest.
+    val before = HandleInspector.payload(f.handle()).hcursor.get[String]("creds").toOption.get
     f.folders.set(Left("the database data folders could not be read"))
-    f.call(body(f.handle())) shouldBe
+    val handle = f.handle()
+    val creds  = HandleInspector.payload(handle).hcursor.get[String]("creds").toOption.get
+    creds shouldBe UserS3Credentials.UnavailableDigest
+    creds should not be before
+    creds should not be f.cache.digest("u-1")
+    f.call(body(handle)) shouldBe
       (Status.ServiceUnavailable, CredentialsRoute.Unavailable, Some(MediaType.text.plain))
   }
 
@@ -268,7 +275,10 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture
     f.fails.set(true)
     f.cache.refresh()
-    f.call(body(f.handle()))._1 shouldBe Status.ServiceUnavailable
+    val stale = f.handle()
+    HandleInspector.payload(stale).hcursor.get[String]("creds") shouldBe
+      Right(UserS3Credentials.UnavailableDigest)
+    f.call(body(stale))._1 shouldBe Status.ServiceUnavailable
     f.fails.set(false)
     f.clock.addAndGet(UserS3CredentialCache.RetryMs)
     f.call(body(f.handle()))._1 shouldBe Status.Ok
