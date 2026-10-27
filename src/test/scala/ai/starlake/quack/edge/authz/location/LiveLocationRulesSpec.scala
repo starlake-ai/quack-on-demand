@@ -121,11 +121,32 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture()
     f.paths.set(List("/srv/qod-files/acme/in/x\u0000y"))
     val r = f.rules.rulesFor("acme").toOption.get
-    LocationChecker.check("/srv/qod-files/acme/in/x.csv", r).isLeft shouldBe true
+    LocationChecker.check("/srv/qod-files/acme/in/x.csv", r) shouldBe
+      Left(
+        "/srv/qod-files/acme/in/x.csv is a database data folder (a relative data path of this " +
+          "deployment may lie there)"
+      )
     LocationChecker.check("s3://acme-etl/in/x.csv", r) shouldBe Right(())
   }
 
-  "on the local runtime" should "use real paths for the root and the folders" in {
+  "on the local runtime" should "drop a folder whose real path leaves the real root/tenant" in
+    List(
+      (p: String) => p.replace("/srv/qod-files/acme/in/", "/srv/qod-files/globex/in/"),
+      (p: String) => p.replace("/srv/qod-files/acme/in/", "/etc/")
+    ).foreach { real =>
+      val r = new LiveLocationRules(
+        dataPaths = () => Nil,
+        unpurgedPrefixes = () => Nil,
+        tenantLocations = t => Locations.getOrElse(t, Nil),
+        filesRoot = Some("/srv/qod-files/"),
+        sameHost = true,
+        realPath = real
+      ).rulesFor("acme").toOption.get
+      r.tenantFolders shouldBe Nil
+      LocationChecker.check("/srv/qod-files/globex/in/x.csv", r).isLeft shouldBe true
+    }
+
+  it should "use real paths for the root and the folders" in {
     val real = (p: String) => p.replace("/srv/", "/private/srv/")
     val r    = new LiveLocationRules(
       dataPaths = () => List("/srv/qod-files/acme/in/lake"),

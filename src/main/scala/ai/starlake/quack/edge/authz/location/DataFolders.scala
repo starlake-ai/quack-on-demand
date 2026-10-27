@@ -19,16 +19,31 @@ object DataFolders:
 
   private val SchemeRe = "^[a-zA-Z][a-zA-Z0-9+.-]*://.*$".r
 
+  /** A `file:` URL's path naming a Windows drive (`/C:/...`). */
+  private val FileDriveRe = "^/[A-Za-z]:[/\\\\].*$".r
+
+  /** The data path of a database whose node gets none from the manager (a DuckLake or duckdb-file
+    * row with no data path of its own while the default metastore has none either): the spawn
+    * script then picks a folder of its own. Kept as written by [[of]], which the checker reads as
+    * "may be anywhere on the node": every local location is refused.
+    */
+  val Unplaced: String = "(a data path the manager cannot place)"
+
   /** The deny-set entries of data path `path`. `sameHost`: nodes run on this host and resolve a
     * relative data path against this process's directory (the local runtime), so a relative path is
     * resolved and every local entry is joined by its real path (`realPath`). Off the local runtime
     * a relative path stays as written, which the checker reads as "may be anywhere on the node". A
-    * remote scheme no tenant can name yields nothing.
+    * `file:` URL is the local path it names. A remote scheme no tenant can name yields nothing.
     */
   def of(path: String, sameHost: Boolean, realPath: String => String): List[String] =
     val p     = path.trim
     val lower = p.toLowerCase(Locale.ROOT)
     if p.isEmpty then Nil
+    else if p == Unplaced then List(Unplaced)
+    else if lower.startsWith("file:") then
+      fileUrlPath(p.substring("file:".length)) match
+        case Some(local0) => local(local0, sameHost, realPath)
+        case None         => List(Unplaced)
     else
       ObjectSchemes.find(lower.startsWith) match
         case Some(sch) => objectFolder(p.substring(sch.length)).toList
@@ -46,6 +61,22 @@ object DataFolders:
             (objectFolder(s"$hostLabel/$pathPart").toList ++ objectFolder(pathPart).toList).distinct
           else if SchemeRe.matches(p) then Nil
           else local(p, sameHost, realPath)
+
+  /** The local path a `file:` URL names (what follows `file:`): `///p` and `//localhost/p` are
+    * `/p`, a Windows `/C:/p` drops its leading slash, `/p` and a relative `p` stand as written.
+    * None for another host or nothing at all.
+    */
+  private def fileUrlPath(rest: String): Option[String] =
+    val path =
+      if !rest.startsWith("//") then Some(rest)
+      else
+        val authority = rest.drop(2).takeWhile(_ != '/')
+        Option.when(authority.isEmpty || authority.equalsIgnoreCase("localhost"))(
+          rest.drop(2 + authority.length)
+        )
+    path
+      .map(q => if FileDriveRe.matches(q) then q.substring(1) else q)
+      .filter(_.nonEmpty)
 
   /** `bucket/key...` as `s3://<lowercase bucket>/<key segments>/`; None without a bucket. */
   private def objectFolder(rest: String): Option[String] =

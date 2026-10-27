@@ -234,6 +234,30 @@ class LocationCheckerSpec extends AnyFlatSpec with Matchers:
       Left("s3://acme-etl/x.csv is outside the tenant's authorized locations (a control character)")
   }
 
+  it should "keep format and separator characters out of the reason" in {
+    LocationChecker.check("/etc/x\u202ey\u2028z\u2029\u200b\u2066.csv", Rules) shouldBe
+      Left("/etc/xyz.csv is outside the tenant's authorized locations")
+  }
+
+  "a data folder named in one Unicode normalization" should "be refused in the other" in {
+    dataFolder(
+      "/srv/qod-files/acme/out/cafe\u0301/x.parquet",
+      Rules.copy(dataFolders = List("/srv/qod-files/acme/out/caf\u00e9/"))
+    )
+    dataFolder(
+      "/srv/qod-files/acme/out/caf\u00e9.wal",
+      Rules.copy(dataFolders = List("/srv/qod-files/acme/out/cafe\u0301/"))
+    )
+    dataFolder(
+      "s3://shared-lake/cafe\u0301/x.parquet",
+      Rules.copy(dataFolders = List("s3://shared-lake/caf\u00e9/"))
+    )
+    ok(
+      "/srv/qod-files/acme/out/cafe/x.parquet",
+      Rules.copy(dataFolders = List("/srv/qod-files/acme/out/caf\u00e9/"))
+    )
+  }
+
   "a relative data path" should "refuse every local location and leave S3 alone" in {
     val rules = Rules.copy(dataFolders = List("ducklake/tpch"))
     dataFolder("/srv/qod-files/acme/in/x.csv", rules)

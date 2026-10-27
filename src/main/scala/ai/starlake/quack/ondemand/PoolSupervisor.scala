@@ -1549,15 +1549,30 @@ final class PoolSupervisor(
         defaultMetastore.get("dataPath")
     paths.flatMap(ai.starlake.quack.model.BucketKeys.of).toSet
 
-  /** Every data path the control plane knows, as written: each tenant-db's `dataPath` and metastore
-    * `dataPath` (branch rows are tenant-db rows) and the default metastore's. Feeds the location
-    * checker's data-folder deny set (edge.authz.location.LiveLocationRules), which adds the managed
-    * prefixes still within their retention window. In memory, like [[duckLakeBuckets]], so HA
-    * replicas stay fresh through the topology refresh.
+  /** Every data path a node of this control plane may hold data at. Per tenant-db: the data path
+    * its nodes get ([[effectiveMetastoreFor]], the spawn's own derivation, so a DuckLake row with
+    * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
+    * metastore `dataPath` as written. A DuckLake or duckdb-file row whose nodes get none (the spawn
+    * script then picks a folder of its own), or one the derivation fails on, counts as
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]]. Then the default metastore's
+    * own path. Branch rows are tenant-db rows. Feeds the location checker's data-folder deny set
+    * (edge.authz.location.LiveLocationRules), which adds the managed prefixes still within their
+    * retention window. In memory, like [[duckLakeBuckets]], so HA replicas stay fresh through the
+    * topology refresh.
     */
   def dataPaths(): List[String] =
-    (tenantDbs.values.toList.flatMap(td => td.dataPath :: td.metastore.get("dataPath").toList) ++
-      defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+    val unplaced = ai.starlake.quack.edge.authz.location.DataFolders.Unplaced
+    val perRow   = tenantDbs.values.toList.flatMap { td =>
+      val effective =
+        try
+          effectiveMetastoreFor(td).get("dataPath").map(_.trim).filter(_.nonEmpty) match
+            case Some(p)                                  => List(p)
+            case None if td.kind == TenantDbKind.InMemory => Nil
+            case None                                     => List(unplaced)
+        catch case scala.util.control.NonFatal(_) => List(unplaced)
+      effective ++ (td.dataPath :: td.metastore.get("dataPath").toList)
+    }
+    (perRow ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
 
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>

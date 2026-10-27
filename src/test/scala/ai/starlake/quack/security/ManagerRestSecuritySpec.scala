@@ -5,6 +5,8 @@ import io.circe.parser._
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.nio.charset.StandardCharsets.UTF_8
+
 /** End-to-end security tests for the ManagerServer REST API.
   *
   * Each test boots a fresh ManagerServer on an ephemeral port backed by the in-memory fixture store
@@ -16,6 +18,42 @@ import org.scalatest.matchers.should.Matchers
   * /api/manifest/export|import
   */
 class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
+
+  /** Reads one HTTP/1.1 response from `in` (its headers, then a Content-Length or chunked body) and
+    * answers its status; -1 when the server closed the connection first.
+    */
+  private def rawStatus(in: java.io.InputStream): Int =
+    def line(): Option[String] =
+      val sb = new StringBuilder
+      var c  = in.read()
+      while c != -1 && c != '\n' do
+        if c != '\r' then sb.append(c.toChar)
+        c = in.read()
+      if c == -1 && sb.isEmpty then None else Some(sb.toString)
+    line() match
+      case None         => -1
+      case Some(status) =>
+        val headers = Iterator
+          .continually(line().getOrElse(""))
+          .takeWhile(_.nonEmpty)
+          .map { h =>
+            val i = h.indexOf(':')
+            h.take(i).trim.toLowerCase -> h.drop(i + 1).trim
+          }
+          .toMap
+        headers.get("content-length") match
+          case Some(n) => in.readNBytes(n.toInt)
+          case None    =>
+            if headers.get("transfer-encoding").exists(_.equalsIgnoreCase("chunked")) then
+              Iterator
+                .continually(Integer.parseInt(line().getOrElse("0").takeWhile(_ != ';').trim, 16))
+                .takeWhile { size =>
+                  in.readNBytes(size)
+                  line()
+                  size > 0
+                }
+                .foreach(_ => ())
+        status.split(' ')(1).toInt
 
   // ------------------------------------------------------------------
   // A. apiKeyGuard: sessions and PATs only
@@ -191,6 +229,38 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         errorCode(denied.body()) should contain("admin_required")
       }
       post(h.httpClient, url, body).statusCode() shouldBe 401
+    finally h.shutdown()
+  }
+
+  it should "keep a keep-alive connection usable after refusing a POST whose body came late" in {
+    // The guard answers before reading the body. Ember then closed the connection it had just
+    // answered as keep-alive whenever the body had not arrived with the headers, and the JDK
+    // client's next POST on it failed with "header parser received no bytes". A raw socket makes
+    // the late body certain: headers, a pause, then the body.
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val uri  = java.net.URI.create(h.baseUrl)
+      val sock = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        sock.setSoTimeout(10000)
+        val out  = sock.getOutputStream
+        val in   = new java.io.BufferedInputStream(sock.getInputStream)
+        val body = s"""{"tenant":"${SecurityFixtures.TenantId}"}""".getBytes(UTF_8)
+        out.write(
+          ("POST /api/tenant/location/list HTTP/1.1\r\nHost: localhost\r\n" +
+            s"Content-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n")
+            .getBytes(UTF_8)
+        )
+        out.flush()
+        Thread.sleep(300)
+        out.write(body)
+        out.flush()
+        rawStatus(in) shouldBe 401
+        out.write("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n".getBytes(UTF_8))
+        out.flush()
+        rawStatus(in) shouldBe 200
+      finally sock.close()
     finally h.shutdown()
   }
 

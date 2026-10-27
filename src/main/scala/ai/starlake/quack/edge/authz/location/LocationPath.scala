@@ -72,17 +72,26 @@ private[location] object LocationPath:
         else p.segments(i) == folder.segments(i)
       )
 
+  /** A segment as denial compares it: NFC (APFS opens a name by any normalization of it, and the
+    * node cannot canonicalize a tail that does not exist yet), then lowercase.
+    */
+  private def foldForDenial(segment: String): String =
+    java.text.Normalizer
+      .normalize(segment, java.text.Normalizer.Form.NFC)
+      .toLowerCase(Locale.ROOT)
+
   /** Whether `p` reaches data folder `d`: names it or something below it, one of its derived
     * siblings (`<last>.<suffix>`, `<last>__br_<suffix>`), an ancestor of it, or a glob whose
-    * literal prefix runs along it (the glob could expand into it). Case-insensitive.
+    * literal prefix runs along it (the glob could expand into it). Case- and
+    * normalization-insensitive ([[foldForDenial]]).
     */
   def reaches(p: LocationPath, d: LocationPath): Boolean =
     p.space == d.space && {
       val n = d.segments.length
       val k = math.min(p.literalLength, n)
       (0 until k).forall { i =>
-        val a = p.segments(i).toLowerCase(Locale.ROOT)
-        val b = d.segments(i).toLowerCase(Locale.ROOT)
+        val a = foldForDenial(p.segments(i))
+        val b = foldForDenial(d.segments(i))
         a == b || (k == n && i == n - 1 && (a.startsWith(b + ".") || a.startsWith(b + "__br_")))
       }
     }

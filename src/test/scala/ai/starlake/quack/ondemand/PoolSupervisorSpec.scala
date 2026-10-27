@@ -215,6 +215,82 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
     sup.dataPaths() shouldBe List("./ducklake/tpch")
 
+  /** A supervisor whose store holds tenant `acme` and the given tenant-db rows, hydrated through
+    * `restore()`: rows with no data path of their own reach the cache that way (manifest import, a
+    * legacy row), never through createTenantDb's validator. */
+  private def supWithRows(defaults: Map[String, String], rows: List[TenantDb]): PoolSupervisor =
+    val st  = new InMemoryControlPlaneStore()
+    val sup = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, st, defaultMetastore = defaults)
+    st.upsertTenant(Tenant("acme", "acme"))
+    rows.foreach(st.upsertTenantDb)
+    sup.restore()
+    sup
+
+  private def pathless(name: String, kind: TenantDbKind = TenantDbKind.DuckLake): TenantDb =
+    TenantDb(id = s"td-$name", tenantId = "acme", name = name, kind = kind,
+      metastore = Map.empty, dataPath = "")
+
+  /** The location rules `sup` feeds a tenant that authorized bucket `lake` and the local folder
+    * `/srv/qod-files/acme/lake/`. */
+  private def rulesOf(sup: PoolSupervisor) =
+    val creds = Map("s3_access_key_id" -> "AKIA", "s3_secret_access_key" -> "s")
+    val locs = List(
+      ai.starlake.quack.model.TenantLocation("tl-1", "acme", "s3", "s3://lake/", creds, 0L, None),
+      ai.starlake.quack.model.TenantLocation(
+        "tl-2", "acme", "local", "/srv/qod-files/acme/lake/", Map.empty, 0L, None)
+    )
+    new ai.starlake.quack.edge.authz.location.LiveLocationRules(
+      dataPaths = () => sup.dataPaths(),
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = _ => locs,
+      filesRoot = Some("/srv/qod-files"),
+      sameHost = false
+    ).rulesFor("acme").toOption.get
+
+  private def checked(path: String, rules: ai.starlake.quack.edge.authz.location.LocationRules) =
+    ai.starlake.quack.edge.authz.location.LocationChecker.check(path, rules)
+
+  it should "deny each default-path DuckLake database at its own folder beside the default" in:
+    val sup = supWithRows(Map("dataPath" -> "s3://lake/qod/tpch"), List(pathless("a"), pathless("b")))
+    sup.dataPaths().toSet shouldBe Set("s3://lake/qod/a", "s3://lake/qod/b", "s3://lake/qod/tpch")
+    val rules = rulesOf(sup)
+    val denied = ai.starlake.quack.edge.authz.location.LocationChecker.DataFolder
+    checked("s3://lake/qod/a/main/t/x.parquet", rules) shouldBe
+      Left(s"s3://lake/qod/a/main/t/x.parquet $denied")
+    checked("s3://lake/qod/b/main/t/x.parquet", rules) shouldBe
+      Left(s"s3://lake/qod/b/main/t/x.parquet $denied")
+    checked("s3://lake/qod/tpch/x.parquet", rules).isLeft shouldBe true
+    checked("s3://lake/qod/other-file.csv", rules) shouldBe Right(())
+
+  it should "deny each default-path DuckLake database beside a local default too" in:
+    val sup = supWithRows(
+      Map("dataPath" -> "/srv/qod-files/acme/lake/tpch"),
+      List(pathless("a"), pathless("b"))
+    )
+    val rules  = rulesOf(sup)
+    val denied = ai.starlake.quack.edge.authz.location.LocationChecker.DataFolder
+    checked("/srv/qod-files/acme/lake/a/main/t/x.parquet", rules) shouldBe
+      Left(s"/srv/qod-files/acme/lake/a/main/t/x.parquet $denied")
+    checked("/srv/qod-files/acme/lake/b/x.parquet", rules) shouldBe
+      Left(s"/srv/qod-files/acme/lake/b/x.parquet $denied")
+    checked("/srv/qod-files/acme/lake/other-file.csv", rules) shouldBe Right(())
+
+  it should "count a DuckLake or duckdb-file database whose nodes get no data path as unplaced" in:
+    val unplaced = ai.starlake.quack.edge.authz.location.DataFolders.Unplaced
+    val sup = supWithRows(
+      Map.empty,
+      List(pathless("a"), pathless("f", TenantDbKind.DuckDbFile), pathless("m", TenantDbKind.InMemory))
+    )
+    sup.dataPaths() shouldBe List(unplaced)
+    val rules = rulesOf(sup)
+    checked("/srv/qod-files/acme/lake/x.csv", rules) shouldBe
+      Left(
+        "/srv/qod-files/acme/lake/x.csv is a database data folder (a relative data path of this " +
+          "deployment may lie there)"
+      )
+    checked("s3://lake/x.csv", rules) shouldBe Right(())
+    supWithRows(Map.empty, List(pathless("m", TenantDbKind.InMemory))).dataPaths() shouldBe Nil
+
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 
   "PoolSupervisor.createPool" should "start N nodes matching the role distribution" in:

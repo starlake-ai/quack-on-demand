@@ -188,6 +188,24 @@ final class ManagerServer(
     * `/api/config/client`, `/health`, `/ready`, and everything outside `/api/...` (incl.
     * `/ui/...`).
     */
+  /** The largest request body a refusal reads and discards before answering. */
+  private val RefusalDrainBytes: Long = 1L << 20
+
+  /** `resp`, after reading the rest of `req`'s body. Ember answers a request whose body the app
+    * left partly unread as keep-alive and then closes the connection, so a client that reuses it
+    * for its next request finds it closed (the JDK client does not retry a POST: "header parser
+    * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
+    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read; any
+    * other still closes the connection.
+    */
+  private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
+    val drain =
+      req.contentLength
+        .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
+    OptionT.liftF(
+      (if drain then req.body.compile.drain.attempt.void else IO.unit).as(resp)
+    )
+
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =
     Kleisli { req =>
       // Router parity: tapir segments the path as
@@ -266,7 +284,8 @@ final class ManagerServer(
                 tenant = caller.flatMap(_.tenant),
                 detail = Map("path" -> safePath)
               )
-            OptionT.pure[IO](
+            refuse(
+              req,
               Response[IO](Status.Forbidden)
                 .withEntity(
                   """{"error":"admin_required","message":"this endpoint requires an admin session"}"""
@@ -286,7 +305,7 @@ final class ManagerServer(
                 "denied",
                 detail = Map("path" -> safePath, "source" -> source)
               )
-            OptionT.pure[IO](Response[IO](Status.Unauthorized))
+            refuse(req, Response[IO](Status.Unauthorized))
         else
           // Per-request tenant scope check on the admitted credential's scope.
           // Body-tenant endpoints do their own check via TenantScopeCheck.reject.
@@ -297,7 +316,8 @@ final class ManagerServer(
           (tokenScope, pathTenant) match
             case (Some(scope), Some(t))
                 if !scope.superuser && !scope.manageableTenants.contains(t) =>
-              OptionT.pure[IO](
+              refuse(
+                req,
                 Response[IO](Status.Forbidden)
                   .withEntity(
                     s"""{"error":"tenant_forbidden","message":"session has no admin grant on tenant '$t'"}"""

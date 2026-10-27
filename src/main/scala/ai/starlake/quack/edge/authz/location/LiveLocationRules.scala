@@ -50,7 +50,8 @@ final class LiveLocationRules(
       dataPaths().foreach(p => seen.put(p, now))
       seen.filterInPlace((_, at) => now - at <= RecentMs)
       val sources = (seen.keys.toList ++ prefixes).distinct
-      entries.filterInPlace((path, _) => sources.contains(path))
+      val live    = sources.toSet
+      entries.filterInPlace((path, _) => live.contains(path))
       val folders   = sources.flatMap(entriesOf(_, now)).distinct
       val locations = tenantLocations(tenantId)
       LocationRules(
@@ -71,21 +72,24 @@ final class LiveLocationRules(
     }
 
   /** The tenant's local folders under `<root>/<tenantId>/`, as written; on the local runtime each
-    * replaced by its real path, dropped when that leaves the real root.
+    * replaced by its real path, dropped when that leaves the real `<root>/<tenantId>/` (an operator
+    * symlink to another tenant's folder authorizes nothing).
     */
   private def tenantFolders(tenantId: String, locations: List[TenantLocation]): List[String] =
-    (root.flatMap(r => LocationPath.folder(s"$r$tenantId/")), root.map(real)) match
-      case (Some(tenantRoot), Some(realRoot)) =>
-        val under = (f: String, r: String) =>
-          LocationPath
-            .folder(r)
-            .exists(rp => LocationPath.folder(f).exists(LocationPath.within(_, rp)))
+    val tenantRoot = root.map(r => s"$r$tenantId/")
+    (
+      tenantRoot.flatMap(LocationPath.folder),
+      tenantRoot.map(real).flatMap(LocationPath.folder)
+    ) match
+      case (Some(asWritten), Some(asReal)) =>
+        def under(f: String, r: LocationPath) =
+          LocationPath.folder(f).exists(LocationPath.within(_, r))
         locations
           .filter(_.kind == TenantLocation.Local)
           .flatMap(l => LocationPath.normalizeLocal(l.location))
-          .filter(f => LocationPath.folder(f).exists(LocationPath.within(_, tenantRoot)))
+          .filter(under(_, asWritten))
           .map(real)
-          .filter(under(_, realRoot))
+          .filter(under(_, asReal))
           .distinct
       case _ => Nil
 

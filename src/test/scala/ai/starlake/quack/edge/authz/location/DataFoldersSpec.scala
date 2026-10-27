@@ -36,6 +36,44 @@ class DataFoldersSpec extends AnyFlatSpec with Matchers:
     remote("   ") shouldBe Nil
   }
 
+  "a file: data path" should "be the local path it names" in {
+    remote("file:///srv/qod-files/acme/out/lake/") shouldBe List("/srv/qod-files/acme/out/lake/")
+    remote("FILE:///srv/lake") shouldBe List("/srv/lake/")
+    remote("file://localhost/srv/lake") shouldBe List("/srv/lake/")
+    remote("file:/srv/./lake") shouldBe List("/srv/lake/")
+    remote("file:///C:/qod/lake") shouldBe List("C:/qod/lake/")
+    DataFolders.of("file:ducklake/tpch", sameHost = true, identity) shouldBe
+      List(Paths.get("ducklake/tpch").toAbsolutePath.normalize.toString + "/")
+  }
+
+  it should "fail closed for another host, no path, or a relative path off the local runtime" in {
+    remote("file://nas/srv/lake") shouldBe List(DataFolders.Unplaced)
+    remote("file://") shouldBe List(DataFolders.Unplaced)
+    remote("file:") shouldBe List(DataFolders.Unplaced)
+    remote("file:ducklake/tpch") shouldBe List("ducklake/tpch")
+  }
+
+  it should "deny its folder to the checker, and every local location when it cannot be placed" in {
+    val rules = LocationRules(
+      tenantBuckets = Set("acme-etl"),
+      tenantFolders = List("/srv/qod-files/acme/out/"),
+      dataFolders = remote("file:///srv/qod-files/acme/out/lake"),
+      filesRoot = Some("/srv/qod-files/")
+    )
+    LocationChecker.check("/srv/qod-files/acme/out/lake/x.parquet", rules) shouldBe
+      Left(s"/srv/qod-files/acme/out/lake/x.parquet ${LocationChecker.DataFolder}")
+    LocationChecker.check("/srv/qod-files/acme/out/x.parquet", rules) shouldBe Right(())
+    val unplaced = rules.copy(dataFolders = remote("file://nas/srv/lake"))
+    LocationChecker.check("/srv/qod-files/acme/out/x.parquet", unplaced).isLeft shouldBe true
+    LocationChecker.check("s3://acme-etl/x.parquet", unplaced) shouldBe Right(())
+  }
+
+  "the unplaced marker" should "stay as written on every runtime" in {
+    remote(DataFolders.Unplaced) shouldBe List(DataFolders.Unplaced)
+    DataFolders.of(DataFolders.Unplaced, sameHost = true, identity) shouldBe
+      List(DataFolders.Unplaced)
+  }
+
   "an absolute local data path" should "be normalized lexically" in {
     remote("/var/qod//lake/./a/../b") shouldBe List("/var/qod/lake/b/")
     remote("C:\\qod\\lake") shouldBe List("C:/qod/lake/")

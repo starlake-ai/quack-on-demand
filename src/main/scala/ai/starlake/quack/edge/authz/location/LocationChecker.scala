@@ -30,7 +30,7 @@ object LocationRules:
   * Segments compare whole, so `s3://b/lake-1/` never covers `s3://b/lake-10/`.
   *
   * The tenant's own locations are checked first, so a location outside them always reads as such,
-  * whatever lies there. A reason never carries a control character.
+  * whatever lies there. A reason never carries a control, format or separator character.
   */
 object LocationChecker:
 
@@ -38,12 +38,23 @@ object LocationChecker:
   val DataFolder: String = "is a database data folder"
 
   def check(resolved: String, rules: LocationRules): Either[String, Unit] =
-    val shown = resolved.filterNot(Character.isISOControl).take(512)
+    val shown = resolved.filterNot(unshown).take(512)
     for
       p <- LocationPath.parse(resolved).left.map(why => s"$shown $Outside ($why)")
       _ <- admit(p, rules).left.map(_.fold(s"$shown $Outside")(why => s"$shown $Outside ($why)"))
       _ <- deny(p, rules.dataFolders).map(detail => s"$shown $DataFolder$detail").toLeft(())
     yield ()
+
+  /** A character a reason never shows: a control character, a format character (bidi overrides and
+    * isolates, zero-width marks) or a line or paragraph separator, any of which could make the text
+    * a client or a log displays differ from the path it names.
+    */
+  private def unshown(c: Char): Boolean =
+    Character.isISOControl(c) || {
+      val t = Character.getType(c)
+      t == Character.FORMAT || t == Character.LINE_SEPARATOR ||
+      t == Character.PARAGRAPH_SEPARATOR
+    }
 
   /** Left(None): outside; Left(Some(why)): outside, and why. */
   private def admit(p: LocationPath, rules: LocationRules): Either[Option[String], Unit] =
@@ -77,7 +88,9 @@ object LocationChecker:
     LocationPath.folder(s) match
       case Some(p)                       => Entry.Folder(p)
       case None if s.startsWith("s3://") =>
-        Entry.WholeBucket(s.substring("s3://".length).takeWhile(_ != '/').toLowerCase)
+        Entry.WholeBucket(
+          s.substring("s3://".length).takeWhile(_ != '/').toLowerCase(java.util.Locale.ROOT)
+        )
       case None => Entry.UnknownLocal
 
   /** Some(detail) when `p` reaches a data folder (detail empty, or why it may). */
