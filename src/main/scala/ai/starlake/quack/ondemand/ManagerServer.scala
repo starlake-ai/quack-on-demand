@@ -103,7 +103,16 @@ final class ManagerServer(
     icebergCatalog: Option[IcebergCatalogHandlers] = None,
     // A tenant's authorized locations (tenant/location/*). None leaves the routes unmounted; Main
     // always wires it. Session-gated per request via TenantScopeCheck inside the handler.
-    tenantLocations: Option[TenantLocationHandlers] = None
+    tenantLocations: Option[TenantLocationHandlers] = None,
+    // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
+    // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
+    s3Credentials: Option[UserS3CredentialHandlers] = None,
+    // The node-to-manager calls (POST /api/internal/authz/*: CredentialsRoute here, Task 6's
+    // DecideRoute): mounted IN FRONT of apiKeyGuard, since a node has no session; each route
+    // authenticates every call itself (the node-key MAC of the body, then the handle). Empty (tests)
+    // leaves them unmounted, so a node's call is refused (fail closed). Never Tapir endpoints: they
+    // stay out of the OpenAPI contract, CLI parity and McpCoverageSpec.
+    internalRoutes: List[HttpRoutes[IO]] = Nil
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -159,6 +168,9 @@ final class ManagerServer(
     path == "/api/auth/whoami" || path == "/api/auth/logout" ||
       path == "/api/profile/usage" || path == "/api/profile/statements" ||
       path == "/api/profile/pools" ||
+      // A user's own S3 credentials: the handlers act on the caller's own user row only.
+      path == "/api/profile/s3/list" || path == "/api/profile/s3/add" ||
+      path == "/api/profile/s3/remove" ||
       // Personal access tokens are self-service for every principal, admin or
       // not: the handlers scope every call to the session's own user id, so
       // there is nothing here a regular user could reach beyond its own tokens.
@@ -538,6 +550,23 @@ final class ManagerServer(
           },
           TenantEndpoints.removeTenantLocation.serverLogic { case (req, token) =>
             h.remove(req, token)(scopeOfToken)
+          }
+        )
+      }
+
+    val s3CredentialEndpoints: List[ServerEndpoint[Any, IO]] =
+      s3Credentials.toList.flatMap { h =>
+        List[ServerEndpoint[Any, IO]](
+          S3CredentialEndpoints.listMine.serverLogic { case (_, token) => h.listMine(token) },
+          S3CredentialEndpoints.addMine.serverLogic { case (req, token) => h.addMine(req, token) },
+          S3CredentialEndpoints.removeMine.serverLogic { case (req, token) =>
+            h.removeMine(req, token)
+          },
+          S3CredentialEndpoints.listForUser.serverLogic { case (req, token) =>
+            h.listForUser(req, token)(scopeOfToken)
+          },
+          S3CredentialEndpoints.removeForUser.serverLogic { case (req, token) =>
+            h.removeForUser(req, token)(scopeOfToken)
           }
         )
       }
@@ -1021,7 +1050,7 @@ final class ManagerServer(
       NodeEndpoints.killStatement.serverLogic { case (req, token) =>
         activeStmts.kill(req, token)(scopeOfToken)
       }
-    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
+    ) ++ authEndpoints ++ ssoEndpoints ++ patEndpoints ++ passwordResetEndpoints ++ catalogEndpoints ++ tagEndpoints ++ maintenanceEndpoints ++ timeTravelEndpoints ++ icebergCatalogEndpoints ++ catalogHistoryEndpoints ++ undropEndpoints ++ restoreEndpoints ++ branchEndpoints ++ fleetEndpoints ++ tenantLocationEndpoints ++ s3CredentialEndpoints ++ metricsEndpoints ++ rbacEndpoints ++ scimEndpoints ++ federatedSourceEndpoints ++ moduleEndpoints
 
     val collisions = ai.starlake.quack.ondemand.module.RouteCollisions.check(endpoints)
     if collisions.nonEmpty then
@@ -1160,8 +1189,8 @@ final class ManagerServer(
       .withHost(Host.fromString(cfg.host).get)
       .withPort(Port.fromInt(cfg.port).get)
       .withHttpApp(
-        (apiKeyGuard(apiRoutes) <+> mcpRoutes.getOrElse(
-          HttpRoutes.empty[IO]
-        ) <+> uiRoutes <+> moduleStatic <+> rootRedirect).orNotFound
+        (internalRoutes.foldLeft(HttpRoutes.empty[IO])(_ <+> _) <+> apiKeyGuard(apiRoutes) <+>
+          mcpRoutes.getOrElse(HttpRoutes.empty[IO]) <+> uiRoutes <+> moduleStatic <+>
+          rootRedirect).orNotFound
       )
       .build

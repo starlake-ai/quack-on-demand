@@ -45,6 +45,10 @@ CASES = [
         {},
         {"tenant": "acme", "id": "0123abcd"},
     ),
+    (["profile", "s3", "list"], "POST", "/api/profile/s3/list", {}, {}),
+    (["profile", "s3", "remove", "0123abcd"], "POST", "/api/profile/s3/remove", {}, {"id": "0123abcd"}),
+    (["user", "s3", "list", "u-1"], "POST", "/api/user/s3/list", {}, {"userId": "u-1"}),
+    (["user", "s3", "remove", "u-1", "0123abcd"], "POST", "/api/user/s3/remove", {}, {"userId": "u-1", "id": "0123abcd"}),
     (
         ["tenant", "set-disabled", "acme", "--disabled"],
         "POST",
@@ -753,4 +757,61 @@ def test_tenant_set_auth_refuses_a_blank_client_secret(runner):
     result = runner.invoke(app, SET_AUTH + ["--client-secret-stdin"], input="   \n")
     assert result.exit_code != 0
     assert "blank" in result.output
+    assert not route.called
+
+S3_ADD = ["profile", "s3", "add", "s3://acme-etl/", "--access-key-id", "AKIAEXAMPLE"]
+
+
+def _s3_add_route():
+    return respx.route(method="POST", url=f"{BASE}/api/profile/s3/add").mock(
+        return_value=httpx.Response(200, json={"id": "0123abcd", "scope": "s3://acme-etl/", "secretSet": True})
+    )
+
+
+@respx.mock
+def test_profile_s3_add_reads_the_secret_from_stdin(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-stdin", "--endpoint", "http://127.0.0.1:9000"], input="s3-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content) == {
+        "scope": "s3://acme-etl/", "accessKeyId": "AKIAEXAMPLE", "secretAccessKey": "s3-s3cr3t", "endpoint": "http://127.0.0.1:9000",
+    }
+    assert "s3-s3cr3t" not in result.output
+
+
+@respx.mock
+def test_profile_s3_add_reads_the_secret_and_the_token_from_stdin_lines(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-stdin", "--session-token-stdin"], input="s3-s3cr3t\ns3-t0ken\n")
+    assert result.exit_code == 0, result.output
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["secretAccessKey"] == "s3-s3cr3t" and sent["sessionToken"] == "s3-t0ken"
+    assert "s3-t0ken" not in result.output
+
+
+@respx.mock
+def test_profile_s3_add_prompts_for_the_secret(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, ["--json"] + S3_ADD + ["--secret-prompt"], input="s3-s3cr3t\ns3-s3cr3t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["secretAccessKey"] == "s3-s3cr3t"
+
+
+@respx.mock
+def test_profile_s3_add_takes_no_secret_on_the_command_line(runner):
+    route = _s3_add_route()
+    result = runner.invoke(app, S3_ADD + ["--secret-access-key", "s3-s3cr3t"])
+    assert result.exit_code != 0
+    assert not route.called
+
+
+@respx.mock
+def test_profile_s3_add_needs_exactly_one_secret_source_and_no_blank(runner):
+    route = _s3_add_route()
+    none = runner.invoke(app, S3_ADD)
+    assert none.exit_code != 0 and "exactly one of" in none.output
+    both = runner.invoke(app, S3_ADD + ["--secret-stdin", "--secret-prompt"], input="x\nx\n")
+    assert both.exit_code != 0 and "exactly one of" in both.output
+    blank = runner.invoke(app, S3_ADD + ["--secret-stdin"], input="  \n")
+    assert blank.exit_code != 0 and "blank" in blank.output
     assert not route.called

@@ -532,6 +532,55 @@ final case class RemoveTenantLocationRequest(tenant: String, id: String)
 /** The location added or removed. A local folder needs nothing pushed to running nodes. */
 final case class TenantLocationChangeResponse(location: TenantLocationDto)
 
+/** One of a user's own S3 credentials (`POST /api/profile/s3/{list,add,remove}`,
+  * `POST /api/user/s3/{list,remove}`). Never the secret or the session token: `secretSet` is always
+  * true (a credential without a secret is never stored), `sessionTokenSet` says whether a token is.
+  * `endpoint` as stored (`host[:port]` TLS, `http://host[:port]` plain), None for AWS's own. Times
+  * are epoch milliseconds.
+  */
+final case class S3CredentialDto(
+    id: String,
+    userId: String,
+    scope: String,
+    accessKeyId: String,
+    secretSet: Boolean,
+    sessionTokenSet: Boolean,
+    region: Option[String],
+    endpoint: Option[String],
+    urlStyle: Option[String],
+    createdAt: Long,
+    updatedAt: Long
+)
+
+final case class S3CredentialListResponse(credentials: List[S3CredentialDto])
+
+/** `POST /api/profile/s3/list`: the caller's own credentials; no field. */
+final case class ProfileS3ListRequest()
+
+/** One credential of the caller's own (`POST /api/profile/s3/add`); a scope the caller already
+  * holds is replaced. The secret and the session token are write-only.
+  */
+final case class ProfileS3AddRequest(
+    scope: String,
+    accessKeyId: String,
+    secretAccessKey: String,
+    sessionToken: Option[String] = None,
+    region: Option[String] = None,
+    endpoint: Option[String] = None,
+    urlStyle: Option[String] = None
+):
+  override def toString: String =
+    s"ProfileS3AddRequest(scope=$scope,accessKeyId=$accessKeyId," +
+      s"secretAccessKey=${ai.starlake.quack.model.FederatedSecret.RedactedMarker}," +
+      s"sessionToken=${sessionToken.map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)}," +
+      s"region=$region,endpoint=$endpoint,urlStyle=$urlStyle)"
+
+final case class ProfileS3RemoveRequest(id: String)
+
+final case class UserS3ListRequest(userId: String)
+
+final case class UserS3RemoveRequest(userId: String, id: String)
+
 /** OPA dry run: builds the exact input the edge would send for `user` on `pool` (a `connect`
   * decision without `sql`, a `statement` decision with it) and evaluates it against the tenant's
   * OPA. Nothing is executed and the decision cache is not touched.
@@ -1727,6 +1776,13 @@ object Dtos:
   given Codec[AddTenantLocationRequest]     = ConfiguredCodec.derived
   given Codec[RemoveTenantLocationRequest]  = deriveCodec
   given Codec[TenantLocationChangeResponse] = deriveCodec
+  given Codec[S3CredentialDto]              = deriveCodec
+  given Codec[S3CredentialListResponse]     = deriveCodec
+  given Codec[ProfileS3ListRequest]         = deriveCodec
+  given Codec[ProfileS3AddRequest]          = ConfiguredCodec.derived
+  given Codec[ProfileS3RemoveRequest]       = deriveCodec
+  given Codec[UserS3ListRequest]            = deriveCodec
+  given Codec[UserS3RemoveRequest]          = deriveCodec
   given Codec[SetPoolDisabledRequest]       = deriveCodec
   given Codec[ClientConfigResponse]         = deriveCodec
   given Codec[ConfigEntryView]              = deriveCodec

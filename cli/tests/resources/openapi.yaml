@@ -6306,6 +6306,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/add:
+    post:
+      operationId: postApiProfileS3Add
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3AddRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/list:
+    post:
+      operationId: postApiProfileS3List
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3ListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/profile/s3/remove:
+    post:
+      operationId: postApiProfileS3Remove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileS3RemoveRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/role/column-policy/create:
     post:
       operationId: postApiRoleColumn-policyCreate
@@ -7141,6 +7261,86 @@ paths:
       responses:
         '200':
           description: ''
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/s3/list:
+    post:
+      operationId: postApiUserS3List
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserS3ListRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialListResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/user/s3/remove:
+    post:
+      operationId: postApiUserS3Remove
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserS3RemoveRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CredentialDto'
         '400':
           description: 'Invalid value for: body, Invalid value for: header X-API-Key,
             Invalid value for: cookie qod_session'
@@ -9711,6 +9911,39 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ProfilePool'
+    ProfileS3AddRequest:
+      title: ProfileS3AddRequest
+      type: object
+      required:
+      - scope
+      - accessKeyId
+      - secretAccessKey
+      properties:
+        scope:
+          type: string
+        accessKeyId:
+          type: string
+        secretAccessKey:
+          type: string
+        sessionToken:
+          type: string
+        region:
+          type: string
+        endpoint:
+          type: string
+        urlStyle:
+          type: string
+    ProfileS3ListRequest:
+      title: ProfileS3ListRequest
+      type: object
+    ProfileS3RemoveRequest:
+      title: ProfileS3RemoveRequest
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
     RdbmsConfig:
       title: RdbmsConfig
       type: object
@@ -10016,6 +10249,51 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RowPolicyDto'
+    S3CredentialDto:
+      title: S3CredentialDto
+      type: object
+      required:
+      - id
+      - userId
+      - scope
+      - accessKeyId
+      - secretSet
+      - sessionTokenSet
+      - createdAt
+      - updatedAt
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        scope:
+          type: string
+        accessKeyId:
+          type: string
+        secretSet:
+          type: boolean
+        sessionTokenSet:
+          type: boolean
+        region:
+          type: string
+        endpoint:
+          type: string
+        urlStyle:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+        updatedAt:
+          type: integer
+          format: int64
+    S3CredentialListResponse:
+      title: S3CredentialListResponse
+      type: object
+      properties:
+        credentials:
+          type: array
+          items:
+            $ref: '#/components/schemas/S3CredentialDto'
     ScalePoolRequest:
       title: ScalePoolRequest
       type: object
@@ -11018,6 +11296,25 @@ components:
         userId:
           type: string
         roleId:
+          type: string
+    UserS3ListRequest:
+      title: UserS3ListRequest
+      type: object
+      required:
+      - userId
+      properties:
+        userId:
+          type: string
+    UserS3RemoveRequest:
+      title: UserS3RemoveRequest
+      type: object
+      required:
+      - userId
+      - id
+      properties:
+        userId:
+          type: string
+        id:
           type: string
     UserUpdateRequest:
       title: UserUpdateRequest

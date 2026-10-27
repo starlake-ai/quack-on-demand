@@ -1648,6 +1648,19 @@ object Main extends IOApp with LazyLogging:
         sup,
         restCaller
       )
+      // Users' own S3 credentials (decision 23): self-service on the profile routes, an admin's
+      // list and remove on the user routes. The data-folder check reads the live deny set.
+      val s3CredentialHandlers = new ai.starlake.quack.ondemand.api.UserS3CredentialHandlers(
+        sup,
+        restCaller,
+        mgrCfg.userS3.endpoints,
+        locationRules.dataFolderOverlap,
+        auditRecorder
+      )
+      // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), outside the
+      // api-key guard; it answers only handles this replica minted (issuedHandles).
+      val credentialsRoute =
+        new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, userS3)
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(
@@ -1854,7 +1867,8 @@ object Main extends IOApp with LazyLogging:
               mgrCfg.mcp,
               patAuthenticator.resolve,
               dataTools.tools ++ branchTools.toList.flatMap(_.tools) ++ adminTools.tools ++
-                identityTools.tools ++ accessTools.tools ++ platformTools.tools,
+                identityTools.tools ++ accessTools.tools ++ platformTools.tools ++
+                new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
               serverVersion = "dev"
             ).routes
       if mgrCfg.mcp.enabled && mcpRoutes.isEmpty then
@@ -1929,7 +1943,9 @@ object Main extends IOApp with LazyLogging:
         mcpRoutes = mcpRoutes,
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
-        tenantLocations = Some(tenantLocationHandlers)
+        tenantLocations = Some(tenantLocationHandlers),
+        s3Credentials = Some(s3CredentialHandlers),
+        internalRoutes = List(credentialsRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

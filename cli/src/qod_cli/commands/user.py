@@ -147,3 +147,25 @@ def delete(ctx: typer.Context, user_id: str = typer.Argument(..., metavar="ID"))
 def effective(ctx: typer.Context, user_id: str = typer.Argument(..., metavar="ID")):
     """Closure of roles, groups, table permissions, and pool grants."""
     call(ctx, "GET", f"/api/user/{user_id}/effective")
+
+
+s3_app = typer.Typer(help="A user's own S3 credentials, as an admin sees them: list and remove (only the user adds them).")
+app.add_typer(s3_app, name="s3")
+
+
+@s3_app.command("list")
+@covers("POST", "/api/user/s3/list", {"userId": "USER_ID"})
+def s3_list(ctx: typer.Context, user_id: str = typer.Argument(..., metavar="USER_ID")):
+    """The user's S3 credentials (never a secret)."""
+    call(ctx, "POST", "/api/user/s3/list", body={"userId": user_id})
+
+
+@s3_app.command("remove")
+@covers("POST", "/api/user/s3/remove", {"userId": "USER_ID", "id": "ID"})
+def s3_remove(
+    ctx: typer.Context,
+    user_id: str = typer.Argument(..., metavar="USER_ID"),
+    credential_id: str = typer.Argument(..., metavar="ID", help="The credential id (from `qod user s3 list`)."),
+):
+    """Remove one of the user's S3 credentials."""
+    call(ctx, "POST", "/api/user/s3/remove", body={"userId": user_id, "id": credential_id})

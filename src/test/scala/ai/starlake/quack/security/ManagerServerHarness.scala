@@ -552,6 +552,14 @@ object ManagerServerHarness:
       sup,
       restCaller
     )
+    // Mirror Main: users' own S3 credentials; no data folder in this harness.
+    val s3CredentialHandlers = new ai.starlake.quack.ondemand.api.UserS3CredentialHandlers(
+      sup,
+      restCaller,
+      Nil,
+      _ => Right(None),
+      audit
+    )
     val previewHandlers = new CatalogPreviewHandlers(
       sup,
       store,
@@ -671,7 +679,8 @@ object ManagerServerHarness:
               pa => pa.resolve
             ),
             dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
-              accessTools.tools ++ platformTools.tools,
+              accessTools.tools ++ platformTools.tools ++
+              new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
             serverVersion = "test-harness"
           ).routes
 
@@ -731,6 +740,7 @@ object ManagerServerHarness:
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),
       mcpRoutes = mcpRoutes,
       tenantLocations = Some(tenantLocationHandlers),
+      s3Credentials = Some(s3CredentialHandlers),
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,

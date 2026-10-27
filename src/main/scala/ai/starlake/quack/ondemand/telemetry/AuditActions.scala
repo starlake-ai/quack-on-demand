@@ -55,9 +55,13 @@ object AuditActions:
   val PoolPermissionGrant  = "pool.permission.grant"
   val PoolPermissionRevoke = "pool.permission.revoke"
   // users, roles, groups
-  val UserCreate             = "user.create"
-  val UserUpdate             = "user.update"
-  val UserDelete             = "user.delete"
+  val UserCreate = "user.create"
+  val UserUpdate = "user.update"
+  val UserDelete = "user.delete"
+  // A user's own S3 credential (decision 23): the scope and the credential id are audited, never a
+  // key, the secret or the token.
+  val UserS3CredentialAdd    = "user.s3.add"
+  val UserS3CredentialRemove = "user.s3.remove"
   val RoleCreate             = "role.create"
   val RoleDelete             = "role.delete"
   val RolePermissionGrant    = "role.permission.grant"
@@ -175,6 +179,8 @@ object AuditActions:
     UserCreate,
     UserUpdate,
     UserDelete,
+    UserS3CredentialAdd,
+    UserS3CredentialRemove,
     RoleCreate,
     RoleDelete,
     RolePermissionGrant,

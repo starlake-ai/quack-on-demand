@@ -91,6 +91,8 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/pool/setResources"            -> "set_pool_resources",
     "POST /api/pool/stop"                    -> "stop_pool",
     "POST /api/pool/suspend"                 -> "suspend_pool",
+    "POST /api/profile/s3/list"              -> "list_my_s3_credentials",
+    "POST /api/profile/s3/remove"            -> "remove_my_s3_credential",
     "POST /api/role/column-policy/create"    -> "create_column_policy",
     "POST /api/role/column-policy/delete"    -> "delete_column_policy",
     "POST /api/role/column-policy/update"    -> "update_column_policy",
@@ -138,6 +140,9 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/branch/merge",
     "POST /api/tenant/opaTest", // dry-run diagnostic for policy authors; CLI/REST only
     "POST /api/fleet/",         // fleet servers are operator infrastructure, no agent tool
+    "POST /api/internal/",      // node-to-manager calls (CredentialsRoute, DecideRoute), never REST
+    "POST /api/profile/s3/add", // a secret must not pass through an agent (decision 23)
+    "POST /api/user/s3/",       // an admin's view of a user's S3 credentials: REST, CLI and UI
     "POST /api/scim/",          // IdP wire protocol
     "PUT /api/scim/",
     "PATCH /api/scim/",
@@ -392,9 +397,10 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
       // Branch tools only touch their handlers inside `run`, so a null handler is enough to
       // enumerate the registered names.
       val branchTools             = new McpBranchTools(null, superuserScope)
+      val profileTools            = new McpProfileTools(null)
       val registered: Set[String] =
         (identityTools.tools ++ accessTools.tools ++ adminTools.tools ++ platformTools.tools ++
-          branchTools.tools)
+          branchTools.tools ++ profileTools.tools)
           .map(_.name)
           .toSet
       val referenced = covered.map(_._2).toSet

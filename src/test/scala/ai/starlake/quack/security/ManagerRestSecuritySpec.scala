@@ -232,6 +232,57 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "let a profile session manage its own S3 credentials, and keep the user routes to admins" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val bob = h.mintToken(
+        SecurityFixtures.BobUsername,
+        SecurityFixtures.BobPassword,
+        tenant = Some(SecurityFixtures.TenantId)
+      )
+      val add = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/profile/s3/add",
+        """{"scope":"s3://bob-etl/","accessKeyId":"AKIABOB","secretAccessKey":"bob-sekr3t"}""",
+        apiKey = Some(bob)
+      )
+      withClue(s"add body: ${add.body()}")(add.statusCode() shouldBe 200)
+      add.body() should not include "bob-sekr3t"
+      val mine = post(h.httpClient, s"${h.baseUrl}/api/profile/s3/list", "{}", apiKey = Some(bob))
+      mine.statusCode() shouldBe 200
+      mine.body() should include("s3://bob-etl/")
+      mine.body() should not include "bob-sekr3t"
+      val userBody = s"""{"userId":"${fix.bobUserId}"}"""
+      val denied   =
+        post(h.httpClient, s"${h.baseUrl}/api/user/s3/list", userBody, apiKey = Some(bob))
+      withClue(s"profile session body: ${denied.body()}") {
+        denied.statusCode() shouldBe 403
+        errorCode(denied.body()) should contain("admin_required")
+      }
+      val su = post(
+        h.httpClient,
+        s"${h.baseUrl}/api/user/s3/list",
+        userBody,
+        apiKey = Some(h.superuserSession())
+      )
+      su.statusCode() shouldBe 200
+      su.body() should include("s3://bob-etl/")
+      su.body() should not include "bob-sekr3t"
+      post(h.httpClient, s"${h.baseUrl}/api/profile/s3/list", "{}").statusCode() shouldBe 401
+    finally h.shutdown()
+  }
+
+  it should "refuse a call to /api/internal/ when no internal route is mounted" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      // The harness mounts no internal route: the path falls through to the guard, which refuses.
+      post(h.httpClient, s"${h.baseUrl}/api/internal/authz/credentials", """{"handle":"x"}""")
+        .statusCode() shouldBe 401
+    finally h.shutdown()
+  }
+
   it should "keep a keep-alive connection usable after refusing a POST whose body came late" in {
     // The guard answers before reading the body. Ember then closed the connection it had just
     // answered as keep-alive whenever the body had not arrived with the headers, and the JDK
