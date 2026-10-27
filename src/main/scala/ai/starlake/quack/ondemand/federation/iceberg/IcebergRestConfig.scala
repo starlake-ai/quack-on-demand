@@ -225,8 +225,8 @@ final case class IcebergRestConfig(
       // again.
       if awsCredentials.isDefined && awsScope.isEmpty then
         errs += "awsScope is required: list the S3 prefixes holding this catalog's table data " +
-          "(e.g. s3://my-lake/). An unscoped secret would outrank QoD's own storage secret on " +
-          "every S3 read"
+          "(e.g. s3://my-lake/). An unscoped secret would sign every S3 read on the node that no " +
+          "other secret's scope covers"
       awsScope.foreach { entry =>
         if !IcebergRestConfig.ScopeEntry.matches(entry.trim) then
           errs += s"awsScope entry '$entry' must be an s3:// prefix naming a bucket " +

@@ -209,7 +209,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .isRight shouldBe true
     sup.dataPaths().toSet shouldBe
-      Set("./ducklake/tpch", "/var/data/sales/duck.db", "gs://ops-lake/x")
+      Set(
+        "./ducklake/tpch",
+        "/var/data/sales/duck.db",
+        "/var/data/sales/duck.db" + ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker,
+        "gs://ops-lake/x"
+      )
     val dbName =
       sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("/var/data")).get.name
     sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
@@ -241,7 +246,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       dataPaths = () => sup.dataPaths(),
       unpurgedPrefixes = () => Nil,
       tenantLocations = _ => locs,
-      userScopes = _ => List("s3://lake/"),
+      userScopes = _ => Right(List("s3://lake/")),
       filesRoot = Some("/srv/qod-files"),
       sameHost = false
     ).rulesFor("acme", "u-1").toOption.get

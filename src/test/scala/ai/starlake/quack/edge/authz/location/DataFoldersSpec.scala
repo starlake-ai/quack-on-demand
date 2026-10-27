@@ -118,3 +118,25 @@ class DataFoldersSpec extends AnyFlatSpec with Matchers:
   it should "answer an unreadable path unchanged" in {
     LocalRealPath.of("relative/x") shouldBe "relative/x"
   }
+
+  "a database file's path" should "also deny every name beginning with its own" in {
+    DataFolders.of(
+      "s3://Lake/db/x.duckdb" + DataFolders.NamePrefixMarker,
+      sameHost = false,
+      identity
+    ) shouldBe
+      List("s3://lake/db/x.duckdb/", "s3://lake/db/x.duckdb" + DataFolders.NamePrefixMarker)
+    DataFolders.of(
+      "/srv/x.duckdb" + DataFolders.NamePrefixMarker,
+      sameHost = false,
+      identity
+    ) shouldBe
+      List("/srv/x.duckdb/", "/srv/x.duckdb" + DataFolders.NamePrefixMarker)
+    // A path the checker cannot place stays as it was.
+    DataFolders.of(
+      "ducklake/x.duckdb" + DataFolders.NamePrefixMarker,
+      sameHost = false,
+      identity
+    ) shouldBe
+      List("ducklake/x.duckdb")
+  }

@@ -15,7 +15,7 @@ import org.typelevel.ci.CIString
 import java.nio.charset.StandardCharsets.UTF_8
 import java.time.Instant
 import java.util.Base64
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
 
@@ -87,16 +87,23 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
   private final class Fixture:
     val clock  = new AtomicLong(1_761_200_000_000L)
     val issued = new IssuedHandles(clock = () => clock.get())
-    val cache  = new UserS3CredentialCache(() => Creds)
+    val fails  = new AtomicBoolean(false)
+    val cache  = new UserS3CredentialCache(
+      () => if fails.get() then throw new RuntimeException("pg down") else Creds,
+      () => clock.get()
+    )
     cache.refresh()
-    val keys = new NodeKeys(
+    // Main's wiring: handles and answers both from the served view over the cache.
+    val folders = new AtomicReference[Either[String, List[String]]](Right(Nil))
+    val served  = new ServedUserS3Credentials(cache, () => folders.get())
+    val keys    = new NodeKeys(
       Secret,
       "http://127.0.0.1:20900",
       () => clock.get(),
-      creds = cache,
+      creds = served,
       issued = Some(issued)
     )
-    val route = new CredentialsRoute(keys, issued, cache, () => clock.get())
+    val route = new CredentialsRoute(keys, issued, served, () => clock.get())
 
     def handle(p: NodePrincipal = Alice): String = keys.handle(Node, p)
 
@@ -231,4 +238,38 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     val b = body(f.handle())
     f.clock.addAndGet(NodeHandles.LifetimeMs + NodeHandles.DecideGraceMs + 1)
     f.call(b)._1 shouldBe Status.Unauthorized
+  }
+
+  "a credential whose scope a database now covers" should "be left out of the answer and the handle" in {
+    val f = new Fixture
+    // A database created after the credentials were added, at s3://acme-etl/in/ itself: that
+    // scope is withheld, its ancestor s3://acme-etl/ stays.
+    f.folders.set(Right(List("s3://acme-etl/in/")))
+    val handle        = f.handle()
+    val (st, text, _) = f.call(body(handle))
+    st shouldBe Status.Ok
+    val (_, c) = answer(text)
+    val kept   = Creds.filter(_.id == "a" * 32)
+    c.downField("credentials").downN(0).get[String]("id") shouldBe Right("a" * 32)
+    c.downField("credentials").downN(1).focus shouldBe None
+    c.get[String]("creds") shouldBe Right(UserS3Credentials.digestOf(kept))
+    HandleInspector.payload(handle).hcursor.get[String]("creds") shouldBe
+      Right(UserS3Credentials.digestOf(kept))
+  }
+
+  it should "answer 503 while the deny set cannot be read" in {
+    val f = new Fixture
+    f.folders.set(Left("the database data folders could not be read"))
+    f.call(body(f.handle())) shouldBe
+      (Status.ServiceUnavailable, CredentialsRoute.Unavailable, Some(MediaType.text.plain))
+  }
+
+  "a stale credential cache" should "answer 503 until a reload succeeds" in {
+    val f = new Fixture
+    f.fails.set(true)
+    f.cache.refresh()
+    f.call(body(f.handle()))._1 shouldBe Status.ServiceUnavailable
+    f.fails.set(false)
+    f.clock.addAndGet(UserS3CredentialCache.RetryMs)
+    f.call(body(f.handle()))._1 shouldBe Status.Ok
   }

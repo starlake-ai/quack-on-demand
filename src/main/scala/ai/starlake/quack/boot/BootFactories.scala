@@ -267,7 +267,7 @@ object BootFactories extends LazyLogging:
       dataPaths = () => sup.dataPaths(),
       unpurgedPrefixes = () => store.unpurgedManagedPrefixes().map(_.prefix),
       tenantLocations = sup.tenantLocations,
-      userScopes = userId => sup.userS3.of(userId).map(_.scope),
+      userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
       sameHost = mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local"
     )

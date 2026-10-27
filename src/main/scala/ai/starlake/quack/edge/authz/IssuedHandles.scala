@@ -10,9 +10,11 @@ import java.util.concurrent.TimeUnit
   * could read it would otherwise mint a handle for any principal and fetch that principal's keys.
   *
   * Kept until [[NodeHandles.DecideGraceMs]] past the handle's expiry (a connection keeps its last
-  * handle while it fetches), bounded by `maxEntries`: under a flood of mints the oldest go first,
-  * and their fetch is a retryable 503. In memory only, per replica: a node calls the replica its
-  * handle names.
+  * handle while it fetches), bounded by `maxEntries`. Past the bound Caffeine evicts by W-TinyLFU,
+  * not oldest first: a nonce still in its small admission window (about 1% of the bound) can go
+  * before older ones. The fetch follows the mint within milliseconds, so under a flood that is
+  * rare, and an evicted nonce's fetch is a retryable 503. In memory only, per replica: a node calls
+  * the replica its handle names.
   */
 final class IssuedHandles(
     maxEntries: Long = IssuedHandles.MaxEntries,

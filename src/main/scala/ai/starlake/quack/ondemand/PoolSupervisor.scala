@@ -1654,12 +1654,14 @@ final class PoolSupervisor(
     * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
     * metastore `dataPath` as written. A DuckLake or duckdb-file row whose nodes get none (the spawn
     * script then picks a folder of its own), or one the derivation fails on, counts as
-    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]], and is named once in a WARN.
-    * Then the default metastore's own path. Branch rows are tenant-db rows. Feeds the location
-    * checker's data-folder deny set (edge.authz.location.LiveLocationRules), which adds the managed
-    * prefixes still within their retention window. In memory, like [[duckLakeBuckets]], so HA
-    * replicas stay fresh through the topology refresh; derived again only after a tenant-db change
-    * (the same list until then).
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]], and is named once in a WARN. A
+    * duckdb-file row's path also comes with
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker]], which denies every
+    * name beginning with the file's. Then the default metastore's own path. Branch rows are
+    * tenant-db rows. Feeds the location checker's data-folder deny set
+    * (edge.authz.location.LiveLocationRules), which adds the managed prefixes still within their
+    * retention window. In memory, like [[duckLakeBuckets]], so HA replicas stay fresh through the
+    * topology refresh; derived again only after a tenant-db change (the same list until then).
     */
   def dataPaths(): List[String] =
     val version   = tenantDbsVersion.get()
@@ -1676,16 +1678,27 @@ final class PoolSupervisor(
   private val unplacedWarned = TrieMap.empty[String, Unit]
 
   private def deriveDataPaths(): List[String] =
-    val unplaced = ai.starlake.quack.edge.authz.location.DataFolders.Unplaced
+    val folders  = ai.starlake.quack.edge.authz.location.DataFolders
+    val unplaced = folders.Unplaced
     val rows     = tenantDbs.values.toList
     val perRow   = rows.map { td =>
       val effective =
         try
           effectiveMetastoreFor(td).get("dataPath").map(_.trim).filter(_.nonEmpty) match
+            // A database file: every name beginning with its own is denied too, since its secret,
+            // scoped to the file's path, would sign them (DataFolders.NamePrefixMarker).
+            case Some(p) if td.kind == TenantDbKind.DuckDbFile =>
+              Right(List(p, p + folders.NamePrefixMarker))
             case Some(p)                                  => Right(List(p))
             case None if td.kind == TenantDbKind.InMemory => Right(Nil)
-            case None                                     => Left("its nodes get no data path")
-        catch case scala.util.control.NonFatal(_) => Left("its data path cannot be derived")
+            case None                                     =>
+              Left(
+                "its nodes get no data path (no dataPath of its own and none in the default " +
+                  "metastore), so they pick a folder of their own"
+              )
+        catch
+          case scala.util.control.NonFatal(e) =>
+            Left(s"its data path cannot be derived (${e.getClass.getSimpleName})")
       td -> effective
     }
     val unplacedNow = perRow.collect { case (td, Left(_)) => td.id }.toSet
@@ -1693,9 +1706,9 @@ final class PoolSupervisor(
     perRow.foreach {
       case (td, Left(why)) if unplacedWarned.putIfAbsent(td.id, ()).isEmpty =>
         logger.warn(
-          s"location rules: tenant-db ${td.tenantId}/${td.name} (${td.id}): $why (no dataPath of " +
-            "its own and none in the default metastore), so its nodes pick a folder of their " +
-            "own: every tenant's local file locations are refused until it gets a data path"
+          s"location rules: tenant-db ${td.tenantId}/${td.name} (${td.id}): $why. Every " +
+            "tenant's local file locations are refused until it gets a data path " +
+            s"(${folders.UnplacedReason})"
         )
       case _ => ()
     }

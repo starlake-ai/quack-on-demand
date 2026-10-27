@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{Tenant, UserS3CredentialRules}
+import ai.starlake.quack.model.{Tenant, TenantDbKind, UserS3CredentialRules}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
 import cats.effect.unsafe.implicits.global
@@ -92,4 +92,55 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
     f.sup.userS3.of(f.alice).size shouldBe 1
     f.sup.restore()
     f.sup.userS3.of(f.alice) shouldBe Nil
+  }
+
+  "a credential" should "stop being served and admitted once a database lands at or above its scope" in {
+    val f     = new Fixture
+    val rules = new ai.starlake.quack.edge.authz.location.LiveLocationRules(
+      dataPaths = () => f.sup.dataPaths(),
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = f.sup.tenantLocations,
+      userScopes = u => f.sup.userS3.current(u).map(_.map(_.scope)),
+      filesRoot = None,
+      sameHost = false
+    )
+    val served = new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
+      f.sup.userS3,
+      () => rules.dataFolders()
+    )
+    // Registered first, while nothing lies there.
+    val under = f.put(f.alice, "s3://lake/root/salesdb/main/").toOption.get
+    val at    = f.put(f.alice, "s3://lake/root/salesdb/").toOption.get
+    val above = f.put(f.alice, "s3://lake/").toOption.get
+    served.current(f.alice).map(_.map(_.id).toSet) shouldBe Right(Set(under.id, at.id, above.id))
+    rules.rulesFor("acme", f.alice).map(_.s3Scopes.toSet) shouldBe
+      Right(Set("s3://lake/root/salesdb/main/", "s3://lake/root/salesdb/", "s3://lake/"))
+    // Then a database is created at s3://lake/root/salesdb.
+    f.sup
+      .createTenantDb(
+        "acme",
+        "salesdb",
+        TenantDbKind.DuckLake,
+        Map(
+          "dbName"     -> "acme_salesdb",
+          "schemaName" -> "main",
+          "pgHost"     -> "h",
+          "pgPort"     -> "5432",
+          "pgUser"     -> "u",
+          "pgPassword" -> "p"
+        ),
+        dataPath = "s3://lake/root/salesdb"
+      )
+      .unsafeRunSync()
+      .left
+      .map(_.message)
+      .map(_ => ()) shouldBe Right(())
+    served.current(f.alice).map(_.map(_.id)) shouldBe Right(List(above.id))
+    served.digest(f.alice) shouldBe
+      ai.starlake.quack.edge.authz.UserS3Credentials.digestOf(List(above))
+    val r = rules.rulesFor("acme", f.alice).toOption.get
+    r.s3Scopes shouldBe List("s3://lake/")
+    ai.starlake.quack.edge.authz.location.LocationChecker
+      .check("s3://lake/root/salesdb/main/t/x.parquet", r)
+      .isLeft shouldBe true
   }

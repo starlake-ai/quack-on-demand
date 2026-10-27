@@ -1,5 +1,7 @@
 package ai.starlake.quack.edge.authz.location
 
+import ai.starlake.quack.model.UnshownCodePoints
+
 import java.util.concurrent.atomic.AtomicReference
 
 /** What one principal's statements may name as a file location (spec decisions 15, 18 and 23): the
@@ -67,6 +69,8 @@ object LocationChecker:
         val hit = entriesOf(dataFolders).exists {
           case Entry.Folder(d) =>
             p.segments.length >= d.segments.length && LocationPath.reaches(p, d)
+          case Entry.FileName(d) =>
+            p.segments.length >= d.segments.length && LocationPath.reachesByName(p, d)
           case Entry.WholeBucket(b)                     => p.space == Space.Bucket(b)
           case Entry.UnknownLocal | Entry.UnplacedLocal => false
         }
@@ -85,25 +89,14 @@ object LocationChecker:
         .map(_._1)
     }
 
-  /** `s` as a reason shows it: every [[unshown]] code point dropped, at most 512 code points. */
+  /** `s` as a reason shows it: every code point [[UnshownCodePoints]] names dropped (the same ones
+    * a credential's scope may not hold), at most 512 code points.
+    */
   private def shownOf(s: String): String =
     val b  = new java.lang.StringBuilder
-    val it = s.codePoints.filter(cp => !unshown(cp)).limit(512).iterator
+    val it = s.codePoints.filter(cp => !UnshownCodePoints.isUnshown(cp)).limit(512).iterator
     while it.hasNext do b.appendCodePoint(it.next())
     b.toString
-
-  /** A code point a reason never shows: a control character, a format character (bidi overrides and
-    * isolates, zero-width marks, the supplementary plane's tag characters U+E0001 and
-    * U+E0020-U+E007F), a line or paragraph separator, or a lone surrogate, any of which could make
-    * the text a client or a log displays differ from the path it names. Judged per code point, so a
-    * supplementary character is judged whole, never as its two surrogate halves.
-    */
-  private def unshown(cp: Int): Boolean =
-    Character.isISOControl(cp) || {
-      val t = Character.getType(cp)
-      t == Character.FORMAT || t == Character.LINE_SEPARATOR ||
-      t == Character.PARAGRAPH_SEPARATOR || t == Character.SURROGATE
-    }
 
   /** Left(None): outside; Left(Some(why)): outside, and why. */
   private def admit(p: LocationPath, rules: LocationRules): Either[Option[String], Unit] =
@@ -129,22 +122,31 @@ object LocationChecker:
 
   private enum Entry:
     case Folder(path: LocationPath)
+    case FileName(path: LocationPath)
     case WholeBucket(name: String)
     case UnknownLocal
     case UnplacedLocal
 
-  /** A deny-set entry: a folder; for an `s3://` entry the checker cannot parse, its whole bucket;
-    * for [[DataFolders.Unplaced]] or anything else (a relative data path), every local location.
+  /** A deny-set entry: a folder; a database file's name and every name it begins
+    * ([[DataFolders.NamePrefixMarker]]); for an `s3://` entry the checker cannot parse, its whole
+    * bucket; for [[DataFolders.Unplaced]] or anything else (a relative data path), every local
+    * location.
     */
   private def entry(s: String): Entry =
-    LocationPath.folder(s) match
-      case Some(p)                           => Entry.Folder(p)
-      case None if s == DataFolders.Unplaced => Entry.UnplacedLocal
-      case None if s.startsWith("s3://")     =>
-        Entry.WholeBucket(
-          s.substring("s3://".length).takeWhile(_ != '/').toLowerCase(java.util.Locale.ROOT)
-        )
-      case None => Entry.UnknownLocal
+    if s.endsWith(DataFolders.NamePrefixMarker) then
+      val named = s.dropRight(DataFolders.NamePrefixMarker.length)
+      LocationPath.folder(named).filter(_.segments.nonEmpty) match
+        case Some(p) => Entry.FileName(p)
+        case None    => entry(named)
+    else
+      LocationPath.folder(s) match
+        case Some(p)                           => Entry.Folder(p)
+        case None if s == DataFolders.Unplaced => Entry.UnplacedLocal
+        case None if s.startsWith("s3://")     =>
+          Entry.WholeBucket(
+            s.substring("s3://".length).takeWhile(_ != '/').toLowerCase(java.util.Locale.ROOT)
+          )
+        case None => Entry.UnknownLocal
 
   /** The deny set as parsed entries, kept for the last list judged: the live rules hand every
     * statement the same list until a data path changes, so each data folder is parsed and folded
@@ -165,6 +167,7 @@ object LocationChecker:
     val entries = entriesOf(dataFolders)
     val hit     = entries.exists {
       case Entry.Folder(d)                          => LocationPath.reaches(p, d)
+      case Entry.FileName(d)                        => LocationPath.reachesByName(p, d)
       case Entry.WholeBucket(b)                     => p.space == Space.Bucket(b)
       case Entry.UnknownLocal | Entry.UnplacedLocal => false
     }
@@ -172,5 +175,5 @@ object LocationChecker:
     else if p.isLocal && entries.contains(Entry.UnknownLocal) then
       Some(" (a relative data path of this deployment may lie there)")
     else if p.isLocal && entries.contains(Entry.UnplacedLocal) then
-      Some(" (a database whose data path this manager cannot place may lie there)")
+      Some(s" (${DataFolders.UnplacedReason})")
     else None

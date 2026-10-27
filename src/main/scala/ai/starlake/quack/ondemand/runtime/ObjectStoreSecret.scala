@@ -23,7 +23,10 @@ object ObjectStoreSecret:
 
   /** The scopes of a database's own credentials for `dataPath`, the rule `qod_db_store` here and
     * `qod_data_s3` in the spawn scripts share:
-    *   - a `duckdb-file` path names one file: itself (its `.wal` and `.tmp` begin with it);
+    *   - a `duckdb-file` path names one file: itself (its `.wal` and `.tmp` begin with it). DuckDB
+    *     matches a scope as a string prefix, so no scope can name the file alone: this one also
+    *     reaches every name that begins with the file's (`x.duckdb2/...`). The deny set covers
+    *     those names instead (DataFolders.NamePrefixMarker), so no user URL there is ever admitted;
     *   - a branch prefix (`<parent>__br_<id8>/`): the parent's prefix and its own, since the branch
     *     reads the parent's Parquet in place;
     *   - any other path is a directory: itself with one trailing `/`, and its branches' prefix

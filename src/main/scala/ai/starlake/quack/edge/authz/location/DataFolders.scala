@@ -29,6 +29,17 @@ object DataFolders:
     */
   val Unplaced: String = "(a data path the manager cannot place)"
 
+  /** Why every local location is refused while a database is [[Unplaced]]: the checker's reason and
+    * the supervisor's WARN share it.
+    */
+  val UnplacedReason: String = "a database whose data path this manager cannot place may lie there"
+
+  /** Appended to a data path that names one database file (a `duckdb-file` database): its deny
+    * entries then also cover every name that begins with the file's own (`x.duckdb2/...`), all of
+    * which the database's own secret (scoped to the file's path) would sign.
+    */
+  val NamePrefixMarker: String = "*"
+
   /** The deny-set entries of data path `path`. `sameHost`: nodes run on this host and resolve a
     * relative data path against this process's directory (the local runtime), so a relative path is
     * resolved and every local entry is joined by its real path (`realPath`). Off the local runtime
@@ -40,6 +51,12 @@ object DataFolders:
     val lower = p.toLowerCase(Locale.ROOT)
     if p.isEmpty then Nil
     else if p == Unplaced then List(Unplaced)
+    else if p.endsWith(NamePrefixMarker) then
+      val named = of(p.dropRight(NamePrefixMarker.length), sameHost, realPath)
+      named ++ named.collect {
+        case e if e.endsWith("/") && LocationPath.folder(e).exists(_.segments.nonEmpty) =>
+          e.stripSuffix("/") + NamePrefixMarker
+      }
     else if lower.startsWith("file:") then
       fileUrlPath(p.substring("file:".length)) match
         case Some(local0) => local(local0, sameHost, realPath)

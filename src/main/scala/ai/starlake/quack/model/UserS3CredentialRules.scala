@@ -11,7 +11,8 @@ import java.util.{Locale, UUID}
   *   - `scope`: `s3://<bucket>/` or `s3://<bucket>/<prefix>/`, stored with one trailing `/`. The
   *     bucket follows S3's rules, is lowercase (DuckDB matches secret scopes case-sensitively) and
   *     is no access point alias ([[S3BucketName]]); no segment is empty, `.` or `..`, and none
-  *     holds `%`, `?`, `#`, `\`, a glob character or a control character (decision 18's URL rules).
+  *     holds `%`, `?`, `#`, `\`, a glob character, or a code point no listing may show
+  *     ([[UnshownCodePoints]]: control, format, separator) (decision 18's URL rules).
   *   - the access key id and the secret are required; the session token, the region and the URL
   *     style (`path` or `vhost`) are optional.
   *   - an endpoint only when the operator lists it (`QOD_USER_S3_ALLOWED_ENDPOINTS`): a node would
@@ -63,8 +64,8 @@ object UserS3CredentialRules:
   private val MaxToken     = 8192
   private val ScopeRefusal =
     "invalid_scope" -> ("a scope is s3://<bucket>/ or s3://<bucket>/<prefix>/: a lowercase bucket, " +
-      "whole path segments, no empty, '.' or '..' segment, and no '%', '?', '#', '\\', glob or " +
-      "control character")
+      "whole path segments, no empty, '.' or '..' segment, and no '%', '?', '#', '\\', glob, " +
+      "control, format or separator character")
   private val AliasRefusal =
     "invalid_scope" -> ("a scope names the bucket itself, never an access point alias (a name " +
       s"ending in ${S3BucketName.AliasSuffixes.mkString(", ")})")
@@ -85,7 +86,7 @@ object UserS3CredentialRules:
   /** `raw` as a stored scope (see the object's scaladoc), or the refusal. */
   def normalizeScope(raw: String): Either[(String, String), String] =
     val s = raw.trim
-    if !s.startsWith("s3://") || s.length > MaxScope || s.exists(_.isControl) ||
+    if !s.startsWith("s3://") || s.length > MaxScope || UnshownCodePoints.holdsAny(s) ||
       s.exists(c => Forbidden.indexOf(c) >= 0)
     then Left(ScopeRefusal)
     else
@@ -101,7 +102,8 @@ object UserS3CredentialRules:
       else Right(s"s3://$bucket/" + parts.map(_ + "/").mkString)
 
   /** `e` as an allowed-endpoint entry: `host[:port]` for TLS (an `https://` prefix dropped),
-    * `http://host[:port]` for plain HTTP, the host lowercase, no path. None when it is neither.
+    * `http://host[:port]` for plain HTTP, the host lowercase, the port 1 to 65535, no path. None
+    * when it is neither.
     */
   def normalizeEndpoint(e: String): Option[String] =
     val t                  = e.trim.stripSuffix("/")
@@ -110,7 +112,12 @@ object UserS3CredentialRules:
       if lower.startsWith("http://") then ("http://", lower.substring("http://".length))
       else if lower.startsWith("https://") then ("", lower.substring("https://".length))
       else ("", lower)
-    Option.when(HostPortRe.matches(hostPort) && !hostPort.contains(".."))(prefix + hostPort)
+    val portOk = hostPort.lastIndexOf(':') match
+      case -1 => true
+      case i  => hostPort.substring(i + 1).toIntOption.exists(p => p >= 1 && p <= 65535)
+    Option.when(HostPortRe.matches(hostPort) && !hostPort.contains("..") && portOk)(
+      prefix + hostPort
+    )
 
   /** `QOD_USER_S3_ALLOWED_ENDPOINTS`: comma separated `host[:port]` (TLS) or `http://host[:port]`
     * (plain). An `https://` entry is refused (write `host[:port]`), so an entry reads as exactly

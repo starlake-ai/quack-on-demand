@@ -425,7 +425,7 @@ class IcebergRestConfigSpec extends AnyFlatSpec with Matchers:
     errs.exists(_.contains("awsCredentials")) shouldBe true
   }
 
-  it should "require a scope, because an unscoped secret outranks QoD's storage secret" in {
+  it should "require a scope, because an unscoped secret signs every read no other scope covers" in {
     val errs = glueWithKeys.copy(awsScope = Nil).validate("glue_lake", Set.empty)
     errs.exists(_.contains("awsScope")) shouldBe true
   }

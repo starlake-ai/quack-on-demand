@@ -14,7 +14,8 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
   // Each user's own S3 credential scopes (decision 23); a malformed stored one never admits.
   private val Scopes = Map(
     "u-1" -> List("s3://acme-etl/", "s3://acme-etl/", "not-a-scope", "/srv/qod-files/acme/in/"),
-    "u-3" -> List("s3://other-etl/in/")
+    "u-3" -> List("s3://other-etl/in/"),
+    "u-4" -> List("s3://lake/root/salesdb/main/", "s3://lake/")
   )
 
   private val Locations = Map(
@@ -38,7 +39,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
         List("s3://managed/acme_old-0f0f0f0f/")
       },
       tenantLocations = t => Locations.getOrElse(t, Nil),
-      userScopes = u => Scopes.getOrElse(u, Nil),
+      userScopes = u => Right(Scopes.getOrElse(u, Nil)),
       filesRoot = filesRoot,
       sameHost = false,
       clock = () => clock.get()
@@ -108,11 +109,15 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
       val f = new Fixture()
       f.paths.set(List(root))
       val r = f.rules.rulesFor("acme", "u-1").toOption.get
-      List("s3://acme-etl/", "s3://acme-etl/in/x.csv", "s3://acme-etl/**").foreach(p =>
-        withClue(s"$root / $p")(
-          LocationChecker.check(p, r) shouldBe Left(s"$p ${LocationChecker.DataFolder}")
-        )
-      )
+      // The user's own scope s3://acme-etl/ now lies at a data folder: it is withheld.
+      r.s3Scopes shouldBe Nil
+      val held = r.copy(s3Scopes = List("s3://acme-etl/"))
+      List("s3://acme-etl/", "s3://acme-etl/in/x.csv", "s3://acme-etl/**").foreach { p =>
+        withClue(s"$root / $p") {
+          LocationChecker.check(p, r).isLeft shouldBe true
+          LocationChecker.check(p, held) shouldBe Left(s"$p ${LocationChecker.DataFolder}")
+        }
+      }
     }
 
   it should "deny every local location for an unreadable local data path, fail closed" in {
@@ -136,7 +141,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
         dataPaths = () => Nil,
         unpurgedPrefixes = () => Nil,
         tenantLocations = t => Locations.getOrElse(t, Nil),
-        userScopes = u => Scopes.getOrElse(u, Nil),
+        userScopes = u => Right(Scopes.getOrElse(u, Nil)),
         filesRoot = Some("/srv/qod-files/"),
         sameHost = true,
         realPath = real
@@ -151,7 +156,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
       dataPaths = () => List("/srv/qod-files/acme/in/lake"),
       unpurgedPrefixes = () => Nil,
       tenantLocations = t => Locations.getOrElse(t, Nil),
-      userScopes = u => Scopes.getOrElse(u, Nil),
+      userScopes = u => Right(Scopes.getOrElse(u, Nil)),
       filesRoot = Some("/srv/qod-files/"),
       sameHost = true,
       realPath = real
@@ -199,4 +204,56 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     // The dropped path is still denied for RecentMs, so the set itself is the same.
     second.toSet shouldBe first.toSet
     f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders should be theSameInstanceAs second
+  }
+
+  "a user's scope" should "stop counting once a database lands at it or above it" in {
+    val f = new Fixture()
+    f.rules.rulesFor("acme", "u-4").toOption.get.s3Scopes shouldBe
+      List("s3://lake/root/salesdb/main/", "s3://lake/")
+    // A DuckLake database created afterwards at an ancestor of the scope.
+    f.paths.set(f.paths.get() :+ "s3://lake/root/salesdb")
+    val r = f.rules.rulesFor("acme", "u-4").toOption.get
+    r.s3Scopes shouldBe List("s3://lake/")
+    LocationChecker.admittedBy("s3://lake/root/salesdb/main/t/x.parquet", r) shouldBe
+      Some("s3://lake/")
+    LocationChecker.check("s3://lake/root/salesdb/main/t/x.parquet", r).isLeft shouldBe true
+  }
+
+  it should "make the rules unavailable while the user's credentials cannot be read" in {
+    val r = new LiveLocationRules(
+      dataPaths = () => Nil,
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = t => Locations.getOrElse(t, Nil),
+      userScopes = _ => Left("the users' S3 credentials could not be read"),
+      filesRoot = Some("/srv/qod-files"),
+      sameHost = false
+    )
+    r.rulesFor("acme", "u-1") shouldBe Left("the users' S3 credentials could not be read")
+  }
+
+  "on the local runtime" should "resolve the root and the folders once per rebuild, not per statement" in {
+    val calls = new AtomicInteger(0)
+    val clock = new AtomicLong(1_000_000L)
+    val r     = new LiveLocationRules(
+      dataPaths = () => Nil,
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = t => Locations.getOrElse(t, Nil),
+      userScopes = u => Right(Scopes.getOrElse(u, Nil)),
+      filesRoot = Some("/srv/qod-files/"),
+      sameHost = true,
+      clock = () => clock.get(),
+      realPath = p => { calls.incrementAndGet(); p }
+    )
+    val first = r.rulesFor("acme", "u-1").toOption.get
+    val once  = calls.get()
+    once should be > 0
+    (1 to 5).foreach(_ =>
+      r.rulesFor("acme", "u-3").toOption.get shouldBe first.copy(
+        s3Scopes = List("s3://other-etl/in/")
+      )
+    )
+    calls.get() shouldBe once
+    clock.addAndGet(LiveLocationRules.EntryTtlMs)
+    r.rulesFor("acme", "u-1").toOption.get.tenantFolders shouldBe first.tenantFolders
+    calls.get() should be > once
   }

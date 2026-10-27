@@ -214,7 +214,12 @@ switch -Regex ($dataPath) {
       $dataScopes = ($scopes | ForEach-Object { "'" + (Sql-Quote $_) + "'" }) -join ', '
       $ep = Env-Or 'QOD_S3_ENDPOINT' ''
       $ep = Sql-Quote ($ep -replace '^https?://', '' -replace '/$', '')
-      $s3UseSsl = Env-Or 'QOD_S3_USE_SSL' 'true'
+      # USE_SSL is spliced into SQL unquoted: true or false only (mirrors spawn-quack-node.sh).
+      $s3UseSsl = (Env-Or 'QOD_S3_USE_SSL' 'true').ToLowerInvariant()
+      if ($s3UseSsl -cne 'true' -and $s3UseSsl -cne 'false') {
+        [Console]::Error.WriteLine("ERROR: QOD_S3_USE_SSL must be true or false.")
+        Exit-Spawn 1
+      }
       $s3Key = Secret-Or 'QOD_S3_ACCESS_KEY_ID' ''
       $s3Sec = Secret-Or 'QOD_S3_SECRET_ACCESS_KEY' ''
       if (-not [string]::IsNullOrEmpty($s3Key) -and -not [string]::IsNullOrEmpty($s3Sec)) {

@@ -105,6 +105,23 @@ private[location] object LocationPath:
       }
     }
 
+  /** Whether `p` reaches database file `d` by name: [[reaches]], `d`'s last segment matched as a
+    * name prefix (`x.duckdb` reaches `x.duckdb2/...`, `x.duckdb.wal` and `x.duckdbx`). DuckDB signs
+    * a path with the secret whose scope is its longest string prefix, and a file's own scope (the
+    * file's path, ObjectStoreSecret.dataScopes) is a string prefix of every name that begins with
+    * it.
+    */
+  def reachesByName(p: LocationPath, d: LocationPath): Boolean =
+    p.space == d.space && d.segments.nonEmpty && {
+      val n = d.segments.length
+      val k = math.min(p.literalLength, n)
+      (0 until k).forall { i =>
+        val a = p.denialSegments(i)
+        val b = d.denialSegments(i)
+        if i == n - 1 then a.startsWith(b) else a == b
+      }
+    }
+
   /** An absolute local path an operator configured (a data path, the files root, an authorized
     * folder), in the checker's spelling: forward slashes, an uppercase drive letter, `.` and empty
     * segments dropped, `..` applied, a trailing `/`. None when it is not absolute, is a POSIX path

@@ -157,7 +157,9 @@ fi
 # (qod_uc_<id8>, which qod-node installs per connection) or with nothing. A key a secret leaves out
 # is filled from the s3_* settings, so every key is named; qod-node resets the GLOBAL ones the
 # environment filled whenever httpfs loads. The scopes follow ObjectStoreSecret.dataScopes: a
-# duckdb-file path itself; a branch prefix <parent>__br_<id8>/ its parent's prefix and its own (it
+# duckdb-file path itself (DuckDB matches a scope as a string prefix, so it also reaches every name
+# beginning with the file's; the manager's deny set refuses those names); a branch prefix
+# <parent>__br_<id8>/ its parent's prefix and its own (it
 # reads the parent's Parquet in place); any other path itself plus one '/' and its branches' prefix
 # <path>__br_ (a merge node attaches a branch beside its parent).
 IS_REMOTE=0
@@ -177,6 +179,12 @@ case "$dataPath" in
       else
         data_scopes="'$(sql_quote "${dataPath%/}/")', '$(sql_quote "${dataPath%/}__br_")'"
       fi
+      # USE_SSL is spliced into SQL unquoted: true or false only.
+      s3_use_ssl="$(printf '%s' "${QOD_S3_USE_SSL:-true}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$s3_use_ssl" != "true" && "$s3_use_ssl" != "false" ]]; then
+        echo "ERROR: QOD_S3_USE_SSL must be true or false." >&2
+        exit 1
+      fi
       # Strip http(s):// from the endpoint - DuckDB wants "host:port".
       ep="${QOD_S3_ENDPOINT:-}"
       ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
@@ -190,7 +198,7 @@ CREATE OR REPLACE SECRET qod_data_s3 (
   REGION '$(sql_quote "${QOD_S3_REGION:-us-east-1}")',
   ENDPOINT '$(sql_quote "$ep")',
   URL_STYLE '$(sql_quote "${QOD_S3_URL_STYLE:-path}")',
-  USE_SSL ${QOD_S3_USE_SSL:-true},
+  USE_SSL ${s3_use_ssl},
   KMS_KEY_ID '',
   URL_COMPATIBILITY_MODE false,
   REQUESTER_PAYS false,
@@ -217,7 +225,7 @@ CREATE OR REPLACE SECRET qod_data_s3 (
   REFRESH 'auto',$region_line
   ENDPOINT '$(sql_quote "$ep")',
   URL_STYLE '$(sql_quote "${QOD_S3_URL_STYLE:-vhost}")',
-  USE_SSL ${QOD_S3_USE_SSL:-true},
+  USE_SSL ${s3_use_ssl},
   URL_COMPATIBILITY_MODE false,
   SCOPE [$data_scopes]
 );"

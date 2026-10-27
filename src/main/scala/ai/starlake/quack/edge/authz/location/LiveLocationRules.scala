@@ -25,15 +25,18 @@ trait LocationRulesSource:
   *
   * `filesRoot` is `QOD_TENANT_FILES_ROOT` (`TenantFilesConfig.rootOpt`; a relative or blank one
   * authorizes nothing). A tenant folder counts only under `<root>/<tenantId>/`; an `s3://` URL
-  * counts under the user's own credential scopes (`userScopes`, the supervisor's cache), a
-  * malformed one never. `sameHost` (the local runtime): local paths are also taken through
-  * `realPath`, as the node resolves them.
+  * counts under the user's own credential scopes (`userScopes`, the supervisor's cache; Left while
+  * they cannot be read, and the rules are then unavailable), never under a malformed one nor under
+  * one that now lies at or under a data folder ([[LocationChecker.scopeError]]: a database created
+  * after the scope was added). `sameHost` (the local runtime): local paths are also taken through
+  * `realPath`, as the node resolves them; the root's real path and each tenant's folders are
+  * resolved with the deny set and kept as long ([[LiveLocationRules.EntryTtlMs]] at most).
   */
 final class LiveLocationRules(
     dataPaths: () => List[String],
     unpurgedPrefixes: () => List[String],
     tenantLocations: String => List[TenantLocation],
-    userScopes: String => List[String],
+    userScopes: String => Either[String, List[String]],
     filesRoot: Option[String],
     sameHost: Boolean,
     clock: () => Long = () => System.currentTimeMillis(),
@@ -54,21 +57,28 @@ final class LiveLocationRules(
       paths: List[String],
       prefixes: List[String],
       validUntil: Long,
-      folders: List[String]
+      folders: List[String],
+      rootReal: Option[String]
   )
 
   private val built = new AtomicReference[Option[Built]](None)
 
+  /** tenant id -> the locations its folders were resolved from, and the folders; emptied with every
+    * rebuild of the deny set, so a real path is resolved again at least every EntryTtlMs.
+    */
+  private val folderCache = TrieMap.empty[String, (List[TenantLocation], List[String])]
+
   /** Every database data folder of the deployment, as the deny set holds it now: the same list
     * instance while nothing it is built from changes (LocationChecker parses each list once).
     */
-  def dataFolders(): Either[String, List[String]] =
+  def dataFolders(): Either[String, List[String]] = current().map(_.folders)
+
+  private def current(): Either[String, Built] =
     storePrefixes().map { prefixes =>
       val now   = clock()
       val paths = dataPaths()
       built.get() match
-        case Some(b) if b.paths == paths && b.prefixes == prefixes && now < b.validUntil =>
-          b.folders
+        case Some(b) if b.paths == paths && b.prefixes == prefixes && now < b.validUntil => b
         case previous => synchronized(rebuild(paths, prefixes, previous, now))
     }
 
@@ -80,7 +90,7 @@ final class LiveLocationRules(
       prefixes: List[String],
       previous: Option[Built],
       now: Long
-  ): List[String] =
+  ): Built =
     previous.foreach(_.paths.foreach(p => seen.put(p, now)))
     paths.foreach(p => seen.put(p, now))
     seen.filterInPlace((_, at) => now - at <= RecentMs)
@@ -92,19 +102,38 @@ final class LiveLocationRules(
     val livePaths  = paths.toSet
     val firstGone  = seen.collect { case (p, at) if !livePaths.contains(p) => at + RecentMs + 1 }
     val validUntil = (now + EntryTtlMs) +: firstGone.toList
-    built.set(Some(Built(paths, prefixes, validUntil.min, folders)))
-    folders
+    folderCache.clear()
+    val b = Built(paths, prefixes, validUntil.min, folders, root.map(real))
+    built.set(Some(b))
+    b
 
   def rulesFor(tenantId: String, userId: String): Either[String, LocationRules] =
-    dataFolders().map { folders =>
-      LocationRules(
-        s3Scopes =
-          userScopes(userId).filter(s => LocationPath.folder(s).exists(!_.isLocal)).distinct,
-        tenantFolders = tenantFolders(tenantId, tenantLocations(tenantId)),
-        dataFolders = folders,
-        filesRoot = root.map(real)
-      )
-    }
+    for
+      b      <- current()
+      scopes <- userScopes(userId)
+    yield LocationRules(
+      s3Scopes = scopes
+        .filter(s =>
+          LocationPath.folder(s).exists(!_.isLocal) &&
+            LocationChecker.scopeError(s, b.folders).isEmpty
+        )
+        .distinct,
+      tenantFolders = cachedTenantFolders(tenantId),
+      dataFolders = b.folders,
+      filesRoot = b.rootReal
+    )
+
+  /** [[tenantFolders]] of `tenantId`, kept while its locations are unchanged and until the next
+    * rebuild of the deny set.
+    */
+  private def cachedTenantFolders(tenantId: String): List[String] =
+    val locations = tenantLocations(tenantId)
+    folderCache.get(tenantId) match
+      case Some((from, folders)) if from == locations => folders
+      case _                                          =>
+        val folders = tenantFolders(tenantId, locations)
+        folderCache.put(tenantId, (locations, folders))
+        folders
 
   /** Why a user may not hold an S3 credential for `scope` ([[LocationChecker.scopeError]] against
     * the deny set as it is now); Left when the deny set could not be read.

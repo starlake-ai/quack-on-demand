@@ -473,6 +473,14 @@ object Main extends IOApp with LazyLogging:
     // serves them to nodes. One instance for the three.
     val userS3 =
       new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
+    // What NodeKeys digests and the credentials endpoint serves: the cache without a credential
+    // whose scope now lies at or under a database data folder. The deny set is the location
+    // rules', built after the supervisor (denySet is set there); until then nothing is served.
+    val denySet = new java.util.concurrent.atomic.AtomicReference[
+      () => Either[String, List[String]]
+    ](() => Left("the database data folders are not loaded yet"))
+    val servedUserS3 =
+      new ai.starlake.quack.edge.authz.ServedUserS3Credentials(userS3, () => denySet.get()())
     // The nonces of the handles this replica mints: the credentials endpoint answers only those.
     val issuedHandles = new ai.starlake.quack.edge.authz.IssuedHandles()
     // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
@@ -486,7 +494,7 @@ object Main extends IOApp with LazyLogging:
             secret,
             mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
             versions = policyVersions,
-            creds = userS3,
+            creds = servedUserS3,
             issued = Some(issuedHandles)
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
@@ -643,6 +651,7 @@ object Main extends IOApp with LazyLogging:
     // The tenants' local folders, the users' S3 scopes and every database data folder, read live
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
+    denySet.set(() => locationRules.dataFolders())
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
       sup.serverLivenessAll =
@@ -1660,7 +1669,7 @@ object Main extends IOApp with LazyLogging:
       // The node-to-manager credentials fetch (POST /api/internal/authz/credentials), outside the
       // api-key guard; it answers only handles this replica minted (issuedHandles).
       val credentialsRoute =
-        new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, userS3)
+        new ai.starlake.quack.edge.authz.CredentialsRoute(nodeKeys, issuedHandles, servedUserS3)
 
       val previewHandlers: Option[ai.starlake.quack.ondemand.api.CatalogPreviewHandlers] = Some(
         new ai.starlake.quack.ondemand.api.CatalogPreviewHandlers(

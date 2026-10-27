@@ -30,9 +30,11 @@ import java.util.Base64
   * "region","scope","secret","sessionToken","urlStyle","useSsl"}],"creds":"<digest>","v":1}`, every
   * member present (null when unset), by id, `creds` the digest of the set served; 401 when the node
   * or the handle fails; 503 [[CredentialsRoute.ContextExpired]] for a handle this replica did not
-  * mint or no longer remembers (retryable); 400 for a malformed request; 413 past
-  * [[CredentialsRoute.MaxBodyBytes]]. The system principal has no credential: an empty set. The log
-  * never holds the body, the handle, the signature, the answer or a key.
+  * mint or no longer remembers, and 503 [[CredentialsRoute.Unavailable]] while the principal's set
+  * cannot be served ([[UserS3Credentials.current]]: a stale cache, an unreadable deny set), both
+  * retryable; 400 for a malformed request; 413 past [[CredentialsRoute.MaxBodyBytes]]. The system
+  * principal has no credential: an empty set. The log never holds the body, the handle, the
+  * signature, the answer or a key.
   */
 final class CredentialsRoute(
     keys: NodeKeys,
@@ -87,9 +89,13 @@ final class CredentialsRoute(
     else
       issued.get(h.nonce) match
         case Some(i) if i.node == nodeId && i.principalId == p.id =>
-          val set = creds.of(p.id)
-          logger.info(s"authz credentials: ${set.size} for ${p.name} on node '$nodeId'")
-          (Status.Ok, signed(key, set))
+          creds.current(p.id) match
+            case Right(set) =>
+              logger.info(s"authz credentials: ${set.size} for ${p.name} on node '$nodeId'")
+              (Status.Ok, signed(key, set))
+            case Left(why) =>
+              logger.warn(s"authz credentials: none served to ${p.name} on node '$nodeId': $why")
+              (Status.ServiceUnavailable, Unavailable)
         case Some(_) => refused(nodeId, "handle does not match the one this replica minted")
         case None    =>
           logger.info(s"authz credentials: no minted handle for ${p.name} on node '$nodeId'")
@@ -121,6 +127,11 @@ object CredentialsRoute:
 
   /** A handle this replica did not mint, or no longer remembers: the decide endpoint's wording. */
   val ContextExpired: String = "authorization context expired; retry"
+
+  /** The principal's credentials cannot be vouched for now (the store or the data-folder deny set
+    * could not be read): retryable.
+    */
+  val Unavailable: String = "S3 credentials unavailable; retry"
 
   private val NodeIdText = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}".r
   private val MacText    = "[0-9a-f]{64}".r

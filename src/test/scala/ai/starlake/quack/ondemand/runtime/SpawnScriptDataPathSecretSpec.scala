@@ -190,6 +190,17 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
         include("SECRET 'it''s'")
     }
 
+    it should "refuse a QOD_S3_USE_SSL other than true or false, spliced unquoted into SQL" in {
+      a[RuntimeException] should be thrownBy
+        initSql("s3://lake/acme_lake", "QOD_S3_USE_SSL" -> "false, SCOPE 's3://'")
+      secret(initSql("s3://lake/acme_lake", "QOD_S3_USE_SSL" -> "TRUE"), "qod_data_s3").get should
+        include("USE_SSL true")
+      secret(
+        initSql("s3://lake/acme_lake", (NoManagerKeys :+ ("QOD_S3_USE_SSL" -> "False"))*),
+        "qod_data_s3"
+      ).get should include("USE_SSL false")
+    }
+
 class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPathSecretCases:
   protected val command            = Seq("bash", "scripts/spawn-quack-node.sh", "21999")
   protected def assumeHost(): Unit = ()

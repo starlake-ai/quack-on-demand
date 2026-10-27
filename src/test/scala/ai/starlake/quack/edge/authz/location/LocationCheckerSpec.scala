@@ -395,3 +395,39 @@ class LocationCheckerSpec extends AnyFlatSpec with Matchers:
     LocationChecker.scopeError(tagged, List(tagged)) shouldBe
       Some(s"s3://shared-lake/lake-1/ ${LocationChecker.DataFolder}")
   }
+
+  "a database file" should "deny every name beginning with its own, which its secret would sign" in {
+    val file =
+      DataFolders.of("s3://shared-lake/x.duckdb" + DataFolders.NamePrefixMarker, false, identity)
+    val rules = Rules.copy(dataFolders = file)
+    dataFolder("s3://shared-lake/x.duckdb", rules)
+    dataFolder("s3://shared-lake/x.duckdb.wal", rules)
+    dataFolder("s3://shared-lake/x.duckdb2/f.parquet", rules)
+    dataFolder("s3://shared-lake/X.DUCKDB2/f.parquet", rules)
+    dataFolder("s3://shared-lake/x.d*/f.parquet", rules)
+    ok("s3://shared-lake/x.duck/f.parquet", rules)
+    ok("s3://shared-lake/y.duckdb/f.parquet", rules)
+    LocationChecker.scopeError("s3://shared-lake/x.duckdb2/", file) shouldBe
+      Some(s"s3://shared-lake/x.duckdb2/ ${LocationChecker.DataFolder}")
+    LocationChecker.scopeError("s3://shared-lake/", file) shouldBe None
+    // A local file too, under its tenant folder.
+    val local = Rules.copy(dataFolders =
+      DataFolders.of(
+        "/srv/qod-files/acme/in/f.duckdb" + DataFolders.NamePrefixMarker,
+        false,
+        identity
+      )
+    )
+    dataFolder("/srv/qod-files/acme/in/f.duckdb2/x.csv", local)
+    ok("/srv/qod-files/acme/in/g.csv", local)
+  }
+
+  "the unplaced reason" should "be the one the supervisor's WARN names" in {
+    LocationChecker.check(
+      "/srv/qod-files/acme/in/x.csv",
+      Rules.copy(dataFolders = List(DataFolders.Unplaced))
+    ) shouldBe
+      Left(
+        s"/srv/qod-files/acme/in/x.csv ${LocationChecker.DataFolder} (${DataFolders.UnplacedReason})"
+      )
+  }

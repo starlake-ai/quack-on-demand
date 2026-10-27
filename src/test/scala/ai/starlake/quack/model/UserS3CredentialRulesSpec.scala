@@ -197,3 +197,26 @@ class UserS3CredentialRulesSpec extends AnyFlatSpec with Matchers:
     val tls = c.copy(endpoint = Some("minio.internal:9000"))
     (tls.useSsl, tls.endpointHost) shouldBe (true, "minio.internal:9000")
   }
+
+  "a scope" should "refuse the code points no listing may show: format, separator, lone surrogate" in
+    List(
+      "s3://acme-etl/in\u200b/",
+      "s3://acme-etl/in\u202e/",
+      "s3://acme-etl/in\u2028/",
+      "s3://acme-etl/in\uDB40\uDC41/",
+      "s3://acme-etl/in\uD834/"
+    ).foreach { raw =>
+      withClue(raw.codePoints.toArray.map(Integer.toHexString).mkString(" ")) {
+        UserS3CredentialRules.normalizeScope(raw).left.map(_._1) shouldBe Left("invalid_scope")
+      }
+    }
+
+  "an allowed endpoint's port" should "lie between 1 and 65535" in {
+    UserS3CredentialRules.normalizeEndpoint("minio.internal:65535") shouldBe Some(
+      "minio.internal:65535"
+    )
+    UserS3CredentialRules.normalizeEndpoint("minio.internal:1") shouldBe Some("minio.internal:1")
+    List("minio.internal:0", "minio.internal:65536", "minio.internal:99999", "http://h.example:0")
+      .foreach(e => withClue(e)(UserS3CredentialRules.normalizeEndpoint(e) shouldBe None))
+    UserS3CredentialRules.parseAllowedEndpoints("minio.internal:99999").isLeft shouldBe true
+  }
