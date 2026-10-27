@@ -8222,6 +8222,7 @@ components:
       - objectStoreSql
       - extraSetupSql
       - lockdownSql
+      - tenantStoreSql
       - nodeExtensions
       properties:
         epoch:
@@ -8249,6 +8250,8 @@ components:
         extraSetupSql:
           type: string
         lockdownSql:
+          type: string
+        tenantStoreSql:
           type: string
         nodeExtensions:
           $ref: '#/components/schemas/FleetNodeExtensionsDto'

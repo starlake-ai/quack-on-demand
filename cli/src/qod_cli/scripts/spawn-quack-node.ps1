@@ -39,7 +39,7 @@
   $env:QOD_NODE_BIN names it (an absolute path the launcher sets); otherwise the first `qod-node`
   on PATH.
 
-  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, the node token, the
+  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, tenantStoreSql, the node token, the
   node key and the object-store credentials, see $SecretKeys below) NEVER arrive through the
   environment or the command line: another process of the same user can read both. They arrive as
   one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an
@@ -84,8 +84,8 @@ $startDir = (Get-Location).ProviderPath
 
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.sh and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
-$SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql', 'QOD_NODE_TOKEN',
-  'QOD_NODE_AUTHZ_KEY', 'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY',
+$SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql', 'tenantStoreSql',
+  'QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY', 'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY',
   'QOD_AZURE_CONNECTION_STRING', 'QOD_GCS_KEY_ID', 'QOD_GCS_SECRET')
 # The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
 # script never reads them.
@@ -152,6 +152,7 @@ $dbInitSql      = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql  = Secret-Or 'extraSetupSql' ''
 $lockdownSql    = [Environment]::GetEnvironmentVariable('lockdownSql')
 $objectStoreSql = Secret-Or 'objectStoreSql' ''
+$tenantStoreSql = Secret-Or 'tenantStoreSql' ''
 
 function Env-Or([string]$name, [string]$default) {
   $v = [Environment]::GetEnvironmentVariable($name)
@@ -526,6 +527,9 @@ if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql)
 # database may carry an objectStore (TenantDb.validate permits it), and a `memory` database
 # of views over remote parquet reads nothing without the CREATE SECRET. Must precede ATTACH.
 if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
+# The tenant's authorized S3 locations (TenantLocationSecrets.scala): one bucket-scoped secret per
+# line, before any ATTACH, as in spawn-quack-node.sh.
+if (-not [string]::IsNullOrEmpty($tenantStoreSql)) { [void]$sb.AppendLine($tenantStoreSql) }
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
 # mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently

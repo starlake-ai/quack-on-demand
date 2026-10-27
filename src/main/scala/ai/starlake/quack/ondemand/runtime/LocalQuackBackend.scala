@@ -89,6 +89,7 @@ final class LocalQuackBackend(
       spec.metastore,
       spec.extraSetupSql,
       spec.objectStoreSql,
+      spec.tenantStoreSql,
       token,
       nodeKeys.keyHex(spec.nodeId),
       inherited

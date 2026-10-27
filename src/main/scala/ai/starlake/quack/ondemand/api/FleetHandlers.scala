@@ -350,6 +350,7 @@ object FleetHandlers:
       a.objectStoreSql,
       a.extraSetupSql,
       a.lockdownSql,
+      a.tenantStoreSql.getOrElse(""),
       FleetNodeExtensionsDto(
         extensions.allowCommunity,
         extensions.allowUnsigned,

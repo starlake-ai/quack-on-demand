@@ -89,10 +89,11 @@ _NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS")
 # both back through getenv() or /proc/<pid>/environ|cmdline): they go to a private directory, one
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
 # spawn-quack-node.sh and NodeSecretFiles.Keys on the manager.
-_SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN",
-                "QOD_NODE_AUTHZ_KEY", "QOD_S3_ACCESS_KEY_ID", "QOD_S3_SECRET_ACCESS_KEY",
-                "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
-_CLOUD_CRED_KEYS = _SECRET_KEYS[6:]
+_SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "tenantStoreSql",
+                "QOD_NODE_TOKEN", "QOD_NODE_AUTHZ_KEY", "QOD_S3_ACCESS_KEY_ID",
+                "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID",
+                "QOD_GCS_SECRET")
+_CLOUD_CRED_KEYS = _SECRET_KEYS[7:]
 # An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
 # reads from its environment are laid over the node's environment, and only the metastore's own
 # secrets below become files. Any other name (BASH_ENV, which bash expands before running the
@@ -525,7 +526,7 @@ class FleetMember:
         # (a lockdownSql=... exported by hand) must never reach a node.
         for key in _SQL_KEYS:
             env[key] = str(assignment.get(key) or "")
-        for key in ("extraSetupSql", "objectStoreSql"):
+        for key in ("extraSetupSql", "objectStoreSql", "tenantStoreSql"):
             if assignment.get(key):
                 secrets[key] = str(assignment[key])
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])

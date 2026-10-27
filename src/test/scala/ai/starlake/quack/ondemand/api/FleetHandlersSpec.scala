@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.FleetConfig
+import ai.starlake.quack.{FleetConfig, NodeExtensionsConfig}
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.PoolKey
@@ -824,4 +824,35 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     beat(store, "gone", "10.0.0.3"); store.backdate("gone", 100)
     FleetHandlers.livenessByName(store, backend) shouldBe
       Map("up" -> "reachable", "late" -> "unreachable", "gone" -> "dead")
+  }
+
+  "toDto" should "carry the tenant's location secrets, empty when the assignment has none" in {
+    val a = FleetAssignment(
+      1,
+      "n1",
+      PoolKey("acme", "db", "bi"),
+      21900,
+      "tok",
+      "memory",
+      Map.empty,
+      "",
+      "",
+      "",
+      "",
+      tenantStoreSql = Some("CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3);")
+    )
+    FleetHandlers.toDto(a, "ab" * 32, NodeExtensionsConfig()).tenantStoreSql shouldBe
+      "CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3);"
+    FleetHandlers
+      .toDto(a.copy(tenantStoreSql = None), "ab" * 32, NodeExtensionsConfig())
+      .tenantStoreSql shouldBe ""
+  }
+
+  "a stored assignment" should "decode without tenantStoreSql (written by an earlier manager)" in {
+    import FleetAssignment.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"dbInitSql":"","objectStoreSql":"",
+        |"extraSetupSql":"","lockdownSql":""}""".stripMargin
+    io.circe.parser.decode[FleetAssignment](json).map(_.tenantStoreSql) shouldBe Right(None)
   }

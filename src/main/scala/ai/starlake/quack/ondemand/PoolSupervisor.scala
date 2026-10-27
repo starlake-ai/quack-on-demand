@@ -16,7 +16,9 @@ import ai.starlake.quack.model.{
   SqlLiterals,
   Tenant,
   TenantDb,
-  TenantDbKind
+  TenantDbKind,
+  TenantLocation,
+  TenantLocationRules
 }
 import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
 import ai.starlake.quack.ondemand.fleet.MissingSlots
@@ -26,7 +28,8 @@ import ai.starlake.quack.ondemand.runtime.{
   NodePaths,
   NodeProcess,
   ObjectStoreSecret,
-  QuackBackend
+  QuackBackend,
+  TenantLocationSecrets
 }
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
@@ -286,6 +289,96 @@ final class PoolSupervisor(
     invalidateEffectiveCacheLocal()
     publish.rbacChanged()
 
+  // ---------- Tenant authorized locations (in-engine authorization) ----------
+
+  /** tenant id -> its authorized locations (Liquibase 0051), by location. Rebuilt by [[restore]]
+    * (peer NOTIFYs included), updated in place by this replica's own add and remove.
+    */
+  private val locationCache = TrieMap.empty[String, List[TenantLocation]]
+
+  /** The locations `tenantId` authorized, as this replica last read them: what its serving nodes'
+    * secrets are built from and what file access is checked against.
+    */
+  def tenantLocations(tenantId: String): List[TenantLocation] =
+    locationCache.getOrElse(tenantId, Nil)
+
+  /** Every running node of `tenantId`'s pools (branch pools included): where a location change is
+    * pushed.
+    */
+  def liveNodesOfTenant(tenantId: String): List[RunningNode] =
+    pools.values.filter(_.key.tenant == tenantId).flatMap(_.nodes).toList
+
+  /** Tenant `tenant`'s stored locations, read from the store so another replica's fresh change is
+    * listed too.
+    */
+  def listTenantLocations(tenant: String): Either[SupervisorError, List[TenantLocation]] =
+    getTenant(tenant) match
+      case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+      case Some(t) => Right(store.listTenantLocations(t.id))
+
+  /** Authorize `location` for tenant `tenant` ([[TenantLocationRules]]; a refusal is an
+    * `InvalidArgument` whose message is `<code>: <text>`, a location already authorized
+    * `AlreadyExists`). The caller pushes the change to the tenant's running nodes.
+    */
+  def addTenantLocation(
+      tenant: String,
+      location: String,
+      objectStore: Map[String, String],
+      filesRoot: Option[String],
+      createdBy: Option[String]
+  ): IO[Either[SupervisorError, TenantLocation]] = IO.blocking {
+    withCacheRecovery("addTenantLocation") {
+      getTenant(tenant) match
+        case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+        case Some(t) =>
+          TenantLocationRules.validate(t.id, location, objectStore, filesRoot) match
+            case Left((code, msg)) => Left(SupervisorError.InvalidArgument(s"$code: $msg"))
+            case Right(accepted)   =>
+              val row = TenantLocation(
+                id = TenantLocationRules.newId(store.listTenantLocations(t.id).map(_.id)),
+                tenantId = t.id,
+                kind = accepted.kind,
+                location = accepted.location,
+                objectStore = if accepted.kind == TenantLocation.S3 then objectStore else Map.empty,
+                createdAt = System.currentTimeMillis(),
+                createdBy = createdBy
+              )
+              if store.insertTenantLocation(row) then
+                locationCache.put(t.id, store.listTenantLocations(t.id))
+                // The insert bumped the tenant's policy version (Liquibase 0051); the rbac NOTIFY
+                // has peers restore(), which reloads the locations.
+                invalidateEffectiveCache()
+                Right(row)
+              else
+                Left(
+                  SupervisorError.AlreadyExists(
+                    s"tenant '${t.id}' already authorizes ${accepted.location}"
+                  )
+                )
+    }
+  }
+
+  /** Remove location `id` of tenant `tenant` and return it. An id of another tenant is `NotFound`:
+    * nothing is removed. The caller pushes the change to the tenant's running nodes.
+    */
+  def removeTenantLocation(
+      tenant: String,
+      id: String
+  ): IO[Either[SupervisorError, TenantLocation]] = IO.blocking {
+    withCacheRecovery("removeTenantLocation") {
+      getTenant(tenant) match
+        case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
+        case Some(t) =>
+          store.deleteTenantLocation(t.id, id) match
+            case None =>
+              Left(SupervisorError.NotFound(s"tenant '${t.id}' has no location $id"))
+            case Some(row) =>
+              locationCache.put(t.id, store.listTenantLocations(t.id))
+              invalidateEffectiveCache()
+              Right(row)
+    }
+  }
+
   /** Broadcast both channels after a store mutation done OUTSIDE the supervisor's own mutators
     * (e.g. ManifestImporter). restore() never broadcasts, so external writers call this after
     * restore().
@@ -522,6 +615,10 @@ final class PoolSupervisor(
     pools.values.flatMap(_.nodes).foreach { n =>
       tracker.setQuarantined(n.nodeId, quarantinedIds.contains(n.nodeId))
     }
+    // Authorized locations, diff-aware like the caches above: a tenant a peer emptied drops out.
+    val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
+    locationCache.keys.toList.filterNot(locationsByTenant.contains).foreach(locationCache.remove)
+    locationsByTenant.foreach((t, ls) => locationCache.put(t, ls.sortBy(_.location)))
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
     invalidateEffectiveCacheLocal()
@@ -808,6 +905,7 @@ final class PoolSupervisor(
       lockdownSql =
         NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
       objectStoreSql = ObjectStoreSecret.sql(state.s3, state.metastore.getOrElse("dataPath", "")),
+      tenantStoreSql = TenantLocationSecrets.initSql(tenantLocations(key.tenant)),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -1717,6 +1815,8 @@ final class PoolSupervisor(
             }
             store.deleteTenant(t.id)
             tenants.remove(t.id)
+            // The store cascaded the tenant's locations away.
+            locationCache.remove(t.id)
             publish.topologyChanged()
             events.emit(ManagerEvent.TenantDeleted(name))
             Right(())

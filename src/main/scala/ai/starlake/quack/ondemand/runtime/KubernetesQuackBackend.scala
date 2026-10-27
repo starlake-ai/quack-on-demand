@@ -720,12 +720,17 @@ final class KubernetesQuackBackend(
     // API response by those two, so it must not be the one spelling that lands in a pod spec as a
     // plain EnvVar. The key keeps its original spelling in the Secret; the volume maps it to the
     // canonical file name the script reads. Only the metastore's own secrets (NodeMetastore): a
-    // metastore holds no cloud credential.
+    // metastore holds no cloud credential, and no SQL.
     val fromMetastore = NodeMetastore.secrets(spec.metastore)
     // The manager's own object-store credentials, forwarded as env before: now Secret-backed.
     val fromManager = NodeSecretFiles.CloudCredKeys
       .flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _))
-    fromMetastore ++ fromManager
+    // The tenant's authorized-location secrets: per tenant, so the same for every pod of the pool.
+    val tenantStore =
+      Option.when(spec.tenantStoreSql.nonEmpty)(
+        NodeSecretFiles.TenantStoreKey -> spec.tenantStoreSql
+      )
+    fromMetastore ++ fromManager ++ tenantStore
 
   /** K8s Secret name for a pool's sensitive node env values. Per-pool, not per-pod: every pod of a
     * pool attaches the same tenant-db with the same credentials. Same RFC-1123 hyphenization as

@@ -26,6 +26,10 @@ final case class NodeSpec(
     // tenant-db has no objectStore config (the global-env secret path is used instead). Shipped
     // via the `objectStoreSql` node env var; in K8s the value rides in a per-node Secret.
     objectStoreSql: String = "",
+    // The tenant's authorized S3 locations (TenantLocationSecrets.initSql): one bucket-scoped
+    // CREATE SECRET per line, delivered as the node secret file `tenantStoreSql`. Serving nodes
+    // only: maintenance and merge nodes never read a tenant bucket. Empty = none.
+    tenantStoreSql: String = "",
     // K8s scheduling hint inherited from the node's cohort. None / empty
     // = no placement constraint (default scheduler decides). Backends
     // other than KubernetesQuackBackend ignore this field.

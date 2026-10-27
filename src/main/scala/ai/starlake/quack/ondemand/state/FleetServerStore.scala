@@ -19,7 +19,10 @@ final case class FleetAssignment(
     dbInitSql: String,
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String
+    lockdownSql: String,
+    // The tenant's authorized-location secrets (TenantLocationSecrets.initSql); None when the
+    // tenant has none, and in an assignment an earlier manager wrote.
+    tenantStoreSql: Option[String] = None
 )
 object FleetAssignment:
   given Codec[PoolKey]         = deriveCodec

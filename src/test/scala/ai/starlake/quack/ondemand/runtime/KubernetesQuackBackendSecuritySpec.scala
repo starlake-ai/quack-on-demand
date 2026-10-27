@@ -256,6 +256,21 @@ class KubernetesQuackBackendSecuritySpec
         "QOD_NODE_AUTHZ_KEY"
       )
 
+  it should "deliver the tenant's location secrets as a file of the node-env Secret, never as env" in:
+    val backend = makeBackend()
+    val sql     = "CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3, KEY_ID 'k', " +
+      "SECRET 'tl-marker-secret', SCOPE 's3://acme-etl/');"
+    backend
+      .start(
+        nodeEnvSpec("quack-nodeenv-tl", lakeMeta + ("pgPassword" -> "p")).copy(tenantStoreSql = sql)
+      )
+      .unsafeRunSync()
+    secretRefs("quack-nodeenv-tl").get("tenantStoreSql") shouldBe
+      Some((nodeEnvSecretName, "tenantStoreSql"))
+    secretPayload(nodeEnvSecretName).flatMap(_.get("tenantStoreSql")) shouldBe Some(sql)
+    podEnv("quack-nodeenv-tl").exists(e =>
+      Option(e.getValue).exists(_.contains("tl-marker-secret"))
+    ) shouldBe false
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
     backend.start(nodeEnvSpec("quack-nodeenv-4", lakeMeta + ("pgPassword" -> "p"))).unsafeRunSync()

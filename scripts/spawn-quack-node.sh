@@ -74,7 +74,7 @@ START_DIR="${START_DIR%/}"
 
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.ps1 and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
-SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql QOD_NODE_TOKEN
+SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql tenantStoreSql QOD_NODE_TOKEN
   QOD_NODE_AUTHZ_KEY QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING
   QOD_GCS_KEY_ID QOD_GCS_SECRET)
 # The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
@@ -503,6 +503,14 @@ fi
 # picks the longest matching scope.
 if [[ -n "${objectStoreSql:-}" ]]; then
   INIT_SQL+="$objectStoreSql"$'\n'
+fi
+
+# The tenant's authorized S3 locations (tenantStoreSql, authored by TenantLocationSecrets.scala): one
+# CREATE OR REPLACE SECRET qod_tl_<id8> per bucket, scoped to it, so the tenant's users reach exactly
+# the buckets it holds keys for. Every kind, before any ATTACH; a database's own scoped secret still
+# wins for its data path (DuckDB picks the longest matching scope).
+if [[ -n "${tenantStoreSql:-}" ]]; then
+  INIT_SQL+="$tenantStoreSql"$'\n'
 fi
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to

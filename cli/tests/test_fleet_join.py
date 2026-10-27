@@ -78,7 +78,7 @@ def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
     return {"epoch": epoch, "nodeId": node_id, "poolKey": {"tenant": "acme", "tenantDb": "db", "pool": "bi"},
             "port": port, "token": "tok", "authzKey": "ab" * 32, "kind": "memory",
             "env": {"pgHost": "h", "pgPassword": "pw"},
-            "dbInitSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
+            "dbInitSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": "", "tenantStoreSql": ""}
 
 
 def read_secrets(env):
@@ -278,12 +278,12 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
 
 
 SECRET_VALUES = {"pw", "tok", "hunter2", "fed-sql-secret", "store-sql-secret", "s3-key-id", "s3-secret",
-                 "az-conn", "ab" * 32}
+                 "az-conn", "ab" * 32, "tenant-store-secret"}
 
 
 def secret_assignment():
     return dict(assignment(1), env={"pgHost": "h", "pgPassword": "hunter2", "encryptionKey": "k3y"},
-                extraSetupSql="fed-sql-secret", objectStoreSql="store-sql-secret", token="tok")
+                extraSetupSql="fed-sql-secret", objectStoreSql="store-sql-secret", tenantStoreSql="tenant-store-secret", token="tok")
 
 
 def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypatch):
@@ -304,7 +304,7 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
         assert value not in env.values() and value not in cmd, value
         assert not any(value in v for v in env.values()), value
     assert secrets == {"pgPassword": "hunter2", "encryptionKey": "k3y", "extraSetupSql": "fed-sql-secret",
-                       "objectStoreSql": "store-sql-secret", "QOD_NODE_TOKEN": "tok",
+                       "objectStoreSql": "store-sql-secret", "tenantStoreSql": "tenant-store-secret", "QOD_NODE_TOKEN": "tok",
                        "QOD_NODE_AUTHZ_KEY": "ab" * 32,
                        "QOD_S3_ACCESS_KEY_ID": "s3-key-id", "QOD_S3_SECRET_ACCESS_KEY": "s3-secret",
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}

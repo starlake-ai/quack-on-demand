@@ -31,30 +31,35 @@ object ObjectStoreSecret:
         case "az" | "azure" | "abfss" => azureSecret(objectStore, scope)
         case _                        => ""
 
-  private def s3Secret(m: Map[String, String], scope: String): String =
+  /** One s3 secret named `name`, scoped to `scope`, as a single-line statement: a tenant's
+    * authorized locations (TenantLocationSecrets). The same options as the per-database secret.
+    */
+  def s3Statement(name: String, m: Map[String, String], scope: String): String =
+    s"CREATE OR REPLACE SECRET $name (${s3Options(m, scope).mkString(", ")});"
+
+  private def s3Options(m: Map[String, String], scope: String): List[String] =
     val region      = m.getOrElse("s3_region", "us-east-1")
     val urlStyle    = m.getOrElse("s3_url_style", "path")
     val rawEndpoint = m.get("s3_endpoint").map(_.trim).filter(_.nonEmpty)
     // http:// (e.g. a local MinIO) means TLS is off; https:// or no endpoint at all keeps the
     // secure default. No separate s3_use_ssl key: the endpoint scheme is the one signal.
     val useSsl   = !rawEndpoint.exists(_.startsWith("http://"))
-    val endpoint = rawEndpoint
-      .map { e =>
-        val stripped = e.stripPrefix("https://").stripPrefix("http://").stripSuffix("/")
-        s"  ENDPOINT ${lit(stripped)},\n"
-      }
-      .getOrElse("")
+    val endpoint = rawEndpoint.map { e =>
+      val stripped = e.stripPrefix("https://").stripPrefix("http://").stripSuffix("/")
+      s"ENDPOINT ${lit(stripped)}"
+    }
+    List(
+      "TYPE s3",
+      s"KEY_ID ${lit(m.getOrElse("s3_access_key_id", ""))}",
+      s"SECRET ${lit(m.getOrElse("s3_secret_access_key", ""))}",
+      s"REGION ${lit(region)}"
+    ) ++ endpoint ++ List(s"URL_STYLE ${lit(urlStyle)}", s"USE_SSL $useSsl", s"SCOPE ${lit(scope)}")
+
+  private def s3Secret(m: Map[String, String], scope: String): String =
     "INSTALL httpfs;\nLOAD httpfs;\n" +
       s"CREATE OR REPLACE SECRET $SecretName (\n" +
-      "  TYPE s3,\n" +
-      s"  KEY_ID ${lit(m.getOrElse("s3_access_key_id", ""))},\n" +
-      s"  SECRET ${lit(m.getOrElse("s3_secret_access_key", ""))},\n" +
-      s"  REGION ${lit(region)},\n" +
-      endpoint +
-      s"  URL_STYLE ${lit(urlStyle)},\n" +
-      s"  USE_SSL $useSsl,\n" +
-      s"  SCOPE ${lit(scope)}\n" +
-      ");"
+      s3Options(m, scope).map("  " + _).mkString(",\n") +
+      "\n);"
 
   private def gcsSecret(m: Map[String, String], scope: String): String =
     "INSTALL httpfs;\nLOAD httpfs;\n" +

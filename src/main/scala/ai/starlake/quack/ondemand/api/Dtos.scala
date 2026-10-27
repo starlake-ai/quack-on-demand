@@ -354,6 +354,7 @@ final case class FleetAssignmentDto(
     objectStoreSql: String,
     extraSetupSql: String,
     lockdownSql: String,
+    tenantStoreSql: String,
     nodeExtensions: FleetNodeExtensionsDto
 )
 
