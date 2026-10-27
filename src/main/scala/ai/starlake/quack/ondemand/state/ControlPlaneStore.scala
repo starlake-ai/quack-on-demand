@@ -12,7 +12,8 @@ import ai.starlake.quack.model.{
   SnapshotTag,
   Tenant,
   TenantAcl,
-  TenantDb
+  TenantDb,
+  TenantLocation
 }
 
 /** Per-entity persistence for the normalized control plane (`qodstate_tenant`,
@@ -148,6 +149,22 @@ trait ControlPlaneStore:
 
   /** Look up a single tombstone row by id. */
   def managedPrefix(id: String): Option[ManagedPrefixRow]
+
+  // ---------------- Tenant authorized locations (Liquibase 0051) ----------------
+
+  /** Insert `l`. False, with nothing written, when its tenant already authorizes that location. */
+  def insertTenantLocation(l: TenantLocation): Boolean
+
+  /** Delete location `id` of tenant `tenantId` and return it; None when that tenant has no such
+    * location (an id of another tenant included: nothing is deleted).
+    */
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation]
+
+  /** `tenantId`'s locations, by location. */
+  def listTenantLocations(tenantId: String): List[TenantLocation]
+
+  /** Every tenant's locations, by tenant then location. */
+  def listAllTenantLocations(): List[TenantLocation]
 
   /** Insert/update a running node under the given pool surrogate id. `RunningNode.poolKey` is a
     * natural key (tenant/pool) carried by the runtime and does not always match a single Postgres

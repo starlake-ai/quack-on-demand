@@ -99,6 +99,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
   given ProductHint[AutoscaleConfig]           = ProductHint[AutoscaleConfig](camelMapping)
+  given ProductHint[TenantFilesConfig]         = ProductHint[TenantFilesConfig](camelMapping)
   given ProductHint[BranchingConfig]           = ProductHint[BranchingConfig](camelMapping)
   given ProductHint[FleetConfig]               = ProductHint[FleetConfig](camelMapping)
   given ProductHint[ManagedObjectStoreConfig]  = ProductHint[ManagedObjectStoreConfig](camelMapping)
@@ -134,6 +135,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
   given ConfigReader[RoutingConfig]            = deriveReader[RoutingConfig]
   given ConfigReader[AutoscaleConfig]          = deriveReader[AutoscaleConfig]
+  given ConfigReader[TenantFilesConfig]        = deriveReader[TenantFilesConfig]
   given ConfigReader[ManagedObjectStoreConfig] = deriveReader[ManagedObjectStoreConfig]
   given ConfigReader[EmbeddedPostgresConfig]   = deriveReader[EmbeddedPostgresConfig]
   given ConfigReader[SmtpConfig]               = deriveReader[SmtpConfig]

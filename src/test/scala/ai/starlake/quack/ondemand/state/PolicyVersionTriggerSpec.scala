@@ -239,6 +239,11 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
   "applying 0050 to a control plane that already holds tenants" should
     "give each existing tenant its own version, below the next one issued" in withDb { (c, _) =>
       // Undo 0050 on the populated database, then let Liquibase apply it again: the upgrade path.
+      // 0051's table carries triggers on 0050's function, so it goes first and comes back too.
+      exec(c)(
+        "DROP TABLE qodstate_tenant_location",
+        "DELETE FROM databasechangelog WHERE id LIKE '0051-%'"
+      )
       val triggered = List(
         "qodstate_role",
         "qodstate_group",

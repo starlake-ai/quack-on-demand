@@ -21,7 +21,8 @@ import ai.starlake.quack.model.{
   Tenant,
   TenantAcl,
   TenantDb,
-  TenantDbKind
+  TenantDbKind,
+  TenantLocation
 }
 import com.typesafe.scalalogging.LazyLogging
 import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -3128,6 +3129,73 @@ final class PostgresControlPlaneStore(
       deletedAt = Option(rs.getTimestamp("deleted_at")).map(_.toInstant),
       purgeEligibleAt = Option(rs.getTimestamp("purge_eligible_at")).map(_.toInstant),
       purgedAt = Option(rs.getTimestamp("purged_at")).map(_.toInstant)
+    )
+
+  // ---------------- Tenant authorized locations ----------------
+
+  private val SelectTenantLocations: String =
+    "SELECT id, tenant_id, kind, location, object_store, created_at, created_by " +
+      "FROM qodstate_tenant_location"
+
+  def insertTenantLocation(l: TenantLocation): Boolean = withConn { c =>
+    val ps = c.prepareStatement(
+      """INSERT INTO qodstate_tenant_location
+        |  (id, tenant_id, kind, location, object_store, created_at, created_by)
+        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
+        |ON CONFLICT (tenant_id, location) DO NOTHING""".stripMargin
+    )
+    try
+      ps.setString(1, l.id)
+      ps.setString(2, l.tenantId)
+      ps.setString(3, l.kind)
+      ps.setString(4, l.location)
+      ps.setString(5, mapToJson(l.objectStore))
+      ps.setTimestamp(6, new Timestamp(l.createdAt))
+      setNullable(ps, 7, l.createdBy)
+      ps.executeUpdate() == 1
+    finally ps.close()
+  }
+
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation] = withConn { c =>
+    val ps = c.prepareStatement(
+      """DELETE FROM qodstate_tenant_location WHERE tenant_id = ? AND id = ?
+        |RETURNING id, tenant_id, kind, location, object_store, created_at, created_by""".stripMargin
+    )
+    try
+      ps.setString(1, tenantId)
+      ps.setString(2, id)
+      val rs = ps.executeQuery()
+      try if rs.next() then Some(readTenantLocation(rs)) else None
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listTenantLocations(tenantId: String): List[TenantLocation] = withConn { c =>
+    val ps = c.prepareStatement(s"$SelectTenantLocations WHERE tenant_id = ? ORDER BY location")
+    try
+      ps.setString(1, tenantId)
+      val rs = ps.executeQuery()
+      try drain(rs)(readTenantLocation)
+      finally rs.close()
+    finally ps.close()
+  }
+
+  def listAllTenantLocations(): List[TenantLocation] = withConn { c =>
+    val rs =
+      c.createStatement().executeQuery(s"$SelectTenantLocations ORDER BY tenant_id, location")
+    try drain(rs)(readTenantLocation)
+    finally rs.close()
+  }
+
+  private def readTenantLocation(rs: ResultSet): TenantLocation =
+    TenantLocation(
+      id = rs.getString("id"),
+      tenantId = rs.getString("tenant_id"),
+      kind = rs.getString("kind"),
+      location = rs.getString("location"),
+      objectStore = jsonToMap(rs.getString("object_store")),
+      createdAt = rs.getTimestamp("created_at").getTime,
+      createdBy = Option(rs.getString("created_by"))
     )
 
   private def drain[A](rs: ResultSet)(read: ResultSet => A): List[A] =

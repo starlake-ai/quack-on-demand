@@ -12,7 +12,8 @@ import ai.starlake.quack.model.{
   SnapshotTag,
   Tenant,
   TenantAcl,
-  TenantDb
+  TenantDb,
+  TenantLocation
 }
 
 import java.time.Instant
@@ -57,6 +58,33 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
 
   def bumpPolicyVersion(tenantId: String): Unit =
     policyVersionsOf.put(tenantId, policyVersionSeq.incrementAndGet())
+
+  // Mirrors Postgres: UNIQUE (tenant_id, location), a delete scoped to its tenant, and the
+  // policy-version bump Liquibase 0051's trigger makes.
+  private val tenantLocations = TrieMap.empty[String, TenantLocation]
+
+  def insertTenantLocation(l: TenantLocation): Boolean = synchronized {
+    if tenantLocations.values.exists(x => x.tenantId == l.tenantId && x.location == l.location)
+    then false
+    else
+      tenantLocations.put(l.id, l)
+      bumpPolicyVersion(l.tenantId)
+      true
+  }
+
+  def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation] = synchronized {
+    tenantLocations.get(id).filter(_.tenantId == tenantId).map { l =>
+      tenantLocations.remove(id)
+      bumpPolicyVersion(tenantId)
+      l
+    }
+  }
+
+  def listTenantLocations(tenantId: String): List[TenantLocation] =
+    tenantLocations.values.filter(_.tenantId == tenantId).toList.sortBy(_.location)
+
+  def listAllTenantLocations(): List[TenantLocation] =
+    tenantLocations.values.toList.sortBy(l => (l.tenantId, l.location))
 
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit =
     if tenants.contains(tenant.id) then
@@ -144,6 +172,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     roles.values.filter(_.tenantId == id).foreach(r => deleteRole(r.id))
     groups.values.filter(_.tenantId == id).foreach(g => deleteGroup(g.id))
     poolPermissions.values.filter(_.tenantId == id).foreach(p => poolPermissions.remove(p.id))
+    tenantLocations.values.filter(_.tenantId == id).foreach(l => tenantLocations.remove(l.id))
 
   def upsertTenantDb(t: TenantDb): Unit               = tenantDbs.put(t.id, t)
   def listTenantDbs(tenantId: String): List[TenantDb] =

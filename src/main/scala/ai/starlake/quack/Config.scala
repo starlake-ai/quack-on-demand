@@ -573,6 +573,7 @@ final case class ManagerConfig(
     smtp: SmtpConfig = SmtpConfig(),
     mcp: McpConfig = McpConfig(),
     pat: PatConfig = PatConfig(),
+    tenantFiles: TenantFilesConfig = TenantFilesConfig(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
     @field @ConfigField(
@@ -610,6 +611,35 @@ final case class ManagerConfig(
     nodeLeaseSec >= 1,
     s"nodeLeaseSec (QOD_QUACK_NODE_LEASE_SEC) must be >= 1, got $nodeLeaseSec"
   )
+
+/** Where tenants may authorize local folders for their users (in-engine authorization, decision
+  * 15): only under `<root>/<tenant id>/`. Unset, no local folder can be authorized. The root must
+  * be the real path on the nodes (no symlink component): nodes check real paths.
+  */
+final case class TenantFilesConfig(
+    @field @ConfigField(
+      envVar = "QOD_TENANT_FILES_ROOT",
+      description =
+        "Absolute folder under which tenant admins may authorize local folders, one subfolder per " +
+          "tenant id (<root>/<tenant>/...). Unset: no local folder can be authorized, and " +
+          "non-superusers reach no local file. Must be a real path on the nodes."
+    )
+    root: String = ""
+):
+  require(
+    root.trim.isEmpty || TenantFilesConfig.validRoot(root.trim),
+    s"tenantFiles.root (QOD_TENANT_FILES_ROOT) must be an absolute folder of at least one " +
+      s"segment with no empty, '.' or '..' segment, got '$root'"
+  )
+
+  /** The root without its trailing `/`, or None when unset. */
+  def rootOpt: Option[String] = Option(root.trim).filter(_.nonEmpty).map(_.stripSuffix("/"))
+
+object TenantFilesConfig:
+  def validRoot(r: String): Boolean =
+    val body = r.stripPrefix("/").stripSuffix("/")
+    r.startsWith("/") && body.nonEmpty &&
+    body.split("/", -1).forall(s => s.nonEmpty && s != "." && s != "..")
 
 /** In-engine authorization: node keys and the URL nodes reach this replica on. */
 final case class NodeAuthzConfig(
