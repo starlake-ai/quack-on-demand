@@ -23,7 +23,10 @@ final case class OpaCacheKey(
     edge: String,
     parentPools: List[String],
     accesses: List[String],
-    textHash: String
+    textHash: String,
+    // SHA-256 of a node decision's whole input (kinds, columns, via, locations: what `accesses`
+    // above does not carry); empty for the gateway's inputs.
+    detail: String = ""
 )
 
 /** Short-TTL decision cache. `Error` is never stored; ttlSec 0 disables caching. */

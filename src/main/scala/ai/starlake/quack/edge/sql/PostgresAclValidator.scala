@@ -1,7 +1,6 @@
 package ai.starlake.quack.edge.sql
 
-import java.util.Locale
-import ai.starlake.acl.parser.{TableAccess, Verb}
+import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
 import com.typesafe.scalalogging.LazyLogging
@@ -19,8 +18,8 @@ import com.typesafe.scalalogging.LazyLogging
   *   4. `ControlFlow` statements (COMMIT, ROLLBACK, SET, ...) carry no table refs and are admitted
   *      unconditionally.
   *   5. For each `TableAccess(table, verb)` check that at least one [[RolePermission]] in the
-  *      effective set covers it: `verbCovers(p.verb, verb)` AND wildcard-or-literal match on
-  *      catalog / schema / table.
+  *      effective set covers it: `GrantMatch.verbCovers(p.verb, verb)` AND wildcard-or-literal
+  *      match on catalog / schema / table.
   *
   * Catalog/schema defaults: when a referenced table is unqualified, the SQL parser fills them in
   * from the pool's metastore via [[ValidationContext.defaultDatabase]] / `defaultSchema`.
@@ -107,7 +106,7 @@ final class PostgresAclValidator(
       covered: String,
       msg: String
   ): ValidationResult =
-    if hasWildcardAll(eff) then
+    if GrantMatch.hasWildcardAll(eff.permissions) then
       logger.info(s"ACL: wildcard ALL covers $covered for user=$username")
       Allowed
     else
@@ -131,14 +130,16 @@ final class PostgresAclValidator(
     val sessionCatalogs: Set[String] =
       eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty)
 
-    val unauthorized = gated.filterNot { ta =>
-      eff.permissions.exists(p =>
-        verbCovers(p.verb, ta.verb) &&
-          catalogMatch(p.catalogName, ta.table.database, sessionCatalogs) &&
-          wildcardMatch(p.schemaName, ta.table.schema) &&
-          wildcardMatch(p.tableName, ta.table.table)
+    val unauthorized = gated.filterNot(ta =>
+      GrantMatch.covers(
+        eff.permissions,
+        sessionCatalogs,
+        ta.table.database,
+        ta.table.schema,
+        ta.table.table,
+        ta.verb
       )
-    }
+    )
 
     if unauthorized.isEmpty then
       logger.info(
@@ -156,46 +157,3 @@ final class PostgresAclValidator(
             .mkString(", ")}"
       logger.warn(s"ACL DENIED: $msg")
       Denied(msg, unauthorized)
-
-  /** Whether a role-permission verb covers a parser-emitted access verb. Grant verbs are the
-    * canonical (RO / RW / DDL / ALL) set; the parser emits the collapsed
-    * `Verb.Read | Verb.Write | Verb.Ddl` per access. `RW` is the only multi-cover grant (Read +
-    * Write); DDL stays separate because CREATE/DROP/ALTER are deliberately higher-privilege.
-    */
-  private def verbCovers(grantVerb: String, access: Verb): Boolean =
-    val gu = grantVerb.toUpperCase(Locale.ROOT)
-    if gu == "ALL" then true
-    else
-      access match
-        case Verb.Read  => gu == "RO" || gu == "RW"
-        case Verb.Write => gu == "RW"
-        case Verb.Ddl   => gu == "DDL"
-
-  private def wildcardMatch(grant: String, ref: String): Boolean =
-    grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
-
-  /** Catalog-specific wildcard match: the literal-equal arm behaves like `wildcardMatch`, but the
-    * `*` arm additionally requires the referenced catalog to be in the session's allowed-catalog
-    * set. This closes the cross-tenant wildcard leak (a tenant admin with `*.*.* ALL` could
-    * otherwise SELECT from a sibling tenant's catalog -- see project memory
-    * `project-catalog-wildcard-cross-tenant`).
-    *
-    * An empty `sessionCatalogs` means no catalog matches via wildcard for this session. Operators
-    * who want a tenant admin to retain cross-tenant read access can still grant an explicit catalog
-    * (`otherdb.*.* ALL`), which bypasses the wildcard arm via the literal-equal check below.
-    */
-  private def catalogMatch(
-      grant: String,
-      ref: String,
-      sessionCatalogs: Set[String]
-  ): Boolean =
-    if grant == RolePermission.Wildcard then sessionCatalogs.exists(_.equalsIgnoreCase(ref))
-    else grant.equalsIgnoreCase(ref)
-
-  private def hasWildcardAll(eff: EffectiveSet): Boolean =
-    eff.permissions.exists(p =>
-      p.verb.equalsIgnoreCase("ALL") &&
-        p.catalogName == RolePermission.Wildcard &&
-        p.schemaName == RolePermission.Wildcard &&
-        p.tableName == RolePermission.Wildcard
-    )

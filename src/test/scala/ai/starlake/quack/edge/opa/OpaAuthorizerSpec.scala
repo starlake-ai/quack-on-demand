@@ -318,3 +318,55 @@ class OpaAuthorizerSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     result.isLeft shouldBe true
     val leaked = result.left.toOption.exists(_.contains("s3cr3t-opa-token"))
     leaked shouldBe false
+
+  "decide" should "key the decision cache on kinds, columns, via and locations" in:
+    var calls = 0
+    val auth  = new OpaAuthorizer(
+      OpaConfig("qod", "", 500, 60),
+      new OpaClient(
+        500,
+        (_, _, _) => {
+          calls += 1
+          Right((200, """{"result":{"allow":true}}"""))
+        }
+      ),
+      new OpaDecisionCache(60),
+      OpaInstruments.noop
+    )
+    val a = OpaAccess("tpch", "main", "orders", "table", Verb.Read, List("id"), None)
+    def run(x: OpaAccess, locs: List[OpaLocation] = Nil) =
+      auth.decide(tenant(), tgt, usr, "u-1", "READ", List(x), locs)
+    run(a) shouldBe Decision.Allow(None)
+    run(a)
+    calls shouldBe 1
+    run(a.copy(columns = List("id", "ssn")))
+    calls shouldBe 2
+    run(a.copy(via = Some("tpch.main.v")))
+    calls shouldBe 3
+    run(a.copy(kind = "view"))
+    calls shouldBe 4
+    run(a, List(OpaLocation("read", "s3://b/x.parquet", "s3://b/", "read_parquet")))
+    calls shouldBe 5
+
+  it should "ask the statement rule with edge node and never the text" in:
+    var posted = ""
+    var url    = ""
+    val auth   = new OpaAuthorizer(
+      OpaConfig("qod", "", 500, 0),
+      new OpaClient(
+        500,
+        (u, body, _) => {
+          url = u
+          posted = body
+          Right((200, """{"result":{"allow":false,"reason":"no"}}"""))
+        }
+      ),
+      new OpaDecisionCache(0),
+      OpaInstruments.noop
+    )
+    val a = OpaAccess("tpch", "main", "orders", "table", Verb.Read, Nil, None)
+    auth.decide(tenant(text = true), tgt, usr, "u-1", "READ", List(a), Nil) shouldBe
+      Decision.Deny("no", Set(TableAccess(TableRef("tpch", "main", "orders"), Verb.Read)), None)
+    url should endWith("/statement")
+    posted should include("\"edge\":\"node\"")
+    posted should not include "\"text\""

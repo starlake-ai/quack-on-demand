@@ -57,6 +57,15 @@ object Attenuation:
         case (Some(prior), Some(now)) => Some(prior.intersect(now))
         case (prior, now)             => prior.orElse(now)
 
+      // The restriction rides the set for the node decision pipeline. Attenuating twice by the
+      // same token (the handshake, then the routed executor) keeps it; a second, different one
+      // narrows it, and where it would widen an axis the earlier one stays, branchOnly or-ed in.
+      val restriction = eff.restriction.fold(r)(prior =>
+        TokenRestriction
+          .narrow(prior, r)
+          .getOrElse(prior.copy(branchOnly = prior.branchOnly || r.branchOnly))
+      )
+
       eff.copy(
         roles = keptRoles,
         groups = keptGroups,
@@ -64,5 +73,6 @@ object Attenuation:
         poolPerms = eff.poolPerms,
         columnPolicies = eff.columnPolicies,
         rowPolicies = eff.rowPolicies,
-        verbCeiling = ceiling
+        verbCeiling = ceiling,
+        restriction = Some(restriction)
       )

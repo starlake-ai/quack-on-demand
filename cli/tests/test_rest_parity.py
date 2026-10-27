@@ -42,6 +42,7 @@ EXCLUSIONS = {
     # machine-to-machine: qod-node fetching its users' S3 credentials and asking for verdicts (raw
     # http4s routes, never in the OpenAPI contract; listed so a registration cannot slip in)
     "/api/internal/authz/credentials",
+    "/api/internal/authz/decide",
 }
 
 OPENAPI = Path(__file__).resolve().parent / "resources" / "openapi.yaml"

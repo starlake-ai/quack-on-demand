@@ -154,3 +154,11 @@ class AttenuationSpec extends AnyFlatSpec with Matchers:
       .attenuatedBy(rw, TokenRestriction.Unrestricted.copy(verbCeiling = Some("DDL")))
       .verbCeiling shouldBe Some(Set.empty)
   }
+
+  "attenuatedBy" should "record the token's restriction on the narrowed set" in {
+    val r = TokenRestriction.Unrestricted.copy(roles = Some(Set("reader")), branchOnly = true)
+    base.restriction shouldBe None
+    Attenuation.attenuatedBy(base, r).restriction shouldBe Some(r)
+    Attenuation.attenuatedBy(Attenuation.attenuatedBy(base, r), r).restriction shouldBe Some(r)
+    Attenuation.attenuatedBy(base, TokenRestriction.Unrestricted).restriction shouldBe None
+  }

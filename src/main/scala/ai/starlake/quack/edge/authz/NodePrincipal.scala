@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 
 /** Who a statement on a node runs for, as the manager vouches for it in a session handle
@@ -44,3 +45,14 @@ object NodePrincipal:
         system = false
       )
     case None => Unbound
+
+  /** [[of]] with the session's authorization context on `poolKey`, what the router mints with: the
+    * handle's `ctx` digests it, and the decision endpoint judges the statement with it
+    * ([[MintedHandles]]). The token restriction is the one the set was narrowed by
+    * (`EffectiveSet.restriction`). The system principal and an unbound statement carry none.
+    */
+  def of(effectiveSet: Option[EffectiveSet], poolKey: PoolKey): NodePrincipal =
+    effectiveSet.filterNot(_.system) match
+      case Some(e) =>
+        of(effectiveSet).copy(context = Some(DecideContext(e, poolKey, e.restriction)))
+      case None => of(effectiveSet)

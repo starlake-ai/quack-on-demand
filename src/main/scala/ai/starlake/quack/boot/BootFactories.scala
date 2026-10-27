@@ -3,6 +3,8 @@ package ai.starlake.quack.boot
 import java.nio.file.Path
 import java.util.Locale
 import ai.starlake.quack.{FleetConfig, ManagerConfig}
+import ai.starlake.quack.edge.authz.AuthzDecider
+import ai.starlake.quack.edge.authz.location.LocationRulesSource
 import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaValidator}
 import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator, TenantRoutingValidator}
@@ -219,11 +221,7 @@ object BootFactories extends LazyLogging:
           // whether `*.*.*` admits a referenced catalog. Empty set = no
           // catalog matches via wildcard (fail-closed). Explicit named
           // grants bypass this and still cross tenants on purpose.
-          tenantCatalogs = tenantId =>
-            sup
-              .getTenantById(tenantId)
-              .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
-              .getOrElse(Set.empty),
+          tenantCatalogs = tenantCatalogsOf(sup),
           // Same value that mounts the edge metadata rewriter, so the validator can never
           // admit an information_schema read the rewriter would then leave unfiltered.
           filteredMetadata = filterMounted
@@ -270,4 +268,32 @@ object BootFactories extends LazyLogging:
       userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
       sameHost = mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local"
+    )
+
+  /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog
+    * grant admits for its sessions (PostgresAclValidator, AuthzDecider). Unknown tenant: none.
+    */
+  private def tenantCatalogsOf(sup: PoolSupervisor): String => Set[String] =
+    tenantId =>
+      sup
+        .getTenantById(tenantId)
+        .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
+        .getOrElse(Set.empty)
+
+  /** The node decision pipeline (spec Section 6). Always enforced (decision 5): unlike the
+    * gateway's validator it ignores acl.enabled; an opa tenant is judged by its OPA policy.
+    */
+  def authzDecider(
+      sup: PoolSupervisor,
+      opaCfg: OpaConfig,
+      opa: OpaAuthorizer,
+      locationRules: LocationRulesSource
+  ): AuthzDecider =
+    new AuthzDecider(
+      tenantOf = sup.getTenantById,
+      tenantCatalogs = tenantCatalogsOf(sup),
+      parentPoolsOf = sup.parentPoolNamesOf,
+      locations = locationRules,
+      opa = opa,
+      opaCfg = opaCfg
     )

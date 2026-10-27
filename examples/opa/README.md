@@ -5,8 +5,9 @@ QoD can hand the data-access decisions of a tenant to that tenant's own
 tenant's Rego policy is the source of truth for:
 
 1. **pool access**, decided once at session handshake (the `connect` rule), and
-2. **table access**, decided once per statement for every table the statement touches (the
-   `statement` rule).
+2. **table and file access**, decided per statement for every table and file the statement touches
+   (the `statement` rule): once by the gateway on the tables QoD's SQL parser extracts, and once by
+   the node on what DuckDB resolved (see "statement input from the node").
 
 Row filters and column masks are not decided by OPA in this version (see "Result" below).
 
@@ -123,6 +124,62 @@ QoD calls `POST {opaUrl}/v1/data/{policyPath}/connect` and
 - A statement with no table references (`COMMIT`, `SET`, `USE`, `SHOW`) is admitted without
   calling OPA, so the `statement` rule never sees an empty `accesses`.
 
+### statement input from the node
+
+Every statement of a non-superuser is also decided on the node that runs it, on what DuckDB
+resolved for it (in-engine authorization). The node asks the manager, which asks the same
+`statement` rule with this input:
+
+```json
+{"input": {
+  "kind": "statement",
+  "tenant": "acme",
+  "database": "tpch",
+  "pool": "bi",
+  "parentPool": null,
+  "user": {"name": "alice", "roles": ["analyst"], "groups": ["emea"], "claims": {"dept": "fin"}},
+  "client": {"edge": "node"},
+  "statement": {"class": "WRITE"},
+  "accesses": [
+    {"catalog": "lake", "schema": "main", "table": "base", "verb": "read", "kind": "table",
+     "columns": ["id"], "via": "lake.main.v_secure"},
+    {"catalog": "tpch", "schema": "main", "table": "orders", "verb": "read", "kind": "table",
+     "columns": ["o_orderkey", "o_totalprice"], "via": null}
+  ],
+  "locations": [
+    {"access": "write", "location": "s3://acme-etl/out/orders.parquet", "scope": "s3://acme-etl/",
+     "via": "copy_to"}
+  ]
+}}
+```
+
+- `accesses` are the objects of the bound plan, lowercase, sorted: tables and views read or written,
+  and schemas, sequences, indexes, types created, dropped or altered. `kind` is `table`, `view`,
+  `secure_view`, `schema`, `sequence`, `index`, `macro`, `type` or `trigger`; a schema-wide access
+  (`kind: schema`) has `table: "*"`. `columns` lists the columns read (empty for a write or DDL).
+  `via` names the outermost secure view the access is read through (`catalog.schema.name`), `null`
+  otherwise: a secure view runs with its creator's rights, so QoD covers such a read by a read grant
+  on the view, and the starter policy does the same.
+- `locations` lists the files the statement reads (a reader function such as `read_parquet`, or
+  `COPY ... FROM`) or writes (`COPY ... TO`), already admitted by QoD: under one of the user's own S3
+  credential scopes (`qod profile s3 add`) or the tenant's authorized folders, and outside every
+  database data folder. `scope` names the credential scope or folder that admitted it. A policy can
+  only narrow them.
+- `statement.class` is computed from the accesses (any `ddl` verb: `DDL`; any `write` or a
+  `copy_to`: `WRITE`; else `READ`). There is never `statement.text` (the node describes plans, not
+  SQL), whatever `--send-statement-text` says.
+- The node input is sent only when there is something to judge: a statement whose plan touches no
+  object outside the session's `temp` catalog and DuckDB's `system` views, and names no file, is
+  allowed without calling OPA. Rules QoD always enforces (below) are applied first, so OPA is never
+  asked about a statement QoD refuses anyway.
+- A node decision is cached by the node for `QOD_OPA_CACHE_TTL_SEC` (at least 5 s) per user,
+  session context and plan.
+
+**Upgrading a policy.** The new fields are additive, but a policy that ignores `via` judges a read
+through a secure view as a direct read of the underlying table, which the user usually holds no
+grant on: such reads are then denied. Add a `via` rule like the starter policy's, and decide on
+`locations` if your users read or write files. Test with `opa eval` on the node input above.
+
 ### Result
 
 ```json
@@ -172,6 +229,12 @@ capped at 1 MiB.
 Independently of OPA:
 
 - superuser bypass (superusers never reach OPA);
+- file locations: a file a statement names must lie under one of the user's own S3 credential
+  scopes or the tenant's authorized folders, and outside every database data folder (checked before
+  OPA is asked; `locations` only lists files that passed, each with its `scope`);
+- DuckLake catalog metadata, node-state functions and settings, attaching, loading and installing
+  extensions, secrets, and macros, triggers and secure views: superuser-only, whatever the policy
+  says;
 - user existence, `enabled`, lock, forced password change, session revocation;
 - pool lockdown and bucket denial, the protected-write guard, filtered metadata, catalog write
   screening;
@@ -218,14 +281,21 @@ from data you load into OPA, so a migrating tenant starts from equivalence and e
 ```json
 {"qod": {
   "pool_grants":  {"acme": {"analyst": ["bi"], "admin": ["*"]}},
-  "table_grants": {"acme": {"analyst": [{"catalog": "tpch", "schema": "*", "table": "*", "verb": "RO"}]}}
+  "table_grants": {"acme": {"analyst": [{"catalog": "tpch", "schema": "*", "table": "*", "verb": "RO"}]}},
+  "blocked_locations": {"acme": ["s3://acme-etl/restricted/"]}
 }}
 ```
 
 - `pool_grants[tenant][role]`: pool names the role may connect to, `"*"` for every pool. A
   branch pool is allowed when the role holds any of its parent pools.
 - `table_grants[tenant][role]`: `catalog` / `schema` / `table` patterns (`"*"` matches anything)
-  with a verb: `RO` covers read, `RW` read and write, `DDL` ddl, `ALL` everything.
+  with a verb: `RO` covers read, `RW` read and write, `DDL` ddl, `ALL` everything. A read through
+  a secure view (`via`) is covered by a read grant on the view; a schema-wide access needs a grant
+  whose `table` is `"*"`.
+- `blocked_locations[tenant]` (optional): location prefixes the tenant's statements may never
+  read or write, on top of QoD's own location checks. Absent, every location QoD admitted is
+  allowed.
+- Every other input is denied by default (`default statement := {"allow": false, ...}`).
 
 Run it locally:
 

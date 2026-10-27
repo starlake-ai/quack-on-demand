@@ -483,6 +483,9 @@ object Main extends IOApp with LazyLogging:
       new ai.starlake.quack.edge.authz.ServedUserS3Credentials(userS3, () => denySet.get()())
     // The nonces of the handles this replica mints: the credentials endpoint answers only those.
     val issuedHandles = new ai.starlake.quack.edge.authz.IssuedHandles()
+    // The authorization context of every handle this replica mints, by nonce: the decision
+    // endpoint judges a node's statement with the context its handle was minted for.
+    val mintedHandles = new ai.starlake.quack.edge.authz.MintedHandles()
     // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
     // every node key derives from it, so it must outlive this process and agree across replicas.
     val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
@@ -495,7 +498,8 @@ object Main extends IOApp with LazyLogging:
             mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
             versions = policyVersions,
             creds = servedUserS3,
-            issued = Some(issuedHandles)
+            issued = Some(issuedHandles),
+            minted = Some(mintedHandles)
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -1153,6 +1157,12 @@ object Main extends IOApp with LazyLogging:
       )
       val aclValidator: StatementValidator =
         BootFactories.aclValidator(aclCfg, mgrCfg, sup, opaCfg, opaAuthorizer)
+      // The node decision pipeline and its endpoint (POST /api/internal/authz/decide), sharing
+      // the one OPA authorizer.
+      val authzDecider =
+        BootFactories.authzDecider(sup, opaCfg, opaAuthorizer, locationRules)
+      val decideRoute =
+        new ai.starlake.quack.edge.authz.DecideRoute(nodeKeys, mintedHandles, authzDecider)
       // Runs after sup.restore() (tenants are loaded by then): an OPA-mode tenant with no URL
       // anywhere has every decision refused, which is fail-closed but worth shouting about.
       def warnOpaTenantsWithoutUrl(): Unit =
@@ -1954,7 +1964,7 @@ object Main extends IOApp with LazyLogging:
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
         s3Credentials = Some(s3CredentialHandlers),
-        internalRoutes = List(credentialsRoute.routes)
+        internalRoutes = List(credentialsRoute.routes, decideRoute.routes)
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

@@ -217,6 +217,12 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     fx.router.executeWith("c-8", "alice", poolKey, "SELECT 1", Some(eff), send).unsafeRunSync()
     // The retry on the second node runs for the same principal.
     seen shouldBe List.fill(2)(
-      ai.starlake.quack.edge.authz
-        .NodePrincipal("u-7", "alice", Some("acme"), superuser = false, system = false)
+      ai.starlake.quack.edge.authz.NodePrincipal(
+        "u-7",
+        "alice",
+        Some("acme"),
+        superuser = false,
+        system = false,
+        context = Some(ai.starlake.quack.edge.authz.DecideContext(eff, poolKey, None))
+      )
     )

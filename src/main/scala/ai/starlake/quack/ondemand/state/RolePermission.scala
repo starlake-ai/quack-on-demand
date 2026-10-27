@@ -23,7 +23,7 @@ final case class RolePermission(
 )
 
 object RolePermission:
-  /** Canonical grant verbs. Match `PostgresAclValidator.verbCovers` 1:1.
+  /** Canonical grant verbs. Match `GrantMatch.verbCovers` 1:1.
     *
     *   - `RO` covers any SELECT-class access.
     *   - `RW` covers SELECT + any DML (INSERT/UPDATE/DELETE/MERGE/TRUNCATE) target.

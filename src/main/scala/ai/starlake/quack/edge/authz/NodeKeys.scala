@@ -10,7 +10,9 @@ import java.util.Base64
   * that node. `replica` is the URL nodes call back for verdicts and credentials
   * (`QOD_INTERNAL_URL`); `versions` the tenants' policy versions; `creds` each user's S3
   * credentials, digested into every handle; `issued` the registry of minted nonces the credentials
-  * endpoint answers (None: nothing is recorded, so every credentials fetch is refused as expired).
+  * endpoint answers (None: nothing is recorded, so every credentials fetch is refused as expired);
+  * `minted`, the registry of the contexts handles were minted with (None: nothing is registered, so
+  * every decide call for a user statement is refused as expired).
   */
 final class NodeKeys(
     secret: String,
@@ -18,7 +20,8 @@ final class NodeKeys(
     clock: () => Long = () => System.currentTimeMillis(),
     versions: PolicyVersions = PolicyVersions.zero,
     creds: UserS3Credentials = UserS3Credentials.none,
-    issued: Option[IssuedHandles] = None
+    issued: Option[IssuedHandles] = None,
+    minted: Option[MintedHandles] = None
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
@@ -47,6 +50,11 @@ final class NodeKeys(
     )
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.
     if !principal.system then issued.foreach(_.put(m.nonce, node.nodeId, principal.id, m.expiresAt))
+    // The decision endpoint judges this handle's statements with this context (MintedHandles).
+    for
+      context  <- principal.context
+      registry <- minted
+    do registry.put(m.nonce, context, m.expiresAt)
     m.text
 
   /** [[handle]] as the prelude statement the node runs before the statement itself. */
