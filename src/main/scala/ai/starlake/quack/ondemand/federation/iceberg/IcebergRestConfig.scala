@@ -218,11 +218,11 @@ final case class IcebergRestConfig(
               "an S3 Tables ARN (arn:aws:s3tables:<region>:<account>:bucket/<name>)"
           else "awsRegion is required for AWS credentials"
         )
-      // DuckDB picks the s3 secret for a path by longest matching scope and breaks ties on the
-      // secret NAME, alphabetically. An unscoped "qod_ice_<alias>" therefore ties with the node's
-      // own unscoped storage secret "quack_s3" and WINS ("qod" < "qua"), so it would sign every
-      // S3 read no longer scope covers, the tenant-db's own data included. Hence a scope is
-      // mandatory, and every entry must name a bucket: a bare "s3://" is the unscoped case again.
+      // DuckDB picks the s3 secret for a path by longest matching scope. An unscoped
+      // "qod_ice_<alias>" would sign every S3 read no longer scope covers on the node: a user URL
+      // no credential of theirs covers, and a data path whose own secret is missing. Hence a scope
+      // is mandatory, and every entry must name a bucket: a bare "s3://" is the unscoped case
+      // again.
       if awsCredentials.isDefined && awsScope.isEmpty then
         errs += "awsScope is required: list the S3 prefixes holding this catalog's table data " +
           "(e.g. s3://my-lake/). An unscoped secret would outrank QoD's own storage secret on " +
@@ -335,9 +335,9 @@ object IcebergRestConfig:
     * DuckDB already holds, i.e. `Binder Error: Failed to attach database: database with name "name"
     * already exists`. A node's DuckDB CLI reads its init SQL through `-init` with `.bail off`, so
     * it does not bail on that error and the node comes up with a partly-failed federation blob and
-    * no loud signal. Comparison is
-    * case-insensitive (delegated to `validate`, which already lowercases via `equalsIgnoreCase`),
-    * so an entry in any case still blocks the normalized (lowercase) alias.
+    * no loud signal. Comparison is case-insensitive (delegated to `validate`, which already
+    * lowercases via `equalsIgnoreCase`), so an entry in any case still blocks the normalized
+    * (lowercase) alias.
     */
   def validated(
       cfg: IcebergRestConfig,

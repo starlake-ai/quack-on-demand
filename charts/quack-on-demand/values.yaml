@@ -240,8 +240,10 @@ storage:
 # these into the manager's defaultMetastore env vars, which KubernetesQuackBackend
 # then forwards into every spawned Quack node pod (the credentials as files of
 # the node's read-only secrets volume, never env vars). The node's
-# spawn-quack-node.sh consumes `QOD_S3_*` to emit the matching DuckDB
-# `CREATE SECRET quack_s3 (...)` so httpfs can talk to the endpoint.
+# spawn-quack-node.sh consumes `QOD_S3_*` to emit `CREATE SECRET qod_data_s3 (...)`,
+# scoped to each database's data path (no node holds an unscoped S3 secret), so
+# httpfs can talk to the endpoint; without the keys it uses the pod's AWS
+# credential chain.
 #
 # For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
 # For production: point endpoint at your bucket (https://s3.<region>.amazonaws.com

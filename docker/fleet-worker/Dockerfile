@@ -49,7 +49,7 @@ tar -xzf /tmp/cli.tar.gz -C /usr/local/bin duckdb
 tar -xzf /tmp/libs.tar.gz -C /tmp/libs
 cp /tmp/libs/libduckdb.so "/opt/duckdb/${DUCKDB_VERSION}/lib/"
 mkdir -p /opt/duckdb-extensions
-HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs;"
+HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs; INSTALL aws;"
 chmod -R a+rX /opt/duckdb /opt/duckdb-extensions
 EOF
 

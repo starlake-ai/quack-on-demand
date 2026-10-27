@@ -135,6 +135,26 @@ int main() {
 	Expect(ErrorOf(con, "SET GLOBAL autoinstall_known_extensions = true").empty(),
 	       "SET GLOBAL autoinstall_known_extensions = true was refused by DuckDB");
 
+	// Both shared file caches are off at open: they serve every connection of the node by path, so
+	// one user could read bytes another user's keys fetched. DuckDB's own default turns the external
+	// file cache on.
+	{
+		duckdb::DBConfig plain;
+		duckdb::DuckDB plain_db(nullptr, &plain);
+		duckdb::Connection plain_con(plain_db);
+		Expect(Setting(plain_con, "enable_external_file_cache") == "true",
+		       "DuckDB's default external file cache is on (the policy below must change something)");
+	}
+	{
+		duckdb::DBConfig cached;
+		qod::ApplyExtensionPolicy(cached, PolicyOf({}));
+		qod::ApplyCachePolicy(cached);
+		duckdb::DuckDB cached_db(nullptr, &cached);
+		duckdb::Connection cached_con(cached_db);
+		Expect(Setting(cached_con, "enable_external_file_cache") == "false", "the external file cache at open");
+		Expect(Setting(cached_con, "enable_http_metadata_cache") == "false", "the HTTP metadata cache at open");
+	}
+
 	if (failures == 0) {
 		std::cout << "node_config_test: all passed" << std::endl;
 	}

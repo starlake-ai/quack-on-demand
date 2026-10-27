@@ -192,56 +192,73 @@ ERROR: schemaName ($schemaName) must differ from the catalog alias ($catalogAlia
 # azure:// / abfss:// when the matching DuckDB extension is loaded. For remote
 # schemes we skip the local mkdir and emit the SQL needed to install
 # httpfs/azure + a SECRET so the ATTACH below can read/write parquet.
+# The data path signs with credentials scoped to it alone (spec decision 23): the database's own
+# objectStore (qod_db_store) or else qod_data_s3 below, on the manager's QOD_S3_* keys or, with
+# neither, on the instance's AWS credential chain (the aws extension). No unscoped s3 secret exists
+# on a node, and every key is named. Mirrors spawn-quack-node.sh, which explains each choice.
 $isRemote   = $false
 $storageSql = ''
+function Sql-Quote([string]$v) { return $v.Replace("'", "''") }
 switch -Regex ($dataPath) {
   '^(s3|s3a|gs|r2)://' {
     $isRemote = $true
     $storageSql = "INSTALL httpfs;`nLOAD httpfs;"
-    $s3Key = Secret-Or 'QOD_S3_ACCESS_KEY_ID' ''
-    $s3Sec = Secret-Or 'QOD_S3_SECRET_ACCESS_KEY' ''
-    if (-not [string]::IsNullOrEmpty($s3Key) -and -not [string]::IsNullOrEmpty($s3Sec)) {
+    if ([string]::IsNullOrEmpty($objectStoreSql)) {
+      if ($kind -ceq 'duckdb-file') { $scopes = @($dataPath) }
+      elseif ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') {
+        $scopes = @(($Matches[1] + '/'), (($dataPath -replace '/$', '') + '/'))
+      }
+      else {
+        $base = $dataPath -replace '/$', ''
+        $scopes = @(($base + '/'), ($base + '__br_'))
+      }
+      $dataScopes = ($scopes | ForEach-Object { "'" + (Sql-Quote $_) + "'" }) -join ', '
       $ep = Env-Or 'QOD_S3_ENDPOINT' ''
-      $ep = $ep -replace '^https?://', '' -replace '/$', ''
-      $s3Region   = Env-Or 'QOD_S3_REGION'    'us-east-1'
-      $s3UrlStyle = Env-Or 'QOD_S3_URL_STYLE' 'path'
-      $s3UseSsl   = Env-Or 'QOD_S3_USE_SSL'   'true'
-      $storageSql += @"
-
-CREATE OR REPLACE SECRET quack_s3 (
-  TYPE s3,
-  KEY_ID '$s3Key',
-  SECRET '$s3Sec',
-  REGION '$s3Region',
-  ENDPOINT '$ep',
-  URL_STYLE '$s3UrlStyle',
-  USE_SSL $s3UseSsl
-);
-"@
-      # The same credentials scoped to this database's data path, so a tenant's bucket-scoped
-      # qod_tl_<id8> (tenantStoreSql) does not outrank the unscoped quack_s3 there: DuckDB picks the
-      # longest matching scope, a tie going to the name first in alphabetical order. The scope is
-      # ObjectStoreSecret.dataScope's: a duckdb-file path itself, a branch its parent's prefix
-      # without the separator, any other path itself plus one '/'; it ties a bucket scope at a
-      # bucket root, and qod_data_s3 wins that tie. Skipped when the database has its own
-      # objectStoreSql secret. The exceptions (a branch of a bucket-root database, a database on
-      # neither credential source) are listed in spawn-quack-node.sh, which this mirrors.
-      if ([string]::IsNullOrEmpty($objectStoreSql)) {
-        if ($kind -ceq 'duckdb-file') { $dataScope = $dataPath }
-        elseif ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') { $dataScope = $Matches[1] }
-        else { $dataScope = ($dataPath -replace '/$', '') + '/' }
-        $dataScopeSql = $dataScope.Replace("'", "''")
+      $ep = Sql-Quote ($ep -replace '^https?://', '' -replace '/$', '')
+      $s3UseSsl = Env-Or 'QOD_S3_USE_SSL' 'true'
+      $s3Key = Secret-Or 'QOD_S3_ACCESS_KEY_ID' ''
+      $s3Sec = Secret-Or 'QOD_S3_SECRET_ACCESS_KEY' ''
+      if (-not [string]::IsNullOrEmpty($s3Key) -and -not [string]::IsNullOrEmpty($s3Sec)) {
+        $s3KeySql   = Sql-Quote $s3Key
+        $s3SecSql   = Sql-Quote $s3Sec
+        $s3Region   = Sql-Quote (Env-Or 'QOD_S3_REGION' 'us-east-1')
+        $s3UrlStyle = Sql-Quote (Env-Or 'QOD_S3_URL_STYLE' 'path')
         $storageSql += @"
 
 CREATE OR REPLACE SECRET qod_data_s3 (
   TYPE s3,
-  KEY_ID '$s3Key',
-  SECRET '$s3Sec',
+  KEY_ID '$s3KeySql',
+  SECRET '$s3SecSql',
+  SESSION_TOKEN '',
   REGION '$s3Region',
   ENDPOINT '$ep',
   URL_STYLE '$s3UrlStyle',
   USE_SSL $s3UseSsl,
-  SCOPE '$dataScopeSql'
+  KMS_KEY_ID '',
+  URL_COMPATIBILITY_MODE false,
+  REQUESTER_PAYS false,
+  SCOPE [$dataScopes]
+);
+"@
+      } else {
+        $regionLine = ''
+        $region = Env-Or 'QOD_S3_REGION' ''
+        if (-not [string]::IsNullOrEmpty($region)) { $regionLine = "`n  REGION '" + (Sql-Quote $region) + "'," }
+        $s3UrlStyle = Sql-Quote (Env-Or 'QOD_S3_URL_STYLE' 'vhost')
+        $storageSql += @"
+
+INSTALL aws;
+LOAD aws;
+CREATE OR REPLACE SECRET qod_data_s3 (
+  TYPE s3,
+  PROVIDER credential_chain,
+  VALIDATION 'none',
+  REFRESH 'auto',$regionLine
+  ENDPOINT '$ep',
+  URL_STYLE '$s3UrlStyle',
+  USE_SSL $s3UseSsl,
+  URL_COMPATIBILITY_MODE false,
+  SCOPE [$dataScopes]
 );
 "@
       }
@@ -554,6 +571,9 @@ if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql)
 # database may carry an objectStore (TenantDb.validate permits it), and a `memory` database
 # of views over remote parquet reads nothing without the CREATE SECRET. Must precede ATTACH.
 if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
+# The data path's storage secret and extensions, for every kind, before any ATTACH (mirrors
+# spawn-quack-node.sh).
+if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
 # The tenant's authorized S3 locations (TenantLocationSecrets.scala): one bucket-scoped secret per
 # line, before any ATTACH, as in spawn-quack-node.sh. The data path keeps its own credentials: its
 # qod_db_store or qod_data_s3 secret is scoped to it, longer than a bucket scope or tied with it at
@@ -562,7 +582,7 @@ if (-not [string]::IsNullOrEmpty($tenantStoreSql)) { [void]$sb.AppendLine($tenan
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
 # mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently
-# read-only node rather than an error. storageSql only loads httpfs for remote data paths, so a
+# read-only node rather than an error. storageSql loads httpfs for remote data paths only, so a
 # local encrypted database would miss it. Mirrors ENCRYPTION_SQL in spawn-quack-node.sh.
 # -ceq (case-sensitive) matches bash's `==`, which is also case-sensitive: this script's own
 # code always emits the lowercase string "true", but staying case-sensitive keeps the two
@@ -578,7 +598,6 @@ switch ($kind) {
     [void]$sb.AppendLine("LOAD ducklake;")
     [void]$sb.AppendLine("INSTALL postgres;")
     [void]$sb.AppendLine("LOAD postgres;")
-    if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
     # The catalog password rides a TEMPORARY secret, never an ATTACH string: DuckDB prints an attach
     # path verbatim in duckdb_databases().path and in connection errors, readable by any SQL user
     # of the node. Both ATTACHes name the secret, and it is dropped right after them (before

@@ -6,7 +6,8 @@
 // starting, ends it at once. What must not fail silently runs strict, here rather than in the SQL: the
 // secret directory, loading quack, the parse screen and quack_serve; the identity checks (node_hooks)
 // are registered before any SQL runs. The extension settings are fixed in the config before the
-// database opens (spec decision 17).
+// database opens (spec decision 17). So are the two shared file caches (off) and the guard that
+// resets the environment's S3 defaults whenever httpfs loads (decision 23).
 
 #include "authz.hpp"
 #include "build_info.hpp"
@@ -87,6 +88,10 @@ int Serve(const NodeOptions &options) {
 	// then turn on community or unsigned extensions.
 	duckdb::DBConfig config;
 	ApplyExtensionPolicy(config, options.extensions);
+	// Decision 23: no shared file cache, and no S3 setting the environment filled, from the first
+	// statement on (the init SQL's LOAD httpfs included).
+	ApplyCachePolicy(config);
+	RegisterS3EnvironmentGuard(config);
 	duckdb::DuckDB db(nullptr, &config);
 	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
 	// connection quack opens from here on.

@@ -92,9 +92,9 @@ data:
   # env; KubernetesQuackBackend forwards these settings into every spawned
   # node pod (the access key id and secret go through the per-pool node-env
   # Secret, mounted as files, never as env vars), where spawn-quack-node.sh
-  # consumes them to emit `CREATE SECRET quack_s3 (...)`. Same contract as
-  # docker-compose, where LocalQuackBackend moves the credentials into the
-  # node's private secrets directory.
+  # consumes them to emit `CREATE SECRET qod_data_s3 (...)`, scoped to the
+  # data path. Same contract as docker-compose, where LocalQuackBackend moves
+  # the credentials into the node's private secrets directory.
   QOD_S3_ENDPOINT:    {{ .Values.s3.endpoint  | quote }}
   QOD_S3_REGION:      {{ .Values.s3.region    | quote }}
   QOD_S3_URL_STYLE:   {{ .Values.s3.urlStyle  | quote }}

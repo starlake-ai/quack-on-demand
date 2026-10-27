@@ -1796,7 +1796,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(objKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val spec = backend.specs.head
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
   it should "produce an empty objectStoreSql for a tenant-db with no objectStore" in:
     val (sup, backend) = freshSupervisorWithBackend()
@@ -1824,7 +1824,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.createPool(memKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val spec = backend.specs.head
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/mem/'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/mem/', 's3://bucket/mem__br_']")
 
   // ---------- maintenanceNodeSpec: no-donor s3 fallback ----------
 
@@ -1848,7 +1848,7 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val spec = sup.maintenanceNodeSpec("acme", "acme_objmaint").get
     spec.objectStoreSql should include("CREATE OR REPLACE SECRET qod_db_store")
     spec.objectStoreSql should include("SECRET 's'")
-    spec.objectStoreSql should include("SCOPE 's3://bucket/db'")
+    spec.objectStoreSql should include("SCOPE ['s3://bucket/db']")
 
   // ---------- effectiveSetForUser: column policies ----------
 

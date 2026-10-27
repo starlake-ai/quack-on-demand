@@ -1,22 +1,19 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.model.TenantLocation
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.{Files, Path, Paths}
 import scala.sys.process.*
 
-/** A database whose data path lies in an object store keeps signing with its own credentials once
-  * the tenant authorizes the bucket it lives in. DuckDB picks the s3 secret with the longest
-  * matching scope (a tie going to the name first in alphabetical order), so the unscoped `quack_s3`
-  * would lose every path of that bucket to the tenant's `qod_tl_<id8>` scoped to `s3://<bucket>/`.
-  * The spawn scripts therefore create the manager's `QOD_S3_*` keys a second time as `qod_data_s3`,
-  * scoped to the data path by ObjectStoreSecret.dataScope's rule: a branch to its parent's prefix
-  * without the separator, any other directory (a managed prefix and a bucket root included) to
-  * itself with one trailing `/`. A database with its own objectStore secret (`qod_db_store`, the
-  * same rule, a duckdb-file path scoped to the file itself) gets none. At a bucket root both tie
-  * the tenant's `s3://<bucket>/` and win it by name.
+/** A database's data path signs with credentials scoped to it alone (spec decision 23): its own
+  * objectStore (`qod_db_store`, ObjectStoreSecret) or else `qod_data_s3`, which the spawn scripts
+  * build from the manager's `QOD_S3_*` keys or, with neither, from the instance's AWS credential
+  * chain (the aws extension). No unscoped s3 secret is created on a node, so a user's `s3://` URL
+  * signs with that user's own connection secret `qod_uc_<id8>` or with nothing, and every key is
+  * named, so DuckDB fills none from a session's settings. The scopes follow
+  * ObjectStoreSecret.dataScopes: a duckdb-file path itself, a branch its parent's prefix and its
+  * own, any other path itself plus one `/` and its branches' prefix.
   */
 private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTempDir:
   this: AnyFlatSpec =>
@@ -47,6 +44,9 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
     )
     runSpawn(command, base ++ extra)
 
+  private val NoManagerKeys =
+    Seq("QOD_S3_ACCESS_KEY_ID" -> "", "QOD_S3_SECRET_ACCESS_KEY" -> "")
+
   /** The `CREATE OR REPLACE SECRET <name> (...)` statement of `sql`, its lines joined by `\n`. */
   protected def secret(sql: String, name: String): Option[String] =
     val lines = sql.linesIterator.toVector
@@ -56,76 +56,138 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
       val end = lines.indexWhere(_.trim == ");", start)
       Some(lines.slice(start, end + 1).mkString("\n"))
 
-  private def scopeOf(statement: String): Option[String] =
-    "SCOPE '([^']*)'".r.findFirstMatchIn(statement).map(_.group(1))
+  protected def scopesOf(statement: String): Option[List[String]] =
+    "SCOPE \\[([^\\]]*)\\]".r
+      .findFirstMatchIn(statement)
+      .map(_.group(1).split(",").toList.map(_.trim.stripPrefix("'").stripSuffix("'")))
+
+  private val ManagerKeys = List(
+    "TYPE s3",
+    "KEY_ID 'lake-key-id'",
+    "SECRET 'lake-secret'",
+    "SESSION_TOKEN ''",
+    "REGION 'us-east-1'",
+    "ENDPOINT 'minio:9000'",
+    "URL_STYLE 'path'",
+    "USE_SSL false",
+    "KMS_KEY_ID ''",
+    "URL_COMPATIBILITY_MODE false",
+    "REQUESTER_PAYS false"
+  )
 
   protected def cases(): Unit =
-    it should "scope the manager's keys to the data path, with a trailing slash" in {
+    it should "scope the manager's keys to the data path and its branches, naming every key" in {
       val sql  = initSql("s3://lake/acme_lake")
       val data = secret(sql, "qod_data_s3").getOrElse(fail(s"no qod_data_s3 in:\n$sql"))
-      scopeOf(data) shouldBe Some("s3://lake/acme_lake/")
-      // The same credentials as the unscoped quack_s3, and that one is still there.
-      val global = secret(sql, "quack_s3").getOrElse(fail("no quack_s3"))
-      scopeOf(global) shouldBe None
-      List("KEY_ID 'lake-key-id'", "SECRET 'lake-secret'", "ENDPOINT 'minio:9000'", "USE_SSL false")
-        .foreach { opt =>
-          global should include(opt)
-          data should include(opt)
-        }
+      scopesOf(data) shouldBe Some(List("s3://lake/acme_lake/", "s3://lake/acme_lake__br_"))
+      ManagerKeys.foreach(opt => withClue(opt)(data should include(opt)))
     }
+
+    it should "create no unscoped s3 secret, whatever signs the data path" in
+      List(
+        initSql("s3://lake/acme_lake"),
+        initSql("s3://lake/acme_lake", NoManagerKeys*),
+        initSql(
+          "s3://lake/acme_lake",
+          "objectStoreSql" -> ObjectStoreSecret.sql(OwnKeys, "s3://lake/acme_lake", "ducklake")
+        ),
+        initSql("s3://lake/acme.duckdb", "kind" -> "duckdb-file")
+      ).foreach { sql =>
+        sql should not include "quack_s3"
+        List("qod_data_s3", "qod_db_store")
+          .flatMap(secret(sql, _))
+          .foreach(s => withClue(s)(scopesOf(s) shouldBe defined))
+      }
 
     it should "keep one trailing slash on a data path that has one" in {
-      scopeOf(secret(initSql("s3://lake/acme_lake/"), "qod_data_s3").get) shouldBe
-        Some("s3://lake/acme_lake/")
+      scopesOf(secret(initSql("s3://lake/acme_lake/"), "qod_data_s3").get) shouldBe
+        Some(List("s3://lake/acme_lake/", "s3://lake/acme_lake__br_"))
     }
 
-    it should "scope a managed prefix to itself" in {
-      scopeOf(secret(initSql("s3://qod-managed/acme_lake-0123abcd/"), "qod_data_s3").get) shouldBe
-        Some("s3://qod-managed/acme_lake-0123abcd/")
+    it should "scope a managed prefix to itself and its branches" in {
+      scopesOf(secret(initSql("s3://qod-managed/acme_lake-0123abcd/"), "qod_data_s3").get) shouldBe
+        Some(
+          List("s3://qod-managed/acme_lake-0123abcd/", "s3://qod-managed/acme_lake-0123abcd__br_")
+        )
     }
 
-    it should "scope a branch to its parent's prefix, which also covers the parent's files" in {
-      val branchPath = "s3://lake/acme_lake__br_0123abcd/"
-      scopeOf(secret(initSql(branchPath), "qod_data_s3").get) shouldBe
-        Some(ai.starlake.quack.ondemand.branch.BranchNames.secretScope(branchPath))
-      scopeOf(secret(initSql(branchPath), "qod_data_s3").get) shouldBe Some("s3://lake/acme_lake")
+    it should "scope a branch to its parent's prefix and its own" in {
+      scopesOf(secret(initSql("s3://lake/acme_lake__br_0123abcd/"), "qod_data_s3").get) shouldBe
+        Some(List("s3://lake/acme_lake/", "s3://lake/acme_lake__br_0123abcd/"))
     }
 
     it should "create none for a database with its own object-store secret" in {
       val own = ObjectStoreSecret.sql(OwnKeys, "s3://lake/acme_lake", "ducklake")
       val sql = initSql("s3://lake/acme_lake", "objectStoreSql" -> own)
       secret(sql, "qod_data_s3") shouldBe None
-      secret(sql, "qod_db_store").flatMap(scopeOf) shouldBe Some("s3://lake/acme_lake/")
+      secret(sql, "qod_db_store").flatMap(scopesOf) shouldBe
+        Some(List("s3://lake/acme_lake/", "s3://lake/acme_lake__br_"))
+      sql should not include "LOAD aws;"
     }
 
     it should "scope a bucket root, written with or without its slash, to s3://<bucket>/" in
       List("s3://lake", "s3://lake/").foreach { root =>
         withClue(s"$root: ") {
-          scopeOf(secret(initSql(root), "qod_data_s3").get) shouldBe Some("s3://lake/")
+          scopesOf(secret(initSql(root), "qod_data_s3").get) shouldBe
+            Some(List("s3://lake/", "s3://lake__br_"))
         }
       }
 
-    it should "create neither storage secret for a duckdb-file database (ducklake only)" in {
-      // STORAGE_SQL (quack_s3, qod_data_s3) rides the ducklake arm only: a duckdb-file or memory
-      // database on the manager's keys has no secret scoped to its data path (the known limitation
-      // noted beside qod_data_s3 in spawn-quack-node.sh). Its own objectStore secret is scoped to
-      // the file itself.
+    it should "give a duckdb-file database a secret scoped to its file, on either credential" in {
       val file = "s3://lake/acme.duckdb"
-      secret(initSql(file, "kind" -> "duckdb-file"), "quack_s3") shouldBe None
-      secret(initSql(file, "kind" -> "duckdb-file"), "qod_data_s3") shouldBe None
+      scopesOf(secret(initSql(file, "kind" -> "duckdb-file"), "qod_data_s3").get) shouldBe
+        Some(List(file))
       val own = ObjectStoreSecret.sql(OwnKeys, file, "duckdb-file")
       secret(initSql(file, "kind" -> "duckdb-file", "objectStoreSql" -> own), "qod_db_store")
-        .flatMap(scopeOf) shouldBe Some(file)
+        .flatMap(scopesOf) shouldBe Some(List(file))
     }
 
-    it should "create none without the manager's keys" in {
-      val sql = initSql(
-        "s3://lake/acme_lake",
-        "QOD_S3_ACCESS_KEY_ID"     -> "",
-        "QOD_S3_SECRET_ACCESS_KEY" -> ""
+    it should "fall back to the instance's credential chain without the manager's keys" in {
+      val sql  = initSql("s3://lake/acme_lake", NoManagerKeys*)
+      val data = secret(sql, "qod_data_s3").getOrElse(fail(s"no qod_data_s3 in:\n$sql"))
+      List(
+        "TYPE s3",
+        "PROVIDER credential_chain",
+        "VALIDATION 'none'",
+        "REFRESH 'auto'",
+        "ENDPOINT 'minio:9000'",
+        "USE_SSL false",
+        "URL_COMPATIBILITY_MODE false"
+      ).foreach(opt => withClue(opt)(data should include(opt)))
+      // The chain supplies the identity; an explicit empty session token would break it.
+      List("KEY_ID", "SECRET '", "SESSION_TOKEN", "REGION").foreach(k =>
+        withClue(k)(data should not include k)
       )
-      secret(sql, "quack_s3") shouldBe None
-      secret(sql, "qod_data_s3") shouldBe None
+      scopesOf(data) shouldBe Some(List("s3://lake/acme_lake/", "s3://lake/acme_lake__br_"))
+      sql should include("INSTALL aws;")
+      sql.indexOf("LOAD aws;") should (be >= 0 and be < sql.indexOf(
+        "CREATE OR REPLACE SECRET qod_data_s3"
+      ))
+      secret(
+        initSql("s3://lake/acme_lake", (NoManagerKeys :+ ("QOD_S3_REGION" -> "eu-west-3"))*),
+        "qod_data_s3"
+      ).get should include("REGION 'eu-west-3'")
+    }
+
+    it should "load no aws extension when the manager's keys sign the data path" in {
+      initSql("s3://lake/acme_lake") should not include "LOAD aws;"
+    }
+
+    it should "create the data-path secret before any ATTACH, for every kind" in {
+      val lake = initSql("s3://lake/acme_lake")
+      lake.indexOf("CREATE OR REPLACE SECRET qod_data_s3") should be < lake.indexOf(
+        "ATTACH 'ducklake:"
+      )
+      val file = initSql("s3://lake/acme.duckdb", "kind" -> "duckdb-file")
+      file.indexOf("CREATE OR REPLACE SECRET qod_data_s3") should be < file.indexOf("ATTACH 's3://")
+    }
+
+    it should "double a quote in the manager's keys" in {
+      secret(
+        initSql("s3://lake/acme_lake", "QOD_S3_SECRET_ACCESS_KEY" -> "it's"),
+        "qod_data_s3"
+      ).get should
+        include("SECRET 'it''s'")
     }
 
 class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPathSecretCases:
@@ -166,41 +228,40 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
 
   behavior of "the data-path secret on the DuckDB release (bash)"
 
-  private val Bucket = TenantLocation(
-    "0123abcd" + "0" * 24,
-    "acme",
-    TenantLocation.S3,
-    "s3://lake/",
-    Map("s3_access_key_id" -> "tenant-key-id", "s3_secret_access_key" -> "tenant-secret"),
-    1L,
-    None
-  )
-  private val Tenant = TenantLocationSecrets.name(Bucket)
-  private val Raw    = "s3://lake/raw/events.parquet"
+  /** A user's connection secret, as qod-node installs one (Task 7), here through SQL. */
+  private val UserSecret =
+    "CREATE SECRET qod_uc_0123abcd IN connection (TYPE s3, KEY_ID 'user-key-id', " +
+      "SECRET 'user-secret', SCOPE 's3://lake/');"
+  private val Raw = "s3://lake/raw/events.parquet"
 
-  /** The secret each of `files` signs with on a node of a database at `dataPath`, after the tenant
-    * authorized `s3://lake/` through the live push. The node's order: the storage secrets the spawn
-    * rendered, the ATTACH (its secret lookup, here a which_secret, runs before lockdown, as on a
-    * node), lockdown, then the push.
+  /** The secret each of `files` signs with on a node of a database at `dataPath` whose connection
+    * holds a user's credential for `s3://lake/` (when `user`), `none` for no secret. The node's
+    * order: the storage secrets the spawn rendered, the ATTACH (its secret lookup, here a
+    * which_secret, runs before lockdown, as on a node: the first lookup reads the persistent secret
+    * storage, which lockdown's disabled LocalFileSystem would refuse), lockdown, then a statement's
+    * lookups.
     */
   private def winners(
       cli: Path,
       dataPath: String,
       files: List[String],
       kind: String = "ducklake",
-      own: Boolean = false
+      own: Boolean = false,
+      user: Boolean = true
   ): List[String] =
     val extra =
       List("kind" -> kind) ++
         Option.when(own)("objectStoreSql" -> ObjectStoreSecret.sql(OwnKeys, dataPath, kind))
     val init = initSql(dataPath, extra*)
     val sql  = (List("INSTALL httpfs;", "LOAD httpfs;") ++
-      List("quack_s3", "qod_data_s3", "qod_db_store").flatMap(secret(init, _)) ++
+      List("qod_data_s3", "qod_db_store").flatMap(secret(init, _)) ++
       List(
-        s"SELECT name FROM which_secret('${files.head}', 's3');",
+        s"SELECT coalesce((SELECT name FROM which_secret('${files.head}', 's3')), 'none');",
         NodeLockdown.sql(dataPath, enabled = true)
-      ) ++ TenantLocationSecrets.pushAdd(Bucket) ++
-      files.map(f => s"SELECT name FROM which_secret('$f', 's3');")).mkString("\n")
+      ) ++
+      Option.when(user)(UserSecret).toList ++
+      files.map(f => s"SELECT coalesce((SELECT name FROM which_secret('$f', 's3')), 'none');"))
+      .mkString("\n")
     val (rc, out, err) = runCli(cli, sql + "\n")
     withClue(s"stderr: $err ") {
       rc shouldBe 0
@@ -214,15 +275,14 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
     assume(okRc == 0, "httpfs cannot be installed on this host (offline, no cache)")
     cli
 
-  it should "outrank a tenant's bucket secret for the data path, on a lockdown node too" in {
+  it should "sign the data path with its own secret and a user's URL with the user's" in {
     val cli = cliOrCancel()
     winners(
       cli,
       "s3://lake/acme_lake",
       List("s3://lake/acme_lake/main/t/part-0.parquet", Raw)
-    ) shouldBe
-      List("qod_data_s3", Tenant)
-    // A branch: the parent's files it reads in place and its own.
+    ) shouldBe List("qod_data_s3", "qod_uc_0123abcd")
+    // A branch: the parent's files it reads in place, and its own.
     winners(
       cli,
       "s3://lake/acme_lake__br_0123abcd/",
@@ -231,17 +291,28 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
         "s3://lake/acme_lake__br_0123abcd/main/t/x.parquet",
         Raw
       )
-    ) shouldBe List("qod_data_s3", "qod_data_s3", Tenant)
+    ) shouldBe List("qod_data_s3", "qod_data_s3", "qod_uc_0123abcd")
+    // The parent's node (and its merge node) reaches its branches' files too.
+    winners(
+      cli,
+      "s3://lake/acme_lake",
+      List("s3://lake/acme_lake__br_0123abcd/main/t/x.parquet")
+    ) shouldBe List("qod_data_s3")
   }
 
-  it should "win the tie at a bucket root, on the manager's keys and on the database's own" in {
+  it should "sign nothing outside the data path when no user credential covers it" in {
+    val cli = cliOrCancel()
+    winners(cli, "s3://lake/acme_lake", List(Raw, "s3://other/x.parquet"), user = false) shouldBe
+      List("none", "none")
+  }
+
+  it should "sign a bucket-root data path with its own secret, on either credential" in {
     val cli  = cliOrCancel()
     val file = "s3://lake/main/t/part-0.parquet"
     List("s3://lake", "s3://lake/").foreach { root =>
       withClue(s"$root: ") {
-        winners(cli, root, List(file, Raw)) shouldBe List("qod_data_s3", "qod_data_s3")
-        winners(cli, root, List(file, Raw), own = true) shouldBe
-          List("qod_db_store", "qod_db_store")
+        winners(cli, root, List(file), user = false) shouldBe List("qod_data_s3")
+        winners(cli, root, List(file), own = true, user = false) shouldBe List("qod_db_store")
       }
     }
   }
@@ -250,7 +321,7 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
     val cli  = cliOrCancel()
     val file = "s3://lake/acme.duckdb"
     winners(cli, file, List(file, s"$file.wal", Raw), kind = "duckdb-file", own = true) shouldBe
-      List("qod_db_store", "qod_db_store", Tenant)
+      List("qod_db_store", "qod_db_store", "qod_uc_0123abcd")
   }
 
 // PowerShell twin: pwsh off Windows, cancelled without PowerShell, like

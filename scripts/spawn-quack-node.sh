@@ -149,59 +149,77 @@ fi
 # remote schemes we skip the local mkdir (the parent dir doesn't exist on the
 # container fs) and emit the SQL needed to install httpfs/azure + a SECRET so
 # the ATTACH below can read/write parquet against the bucket.
+#
+# The data path signs with credentials scoped to it alone (spec decision 23): the database's own
+# objectStore (objectStoreSql's qod_db_store) or else qod_data_s3 below, on the manager's QOD_S3_*
+# keys or, with neither, on the instance's AWS credential chain (the aws extension). No unscoped s3
+# secret exists on a node: a user's s3:// URL signs with that user's own connection secret
+# (qod_uc_<id8>, which qod-node installs per connection) or with nothing. A key a secret leaves out
+# is filled from the s3_* settings, so every key is named; qod-node resets the GLOBAL ones the
+# environment filled whenever httpfs loads. The scopes follow ObjectStoreSecret.dataScopes: a
+# duckdb-file path itself; a branch prefix <parent>__br_<id8>/ its parent's prefix and its own (it
+# reads the parent's Parquet in place); any other path itself plus one '/' and its branches' prefix
+# <path>__br_ (a merge node attaches a branch beside its parent).
 IS_REMOTE=0
 STORAGE_SQL=""
+# The quote rides a variable: inside double quotes, bash 3.2 (macOS) keeps the backslashes of an
+# escaped quote in the replacement.
+sql_quote() { local q="'"; printf '%s' "${1//$q/$q$q}"; }
 case "$dataPath" in
   s3://*|s3a://*|gs://*|r2://*)
     IS_REMOTE=1
     STORAGE_SQL="INSTALL httpfs;"$'\n'"LOAD httpfs;"
-    if [[ -n "${QOD_S3_ACCESS_KEY_ID:-}" && -n "${QOD_S3_SECRET_ACCESS_KEY:-}" ]]; then
+    if [[ -z "${objectStoreSql:-}" ]]; then
+      if [[ "$kind" == "duckdb-file" ]]; then
+        data_scopes="'$(sql_quote "$dataPath")'"
+      elif [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
+        data_scopes="'$(sql_quote "${BASH_REMATCH[1]}/")', '$(sql_quote "${dataPath%/}/")'"
+      else
+        data_scopes="'$(sql_quote "${dataPath%/}/")', '$(sql_quote "${dataPath%/}__br_")'"
+      fi
       # Strip http(s):// from the endpoint - DuckDB wants "host:port".
       ep="${QOD_S3_ENDPOINT:-}"
       ep="${ep#http://}"; ep="${ep#https://}"; ep="${ep%/}"
-      STORAGE_SQL="$STORAGE_SQL
-CREATE OR REPLACE SECRET quack_s3 (
-  TYPE s3,
-  KEY_ID '${QOD_S3_ACCESS_KEY_ID}',
-  SECRET '${QOD_S3_SECRET_ACCESS_KEY}',
-  REGION '${QOD_S3_REGION:-us-east-1}',
-  ENDPOINT '${ep}',
-  URL_STYLE '${QOD_S3_URL_STYLE:-path}',
-  USE_SSL ${QOD_S3_USE_SSL:-true}
-);"
-      # The same credentials again, scoped to this database's data path. DuckDB picks the s3 secret
-      # with the longest matching scope, a tie going to the name first in alphabetical order, so the
-      # unscoped quack_s3 loses every path of a bucket the tenant authorized (tenantStoreSql's
-      # qod_tl_<id8>, scoped to s3://<bucket>/): without this secret the database's own ATTACH,
-      # reads and writes would sign with the tenant's keys. The scope follows
-      # ObjectStoreSecret.dataScope: a duckdb-file path itself, a branch its parent's prefix without
-      # the separator (which also covers the parent's files it reads in place), any other path
-      # itself plus one `/` (a managed prefix included). It is longer than a bucket scope, or ties
-      # it at a bucket root, and qod_data_s3 wins that tie ("qod_d" < "qod_t"). A branch of a
-      # bucket-root database stays exposed (see ObjectStoreSecret.dataScope). Skipped when the
-      # database has its own object-store secret (objectStoreSql), which follows the same rule. A
-      # database whose data-path credentials come from neither (a credential_chain secret in its
-      # init SQL, or DuckDB's defaults) gets no data-path secret: once the tenant authorizes that
-      # bucket, its data signs with the tenant's keys (a known limitation).
-      if [[ -z "${objectStoreSql:-}" ]]; then
-        if [[ "$kind" == "duckdb-file" ]]; then
-          data_scope="$dataPath"
-        elif [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
-          data_scope="${BASH_REMATCH[1]}"
-        else
-          data_scope="${dataPath%/}/"
-        fi
-        data_scope_sql=${data_scope//\'/\'\'}
+      if [[ -n "${QOD_S3_ACCESS_KEY_ID:-}" && -n "${QOD_S3_SECRET_ACCESS_KEY:-}" ]]; then
         STORAGE_SQL="$STORAGE_SQL
 CREATE OR REPLACE SECRET qod_data_s3 (
   TYPE s3,
-  KEY_ID '${QOD_S3_ACCESS_KEY_ID}',
-  SECRET '${QOD_S3_SECRET_ACCESS_KEY}',
-  REGION '${QOD_S3_REGION:-us-east-1}',
-  ENDPOINT '${ep}',
-  URL_STYLE '${QOD_S3_URL_STYLE:-path}',
+  KEY_ID '$(sql_quote "$QOD_S3_ACCESS_KEY_ID")',
+  SECRET '$(sql_quote "$QOD_S3_SECRET_ACCESS_KEY")',
+  SESSION_TOKEN '',
+  REGION '$(sql_quote "${QOD_S3_REGION:-us-east-1}")',
+  ENDPOINT '$(sql_quote "$ep")',
+  URL_STYLE '$(sql_quote "${QOD_S3_URL_STYLE:-path}")',
   USE_SSL ${QOD_S3_USE_SSL:-true},
-  SCOPE '${data_scope_sql}'
+  KMS_KEY_ID '',
+  URL_COMPATIBILITY_MODE false,
+  REQUESTER_PAYS false,
+  SCOPE [$data_scopes]
+);"
+      else
+        # The instance's own credentials (an instance role, IRSA, an AWS_* environment, a profile):
+        # the chain supplies the identity, so no key, secret or session token is named here, and
+        # the region only when the operator sets one. VALIDATION 'none': a node without instance
+        # credentials still starts (unsigned requests reach a public bucket); REFRESH 'auto':
+        # instance credentials rotate.
+        region_line=""
+        if [[ -n "${QOD_S3_REGION:-}" ]]; then
+          region_line="
+  REGION '$(sql_quote "$QOD_S3_REGION")',"
+        fi
+        STORAGE_SQL="$STORAGE_SQL
+INSTALL aws;
+LOAD aws;
+CREATE OR REPLACE SECRET qod_data_s3 (
+  TYPE s3,
+  PROVIDER credential_chain,
+  VALIDATION 'none',
+  REFRESH 'auto',$region_line
+  ENDPOINT '$(sql_quote "$ep")',
+  URL_STYLE '$(sql_quote "${QOD_S3_URL_STYLE:-vhost}")',
+  USE_SSL ${QOD_S3_USE_SSL:-true},
+  URL_COMPATIBILITY_MODE false,
+  SCOPE [$data_scopes]
 );"
       fi
     fi
@@ -534,10 +552,17 @@ fi
 # A scoped CREATE SECRET for this database's own bucket/credentials, emitted for EVERY kind:
 # TenantDb.validate permits a `memory` or `duckdb-file` database to carry an objectStore, and a
 # `memory` database of views over s3:// parquet (the `qod serve` remote-prefix case) reads nothing
-# without it. Must precede any ATTACH, and runs alongside the global STORAGE_SQL below - DuckDB
-# picks the longest matching scope.
+# without it. Must precede any ATTACH, and runs right before STORAGE_SQL, which adds
+# qod_data_s3 only when objectStoreSql is empty.
 if [[ -n "${objectStoreSql:-}" ]]; then
   INIT_SQL+="$objectStoreSql"$'\n'
+fi
+
+# The data path's storage secret and extensions (STORAGE_SQL, above), for every kind: a duckdb-file
+# or memory database on an object store needs its scoped secret as much as a DuckLake one. Before any
+# ATTACH.
+if [[ -n "$STORAGE_SQL" ]]; then
+  INIT_SQL+="$STORAGE_SQL"$'\n'
 fi
 
 # The tenant's authorized S3 locations (tenantStoreSql, authored by TenantLocationSecrets.scala): one
@@ -553,7 +578,7 @@ fi
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
 # mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently
-# read-only node rather than an error. STORAGE_SQL only loads httpfs for remote data paths, so a
+# read-only node rather than an error. STORAGE_SQL loads httpfs for remote data paths only, so a
 # local encrypted database would miss it.
 ENCRYPTION_SQL=""
 if [[ "${encrypted:-}" == "true" ]]; then
@@ -565,7 +590,6 @@ case "$kind" in
   ducklake)
     INIT_SQL+=$'INSTALL ducklake;\nLOAD ducklake;\n'
     INIT_SQL+=$'INSTALL postgres;\nLOAD postgres;\n'
-    INIT_SQL+="$STORAGE_SQL"$'\n'
     # The catalog password rides a TEMPORARY secret, never an ATTACH string: DuckDB prints an attach
     # path verbatim in duckdb_databases().path and in connection errors, readable by any SQL user
     # of the node. Both ATTACHes name the secret, and it is dropped right after them (before

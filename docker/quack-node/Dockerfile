@@ -57,7 +57,7 @@ install -m 0755 "/tmp/qod-node-binaries/$PLATFORM/qod-node" /opt/qod-node/bin/qo
 /opt/qod-node/bin/qod-node --build-info | grep -q "duckdb=v${DUCKDB_VERSION};"
 # Pre-install the runtime extensions so the pod needs no outbound internet on first ATTACH.
 mkdir -p /opt/duckdb-extensions
-HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs;"
+HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs; INSTALL aws;"
 chmod -R a+rX /opt/duckdb-extensions
 EOF
 

@@ -221,6 +221,11 @@ if(QOD_NODE_TESTS)
   add_test(NAME json_writer COMMAND json_writer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/canonical-json-v1.txt)
   qod_node_test(node_config_test)
   add_test(NAME node_config COMMAND node_config_test)
+  qod_node_test(s3_env_test)
+  add_test(NAME s3_env COMMAND s3_env_test)
+  # Fake credentials in this test's environment only, never in the shell's.
+  set_tests_properties(s3_env PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT
+    "AWS_ACCESS_KEY_ID=AKIAQODFAKETEST00000;AWS_SECRET_ACCESS_KEY=qod-fake-secret-not-a-key;AWS_SESSION_TOKEN=qod-fake-session-token;AWS_REGION=qod-fake-region-1;DUCKDB_S3_ENDPOINT=qod-fake-endpoint.invalid;DUCKDB_S3_KMS_KEY_ID=qod-fake-kms-key")
   qod_node_test(functions_list_test)
   add_test(NAME functions_list COMMAND functions_list_test)
   qod_node_test(handle_tool)
