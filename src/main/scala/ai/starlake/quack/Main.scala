@@ -459,6 +459,10 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // Each tenant's policy version (Liquibase 0050): NodeKeys stamps it into every handle, the
+    // supervisor refreshes it after RBAC mutations and restores. One instance for both.
+    val policyVersions =
+      new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
     // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
     // every node key derives from it, so it must outlive this process and agree across replicas.
     val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
@@ -468,7 +472,8 @@ object Main extends IOApp with LazyLogging:
         case Right(secret) =>
           new ai.starlake.quack.edge.authz.NodeKeys(
             secret,
-            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port)
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
+            versions = policyVersions
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -616,7 +621,8 @@ object Main extends IOApp with LazyLogging:
       publish = publisher,
       events = supEvents,
       lockdownEnabled = lockdownCfg.enabled,
-      managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore)
+      managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
+      sharedPolicyVersions = Some(policyVersions)
     )
     supRef.set(sup)
     // Fleet mode: the pool listing shows each node's server and its liveness.

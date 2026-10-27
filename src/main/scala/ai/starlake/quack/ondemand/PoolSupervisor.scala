@@ -148,8 +148,20 @@ final class PoolSupervisor(
       * reconcile tick in that gap respawns a node that is merely slow to come up. Past it, a node
       * that never listened (an init that hangs, a port taken by a stray) is respawned as before.
       */
-    nodeStartupGrace: scala.concurrent.duration.FiniteDuration = PoolSupervisor.NodeStartupGrace
+    nodeStartupGrace: scala.concurrent.duration.FiniteDuration = PoolSupervisor.NodeStartupGrace,
+    /** The policy-version cache Main shares with NodeKeys, which mints every session handle. None
+      * (tests) still keeps a real cache, over this supervisor's own store.
+      */
+    sharedPolicyVersions: Option[ai.starlake.quack.edge.authz.PolicyVersionCache] = None
 ) extends LazyLogging:
+
+  /** Each tenant's policy version (Liquibase 0050), refreshed after every local RBAC or ACL
+    * mutation and on every [[restore]].
+    */
+  val policyVersions: ai.starlake.quack.edge.authz.PolicyVersionCache =
+    sharedPolicyVersions.getOrElse(
+      new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
+    )
 
   // Surrogate-id-indexed caches of the persisted state.
   private val tenants   = TrieMap.empty[String, Tenant]   // id -> Tenant
@@ -258,10 +270,14 @@ final class PoolSupervisor(
       .maximumSize(10_000L)
       .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
 
-  /** Drop every cached `EffectiveSet` without broadcasting. Used by [[restore]] and by peer
-    * notification handlers: broadcasting from those paths would echo forever across replicas.
+  /** Drop every cached `EffectiveSet` and reload the tenants' policy versions, without
+    * broadcasting. Used by [[restore]] and by peer notification handlers: broadcasting from those
+    * paths would echo forever across replicas. Every RBAC mutator reaches it through
+    * [[invalidateEffectiveCache]], so handles minted after a grant change carry the new version.
     */
-  private def invalidateEffectiveCacheLocal(): Unit = effectiveCache.invalidateAll()
+  private def invalidateEffectiveCacheLocal(): Unit =
+    effectiveCache.invalidateAll()
+    policyVersions.refresh()
 
   /** Drop every cached `EffectiveSet` and notify peers, so a freshly-granted role or pool
     * permission takes effect on the next handshake, not after a TTL window.
@@ -1646,6 +1662,8 @@ final class PoolSupervisor(
               // (setTenantAuth / setTenantDisabled) can never revert each other.
               store.updateTenantAcl(updated.id, acl)
               tenants.put(updated.id, updated)
+              // The ACL columns bump the tenant's policy version (Liquibase 0050).
+              policyVersions.refresh()
               publish.topologyChanged()
               Right(updated)
     }
