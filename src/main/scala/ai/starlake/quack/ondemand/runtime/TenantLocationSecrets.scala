@@ -4,8 +4,12 @@ import ai.starlake.quack.model.TenantLocation
 
 /** The node side of a tenant's authorized S3 locations: one DuckDB secret per bucket, named
   * `qod_tl_<first 8 of the location id>` and scoped to `s3://<bucket>/`, so the tenant's sessions
-  * reach a bucket only with the keys the tenant gave for it. DuckDB picks the longest matching
-  * scope, so a database's own `qod_db_store` secret (scoped to its data path) still wins there.
+  * reach a bucket only with the keys the tenant gave for it. DuckDB picks the s3 secret with the
+  * longest matching scope, a tie going to the name first in alphabetical order. A bucket scope
+  * therefore outranks the unscoped `quack_s3` for every path in the bucket, so the spawn scripts
+  * scope the database's own credentials to its data path, which is always longer: `qod_db_store`
+  * (ObjectStoreSecret, the database's objectStore) or else `qod_data_s3` (the manager's `QOD_S3_*`
+  * keys). A database whose data path lies in an authorized bucket keeps signing with its own keys.
   * Delivered at spawn as the node secret file `tenantStoreSql` ([[initSql]], one statement per
   * line) and pushed to running nodes on a change ([[pushAdd]], [[pushRemove]]). The statements
   * carry credentials: nothing here, or at a caller, logs them.
@@ -25,9 +29,13 @@ object TenantLocationSecrets:
     if s3.isEmpty then ""
     else ("INSTALL httpfs;" :: "LOAD httpfs;" :: s3.map(createSql)).mkString("", "\n", "\n")
 
-  /** What a running node of the tenant runs once `l` is added. */
+  /** What a running node of the tenant runs once `l` is added. No `INSTALL`: every spawn installs
+    * httpfs before lockdown, and on a lockdown node whose data path is in an object store
+    * (`disabled_filesystems = 'LocalFileSystem'`) an `INSTALL` fails, which would stop the push
+    * before the secret. `LOAD` of an installed extension needs no local file write.
+    */
   def pushAdd(l: TenantLocation): List[String] =
-    if l.kind == TenantLocation.S3 then List("INSTALL httpfs;", "LOAD httpfs;", createSql(l))
+    if l.kind == TenantLocation.S3 then List("LOAD httpfs;", createSql(l))
     else Nil
 
   /** What a running node of the tenant runs once `l` is removed. */

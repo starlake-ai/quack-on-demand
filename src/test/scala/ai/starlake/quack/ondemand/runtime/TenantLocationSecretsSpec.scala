@@ -50,9 +50,14 @@ class TenantLocationSecretsSpec extends AnyFlatSpec with Matchers:
 
   "the live push" should "create on add and drop on remove, for s3 only" in {
     TenantLocationSecrets.pushAdd(Etl) shouldBe
-      List("INSTALL httpfs;", "LOAD httpfs;", TenantLocationSecrets.createSql(Etl))
+      List("LOAD httpfs;", TenantLocationSecrets.createSql(Etl))
     TenantLocationSecrets.pushRemove(Etl) shouldBe List("DROP SECRET IF EXISTS qod_tl_0123abcd;")
     val local = Etl.copy(kind = "local", location = "/srv/qod/acme/", objectStore = Map.empty)
     TenantLocationSecrets.pushAdd(local) shouldBe Nil
     TenantLocationSecrets.pushRemove(local) shouldBe Nil
+  }
+
+  it should "send no INSTALL, which a lockdown node with an object-store data path refuses" in {
+    TenantLocationSecrets.pushAdd(Etl).filter(_.startsWith("INSTALL")) shouldBe Nil
+    TenantLocationSecrets.pushRemove(Etl).filter(_.startsWith("INSTALL")) shouldBe Nil
   }

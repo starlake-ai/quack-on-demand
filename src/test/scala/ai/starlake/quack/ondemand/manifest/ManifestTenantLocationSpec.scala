@@ -155,3 +155,42 @@ class ManifestTenantLocationSpec extends AnyFlatSpec with Matchers:
       .mkString should
       include("invalid_location")
   }
+
+  it should "refuse two spellings of one location as a duplicate" in {
+    val store = seeded()
+    val twice = withLocations(
+      exported(store),
+      Some(
+        List(
+          ManifestTenantLocation("s3://acme-two", Keys),
+          ManifestTenantLocation("s3://acme-two/", Keys)
+        )
+      )
+    )
+    ManifestImporter
+      .apply(twice, store, requireEncryption = false)
+      .left
+      .toOption
+      .get
+      .mkString should
+      include("duplicate location within acme: s3://acme-two/")
+    store.listTenantLocations("acme") shouldBe List(Etl)
+  }
+
+  it should "store the credentials trimmed" in {
+    val store  = seeded()
+    val padded = withLocations(
+      exported(store),
+      Some(
+        List(
+          ManifestTenantLocation(
+            "s3://acme-two/",
+            Map("s3_access_key_id" -> " B ", "s3_secret_access_key" -> "two ")
+          )
+        )
+      )
+    )
+    ManifestImporter.apply(padded, store, requireEncryption = false) shouldBe Right(())
+    store.listTenantLocations("acme").map(_.objectStore) shouldBe
+      List(Map("s3_access_key_id" -> "B", "s3_secret_access_key" -> "two"))
+  }

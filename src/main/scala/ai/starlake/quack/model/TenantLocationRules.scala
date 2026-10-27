@@ -27,6 +27,11 @@ object TenantLocationRules:
   private val UrlStyles      = Set("path", "vhost")
   private val MaxValueLength = 4096
 
+  /** `m` with each value trimmed: what a location stores. A pasted `" AKIA... "` would otherwise
+    * pass the checks and be rendered with its spaces into the node secret, failing only at use.
+    */
+  def trimValues(m: Map[String, String]): Map[String, String] = m.map((k, v) => k -> v.trim)
+
   /** `<root>/<tenantId>/`. */
   def tenantRoot(root: String, tenantId: String): String =
     root.stripSuffix("/") + "/" + tenantId + "/"

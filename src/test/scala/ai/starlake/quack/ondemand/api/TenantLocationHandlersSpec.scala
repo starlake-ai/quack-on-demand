@@ -77,7 +77,6 @@ class TenantLocationHandlersSpec extends AnyFlatSpec with Matchers:
     val sent = f.pushed.asScala.toList
     sent.map(_._1).toSet shouldBe Set(f.nodeOf("acme"))
     sent.map(_._2) shouldBe List(
-      "INSTALL httpfs;",
       "LOAD httpfs;",
       s"CREATE OR REPLACE SECRET qod_tl_${r.location.id.take(8)} (TYPE s3, KEY_ID 'AKIAEXAMPLE', " +
         s"SECRET '$Secret', REGION 'us-east-1', URL_STYLE 'path', USE_SSL true, SCOPE 's3://acme-etl/');"

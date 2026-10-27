@@ -331,7 +331,8 @@ final class PoolSupervisor(
       getTenant(tenant) match
         case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
         case Some(t) =>
-          TenantLocationRules.validate(t.id, location, objectStore, filesRoot) match
+          val trimmed = TenantLocationRules.trimValues(objectStore)
+          TenantLocationRules.validate(t.id, location, trimmed, filesRoot) match
             case Left((code, msg)) => Left(SupervisorError.InvalidArgument(s"$code: $msg"))
             case Right(accepted)   =>
               val row = TenantLocation(
@@ -339,7 +340,7 @@ final class PoolSupervisor(
                 tenantId = t.id,
                 kind = accepted.kind,
                 location = accepted.location,
-                objectStore = if accepted.kind == TenantLocation.S3 then objectStore else Map.empty,
+                objectStore = if accepted.kind == TenantLocation.S3 then trimmed else Map.empty,
                 createdAt = System.currentTimeMillis(),
                 createdBy = createdBy
               )

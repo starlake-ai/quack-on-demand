@@ -39,14 +39,14 @@
   $env:QOD_NODE_BIN names it (an absolute path the launcher sets); otherwise the first `qod-node`
   on PATH.
 
-  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, tenantStoreSql, the node token, the
-  node key and the object-store credentials, see $SecretKeys below) NEVER arrive through the
-  environment or the command line: another process of the same user can read both. They arrive as
-  one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an
-  ACL granting only the current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the keys it
-  assembles into the init SQL and deletes each file right after; qod-node reads its own keys (the
-  node token and the node key) and removes the directory, which this script also removes when it
-  exits. A key still present in the environment is ignored with a warning.
+  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, tenantStoreSql, the
+  node token, the node key and the object-store credentials, see $SecretKeys below) NEVER arrive
+  through the environment or the command line: another process of the same user can read both. They
+  arrive as one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates
+  with an ACL granting only the current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the
+  keys it assembles into the init SQL and deletes each file right after; qod-node reads its own keys
+  (the node token and the node key) and removes the directory, which this script also removes when
+  it exits. A key still present in the environment is ignored with a warning.
 
   The init SQL reaches qod-node on its stdin (--init -), UTF-8 bytes down a pipe it reads once to
   the end: never on disk, and nothing else reaches the node's own connection through it. qod-node
@@ -218,6 +218,29 @@ CREATE OR REPLACE SECRET quack_s3 (
   USE_SSL $s3UseSsl
 );
 "@
+      # The same credentials scoped to this database's data path, so a tenant's bucket-scoped
+      # qod_tl_<id8> (tenantStoreSql) never outranks the unscoped quack_s3 there: DuckDB picks the
+      # longest matching scope, a tie going to the name first in alphabetical order. A branch
+      # scopes to its parent's prefix without the separator (BranchNames.secretScope). Skipped
+      # when the database has its own objectStoreSql secret. Mirrors spawn-quack-node.sh.
+      if ([string]::IsNullOrEmpty($objectStoreSql)) {
+        if ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') { $dataScope = $Matches[1] }
+        else { $dataScope = ($dataPath -replace '/$', '') + '/' }
+        $dataScopeSql = $dataScope.Replace("'", "''")
+        $storageSql += @"
+
+CREATE OR REPLACE SECRET qod_data_s3 (
+  TYPE s3,
+  KEY_ID '$s3Key',
+  SECRET '$s3Sec',
+  REGION '$s3Region',
+  ENDPOINT '$ep',
+  URL_STYLE '$s3UrlStyle',
+  USE_SSL $s3UseSsl,
+  SCOPE '$dataScopeSql'
+);
+"@
+      }
     }
     break
   }
@@ -528,7 +551,8 @@ if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql)
 # of views over remote parquet reads nothing without the CREATE SECRET. Must precede ATTACH.
 if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
 # The tenant's authorized S3 locations (TenantLocationSecrets.scala): one bucket-scoped secret per
-# line, before any ATTACH, as in spawn-quack-node.sh.
+# line, before any ATTACH, as in spawn-quack-node.sh. The data path keeps its own credentials: its
+# qod_db_store or qod_data_s3 secret is scoped to it, longer than any bucket scope.
 if (-not [string]::IsNullOrEmpty($tenantStoreSql)) { [void]$sb.AppendLine($tenantStoreSql) }
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to

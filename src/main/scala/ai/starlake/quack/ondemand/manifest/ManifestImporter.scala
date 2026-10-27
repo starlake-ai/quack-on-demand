@@ -213,10 +213,14 @@ object ManifestImporter extends LazyLogging:
           .find(x => x.id == t.name || x.displayName == t.name)
           .map(_.id)
           .getOrElse(t.name.toLowerCase(java.util.Locale.ROOT))
-        val stored = store.listTenantLocations(tenantId)
-        dup(ls, _.location.trim, s"location within ${t.name}")
-        ls.foreach(l =>
-          resolveLocation(t.name, tenantId, l, stored, tenantFilesRoot).left.foreach(errs += _)
+        val stored   = store.listTenantLocations(tenantId)
+        val resolved = ls.map(l => resolveLocation(t.name, tenantId, l, stored, tenantFilesRoot))
+        resolved.foreach(_.left.foreach(errs += _))
+        // On the stored spelling: s3://b and s3://b/ are one location.
+        dup(
+          resolved.collect { case Right((a, _)) => a.location },
+          identity,
+          s"location within ${t.name}"
         )
       }
     }
@@ -858,35 +862,6 @@ object ManifestImporter extends LazyLogging:
   private def tenantIdFor(store: ControlPlaneStore, name: String): Option[String] =
     store.listTenants().find(t => t.id == name || t.displayName == name).map(_.id)
 
-  /** Resolve a manifest tenant's `acl` block against the tenant's existing stored acl. Pure (no
-    * store access), so it can run unchanged from both `validate()` (before any write) and `apply()`
-    * (to compute the row to persist).
-    *
-    * `incoming = None` (the field absent from the manifest) keeps `existing` untouched -- this is
-    * what stops a manifest re-export/re-import round trip from wiping a tenant's OPA settings,
-    * since the importer otherwise rebuilds the whole `Tenant` row on every apply.
-    *
-    * `opaToken` is exported redacted (`FederatedSecret.RedactedMarker`), so on import:
-    *   - redacted + an existing token is already on file -> keep the existing token (the common
-    *     re-import-without-editing-the-token case), but only when `opaUrl` is unchanged: the stored
-    *     bearer was issued for the stored URL and never follows a URL change, so redacted + a
-    *     changed URL is the same hard error as redacted + nothing to reuse.
-    *   - redacted + no existing token -> there is nothing to restore. Same precedent as a federated
-    *     secret's redacted-with-nothing-to-reuse case (see `applyFederatedSources` below): a hard
-    *     import error, not a silent drop, so a manifest can never leave a tenant mid-edit with an
-    *     OPA mode but no token.
-    *   - anything else (including blank, folded to `None`) is written verbatim.
-    *
-    * `mode` normalizes an empty string to `None` (the manager default), matching
-    * `PoolSupervisor.setTenantAcl`'s own REST normalization; it is not trimmed, so a stray
-    * leading/trailing space is refused rather than silently fixed. `opaUrl` / `opaPolicyPath` are
-    * trimmed, blank folding to `None` the same way.
-    *
-    * Returns `Left` for a value that fails the same validation `PoolSupervisor.setTenantAcl`
-    * applies (`TenantAcl.ValidModes` / `validUrl` / `validPolicyPath`), or for the redacted/
-    * nothing-to-reuse case above: both are a hard error for the import, reported like any other
-    * per-row validation failure.
-    */
   /** A manifest location as it would be stored: its redacted secret resolved against the tenant's
     * `stored` locations, then the add rules (TenantLocationRules). The marker is kept only from a
     * stored location with the same location, `s3_access_key_id` and `s3_endpoint`: a stored secret
@@ -901,15 +876,16 @@ object ManifestImporter extends LazyLogging:
   ): Either[String, (ai.starlake.quack.model.TenantLocationRules.Accepted, Map[String, String])] =
     val label     = s"tenant '$tenantName' location '${ml.location.trim}'"
     val secretKey = "s3_secret_access_key"
-    val objectStore: Either[String, Map[String, String]] = ml.objectStore.get(secretKey) match
+    val incoming  = ai.starlake.quack.model.TenantLocationRules.trimValues(ml.objectStore)
+    val objectStore: Either[String, Map[String, String]] = incoming.get(secretKey) match
       case Some(FederatedSecret.RedactedMarker) =>
         stored.find(_.location == ml.location.trim) match
           case Some(s)
-              if s.objectStore.get("s3_access_key_id") == ml.objectStore.get("s3_access_key_id") &&
-                s.objectStore.get("s3_endpoint") == ml.objectStore.get("s3_endpoint") =>
+              if s.objectStore.get("s3_access_key_id") == incoming.get("s3_access_key_id") &&
+                s.objectStore.get("s3_endpoint") == incoming.get("s3_endpoint") =>
             s.objectStore
               .get(secretKey)
-              .map(v => ml.objectStore.updated(secretKey, v))
+              .map(v => incoming.updated(secretKey, v))
               .toRight(s"$label: s3_secret_access_key is redacted and none is stored; provide it")
           case Some(_) =>
             Left(
@@ -921,7 +897,7 @@ object ManifestImporter extends LazyLogging:
               s"$label: s3_secret_access_key is redacted and the tenant holds no such location to " +
                 "keep it from; provide the secret, or add the location later with qod tenant location add"
             )
-      case _ => Right(ml.objectStore)
+      case _ => Right(incoming)
     objectStore.flatMap { os =>
       ai.starlake.quack.model.TenantLocationRules
         .validate(tenantId, ml.location, os, filesRoot)
@@ -978,6 +954,35 @@ object ManifestImporter extends LazyLogging:
       }
     ()
 
+  /** Resolve a manifest tenant's `acl` block against the tenant's existing stored acl. Pure (no
+    * store access), so it can run unchanged from both `validate()` (before any write) and `apply()`
+    * (to compute the row to persist).
+    *
+    * `incoming = None` (the field absent from the manifest) keeps `existing` untouched -- this is
+    * what stops a manifest re-export/re-import round trip from wiping a tenant's OPA settings,
+    * since the importer otherwise rebuilds the whole `Tenant` row on every apply.
+    *
+    * `opaToken` is exported redacted (`FederatedSecret.RedactedMarker`), so on import:
+    *   - redacted + an existing token is already on file -> keep the existing token (the common
+    *     re-import-without-editing-the-token case), but only when `opaUrl` is unchanged: the stored
+    *     bearer was issued for the stored URL and never follows a URL change, so redacted + a
+    *     changed URL is the same hard error as redacted + nothing to reuse.
+    *   - redacted + no existing token -> there is nothing to restore. Same precedent as a federated
+    *     secret's redacted-with-nothing-to-reuse case (see `applyFederatedSources` below): a hard
+    *     import error, not a silent drop, so a manifest can never leave a tenant mid-edit with an
+    *     OPA mode but no token.
+    *   - anything else (including blank, folded to `None`) is written verbatim.
+    *
+    * `mode` normalizes an empty string to `None` (the manager default), matching
+    * `PoolSupervisor.setTenantAcl`'s own REST normalization; it is not trimmed, so a stray
+    * leading/trailing space is refused rather than silently fixed. `opaUrl` / `opaPolicyPath` are
+    * trimmed, blank folding to `None` the same way.
+    *
+    * Returns `Left` for a value that fails the same validation `PoolSupervisor.setTenantAcl`
+    * applies (`TenantAcl.ValidModes` / `validUrl` / `validPolicyPath`), or for the redacted/
+    * nothing-to-reuse case above: both are a hard error for the import, reported like any other
+    * per-row validation failure.
+    */
   private def importAcl(
       tenantName: String,
       incoming: Option[ManifestTenantAcl],

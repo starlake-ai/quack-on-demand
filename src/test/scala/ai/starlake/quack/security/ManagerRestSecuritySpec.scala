@@ -193,6 +193,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       post(h.httpClient, url, body).statusCode() shouldBe 401
     finally h.shutdown()
   }
+
   it should "let a non-admin session reach both /api/profile routes" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)

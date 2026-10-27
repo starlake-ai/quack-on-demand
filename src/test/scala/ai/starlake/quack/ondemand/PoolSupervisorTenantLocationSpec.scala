@@ -104,3 +104,29 @@ class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
     sup.deleteTenant("globex").unsafeRunSync() shouldBe Right(())
     sup.tenantLocations("globex") shouldBe Nil
   }
+
+  it should "store the credentials trimmed" in {
+    val (sup, _, _) = fixture()
+    val l           = sup
+      .addTenantLocation(
+        "acme",
+        "s3://acme-etl/",
+        Map(
+          "s3_access_key_id"     -> " AKIA ",
+          "s3_secret_access_key" -> "sekr3t\t",
+          "s3_region"            -> " eu-west-3"
+        ),
+        None,
+        None
+      )
+      .unsafeRunSync()
+      .toOption
+      .get
+    l.objectStore shouldBe
+      Map(
+        "s3_access_key_id"     -> "AKIA",
+        "s3_secret_access_key" -> "sekr3t",
+        "s3_region"            -> "eu-west-3"
+      )
+    sup.tenantLocations("acme").map(_.objectStore) shouldBe List(l.objectStore)
+  }

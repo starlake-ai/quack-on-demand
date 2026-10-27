@@ -271,6 +271,7 @@ class KubernetesQuackBackendSecuritySpec
     podEnv("quack-nodeenv-tl").exists(e =>
       Option(e.getValue).exists(_.contains("tl-marker-secret"))
     ) shouldBe false
+
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
     backend.start(nodeEnvSpec("quack-nodeenv-4", lakeMeta + ("pgPassword" -> "p"))).unsafeRunSync()
