@@ -5,16 +5,18 @@ databaseChangeLog:
       changes:
         # A tenant's policy version (in-engine authorization): every session handle carries it and
         # nodes cache verdicts by it, so it moves whenever anything a verdict depends on changes.
-        # Written by the triggers of the next changeset only, never by application code.
-        - addColumn:
-            tableName: qodstate_tenant
-            columns:
-              - column:
-                  name: policy_version
-                  type: BIGINT
-                  defaultValueNumeric: 0
-                  constraints:
-                    nullable: false
+        # Every value comes from one sequence, the column default included, so a version only ever
+        # moves up, and a tenant row (a recreated id too) starts above every version ever issued,
+        # so a cache still holding a deleted tenant's last version sees the recreated row pass it.
+        # The volatile default gives each existing row its own value when the column is added.
+        # Written by the default and the triggers of the next changeset only, never by
+        # application code.
+        - sql:
+            sql: CREATE SEQUENCE qodstate_policy_version_seq AS BIGINT
+        - sql:
+            sql: >
+              ALTER TABLE qodstate_tenant ADD COLUMN policy_version BIGINT NOT NULL
+              DEFAULT nextval('qodstate_policy_version_seq')
   - changeSet:
       id: 0050-policy-version-triggers
       author: qod
@@ -22,7 +24,8 @@ databaseChangeLog:
         # One function for every RBAC table. Its argument names how a row reaches its tenant: the
         # row's own tenant_id, qodstate_user.tenant, or the tenant of the role / group it points
         # at. An UPDATE bumps the old row's tenant and the new row's (a row moved between tenants),
-        # each once. An unknown argument raises (CASE without ELSE): never a silent no-bump.
+        # each once, to a fresh value of the sequence. An unknown argument raises (CASE without
+        # ELSE): never a silent no-bump.
         - sql:
             splitStatements: false
             sql: |
@@ -55,7 +58,8 @@ databaseChangeLog:
                     tenants := array_append(tenants, t);
                   END IF;
                 END LOOP;
-                UPDATE qodstate_tenant SET policy_version = policy_version + 1 WHERE id = ANY(tenants);
+                UPDATE qodstate_tenant SET policy_version = nextval('qodstate_policy_version_seq')
+                WHERE id = ANY(tenants);
                 RETURN NULL;
               END;
               $$
@@ -68,7 +72,7 @@ databaseChangeLog:
               CREATE OR REPLACE FUNCTION qod_bump_tenant_policy_version() RETURNS trigger
               LANGUAGE plpgsql AS $$
               BEGIN
-                NEW.policy_version := OLD.policy_version + 1;
+                NEW.policy_version := nextval('qodstate_policy_version_seq');
                 RETURN NEW;
               END;
               $$

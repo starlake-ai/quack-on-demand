@@ -59,7 +59,7 @@ class PoolSupervisorPolicyVersionSpec extends AnyFlatSpec with Matchers:
       .setTenantAcl("acme", TenantAclPatch(mode = Some("qod")), "", "qod")
       .unsafeRunSync()
       .isRight shouldBe true
-    sup.policyVersions.current("acme") shouldBe before + 1
+    sup.policyVersions.current("acme") should be > before
     sup.policyVersions.current("acme") shouldBe stored(store, "acme")
   }
 
@@ -76,5 +76,5 @@ class PoolSupervisorPolicyVersionSpec extends AnyFlatSpec with Matchers:
     finally c.close()
     sup.policyVersions.current("globex") shouldBe before
     sup.restore()
-    sup.policyVersions.current("globex") shouldBe before + 1
+    sup.policyVersions.current("globex") should be > before
   }

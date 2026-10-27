@@ -31,6 +31,19 @@ class PolicyVersionCacheSpec extends AnyFlatSpec with Matchers:
     cache.current("acme") shouldBe 9L
   }
 
+  it should "follow a recreated tenant, whose row starts above every version issued" in {
+    // Liquibase 0050 takes every version from one sequence, so a deleted tenant's id comes back
+    // above the version the cache still holds for it, and the cache moves with it.
+    var loaded = Map("acme" -> 9L)
+    val cache  = new PolicyVersionCache(() => loaded)
+    cache.refresh()
+    loaded = Map.empty
+    cache.refresh()
+    loaded = Map("acme" -> 14L)
+    cache.refresh()
+    cache.current("acme") shouldBe 14L
+  }
+
   it should "keep the last values when a refresh fails, without throwing" in {
     var fail  = false
     val cache = new PolicyVersionCache(() =>

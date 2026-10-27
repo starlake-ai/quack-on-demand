@@ -39,25 +39,30 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def upsertTenant(t: Tenant): Unit =
     tenants.updateWith(t.id) {
       case Some(old) => Some(t.copy(acl = old.acl))
-      case None      => Some(t)
+      case None      =>
+        bumpPolicyVersion(t.id)
+        Some(t)
     }
 
   def updateTenantAcl(tenantId: String, acl: TenantAcl): Unit =
     tenants.updateWith(tenantId)(_.map(_.copy(acl = acl)))
 
-  // No trigger here: a test that needs a version moves it with bumpPolicyVersion.
+  // Mirrors Liquibase 0050's sequence: a new tenant row and every bump take the next value of one
+  // shared counter. No trigger here: a test that needs a version moves it with bumpPolicyVersion.
+  private val policyVersionSeq = new AtomicLong(0L)
   private val policyVersionsOf = TrieMap.empty[String, Long]
 
   def policyVersions(): Map[String, Long] =
     tenants.keys.map(t => t -> policyVersionsOf.getOrElse(t, 0L)).toMap
 
   def bumpPolicyVersion(tenantId: String): Unit =
-    policyVersionsOf.updateWith(tenantId)(v => Some(v.getOrElse(0L) + 1L))
+    policyVersionsOf.put(tenantId, policyVersionSeq.incrementAndGet())
 
   def createTenantWithBuiltins(tenant: Tenant, builtins: BuiltinRbac.Rows): Unit =
     if tenants.contains(tenant.id) then
       throw new java.sql.SQLException(s"tenant id ${tenant.id} already exists")
     tenants.put(tenant.id, tenant)
+    bumpPolicyVersion(tenant.id)
     builtins.roles.foreach(putRole)
     builtins.groups.foreach(putGroup)
     builtins.permissions.foreach(insertRolePermission)
@@ -134,6 +139,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     if tenantDbs.values.exists(_.tenantId == id) then
       throw new java.sql.SQLException(s"tenant $id has tenant-db children")
     tenants.remove(id)
+    policyVersionsOf.remove(id)
     // CASCADE the RBAC subgraph.
     roles.values.filter(_.tenantId == id).foreach(r => deleteRole(r.id))
     groups.values.filter(_.tenantId == id).foreach(g => deleteGroup(g.id))

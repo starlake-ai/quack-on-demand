@@ -7,8 +7,9 @@ import org.scalatest.matchers.should.Matchers
 import java.sql.Connection
 import scala.util.Try
 
-/** Liquibase 0050: every RBAC write bumps exactly its own tenant's policy version, once per row,
-  * and nothing else does. Needs the local Postgres of TestPostgres.
+/** Liquibase 0050: every RBAC write bumps exactly its own tenant's policy version, once per row, to
+  * a value above every version issued before, and nothing else does. Needs the local Postgres of
+  * TestPostgres.
   */
 class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
   TestPostgres.dropStrayTestDatabases("qodpv")
@@ -51,19 +52,38 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
       b.result()
     finally st.close()
 
-  /** How much each tenant's version moved while `sqls` ran. */
-  private def delta(c: Connection)(sqls: String*): Map[String, Long] =
+  /** The last value the version sequence issued. */
+  private def lastIssued(c: Connection): Long =
+    val st = c.createStatement()
+    try
+      val rs = st.executeQuery("SELECT last_value FROM qodstate_policy_version_seq")
+      rs.next()
+      rs.getLong(1)
+    finally st.close()
+
+  /** Which tenants' versions moved while `sqls` ran, and how many versions the sequence issued
+    * meanwhile (one per bumped row). A version never moves down, and one that moves lands above
+    * every version issued before.
+    */
+  private def delta(c: Connection)(sqls: String*): (Set[String], Long) =
     val before = versions(c)
+    val issued = lastIssued(c)
     exec(c)(sqls*)
     val after = versions(c)
-    after.map((t, v) => t -> (v - before.getOrElse(t, 0L)))
+    val moved = after.collect { case (t, v) if before.get(t).exists(_ != v) => t }.toSet
+    after.foreach((t, v) => before.get(t).foreach(b => withClue(s"$t: ")(v should be >= b)))
+    moved.foreach(t => withClue(s"$t: ")(after(t) should be > issued))
+    (moved, lastIssued(c) - issued)
 
-  private val AcmeOnce = Map("acme" -> 1L, "globex" -> 0L)
-  private val Nothing  = Map("acme" -> 0L, "globex" -> 0L)
+  private val AcmeOnce = (Set("acme"), 1L)
+  private val Nothing  = (Set.empty[String], 0L)
 
-  "policy_version" should "start at 0 for a new tenant" in withDb { (c, _) =>
+  "policy_version" should "start a new tenant above every version issued" in withDb { (c, _) =>
+    val issued = lastIssued(c)
+    issued should be > 0L
     exec(c)("INSERT INTO qodstate_tenant (id, display_name) VALUES ('initech', 'initech')")
-    versions(c)("initech") shouldBe 0L
+    versions(c)("initech") should be > issued
+    versions(c)("initech") should be > versions(c).removed("initech").values.max
   }
 
   "a role" should "bump its tenant on insert, update and delete, and no other tenant" in
@@ -156,7 +176,7 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
 
   it should "bump both tenants when it moves between them" in withDb { (c, _) =>
     delta(c)("UPDATE qodstate_user SET tenant = 'globex' WHERE id = 'u-a'") shouldBe
-      Map("acme" -> 1L, "globex" -> 1L)
+      ((Set("acme", "globex"), 2L))
   }
 
   it should "bump nothing for a superuser row" in withDb { (c, _) =>
@@ -203,6 +223,62 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
     )
     versions(c).keySet shouldBe Set("acme")
   }
+
+  it should "leave a recreated id above the deleted row's last version" in withDb { (c, _) =>
+    exec(c)("INSERT INTO qodstate_role (id, tenant_id, name) VALUES ('r-g2', 'globex', 'x')")
+    val last = versions(c)("globex")
+    exec(c)(
+      "DELETE FROM qodstate_user WHERE tenant = 'globex'",
+      "DELETE FROM qodstate_tenant WHERE id = 'globex'",
+      "INSERT INTO qodstate_tenant (id, display_name) VALUES ('globex', 'globex')"
+    )
+    versions(c)("globex") should be > last
+    versions(c)("globex") should be > versions(c)("acme")
+  }
+
+  "applying 0050 to a control plane that already holds tenants" should
+    "give each existing tenant its own version, below the next one issued" in withDb { (c, _) =>
+      // Undo 0050 on the populated database, then let Liquibase apply it again: the upgrade path.
+      val triggered = List(
+        "qodstate_role",
+        "qodstate_group",
+        "qodstate_pool_permission",
+        "qodstate_role_permission",
+        "qodstate_role_column_policy",
+        "qodstate_role_row_policy",
+        "qodstate_user_role",
+        "qodstate_group_role",
+        "qodstate_user_group",
+        "qodstate_user"
+      )
+      exec(c)(
+        triggered.flatMap(t =>
+          List(
+            s"DROP TRIGGER qod_policy_version_ins_del ON $t",
+            s"DROP TRIGGER qod_policy_version_upd ON $t"
+          )
+        ) ++ List(
+          "DROP TRIGGER qod_policy_version_acl ON qodstate_tenant",
+          "DROP FUNCTION qod_bump_policy_version()",
+          "DROP FUNCTION qod_bump_tenant_policy_version()",
+          "ALTER TABLE qodstate_tenant DROP COLUMN policy_version",
+          "DROP SEQUENCE qodstate_policy_version_seq",
+          "DELETE FROM databasechangelog WHERE id LIKE '0050-%'",
+          "INSERT INTO qodstate_tenant (id, display_name) VALUES ('initech', 'initech')"
+        )*
+      )
+      val url = c.getMetaData.getURL
+      new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
+      val v = versions(c)
+      v.keySet shouldBe Set("acme", "globex", "initech")
+      v.values.toSet.size shouldBe 3
+      v.values.min should be > 0L
+      v.values.max shouldBe lastIssued(c)
+      delta(c)(
+        "INSERT INTO qodstate_role (id, tenant_id, name) VALUES ('r-4', 'acme', 'w')"
+      ) shouldBe
+        AcmeOnce
+    }
 
   "policyVersions" should "read every tenant's version" in withDb { (c, store) =>
     exec(c)("INSERT INTO qodstate_role (id, tenant_id, name) VALUES ('r-3', 'acme', 'z')")
