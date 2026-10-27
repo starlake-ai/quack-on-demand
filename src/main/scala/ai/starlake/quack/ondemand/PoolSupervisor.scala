@@ -905,7 +905,11 @@ final class PoolSupervisor(
       dbInitSql = state.dbInitSql,
       lockdownSql =
         NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
-      objectStoreSql = ObjectStoreSecret.sql(state.s3, state.metastore.getOrElse("dataPath", "")),
+      objectStoreSql = ObjectStoreSecret.sql(
+        state.s3,
+        state.metastore.getOrElse("dataPath", ""),
+        state.kindWire
+      ),
       tenantStoreSql = TenantLocationSecrets.initSql(tenantLocations(key.tenant)),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
@@ -1016,6 +1020,7 @@ final class PoolSupervisor(
       val metastore = donor.map(_.metastore).getOrElse(effectiveMetastoreFor(tenantName, td.name))
       val s3        = donor.map(_.s3).getOrElse(td.objectStore)
       val dataPath  = metastore.getOrElse("dataPath", "")
+      val kindWire  = donor.map(_.kindWire).getOrElse(td.kind.wireValue)
       NodeSpec(
         poolKey = key,
         nodeId = nodeId,
@@ -1023,13 +1028,13 @@ final class PoolSupervisor(
         metastore = metastore,
         s3 = s3,
         maxConcurrent = 1,
-        kindWire = donor.map(_.kindWire).getOrElse(td.kind.wireValue),
+        kindWire = kindWire,
         extraSetupSql = donor
           .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
           .getOrElse(""),
         dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
         lockdownSql = NodeLockdown.sql(dataPath, effectiveLockdown(key)),
-        objectStoreSql = ObjectStoreSecret.sql(s3, dataPath)
+        objectStoreSql = ObjectStoreSecret.sql(s3, dataPath, kindWire)
       )
     }
 
@@ -1139,7 +1144,7 @@ final class PoolSupervisor(
         poolKey = key,
         nodeId = s"merge-${branchDbName.takeRight(8)}-${System.nanoTime()}",
         extraSetupSql = PoolSupervisor.joinInitAndBlob(base.extraSetupSql, attach),
-        objectStoreSql = ObjectStoreSecret.sql(base.s3, branchDataPath)
+        objectStoreSql = ObjectStoreSecret.sql(base.s3, branchDataPath, base.kindWire)
       )
     }
 

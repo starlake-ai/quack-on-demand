@@ -10,7 +10,11 @@ import java.util.Locale
   * non-object-store dataPath yields "" (the global-env path is used, unchanged).
   */
 object ObjectStoreSecret:
-  private val SecretName = "qod_db_store"
+
+  /** Sorts before every tenant location secret (`qod_tl_<id8>`): DuckDB breaks a scope tie on the
+    * name, first in alphabetical order, and a bucket-root data path ties a bucket scope.
+    */
+  val SecretName = "qod_db_store"
 
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
 
@@ -18,13 +22,33 @@ object ObjectStoreSecret:
     val i = dataPath.indexOf("://")
     if i < 0 then "" else dataPath.substring(0, i).toLowerCase(Locale.ROOT)
 
-  def sql(objectStore: Map[String, String], dataPath: String): String =
+  /** The scope of a database's own credentials for `dataPath`, the rule `qod_db_store` here and
+    * `qod_data_s3` in the spawn scripts share:
+    *   - a `duckdb-file` path names one file: itself, nothing appended;
+    *   - a branch prefix (`<parent>__br_<id8>/`): the parent's prefix without its separator, which
+    *     covers the parent's Parquet the branch reads in place AND the branch's own writes;
+    *   - any other path is a directory: itself with one trailing `/`. A bucket root then scopes to
+    *     `s3://<bucket>/`, a tie with a tenant's bucket secret that [[SecretName]] wins.
+    *
+    * A branch of a bucket-root database is the one shape this cannot protect: its prefix
+    * `s3://<bucket>__br_<id8>/` names another bucket (not even a valid S3 bucket name, so the
+    * branch's writes fail), and its scope `s3://<bucket>` is shorter than the tenant's
+    * `s3://<bucket>/`, so the parent's files it reads sign with the tenant's keys once the tenant
+    * authorizes that bucket. Branch create does not refuse it today.
+    */
+  def dataScope(dataPath: String, kind: String): String =
+    if kind == ai.starlake.quack.model.TenantDbKind.DuckDbFile.wireValue then dataPath
+    else if ai.starlake.quack.ondemand.branch.BranchNames.isBranchDataPath(dataPath) then
+      ai.starlake.quack.ondemand.branch.BranchNames.secretScope(dataPath)
+    else dataPath.stripSuffix("/") + "/"
+
+  /** `kind` is the tenant-db's wire kind (`ducklake`, `duckdb-file`, `memory`): it decides whether
+    * the data path is a file or a directory ([[dataScope]]).
+    */
+  def sql(objectStore: Map[String, String], dataPath: String, kind: String): String =
     if objectStore.isEmpty then ""
     else
-      // A branch prefix (`<parent>__br_<id8>/`) scopes to the parent's prefix without its
-      // trailing separator so the same secret covers the parent's Parquet the branch reads in
-      // place AND the branch's own writes; every other path scopes to itself.
-      val scope = ai.starlake.quack.ondemand.branch.BranchNames.secretScope(dataPath)
+      val scope = dataScope(dataPath, kind)
       scheme(dataPath) match
         case "s3" | "s3a" | "r2"      => s3Secret(objectStore, scope)
         case "gs"                     => gcsSecret(objectStore, scope)

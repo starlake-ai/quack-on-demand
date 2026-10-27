@@ -219,12 +219,16 @@ CREATE OR REPLACE SECRET quack_s3 (
 );
 "@
       # The same credentials scoped to this database's data path, so a tenant's bucket-scoped
-      # qod_tl_<id8> (tenantStoreSql) never outranks the unscoped quack_s3 there: DuckDB picks the
-      # longest matching scope, a tie going to the name first in alphabetical order. A branch
-      # scopes to its parent's prefix without the separator (BranchNames.secretScope). Skipped
-      # when the database has its own objectStoreSql secret. Mirrors spawn-quack-node.sh.
+      # qod_tl_<id8> (tenantStoreSql) does not outrank the unscoped quack_s3 there: DuckDB picks the
+      # longest matching scope, a tie going to the name first in alphabetical order. The scope is
+      # ObjectStoreSecret.dataScope's: a duckdb-file path itself, a branch its parent's prefix
+      # without the separator, any other path itself plus one '/'; it ties a bucket scope at a
+      # bucket root, and qod_data_s3 wins that tie. Skipped when the database has its own
+      # objectStoreSql secret. The exceptions (a branch of a bucket-root database, a database on
+      # neither credential source) are listed in spawn-quack-node.sh, which this mirrors.
       if ([string]::IsNullOrEmpty($objectStoreSql)) {
-        if ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') { $dataScope = $Matches[1] }
+        if ($kind -ceq 'duckdb-file') { $dataScope = $dataPath }
+        elseif ($dataPath -cmatch '^(.*)__br_[0-9a-f]{8}/?$') { $dataScope = $Matches[1] }
         else { $dataScope = ($dataPath -replace '/$', '') + '/' }
         $dataScopeSql = $dataScope.Replace("'", "''")
         $storageSql += @"
@@ -552,7 +556,8 @@ if (-not [string]::IsNullOrEmpty($dbInitSql)) { [void]$sb.AppendLine($dbInitSql)
 if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objectStoreSql) }
 # The tenant's authorized S3 locations (TenantLocationSecrets.scala): one bucket-scoped secret per
 # line, before any ATTACH, as in spawn-quack-node.sh. The data path keeps its own credentials: its
-# qod_db_store or qod_data_s3 secret is scoped to it, longer than any bucket scope.
+# qod_db_store or qod_data_s3 secret is scoped to it, longer than a bucket scope or tied with it at
+# a bucket root, a tie both win by name (exceptions: see spawn-quack-node.sh).
 if (-not [string]::IsNullOrEmpty($tenantStoreSql)) { [void]$sb.AppendLine($tenantStoreSql) }
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to

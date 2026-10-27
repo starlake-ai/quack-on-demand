@@ -170,16 +170,23 @@ CREATE OR REPLACE SECRET quack_s3 (
   USE_SSL ${QOD_S3_USE_SSL:-true}
 );"
       # The same credentials again, scoped to this database's data path. DuckDB picks the s3 secret
-      # with the longest matching scope, a tie going to the name first in alphabetical order, so
-      # the unscoped quack_s3 loses every path of a bucket the tenant authorized (tenantStoreSql's
+      # with the longest matching scope, a tie going to the name first in alphabetical order, so the
+      # unscoped quack_s3 loses every path of a bucket the tenant authorized (tenantStoreSql's
       # qod_tl_<id8>, scoped to s3://<bucket>/): without this secret the database's own ATTACH,
-      # reads and writes would sign with the tenant's keys. qod_data_s3 is longer than any bucket
-      # scope, and wins a tie with one ("qod_d" < "qod_t"). A branch scopes to its parent's prefix
-      # without the separator, which also covers the parent's files it reads in place
-      # (BranchNames.secretScope); a managed prefix is an ordinary data path. Skipped when the
-      # database has its own object-store secret (objectStoreSql), already scoped to its data path.
+      # reads and writes would sign with the tenant's keys. The scope follows
+      # ObjectStoreSecret.dataScope: a duckdb-file path itself, a branch its parent's prefix without
+      # the separator (which also covers the parent's files it reads in place), any other path
+      # itself plus one `/` (a managed prefix included). It is longer than a bucket scope, or ties
+      # it at a bucket root, and qod_data_s3 wins that tie ("qod_d" < "qod_t"). A branch of a
+      # bucket-root database stays exposed (see ObjectStoreSecret.dataScope). Skipped when the
+      # database has its own object-store secret (objectStoreSql), which follows the same rule. A
+      # database whose data-path credentials come from neither (a credential_chain secret in its
+      # init SQL, or DuckDB's defaults) gets no data-path secret: once the tenant authorizes that
+      # bucket, its data signs with the tenant's keys (a known limitation).
       if [[ -z "${objectStoreSql:-}" ]]; then
-        if [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
+        if [[ "$kind" == "duckdb-file" ]]; then
+          data_scope="$dataPath"
+        elif [[ "$dataPath" =~ ^(.*)__br_[0-9a-f]{8}/?$ ]]; then
           data_scope="${BASH_REMATCH[1]}"
         else
           data_scope="${dataPath%/}/"
@@ -537,7 +544,9 @@ fi
 # CREATE OR REPLACE SECRET qod_tl_<id8> per bucket, scoped to it, so the tenant's users reach exactly
 # the buckets it holds keys for. Every kind, before any ATTACH. The database's data path keeps its
 # own credentials: its qod_db_store (objectStoreSql) or qod_data_s3 (STORAGE_SQL) secret is scoped
-# to the data path, longer than any bucket scope.
+# to the data path, longer than a bucket scope or tied with it at a bucket root, a tie both win by
+# name. The exceptions (a branch of a bucket-root database, a database on neither credential
+# source) are listed beside qod_data_s3 above.
 if [[ -n "${tenantStoreSql:-}" ]]; then
   INIT_SQL+="$tenantStoreSql"$'\n'
 fi

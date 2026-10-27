@@ -6,10 +6,17 @@ import ai.starlake.quack.model.TenantLocation
   * `qod_tl_<first 8 of the location id>` and scoped to `s3://<bucket>/`, so the tenant's sessions
   * reach a bucket only with the keys the tenant gave for it. DuckDB picks the s3 secret with the
   * longest matching scope, a tie going to the name first in alphabetical order. A bucket scope
-  * therefore outranks the unscoped `quack_s3` for every path in the bucket, so the spawn scripts
-  * scope the database's own credentials to its data path, which is always longer: `qod_db_store`
-  * (ObjectStoreSecret, the database's objectStore) or else `qod_data_s3` (the manager's `QOD_S3_*`
-  * keys). A database whose data path lies in an authorized bucket keeps signing with its own keys.
+  * therefore outranks the unscoped `quack_s3` for every path in the bucket, so the database's own
+  * credentials are scoped to its data path (ObjectStoreSecret.dataScope): `qod_db_store`
+  * (ObjectStoreSecret, the database's objectStore) or else `qod_data_s3` (the spawn scripts, the
+  * manager's `QOD_S3_*` keys). That scope is longer than a bucket scope, or ties it at a bucket
+  * root, a tie both names win since they sort before `qod_tl_`. So a database whose data path lies
+  * in an authorized bucket keeps signing with its own keys, with two exceptions:
+  *   - a branch of a bucket-root database (see ObjectStoreSecret.dataScope);
+  *   - a database whose data-path credentials come from neither its objectStore nor the manager's
+  *     `QOD_S3_*` keys (a `credential_chain` secret in its init SQL, or DuckDB's defaults): no
+  *     secret of its own is scoped to its data path, so once the tenant authorizes that bucket the
+  *     database's data signs with the tenant's keys. A known limitation.
   * Delivered at spawn as the node secret file `tenantStoreSql` ([[initSql]], one statement per
   * line) and pushed to running nodes on a change ([[pushAdd]], [[pushRemove]]). The statements
   * carry credentials: nothing here, or at a caller, logs them.

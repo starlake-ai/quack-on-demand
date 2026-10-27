@@ -61,3 +61,12 @@ class TenantLocationSecretsSpec extends AnyFlatSpec with Matchers:
     TenantLocationSecrets.pushAdd(Etl).filter(_.startsWith("INSTALL")) shouldBe Nil
     TenantLocationSecrets.pushRemove(Etl).filter(_.startsWith("INSTALL")) shouldBe Nil
   }
+
+  "a location secret name" should "sort after the database's own secrets, which win a bucket-root tie" in
+    // qod_db_store (ObjectStoreSecret) and qod_data_s3 (the spawn scripts, pinned by
+    // SpawnScriptDataPathSecretSpec) tie a bucket scope at a bucket root; the first name wins.
+    List("0" * 32, "f" * 32, "0123abcd" + "0" * 24).foreach { id =>
+      val n = TenantLocationSecrets.name(Etl.copy(id = id))
+      (ObjectStoreSecret.SecretName < n) shouldBe true
+      ("qod_data_s3" < n) shouldBe true
+    }

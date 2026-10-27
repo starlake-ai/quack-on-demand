@@ -12,16 +12,20 @@ import scala.sys.process.*
   * matching scope (a tie going to the name first in alphabetical order), so the unscoped `quack_s3`
   * would lose every path of that bucket to the tenant's `qod_tl_<id8>` scoped to `s3://<bucket>/`.
   * The spawn scripts therefore create the manager's `QOD_S3_*` keys a second time as `qod_data_s3`,
-  * scoped to the data path: a branch to its parent's prefix without the separator
-  * (BranchNames.secretScope), any other path (a managed prefix included) to itself with a trailing
-  * `/`. A database with its own objectStore secret (`qod_db_store`, already scoped to its data
-  * path) gets none.
+  * scoped to the data path by ObjectStoreSecret.dataScope's rule: a branch to its parent's prefix
+  * without the separator, any other directory (a managed prefix and a bucket root included) to
+  * itself with one trailing `/`. A database with its own objectStore secret (`qod_db_store`, the
+  * same rule, a duckdb-file path scoped to the file itself) gets none. At a bucket root both tie
+  * the tenant's `s3://<bucket>/` and win it by name.
   */
 private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTempDir:
   this: AnyFlatSpec =>
 
   protected def command: Seq[String]
   protected def assumeHost(): Unit
+
+  protected val OwnKeys: Map[String, String] =
+    Map("s3_access_key_id" -> "own-id", "s3_secret_access_key" -> "own-secret")
 
   protected def initSql(dataPath: String, extra: (String, String)*): String =
     assumeHost()
@@ -88,13 +92,30 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
     }
 
     it should "create none for a database with its own object-store secret" in {
-      val own = ObjectStoreSecret.sql(
-        Map("s3_access_key_id" -> "own-id", "s3_secret_access_key" -> "own-secret"),
-        "s3://lake/acme_lake"
-      )
+      val own = ObjectStoreSecret.sql(OwnKeys, "s3://lake/acme_lake", "ducklake")
       val sql = initSql("s3://lake/acme_lake", "objectStoreSql" -> own)
       secret(sql, "qod_data_s3") shouldBe None
-      secret(sql, "qod_db_store").flatMap(scopeOf) shouldBe Some("s3://lake/acme_lake")
+      secret(sql, "qod_db_store").flatMap(scopeOf) shouldBe Some("s3://lake/acme_lake/")
+    }
+
+    it should "scope a bucket root, written with or without its slash, to s3://<bucket>/" in
+      List("s3://lake", "s3://lake/").foreach { root =>
+        withClue(s"$root: ") {
+          scopeOf(secret(initSql(root), "qod_data_s3").get) shouldBe Some("s3://lake/")
+        }
+      }
+
+    it should "create neither storage secret for a duckdb-file database (ducklake only)" in {
+      // STORAGE_SQL (quack_s3, qod_data_s3) rides the ducklake arm only: a duckdb-file or memory
+      // database on the manager's keys has no secret scoped to its data path (the known limitation
+      // noted beside qod_data_s3 in spawn-quack-node.sh). Its own objectStore secret is scoped to
+      // the file itself.
+      val file = "s3://lake/acme.duckdb"
+      secret(initSql(file, "kind" -> "duckdb-file"), "quack_s3") shouldBe None
+      secret(initSql(file, "kind" -> "duckdb-file"), "qod_data_s3") shouldBe None
+      val own = ObjectStoreSecret.sql(OwnKeys, file, "duckdb-file")
+      secret(initSql(file, "kind" -> "duckdb-file", "objectStoreSql" -> own), "qod_db_store")
+        .flatMap(scopeOf) shouldBe Some(file)
     }
 
     it should "create none without the manager's keys" in {
@@ -145,50 +166,91 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
 
   behavior of "the data-path secret on the DuckDB release (bash)"
 
-  it should "outrank a tenant's bucket secret for the data path, on a lockdown node too" in {
+  private val Bucket = TenantLocation(
+    "0123abcd" + "0" * 24,
+    "acme",
+    TenantLocation.S3,
+    "s3://lake/",
+    Map("s3_access_key_id" -> "tenant-key-id", "s3_secret_access_key" -> "tenant-secret"),
+    1L,
+    None
+  )
+  private val Tenant = TenantLocationSecrets.name(Bucket)
+  private val Raw    = "s3://lake/raw/events.parquet"
+
+  /** The secret each of `files` signs with on a node of a database at `dataPath`, after the tenant
+    * authorized `s3://lake/` through the live push. The node's order: the storage secrets the spawn
+    * rendered, the ATTACH (its secret lookup, here a which_secret, runs before lockdown, as on a
+    * node), lockdown, then the push.
+    */
+  private def winners(
+      cli: Path,
+      dataPath: String,
+      files: List[String],
+      kind: String = "ducklake",
+      own: Boolean = false
+  ): List[String] =
+    val extra =
+      List("kind" -> kind) ++
+        Option.when(own)("objectStoreSql" -> ObjectStoreSecret.sql(OwnKeys, dataPath, kind))
+    val init = initSql(dataPath, extra*)
+    val sql  = (List("INSTALL httpfs;", "LOAD httpfs;") ++
+      List("quack_s3", "qod_data_s3", "qod_db_store").flatMap(secret(init, _)) ++
+      List(
+        s"SELECT name FROM which_secret('${files.head}', 's3');",
+        NodeLockdown.sql(dataPath, enabled = true)
+      ) ++ TenantLocationSecrets.pushAdd(Bucket) ++
+      files.map(f => s"SELECT name FROM which_secret('$f', 's3');")).mkString("\n")
+    val (rc, out, err) = runCli(cli, sql + "\n")
+    withClue(s"stderr: $err ") {
+      rc shouldBe 0
+      err.trim shouldBe ""
+    }
+    out.linesIterator.map(_.trim).filter(_.nonEmpty).toList.takeRight(files.size)
+
+  private def cliOrCancel(): Path =
     val cli          = duckdbCli.getOrElse(cancel("no DuckDB CLI (DUCKDB_CLI or DUCKDB_CACHE_DIR)"))
     val (okRc, _, _) = runCli(cli, "INSTALL httpfs;\nLOAD httpfs;\nSELECT 1;\n")
     assume(okRc == 0, "httpfs cannot be installed on this host (offline, no cache)")
-    val bucket = TenantLocation(
-      "0123abcd" + "0" * 24,
-      "acme",
-      TenantLocation.S3,
-      "s3://lake/",
-      Map("s3_access_key_id" -> "tenant-key-id", "s3_secret_access_key" -> "tenant-secret"),
-      1L,
-      None
-    )
-    List(
-      ("s3://lake/acme_lake", "s3://lake/acme_lake/main/t/part-0.parquet"),
-      ("s3://lake/acme_lake__br_0123abcd/", "s3://lake/acme_lake/main/t/part-0.parquet"),
-      ("s3://lake/acme_lake__br_0123abcd/", "s3://lake/acme_lake__br_0123abcd/main/t/x.parquet")
-    ).foreach { (dataPath, file) =>
-      withClue(s"dataPath $dataPath, file $file: ") {
-        val init = initSql(dataPath)
-        // The spawn order: the storage secrets, the ATTACH (its secret lookup, here a which_secret,
-        // loads DuckDB's persistent secret storage before lockdown: a first lookup after
-        // `disabled_filesystems = 'LocalFileSystem'` would read the local file system), lockdown,
-        // then, on the running node, the push.
-        val sql = (List(
-          "INSTALL httpfs;",
-          "LOAD httpfs;",
-          secret(init, "quack_s3").get,
-          secret(init, "qod_data_s3").get,
-          s"SELECT name FROM which_secret('$file', 's3');",
-          NodeLockdown.sql(dataPath, enabled = true)
-        ) ++ TenantLocationSecrets.pushAdd(bucket) ++ List(
-          s"SELECT name FROM which_secret('$file', 's3');",
-          "SELECT name FROM which_secret('s3://lake/raw/events.parquet', 's3');"
-        )).mkString("\n")
-        val (rc, out, err) = runCli(cli, sql + "\n")
-        withClue(s"stderr: $err ") {
-          rc shouldBe 0
-          err.trim shouldBe ""
-          out.linesIterator.map(_.trim).filter(_.nonEmpty).toList.takeRight(2) shouldBe
-            List("qod_data_s3", TenantLocationSecrets.name(bucket))
-        }
+    cli
+
+  it should "outrank a tenant's bucket secret for the data path, on a lockdown node too" in {
+    val cli = cliOrCancel()
+    winners(
+      cli,
+      "s3://lake/acme_lake",
+      List("s3://lake/acme_lake/main/t/part-0.parquet", Raw)
+    ) shouldBe
+      List("qod_data_s3", Tenant)
+    // A branch: the parent's files it reads in place and its own.
+    winners(
+      cli,
+      "s3://lake/acme_lake__br_0123abcd/",
+      List(
+        "s3://lake/acme_lake/main/t/part-0.parquet",
+        "s3://lake/acme_lake__br_0123abcd/main/t/x.parquet",
+        Raw
+      )
+    ) shouldBe List("qod_data_s3", "qod_data_s3", Tenant)
+  }
+
+  it should "win the tie at a bucket root, on the manager's keys and on the database's own" in {
+    val cli  = cliOrCancel()
+    val file = "s3://lake/main/t/part-0.parquet"
+    List("s3://lake", "s3://lake/").foreach { root =>
+      withClue(s"$root: ") {
+        winners(cli, root, List(file, Raw)) shouldBe List("qod_data_s3", "qod_data_s3")
+        winners(cli, root, List(file, Raw), own = true) shouldBe
+          List("qod_db_store", "qod_db_store")
       }
     }
+  }
+
+  it should "scope a duckdb-file database's own secret to its file" in {
+    val cli  = cliOrCancel()
+    val file = "s3://lake/acme.duckdb"
+    winners(cli, file, List(file, s"$file.wal", Raw), kind = "duckdb-file", own = true) shouldBe
+      List("qod_db_store", "qod_db_store", Tenant)
   }
 
 // PowerShell twin: pwsh off Windows, cancelled without PowerShell, like
