@@ -83,6 +83,8 @@ NodeSecrets ReadNodeSecrets(const NodeOptions &options) {
 
 int Serve(const NodeOptions &options) {
 	auto secrets = ReadNodeSecrets(options);
+	// Before DuckDB opens: a malformed limit stops the node at start, never at its first decide call.
+	auto limits = AuthzLimitsFromEnv();
 
 	// Before the database opens (decision 17): nothing that runs in it, the init SQL included, can
 	// then turn on community or unsigned extensions.
@@ -95,7 +97,8 @@ int Serve(const NodeOptions &options) {
 	duckdb::DuckDB db(nullptr, &config);
 	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
 	// connection quack opens from here on.
-	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>(options.node_id, secrets.node_key));
+	RegisterNodeAuthz(*db.instance,
+	                  std::make_shared<NodeAuthz>(options.node_id, secrets.node_key, SystemNowMs, limits));
 	duckdb::Connection con(db);
 
 	// Before any CREATE SECRET or ATTACH: once duckdb_secrets() has put the secret manager in use,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "decide_client.hpp"
 #include "handle.hpp"
 
 #include <cstdint>
@@ -51,7 +52,8 @@ std::string RefreshRefusal(const Installed *current, const Handle &next);
 //! post_bind backstop.
 class NodeAuthz {
 public:
-	NodeAuthz(std::string node_id, std::string node_key, Clock clock = SystemNowMs);
+	NodeAuthz(std::string node_id, std::string node_key, Clock clock = SystemNowMs,
+	          AuthzLimits limits = AuthzLimits());
 
 	const std::string &NodeId() const {
 		return node_id_;
@@ -78,6 +80,12 @@ public:
 	//! statement without a current one); the screen only stops what it can before bind.
 	std::string Screen(const std::string &connection_id, const std::string &sql);
 
+	//! The decide client of this node (its key, its clock), shared by every connection: the parse
+	//! screen's location decisions and the plan verdicts.
+	DecideClient &Decider() {
+		return decider_;
+	}
+
 private:
 	//! Drops the records whose handles expired, at most every 10 s. Called with lock_ held.
 	void Sweep(int64_t now_ms);
@@ -85,6 +93,8 @@ private:
 	std::string node_id_;
 	std::string node_key_;
 	Clock clock_;
+	//! After the three above: initialized from them.
+	DecideClient decider_;
 	NonceLedger ledger_;
 	std::mutex lock_;
 	std::unordered_map<std::string, Installed> connections_;

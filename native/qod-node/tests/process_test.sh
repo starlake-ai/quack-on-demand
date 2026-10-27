@@ -151,6 +151,21 @@ refuses_key "65-digit" "${lower_key}0" "$not_hex"
 # An empty file never reaches the format check: the secret reader refuses it first.
 refuses_key "empty" "" "QOD_NODE_AUTHZ_KEY is empty"
 
+# A malformed decide limit stops the node at start, naming the variable, never its value.
+QOD_AUTHZ_DECIDE_TIMEOUT_MS=qodbadlimit "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-limit)" \
+  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-limit.out" 2>&1
+status=$?
+[[ $status -eq 1 ]] || fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: exit $status, expected 1"
+grep -q 'QOD_AUTHZ_DECIDE_TIMEOUT_MS must be a number' "$work/bad-limit.out" ||
+  fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: message not found"
+! grep -q 'qodbadlimit' "$work/bad-limit.out" || fail "malformed QOD_AUTHZ_DECIDE_TIMEOUT_MS: the value reached the output"
+QOD_AUTHZ_CACHE_ENTRIES=-1 "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-entries)" \
+  --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-entries.out" 2>&1
+status=$?
+[[ $status -eq 1 ]] || fail "malformed QOD_AUTHZ_CACHE_ENTRIES: exit $status, expected 1"
+grep -q 'QOD_AUTHZ_CACHE_ENTRIES must be a number' "$work/bad-entries.out" ||
+  fail "malformed QOD_AUTHZ_CACHE_ENTRIES: message not found"
+
 # An ephemeral secrets directory goes even when a read fails.
 mkdir -p "$work/empty-ephemeral"
 "$node_bin" --port "$(port)" --secrets-dir "$work/empty-ephemeral" --secrets-ephemeral \
