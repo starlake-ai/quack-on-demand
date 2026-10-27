@@ -190,6 +190,31 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
     sup.duckLakeBuckets() shouldBe Set.empty
 
+  "PoolSupervisor.dataPaths" should "list tenant-db, metastore and default data paths, and drop a deleted one" in:
+    val sup = new PoolSupervisor(
+      fakeBackend(),
+      new NodeLoadTracker,
+      new InMemoryControlPlaneStore(),
+      defaultMetastore = Map("dataPath" -> "./ducklake/tpch")
+    )
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup
+      .createTenantDb(
+        "acme",
+        "sales",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_sales", "schemaName" -> "main", "dataPath" -> "gs://ops-lake/x"),
+        dataPath = "/var/data/sales/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    sup.dataPaths().toSet shouldBe
+      Set("./ducklake/tpch", "/var/data/sales/duck.db", "gs://ops-lake/x")
+    val dbName =
+      sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("/var/data")).get.name
+    sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
+    sup.dataPaths() shouldBe List("./ducklake/tpch")
+
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 
   "PoolSupervisor.createPool" should "start N nodes matching the role distribution" in:

@@ -311,6 +311,21 @@ class PostgresControlPlaneStoreSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "list every prefix not yet purged, live or dropped" in withStore { store =>
+    store.upsertTenant(tenant)
+    store.upsertTenantDb(tenantDb)
+    val createdAt = Instant.parse("2026-08-12T10:00:00Z")
+    store.insertManagedPrefix("mp-b", tenant.id, tenantDb.name, "s3://m/acme_b-2/", createdAt)
+    store.insertManagedPrefix("mp-a", tenant.id, tenantDb.name, "s3://m/acme_a-1/", createdAt)
+    store.insertManagedPrefix("mp-c", tenant.id, tenantDb.name, "s3://m/acme_c-3/", createdAt)
+    store.markManagedPrefixDeleted("mp-b", createdAt, createdAt.plusSeconds(60))
+    store.markManagedPrefixDeleted("mp-c", createdAt, createdAt)
+    store.markManagedPrefixPurged("mp-c", createdAt.plusSeconds(1))
+    store.unpurgedManagedPrefixes().map(_.id) shouldBe List("mp-a", "mp-b")
+    store.unpurgedManagedPrefixes().map(_.prefix) shouldBe
+      List("s3://m/acme_a-1/", "s3://m/acme_b-2/")
+  }
+
   it should "keep the first insert's createdAt on a duplicate id" in withStore { store =>
     store.upsertTenant(tenant)
     store.upsertTenantDb(tenantDb)

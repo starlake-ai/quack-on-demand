@@ -1549,6 +1549,16 @@ final class PoolSupervisor(
         defaultMetastore.get("dataPath")
     paths.flatMap(ai.starlake.quack.model.BucketKeys.of).toSet
 
+  /** Every data path the control plane knows, as written: each tenant-db's `dataPath` and metastore
+    * `dataPath` (branch rows are tenant-db rows) and the default metastore's. Feeds the location
+    * checker's data-folder deny set (edge.authz.location.LiveLocationRules), which adds the managed
+    * prefixes still within their retention window. In memory, like [[duckLakeBuckets]], so HA
+    * replicas stay fresh through the topology refresh.
+    */
+  def dataPaths(): List[String] =
+    (tenantDbs.values.toList.flatMap(td => td.dataPath :: td.metastore.get("dataPath").toList) ++
+      defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>
       val nm = tenantDbName.toLowerCase(Locale.ROOT)

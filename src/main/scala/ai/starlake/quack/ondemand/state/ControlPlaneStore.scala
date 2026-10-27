@@ -142,6 +142,12 @@ trait ControlPlaneStore:
     */
   def dueManagedPrefixes(now: java.time.Instant): List[ManagedPrefixRow]
 
+  /** Every row whose objects are not purged yet, live or dropped, ordered by id. Feeds the location
+    * checker's data-folder deny set (edge.authz.location.LiveLocationRules): a dropped managed
+    * database's prefix stays a data folder for its whole retention window.
+    */
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow]
+
   /** Stamp `purgedAt` once the sweep has removed the underlying objects. No-op when `id` is
     * unknown.
     */

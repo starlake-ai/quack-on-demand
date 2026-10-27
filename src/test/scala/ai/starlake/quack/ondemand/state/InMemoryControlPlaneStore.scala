@@ -833,6 +833,9 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       .toList
       .sortBy(_.purgeEligibleAt.get)
 
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow] =
+    managedPrefixes.values.filter(_.purgedAt.isEmpty).toList.sortBy(_.id)
+
   def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit =
     managedPrefixes
       .get(id)

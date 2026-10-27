@@ -252,3 +252,21 @@ object BootFactories extends LazyLogging:
           .getOrElse(ai.starlake.quack.model.TenantAcl())
           .isOpa(opaCfg.defaultMode)
     )
+
+  /** The live location rules of the decision pipeline (spec decisions 15 and 18): the supervisor's
+    * data paths and tenant locations, the store's unpurged managed prefixes, the operator's files
+    * root. Real-path resolution only on the local runtime, the one whose nodes share this host's
+    * filesystem and working directory.
+    */
+  def locationRules(
+      mgrCfg: ManagerConfig,
+      sup: PoolSupervisor,
+      store: ai.starlake.quack.ondemand.state.ControlPlaneStore
+  ): ai.starlake.quack.edge.authz.location.LiveLocationRules =
+    new ai.starlake.quack.edge.authz.location.LiveLocationRules(
+      dataPaths = () => sup.dataPaths(),
+      unpurgedPrefixes = () => store.unpurgedManagedPrefixes().map(_.prefix),
+      tenantLocations = sup.tenantLocations,
+      filesRoot = mgrCfg.tenantFiles.rootOpt,
+      sameHost = mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local"
+    )

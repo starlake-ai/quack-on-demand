@@ -3094,6 +3094,20 @@ final class PostgresControlPlaneStore(
     finally ps.close()
   }
 
+  def unpurgedManagedPrefixes(): List[ManagedPrefixRow] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT id, tenant, tenant_db_name, prefix, created_at, deleted_at, purge_eligible_at, purged_at
+        |FROM qodstate_managed_prefix
+        |WHERE purged_at IS NULL
+        |ORDER BY id""".stripMargin
+    )
+    try
+      val rs = ps.executeQuery()
+      try drain(rs)(readManagedPrefixRow)
+      finally rs.close()
+    finally ps.close()
+  }
+
   def markManagedPrefixPurged(id: String, purgedAt: Instant): Unit = withConn { c =>
     val ps = c.prepareStatement(
       "UPDATE qodstate_managed_prefix SET purged_at = ? WHERE id = ?"
