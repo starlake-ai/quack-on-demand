@@ -114,6 +114,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
         if throwTenants then throw new IllegalStateException("control plane down")
         else Option.when(t == "acme")(Tenant("acme")),
       tenantCatalogs = _ => Set("acme_lake"),
+      poolCatalog = _ => Some("acme_lake"),
       parentPoolsOf = _ => Nil,
       locations = new LocationRulesSource {
         def rulesFor(tenantId: String, userId: String): Either[String, LocationRules] =
@@ -285,7 +286,12 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val text    = f.handle()
     val nonce   = NodeHandles.verify(text, Key, Node.nodeId, f.clock.get()).toOption.get.nonce
     val mallory = Alice.copy(user = Alice.user.copy(id = "u-2", username = "mallory"))
-    f.minted.put(nonce, DecideContext(mallory, Pool, None), f.clock.get() + 60_000L)
+    val h       = NodeHandles.verify(text, Key, Node.nodeId, f.clock.get()).toOption.get
+    f.minted.put(nonce, DecideContext(mallory, Pool, None), h.ctx, f.clock.get() + 60_000L)
+    f.call(request(text, "plan", plan(List(read("orders"))))) shouldBe
+      (Status.Unauthorized, "handle does not match its minted context", Some(MediaType.text.plain))
+    // The same user and pool under another digest: the context is not the one minted.
+    f.minted.put(nonce, AliceP.context.get, "f" * 64, f.clock.get() + 60_000L)
     f.call(request(text, "plan", plan(List(read("orders"))))) shouldBe
       (Status.Unauthorized, "handle does not match its minted context", Some(MediaType.text.plain))
   }
@@ -330,6 +336,55 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val g = new Fixture(throwTenants = true)
     g.call(request(g.handle(), "plan", plan(List(read("orders"))))) shouldBe
       (Status.ServiceUnavailable, DecideRoute.DecisionFailed, Some(MediaType.text.plain))
+  }
+
+  it should "answer a node whose id is the longest PoolSupervisor composes" in {
+    val f       = new Fixture()
+    val tenant  = "t" * 61
+    val key     = PoolKey(tenant, s"${tenant}_d", "p" * 63)
+    val longest = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)
+    longest.length should be > 128
+    val node          = Node.copy(nodeId = longest, poolKey = key)
+    val body          = request(f.keys.handle(node, Root), "plan", plan())
+    val (st, text, _) =
+      f.call(
+        body,
+        node = Some(longest),
+        signature = Some(sign(body, NodeHandles.nodeKey(Secret, longest)))
+      )
+    st shouldBe Status.Ok
+    verdict(text, NodeHandles.nodeKey(Secret, longest)).get[String]("decision") shouldBe Right(
+      "allow"
+    )
+  }
+
+  it should "refuse an unsigned call before reading its body, and a declared oversize at once" in {
+    val f         = new Fixture()
+    val untouched = fs2.Stream.raiseError[IO](new IllegalStateException("the body was read"))
+    def run(r: Request[IO]) = f.route.routes.orNotFound.run(r).unsafeRunSync().status
+    run(
+      Request[IO](Method.POST, uri"/api/internal/authz/decide").withBodyStream(untouched)
+    ) shouldBe
+      Status.Unauthorized
+    run(
+      Request[IO](Method.POST, uri"/api/internal/authz/decide")
+        .withBodyStream(untouched)
+        .putHeaders(
+          Header.Raw(CIString("X-QoD-Node"), Node.nodeId),
+          Header.Raw(CIString("X-QoD-Signature"), "0" * 64),
+          org.http4s.headers.`Content-Length`(DecideRoute.MaxBodyBytes.toLong + 1)
+        )
+    ) shouldBe Status.PayloadTooLarge
+  }
+
+  it should "log a node's first refusal at WARN and its repeats at DEBUG" in {
+    val f           = new Fixture()
+    val body        = request(f.handle(), "plan", plan(List(read("orders"))))
+    val (_, events) = LogCapture.logged("ai.starlake.quack.edge.authz.DecideRoute") {
+      f.call(body, signature = Some("0" * 64))
+      f.call(body, signature = Some("1" * 64))
+    }
+    events.map(_.getLevel.toString) shouldBe List("WARN", "DEBUG")
   }
 
   "the route" should "answer only POST on its path" in {

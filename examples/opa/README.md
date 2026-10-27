@@ -141,8 +141,10 @@ resolved for it (in-engine authorization). The node asks the manager, which asks
   "client": {"edge": "node"},
   "statement": {"class": "WRITE"},
   "accesses": [
-    {"catalog": "lake", "schema": "main", "table": "base", "verb": "read", "kind": "table",
-     "columns": ["id"], "via": "lake.main.v_secure"},
+    {"catalog": "memory", "schema": "main", "table": "base", "verb": "read", "kind": "table",
+     "columns": ["id"], "via": "memory.main.v_secure"},
+    {"catalog": "memory", "schema": "main", "table": "v_secure", "verb": "read",
+     "kind": "secure_view", "columns": ["id"], "via": null},
     {"catalog": "tpch", "schema": "main", "table": "orders", "verb": "read", "kind": "table",
      "columns": ["o_orderkey", "o_totalprice"], "via": null}
   ],
@@ -159,7 +161,9 @@ resolved for it (in-engine authorization). The node asks the manager, which asks
   (`kind: schema`) has `table: "*"`. `columns` lists the columns read (empty for a write or DDL).
   `via` names the outermost secure view the access is read through (`catalog.schema.name`), `null`
   otherwise: a secure view runs with its creator's rights, so QoD covers such a read by a read grant
-  on the view, and the starter policy does the same.
+  on the view, and the starter policy does the same. The view itself is listed too (`kind:
+  secure_view`, `via: null`). Secure views live in DuckDB catalogs (a `memory` or `duckdb-file`
+  database); a DuckLake catalog holds none.
 - `locations` lists the files the statement reads (a reader function such as `read_parquet`, or
   `COPY ... FROM`) or writes (`COPY ... TO`), already admitted by QoD: under one of the user's own S3
   credential scopes (`qod profile s3 add`) or the tenant's authorized folders, and outside every
@@ -294,7 +298,8 @@ from data you load into OPA, so a migrating tenant starts from equivalence and e
   whose `table` is `"*"`.
 - `blocked_locations[tenant]` (optional): location prefixes the tenant's statements may never
   read or write, on top of QoD's own location checks. Absent, every location QoD admitted is
-  allowed.
+  allowed. A prefix matches as plain text: end it with `/`, or `s3://acme-etl/restricted` also
+  blocks `s3://acme-etl/restricted2/`.
 - Every other input is denied by default (`default statement := {"allow": false, ...}`).
 
 Run it locally:

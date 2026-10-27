@@ -292,6 +292,11 @@ object BootFactories extends LazyLogging:
     new AuthzDecider(
       tenantOf = sup.getTenantById,
       tenantCatalogs = tenantCatalogsOf(sup),
+      // The catalog the pool's node attaches (memory, a catalogAlias or dbName): a wildcard
+      // catalog grant covers it on that pool only. The gateway's validator keeps the tenant-db
+      // names alone.
+      poolCatalog = key =>
+        sup.get(key).flatMap(st => AuthzDecider.attachedCatalog(st.kindWire, st.metastore)),
       parentPoolsOf = sup.parentPoolNamesOf,
       locations = locationRules,
       opa = opa,

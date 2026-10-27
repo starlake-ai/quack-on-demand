@@ -13,7 +13,7 @@ import ai.starlake.quack.edge.opa.{
   OpaUser
 }
 import ai.starlake.quack.edge.sql.GrantMatch
-import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl}
+import ai.starlake.quack.model.{PoolKey, Tenant, TenantAcl, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.branch.BranchNames
 import ai.starlake.quack.ondemand.rbac.{Attenuation, EffectiveSet}
@@ -53,6 +53,7 @@ final case class DecidePrincipal(principal: NodePrincipal, context: Option[Decid
 final class AuthzDecider(
     tenantOf: String => Option[Tenant],
     tenantCatalogs: String => Set[String],
+    poolCatalog: PoolKey => Option[String],
     parentPoolsOf: PoolKey => List[String],
     locations: LocationRulesSource,
     opa: OpaAuthorizer,
@@ -84,6 +85,7 @@ final class AuthzDecider(
         _ <- all(d.functions)(alwaysOnFunction)
         _ <- all(d.settings)(alwaysOnSetting)
         _ <- all(d.control)(alwaysOnControl)
+        _ <- viaBoundaries(d)
         _ <- all(d.functions)(fileFunction(_, rules))
         _ <- all(d.control)(copyTarget(_, rules))
         _ <- branchOnly(ctx, writes)
@@ -143,7 +145,7 @@ final class AuthzDecider(
           case NonFatal(e) =>
             logger.warn(
               s"authz decide: location rules of ${p.principal.name} unreadable " +
-                s"(${e.getClass.getSimpleName}: ${e.getMessage})"
+                s"(${e.getClass.getSimpleName})"
             )
             Left(Decision.Unavailable(RulesUnavailable))
 
@@ -189,6 +191,22 @@ final class AuthzDecider(
           if s.scope == "global" then refuse(s"setting ${s.name} at global scope is superuser-only")
           else if s.scope == "session" || s.scope == "local" then Pass
           else refuse(s"the description names an unknown setting scope '${s.scope}'")
+
+  /** Defense in depth behind the describer: every `via`, of an object or a function, must lead to a
+    * secure view the description itself reads (its boundary object, kind `secure_view`, access
+    * `read`). The view's grant is checked on that object, so a function or object exempted through
+    * a view the description does not list would be judged without it.
+    */
+  private def viaBoundaries(d: Description): Step =
+    def low(s: String): String = s.toLowerCase(Locale.ROOT)
+    val read                   =
+      d.objects
+        .filter(o => o.kind == "secure_view" && o.access == "read")
+        .map(o => low(o.qualified))
+    val vias = d.objects.flatMap(_.via) ++ d.functions.flatMap(_.via)
+    vias.find(v => !read.contains(low(outermostView(v, d)))) match
+      case Some(v) => refuse(s"the description reads through secure view $v without reading it")
+      case None    => Pass
 
   private def alwaysOnControl(c: DescribedControl): Step =
     if UserControl.contains(c.op) then Pass
@@ -240,10 +258,19 @@ final class AuthzDecider(
     val gated = d.objects.filterNot(admittedWithoutGrant)
     if isOpa(ctx.poolKey.tenant) then policy(ctx, eff, d, gated, rules)
     else
-      val sessionCatalogs = eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty)
-      val missing         = gated.filterNot(granted(eff, sessionCatalogs, d, _))
+      val missing = gated.filterNot(granted(eff, sessionCatalogs(eff, ctx.poolKey), d, _))
       if missing.isEmpty then Pass
       else refuse(s"user:${eff.user.username} lacks grants on ${names(missing)}")
+
+  /** The catalogs a wildcard catalog grant covers on this statement: the tenant-db names of the
+    * user's tenant (as the gateway's validator), plus the catalog the pool's node attaches its
+    * database as (`memory` for kind memory, a `catalogAlias` or `dbName`), when the pool is the
+    * user's own tenant's. Per pool, never tenant-wide: on a DuckLake pool the instance-wide
+    * `memory` catalog stays outside every wildcard.
+    */
+  private def sessionCatalogs(eff: EffectiveSet, key: PoolKey): Set[String] =
+    eff.user.tenant.map(tenantCatalogs).getOrElse(Set.empty) ++
+      (if eff.user.tenant.contains(key.tenant) then poolCatalog(key) else None)
 
   private def admittedWithoutGrant(o: DescribedObject): Boolean =
     o.catalog
@@ -282,13 +309,16 @@ final class AuthzDecider(
     * `secure_view`) carries the next view out as its own `via`. A cycle stops the walk.
     */
   private def outermostView(via: String, d: Description): String =
-    val outer = d.objects.filter(_.kind == "secure_view").map(v => v.qualified -> v.via).toMap
+    // Lowercased throughout: DuckDB resolves names case-insensitively.
+    def low(s: String): String = s.toLowerCase(Locale.ROOT)
+    val outer                  =
+      d.objects.filter(_.kind == "secure_view").map(v => low(v.qualified) -> v.via.map(low)).toMap
     @scala.annotation.tailrec
     def up(view: String, seen: Set[String]): String =
       outer.get(view).flatten match
         case Some(next) if !seen.contains(next) => up(next, seen + view)
         case _                                  => view
-    up(via, Set.empty)
+    up(low(via), Set.empty)
 
   private def names(os: List[DescribedObject]): String =
     os.map(o => s"${o.qualified}:${o.access}").distinct.sorted.mkString(", ")
@@ -427,6 +457,17 @@ object AuthzDecider:
   private val DuckLakeMetadataPrefix      = "__ducklake_metadata_"
   private val BuiltinCatalog              = "system"
   private val BuiltinSchema               = "main"
+
+  /** The catalog a pool's node attaches its database as, from the pool's kind and effective
+    * metastore (as the spawn scripts and the router read them): DuckDB's built-in `memory` for kind
+    * memory, else the `catalogAlias` or `dbName`; None when neither is set or the kind is unknown.
+    */
+  def attachedCatalog(kindWire: String, metastore: Map[String, String]): Option[String] =
+    kindWire match
+      case TenantDbKind.InMemory.wireValue                                     => Some("memory")
+      case TenantDbKind.DuckLake.wireValue | TenantDbKind.DuckDbFile.wireValue =>
+        Option(TenantDb.catalogAlias(metastore)).filter(_.nonEmpty)
+      case _ => None
 
   /** A description access as a collapsed grant verb. */
   def verbOf(access: String): Verb = access match

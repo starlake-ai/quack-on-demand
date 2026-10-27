@@ -20,6 +20,10 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
   private val Pool    = PoolKey("acme", "acme_lake", "bi")
   private val Branch  = PoolKey("acme", "acme_lake", "__br_0a1b2c3d")
   private val OpaPool = PoolKey("opaco", "opaco_lake", "bi")
+  // A kind=memory database (its node's catalog is DuckDB's `memory`) and a duckdb-file one
+  // attached under a custom dbName.
+  private val MemPool  = PoolKey("acme", "acme_mem", "bi")
+  private val FilePool = PoolKey("acme", "acme_files", "bi")
 
   private def perm(id: String, cat: String, sch: String, tab: String, verb: String) =
     RolePermission(id, "r-1", cat, sch, tab, verb)
@@ -84,6 +88,13 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
       ).get,
       tenantCatalogs = Map("acme" -> Set("acme_lake"), "opaco" -> Set("opaco_lake"))
         .withDefaultValue(Set.empty[String]),
+      poolCatalog = Map(
+        Pool     -> "acme_lake",
+        Branch   -> "acme_lake",
+        MemPool  -> "memory",
+        FilePool -> "acme_custom",
+        OpaPool  -> "opaco_lake"
+      ).get,
       parentPoolsOf = _ => Nil,
       locations = new LocationRulesSource {
         def rulesFor(tenantId: String, userId: String): Either[String, LocationRules] =
@@ -216,15 +227,95 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "be covered through a secure view by a read grant on the view" in {
-    allow(plan(objects = List(obj("base", via = Some("acme_lake.main.v_secure")))))
+    allow(
+      plan(objects =
+        List(
+          obj("v_secure", kind = "secure_view"),
+          obj("base", via = Some("acme_lake.main.v_secure"))
+        )
+      )
+    )
     refused(
-      plan(objects = List(obj("base", via = Some("acme_lake.main.v_other")))),
-      "user:alice lacks grants on acme_lake.main.base:read"
+      plan(objects =
+        List(
+          obj("v_other", kind = "secure_view"),
+          obj("base", via = Some("acme_lake.main.v_other"))
+        )
+      ),
+      "user:alice lacks grants on acme_lake.main.base:read, acme_lake.main.v_other:read"
+    )
+    // A view name of fewer than three non-empty parts covers nothing.
+    refused(
+      plan(objects =
+        List(
+          obj("v_secure", kind = "secure_view", schema = ""),
+          obj("base", via = Some("acme_lake..v_secure"))
+        )
+      ),
+      "user:alice lacks grants on acme_lake..v_secure:read, acme_lake.main.base:read"
+    )
+  }
+
+  it should "be refused when its secure view is not read by the description (defense in depth)" in {
+    refused(
+      plan(objects = List(obj("base", via = Some("acme_lake.main.v_secure")))),
+      "the description reads through secure view acme_lake.main.v_secure without reading it"
     )
     refused(
       plan(objects = List(obj("base", via = Some("v_secure")))),
-      "user:alice lacks grants on acme_lake.main.base:read"
+      "the description reads through secure view v_secure without reading it"
     )
+    refused(
+      plan(functions =
+        List(fn("read_csv", List(Some("/var/loose/x.csv")), via = Some("acme_lake.main.v_secure")))
+      ),
+      "the description reads through secure view acme_lake.main.v_secure without reading it"
+    )
+    // The view read under another case still counts: DuckDB names are case-insensitive.
+    allow(
+      plan(objects =
+        List(
+          obj("V_Secure", kind = "secure_view"),
+          obj("base", via = Some("acme_lake.main.v_secure"))
+        )
+      )
+    )
+  }
+
+  "a wildcard catalog grant" should "cover the catalog the pool's node attaches, on that pool only" in {
+    // qod_all_tables: *.*.* ALL
+    val all = eff(List(perm("p-9", "*", "*", "*", "ALL")))
+    allow(plan(objects = List(obj("v", catalog = "memory"))), principal(all, MemPool))
+    refused(
+      plan(objects = List(obj("x", catalog = "memory"))),
+      "user:alice lacks grants on memory.main.x:read",
+      principal(all, Pool)
+    )
+    allow(plan(objects = List(obj("t", catalog = "acme_custom"))), principal(all, FilePool))
+    refused(
+      plan(objects = List(obj("t", catalog = "acme_custom"))),
+      "user:alice lacks grants on acme_custom.main.t:read",
+      principal(all, Pool)
+    )
+    // A principal of another tenant on the pool: its wildcard never reaches the pool's catalog.
+    refused(
+      plan(objects = List(obj("v", catalog = "memory"))),
+      "user:alice lacks grants on memory.main.v:read",
+      principal(eff(List(perm("p-9", "*", "*", "*", "ALL")), tenant = "globex"), MemPool)
+    )
+  }
+
+  "attachedCatalog" should "name memory for kind memory, else the catalogAlias or dbName" in {
+    AuthzDecider.attachedCatalog("memory", Map("dbName" -> "memory")) shouldBe Some("memory")
+    AuthzDecider.attachedCatalog("memory", Map("dbName" -> "custom")) shouldBe Some("memory")
+    AuthzDecider.attachedCatalog("duckdb-file", Map("dbName" -> "acme_custom")) shouldBe
+      Some("acme_custom")
+    AuthzDecider.attachedCatalog(
+      "ducklake",
+      Map("dbName" -> "acme_lake", "catalogAlias" -> "lake")
+    ) shouldBe Some("lake")
+    AuthzDecider.attachedCatalog("ducklake", Map.empty) shouldBe None
+    AuthzDecider.attachedCatalog("iceberg", Map("dbName" -> "x")) shouldBe None
   }
 
   it should "be covered through nested secure views by a read grant on the outermost one" in {
@@ -353,10 +444,19 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "run with the view owner's rights through a secure view, but still be classified" in {
-    allow(plan(functions = List(fn("duckdb_settings", via = Some("acme_lake.main.v_secure")))))
+    val view = obj("v_secure", kind = "secure_view")
     allow(
-      plan(functions =
-        List(fn("read_csv", List(Some("/var/loose/x.csv")), via = Some("acme_lake.main.v_secure")))
+      plan(
+        objects = List(view),
+        functions = List(fn("duckdb_settings", via = Some("acme_lake.main.v_secure")))
+      )
+    )
+    allow(
+      plan(
+        objects = List(view),
+        functions = List(
+          fn("read_csv", List(Some("/var/loose/x.csv")), via = Some("acme_lake.main.v_secure"))
+        )
       )
     )
     refused(
@@ -668,7 +768,12 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     val f = new Fixture()
     f.decider.decidePlan(
       OpaAlice,
-      plan(objects = List(obj("base", catalog = "opaco_lake", via = Some("v_secure"))))
+      plan(objects =
+        List(
+          obj("v", kind = "secure_view", catalog = "opaco_lake", schema = ""),
+          obj("base", catalog = "opaco_lake", via = Some("opaco_lake..v"))
+        )
+      )
     ) shouldBe Decision.Refuse("user:alice lacks grants on opaco_lake.main.base:read")
     f.opaBodies shouldBe empty
   }

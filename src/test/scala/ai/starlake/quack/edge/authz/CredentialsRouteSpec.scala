@@ -230,6 +230,20 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       Status.Unauthorized
   }
 
+  it should "answer a node whose id is the longest PoolSupervisor composes" in {
+    val f       = new Fixture
+    val tenant  = "t" * 61
+    val key     = PoolKey(tenant, s"${tenant}_d", "p" * 63)
+    val longest = ai.starlake.quack.ondemand.PoolSupervisor.nodeId(key, Int.MaxValue)
+    longest.length should be > 128
+    val b = body(f.keys.handle(Node.copy(nodeId = longest, poolKey = key), NodePrincipal.System))
+    f.call(
+      b,
+      node = Some(longest),
+      signature = Some(sign(b, NodeHandles.nodeKey(Secret, longest)))
+    )._1 shouldBe Status.Ok
+  }
+
   it should "refuse a malformed, oversized or expired request" in {
     val f = new Fixture
     f.call("{}".getBytes(UTF_8))._1 shouldBe Status.BadRequest

@@ -5,9 +5,8 @@ import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import io.circe.parser.parse
-import org.http4s.{HttpRoutes, Response, Status}
+import org.http4s.{HttpRoutes, Status}
 import org.http4s.dsl.io.*
-import org.typelevel.ci.CIString
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -19,7 +18,8 @@ import java.util.Base64
   * authenticates itself, in order, each failure answered before the next step reads anything:
   *
   *   1. `X-QoD-Node` names the node and `X-QoD-Signature` is the lowercase hex HMAC-SHA256 of the
-  *      body bytes under that node's key, checked (constant-time) before the body is parsed;
+  *      body bytes under that node's key: both headers are checked before the body is read, the MAC
+  *      (constant-time) before it is parsed ([[NodeCalls.serve]]);
   *   2. the body's `handle` verifies under the same key for the same node ([[NodeHandles.verify]]);
   *   3. the handle is one this replica minted, for that node and that principal
   *      ([[IssuedHandles]]): a node user who read the node key cannot mint a handle of their own
@@ -34,7 +34,8 @@ import java.util.Base64
   * cannot be served ([[UserS3Credentials.current]]: a stale cache, an unreadable deny set), both
   * retryable; 400 for a malformed request; 413 past [[CredentialsRoute.MaxBodyBytes]]. The system
   * principal has no credential: an empty set. The log never holds the body, the handle, the
-  * signature, the answer or a key.
+  * signature, the answer or a key; a node's repeated refusals go to DEBUG
+  * ([[NodeCalls.RefusalLog]]).
   */
 final class CredentialsRoute(
     keys: NodeKeys,
@@ -44,44 +45,31 @@ final class CredentialsRoute(
 ) extends LazyLogging:
   import CredentialsRoute.*
 
+  private val refusals = new NodeCalls.RefusalLog(logger)
+
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "api" / "internal" / "authz" / "credentials" =>
-      val node      = req.headers.get(CIString("X-QoD-Node")).map(_.head.value)
-      val signature = req.headers.get(CIString("X-QoD-Signature")).map(_.head.value)
-      req.body.take(MaxBodyBytes.toLong + 1).compile.to(Array).flatMap { body =>
-        IO.blocking(answer(node, signature, body))
-          .map((status, text) => Response[IO](status).withEntity(text))
-      }
+      NodeCalls.serve(req, MaxBodyBytes)(refused)(answer)
   }
 
-  private def answer(
-      node: Option[String],
-      signature: Option[String],
-      body: Array[Byte]
-  ): (Status, String) =
-    (node.filter(NodeIdText.matches), signature.filter(MacText.matches)) match
-      case (Some(nodeId), Some(sig)) =>
-        if body.length > MaxBodyBytes then (Status.PayloadTooLarge, "request body too large")
-        else
-          val key      = keys.key(nodeId)
-          val expected = NodeHandles.hex(NodeHandles.hmac(key, body))
-          if !MessageDigest.isEqual(
-              expected.getBytes(StandardCharsets.US_ASCII),
-              sig.getBytes(StandardCharsets.US_ASCII)
-            )
-          then refused(nodeId, "signature does not verify")
-          else
-            handleOf(body) match
-              case Left(why)   => (Status.BadRequest, why)
-              case Right(text) =>
-                NodeHandles.verify(text, key, nodeId, clock()) match
-                  case Left(why) => refused(nodeId, s"handle refused: $why")
-                  case Right(h)  => serve(nodeId, key, h)
-      case _ =>
-        refused(
-          node.filter(NodeIdText.matches).getOrElse("unknown"),
-          "missing or malformed X-QoD-Node or X-QoD-Signature"
-        )
+  /** One call whose headers are well formed and whose body is within the bound
+    * ([[NodeCalls.serve]]).
+    */
+  private def answer(nodeId: String, sig: String, body: Array[Byte]): (Status, String) =
+    val key      = keys.key(nodeId)
+    val expected = NodeHandles.hex(NodeHandles.hmac(key, body))
+    if !MessageDigest.isEqual(
+        expected.getBytes(StandardCharsets.US_ASCII),
+        sig.getBytes(StandardCharsets.US_ASCII)
+      )
+    then refused(nodeId, "signature does not verify")
+    else
+      handleOf(body) match
+        case Left(why)   => (Status.BadRequest, why)
+        case Right(text) =>
+          NodeHandles.verify(text, key, nodeId, clock()) match
+            case Left(why) => refused(nodeId, s"handle refused: $why")
+            case Right(h)  => serve(nodeId, key, h)
 
   private def serve(nodeId: String, key: Array[Byte], h: VerifiedHandle): (Status, String) =
     val p = h.principal
@@ -102,7 +90,7 @@ final class CredentialsRoute(
           (Status.ServiceUnavailable, ContextExpired)
 
   private def refused(nodeId: String, why: String): (Status, String) =
-    logger.warn(s"authz credentials: refused a call from node '$nodeId': $why")
+    refusals.refused(nodeId, s"authz credentials: refused a call from node '$nodeId': $why")
     (Status.Unauthorized, why)
 
   private def signed(key: Array[Byte], set: List[UserS3Credential]): String =
@@ -132,9 +120,6 @@ object CredentialsRoute:
     * could not be read): retryable.
     */
   val Unavailable: String = "S3 credentials unavailable; retry"
-
-  private val NodeIdText = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}".r
-  private val MacText    = "[0-9a-f]{64}".r
 
   /** The answer's JSON, before its canonical rendering: the set by id, every member present. */
   def json(set: List[UserS3Credential], digest: String): Json =

@@ -3,9 +3,8 @@ package ai.starlake.quack.edge.authz
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.parser.parse
-import org.http4s.{HttpRoutes, Response, Status}
+import org.http4s.{HttpRoutes, Status}
 import org.http4s.dsl.io.*
-import org.typelevel.ci.CIString
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -17,7 +16,8 @@ import scala.util.control.NonFatal
   * every call authenticates itself:
   *
   *   1. `X-QoD-Node` names the node and `X-QoD-Signature` is the lowercase hex HMAC-SHA256 of the
-  *      body bytes under that node's key, checked (constant-time) before the body is parsed;
+  *      body bytes under that node's key: both headers are checked before the body is read, the MAC
+  *      (constant-time) before it is parsed ([[NodeCalls.serve]]);
   *   2. the body's `handle` verifies under the same key for the same node ([[NodeHandles.verify]]);
   *   3. a user's handle names a context this replica minted ([[MintedHandles]]), consistent with
   *      the handle (user, pool, `ctx` digest).
@@ -25,7 +25,8 @@ import scala.util.control.NonFatal
   * Answers (all `text/plain; charset=UTF-8`): 200 with a signed [[Verdict]] (allow or refuse), 401
   * when the node or the handle fails, 503 when the decision is unavailable (an expired context
   * included), 400 for a malformed request, 413 past [[DecideRoute.MaxBodyBytes]]. The log never
-  * holds the body, the handle, the signature, a verdict or a key.
+  * holds the body, the handle, the signature, a verdict or a key; a node's repeated refusals go to
+  * DEBUG ([[NodeCalls.RefusalLog]]).
   */
 final class DecideRoute(
     keys: NodeKeys,
@@ -35,49 +36,36 @@ final class DecideRoute(
 ) extends LazyLogging:
   import DecideRoute.*
 
+  private val refusals = new NodeCalls.RefusalLog(logger)
+
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case req @ POST -> Root / "api" / "internal" / "authz" / "decide" =>
-      val node      = req.headers.get(CIString("X-QoD-Node")).map(_.head.value)
-      val signature = req.headers.get(CIString("X-QoD-Signature")).map(_.head.value)
-      req.body.take(MaxBodyBytes.toLong + 1).compile.to(Array).flatMap { body =>
-        IO.blocking(answer(node, signature, body))
-          .map((status, text) => Response[IO](status).withEntity(text))
-      }
+      NodeCalls.serve(req, MaxBodyBytes)(refused)(answer)
   }
 
   private final case class DecideRequest(description: Array[Byte], handle: String, kind: String)
 
-  private def answer(
-      node: Option[String],
-      signature: Option[String],
-      body: Array[Byte]
-  ): (Status, String) =
-    (node.filter(NodeIdText.matches), signature.filter(MacText.matches)) match
-      case (Some(nodeId), Some(sig)) =>
-        if body.length > MaxBodyBytes then (Status.PayloadTooLarge, "request body too large")
-        else
-          val key      = keys.key(nodeId)
-          val expected = NodeHandles.hex(NodeHandles.hmac(key, body))
-          if !MessageDigest.isEqual(
-              expected.getBytes(StandardCharsets.US_ASCII),
-              sig.getBytes(StandardCharsets.US_ASCII)
-            )
-          then refused(nodeId, "signature does not verify")
-          else
-            parsed(body) match
-              case Left(why) => (Status.BadRequest, why)
-              case Right(r)  =>
-                NodeHandles.verify(r.handle, key, nodeId, clock()) match
-                  case Left(why) => refused(nodeId, s"handle refused: $why")
-                  case Right(h)  => judge(nodeId, key, h, r)
-      case _ =>
-        refused(
-          node.filter(NodeIdText.matches).getOrElse("unknown"),
-          "missing or malformed X-QoD-Node or X-QoD-Signature"
-        )
+  /** One call whose headers are well formed and whose body is within the bound
+    * ([[NodeCalls.serve]]).
+    */
+  private def answer(nodeId: String, sig: String, body: Array[Byte]): (Status, String) =
+    val key      = keys.key(nodeId)
+    val expected = NodeHandles.hex(NodeHandles.hmac(key, body))
+    if !MessageDigest.isEqual(
+        expected.getBytes(StandardCharsets.US_ASCII),
+        sig.getBytes(StandardCharsets.US_ASCII)
+      )
+    then refused(nodeId, "signature does not verify")
+    else
+      parsed(body) match
+        case Left(why) => (Status.BadRequest, why)
+        case Right(r)  =>
+          NodeHandles.verify(r.handle, key, nodeId, clock()) match
+            case Left(why) => refused(nodeId, s"handle refused: $why")
+            case Right(h)  => judge(nodeId, key, h, r)
 
   private def refused(nodeId: String, why: String): (Status, String) =
-    logger.warn(s"authz decide: refused a call from node '$nodeId': $why")
+    refusals.refused(nodeId, s"authz decide: refused a call from node '$nodeId': $why")
     (Status.Unauthorized, why)
 
   private def judge(
@@ -88,14 +76,14 @@ final class DecideRoute(
   ): (Status, String) =
     val p        = h.principal
     val needsCtx = !(p.superuser || p.system)
-    val context  = if needsCtx then minted.get(h.nonce) else None
-    if needsCtx && context.isEmpty then
+    val entry    = if needsCtx then minted.get(h.nonce) else None
+    if needsCtx && entry.isEmpty then
       logger.info(s"authz decide: no context for a handle of ${p.name} on node '$nodeId'")
       (Status.ServiceUnavailable, AuthzDecider.ContextExpired)
-    else if context.exists(c => !consistent(h, c)) then
+    else if entry.exists(e => !consistent(h, e)) then
       refused(nodeId, "handle does not match its minted context")
     else
-      val who         = DecidePrincipal(p, context)
+      val who         = DecidePrincipal(p, entry.map(_.context))
       val fingerprint = NodeHandles.hex(MessageDigest.getInstance("SHA-256").digest(r.description))
       val brief       = s"${r.kind} ${fingerprint.take(12)} for ${p.name} on node '$nodeId'"
       // Whatever a decision fails to read, thrown included, is unavailable: never a verdict. A
@@ -145,10 +133,14 @@ final class DecideRoute(
           )
           (Status.Ok, Verdicts.sign(v, key))
 
-  /** The registered context is the one the handle was minted with. */
-  private def consistent(h: VerifiedHandle, c: DecideContext): Boolean =
-    c.effective.user.id == h.principal.id && NodeHandles.pool(c.poolKey) == h.pool &&
-      NodeHandles.contextDigest(Some(c)) == h.ctx
+  /** The registered context is the one the handle was minted with: its user, its pool and the `ctx`
+    * digest computed at mint (never recomputed per call).
+    */
+  private def consistent(h: VerifiedHandle, e: MintedHandles.Minted): Boolean =
+    e.context.effective.user.id == h.principal.id && NodeHandles.pool(
+      e.context.poolKey
+    ) == h.pool &&
+      e.ctx == h.ctx
 
   private def parsed(body: Array[Byte]): Either[String, DecideRequest] =
     parse(new String(body, StandardCharsets.UTF_8)) match
@@ -178,6 +170,3 @@ object DecideRoute:
 
   /** The largest request accepted: a description is a few kilobytes. */
   val MaxBodyBytes: Int = 1 << 20
-
-  private val NodeIdText = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}".r
-  private val MacText    = "[0-9a-f]{64}".r

@@ -19,12 +19,13 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
   )
 
   "MintedHandles" should "keep a context until DecideGraceMs past its handle's expiry" in {
-    val clock = new AtomicLong(1000L)
-    val m     = new MintedHandles(clock = () => clock.get())
-    m.put("n-1", Ctx, expiresAt = 61_000L)
-    m.get("n-1") shouldBe Some(Ctx)
+    val clock  = new AtomicLong(1000L)
+    val m      = new MintedHandles(clock = () => clock.get())
+    val digest = NodeHandles.contextDigest(Some(Ctx))
+    m.put("n-1", Ctx, digest, expiresAt = 61_000L)
+    m.get("n-1") shouldBe Some(MintedHandles.Minted(Ctx, digest))
     clock.set(61_000L + NodeHandles.DecideGraceMs)
-    m.get("n-1") shouldBe Some(Ctx)
+    m.get("n-1") shouldBe Some(MintedHandles.Minted(Ctx, digest))
     clock.set(61_000L + NodeHandles.DecideGraceMs + 1)
     m.get("n-1") shouldBe None
     m.get("unknown") shouldBe None
@@ -32,7 +33,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
 
   it should "stay within its bound" in {
     val m = new MintedHandles(maxEntries = 2)
-    (1 to 5).foreach(i => m.put(s"n-$i", Ctx, Long.MaxValue / 2))
+    (1 to 5).foreach(i => m.put(s"n-$i", Ctx, "0" * 64, Long.MaxValue / 2))
     m.size should be <= 2L
   }
 
@@ -53,7 +54,9 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
       )
     val text = keys.handle(node, NodePrincipal.of(Some(Ctx.effective), Pool))
     val h = NodeHandles.verify(text, keys.key(node.nodeId), node.nodeId, System.currentTimeMillis())
-    m.get(h.toOption.get.nonce) shouldBe Some(Ctx)
+    // With the digest the handle carries, computed once at mint.
+    m.get(h.toOption.get.nonce) shouldBe Some(MintedHandles.Minted(Ctx, h.toOption.get.ctx))
+    h.toOption.get.ctx shouldBe NodeHandles.contextDigest(Some(Ctx))
     val sys = keys.handle(node, NodePrincipal.System)
     m.get(
       NodeHandles
@@ -62,6 +65,14 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
         .get
         .nonce
     ) shouldBe None
+    // A superuser needs no context: none is registered, though the handle digests it.
+    val root = Ctx.effective.copy(user = Ctx.effective.user.copy(tenant = None))
+    val su   = keys.handle(node, NodePrincipal.of(Some(root), Pool))
+    val suh = NodeHandles.verify(su, keys.key(node.nodeId), node.nodeId, System.currentTimeMillis())
+    suh.toOption.get.principal.superuser shouldBe true
+    suh.toOption.get.ctx shouldBe NodeHandles.contextDigest(Some(DecideContext(root, Pool, None)))
+    m.get(suh.toOption.get.nonce) shouldBe None
+    m.size shouldBe 1L
   }
 
   "NodePrincipal.of with a pool" should "carry the session context, with the set's token restriction" in {

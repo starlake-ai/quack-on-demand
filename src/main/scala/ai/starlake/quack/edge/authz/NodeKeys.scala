@@ -37,24 +37,27 @@ final class NodeKeys(
     * version and the digest of the principal's session context and of its S3 credentials.
     */
   def handle(node: RunningNode, principal: NodePrincipal): String =
-    val m = NodeHandles.mint(
+    val ctx = NodeHandles.contextDigest(principal.context)
+    val m   = NodeHandles.mint(
       secret,
       node.nodeId,
       replica,
       principal,
       NodeHandles.pool(node.poolKey),
       policyVersion = versions.current(node.poolKey.tenant),
-      ctx = NodeHandles.contextDigest(principal.context),
+      ctx = ctx,
       creds = if principal.system then "" else creds.digest(principal.id),
       nowMs = clock()
     )
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.
     if !principal.system then issued.foreach(_.put(m.nonce, node.nodeId, principal.id, m.expiresAt))
-    // The decision endpoint judges this handle's statements with this context (MintedHandles).
-    for
-      context  <- principal.context
-      registry <- minted
-    do registry.put(m.nonce, context, m.expiresAt)
+    // The decision endpoint judges this handle's statements with this context (MintedHandles),
+    // checked against the digest computed here. A superuser's statements need no context.
+    if !principal.superuser then
+      for
+        context  <- principal.context
+        registry <- minted
+      do registry.put(m.nonce, context, ctx, m.expiresAt)
     m.text
 
   /** [[handle]] as the prelude statement the node runs before the statement itself. */
