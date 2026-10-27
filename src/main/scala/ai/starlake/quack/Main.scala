@@ -175,7 +175,8 @@ object Main extends IOApp with LazyLogging:
           ai.starlake.quack.cli.ManifestCli.importFrom(
             store,
             System.in,
-            mgrCfg.requireEncryption
+            mgrCfg.requireEncryption,
+            mgrCfg.tenantFiles.rootOpt
           )
         }.map(rc => if rc == 0 then ExitCode.Success else ExitCode.Error)
       case "admin" :: "reset-password" :: rest =>
@@ -1595,7 +1596,8 @@ object Main extends IOApp with LazyLogging:
           scala.util.Try(java.net.InetAddress.getLocalHost.getHostName).getOrElse("unknown"),
         federatedStore = manifestFedStore,
         audit = auditRecorder,
-        requireEncryption = mgrCfg.requireEncryption
+        requireEncryption = mgrCfg.requireEncryption,
+        tenantFilesRoot = mgrCfg.tenantFiles.rootOpt
       )
 
       // The routed executor (see boot.RoutedExecutor): restriction checks, EffectiveSet

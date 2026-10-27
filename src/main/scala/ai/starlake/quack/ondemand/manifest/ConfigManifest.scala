@@ -153,6 +153,19 @@ final case class ManifestTenantAcl(
     s"ManifestTenantAcl(mode=$mode,opaUrl=$opaUrl,opaPolicyPath=$opaPolicyPath,opaToken=${opaToken
         .map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)},sendStatementText=$sendStatementText)"
 
+/** One authorized location of a tenant (TenantLocation). An export writes the secret
+  * (`s3_secret_access_key`) as FederatedSecret.RedactedMarker; an import keeps the stored secret
+  * only from the tenant's stored location of the same location, `s3_access_key_id` and
+  * `s3_endpoint` (a stored secret never follows a new endpoint), and refuses the marker otherwise.
+  */
+final case class ManifestTenantLocation(
+    location: String,
+    objectStore: Map[String, String] = Map.empty
+):
+  override def toString: String =
+    s"ManifestTenantLocation(location=$location," +
+      s"objectStore=${ai.starlake.quack.model.TenantLocation.redacted(objectStore)})"
+
 final case class ManifestTenant(
     // The tenant slug key (e.g. "acme").
     name: String,
@@ -176,7 +189,11 @@ final case class ManifestTenant(
     // None means "not present in the manifest" and leaves an existing tenant's stored ACL
     // untouched on import (see ManifestImporter.importAcl); it is NOT the same as an explicit
     // default-valued ManifestTenantAcl, which would reset the ACL to manager defaults.
-    acl: Option[ManifestTenantAcl] = None
+    acl: Option[ManifestTenantAcl] = None,
+    // None: not in the manifest, the stored locations stay as they are. Some(list): the tenant's
+    // locations become exactly `list` (Some(Nil) removes them all). Exported only when the tenant
+    // has some.
+    locations: Option[List[ManifestTenantLocation]] = None
 ):
   /** Prints `clientSecret`, and the value of a `clientSecret` key inside `authConfig` (which the
     * importer refuses), as [[FederatedSecret.RedactedMarker]], the way
@@ -191,7 +208,7 @@ final case class ManifestTenant(
     s"ManifestTenant(name=$name,displayName=$displayName,disabled=$disabled," +
       s"authProvider=$authProvider,authConfig=$shownAuthConfig," +
       s"clientSecret=${clientSecret.map(_ => FederatedSecret.RedactedMarker)}," +
-      s"tenantDbs=$tenantDbs,pools=$pools,acl=$acl)"
+      s"tenantDbs=$tenantDbs,pools=$pools,acl=$acl,locations=$locations)"
 
 final case class ManifestTablePermission(
     catalog: String,
@@ -309,6 +326,7 @@ object ConfigManifest:
   given Codec[ManifestTenantDb]         = ConfiguredCodec.derived
   given Codec[ManifestPool]             = ConfiguredCodec.derived
   given Codec[ManifestTenantAcl]        = ConfiguredCodec.derived
+  given Codec[ManifestTenantLocation]   = ConfiguredCodec.derived
   given Codec[ManifestTenant]           = ConfiguredCodec.derived
   given Codec[ManifestRole]             = ConfiguredCodec.derived
   given Codec[ManifestGroup]            = ConfiguredCodec.derived

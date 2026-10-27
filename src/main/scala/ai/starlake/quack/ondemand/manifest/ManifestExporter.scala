@@ -74,7 +74,9 @@ object ManifestExporter extends LazyLogging:
       federatedStore: Option[FederatedSourceStore]
   ): ConfigManifest =
     val dbsByTenant = snap.tenantDbs.groupBy(_.tenantId)
-    val poolsByDb   = snap.pools.groupBy(_.tenantDbId)
+    // Authorized locations are not part of the snapshot.
+    val locationsByTenant = store.listAllTenantLocations().groupBy(_.tenantId)
+    val poolsByDb         = snap.pools.groupBy(_.tenantDbId)
     // Global pool -> (owning tenant addressing-name, pool name) index, used to
     // resolve pool grants regardless of which tenant loop iteration is
     // running. Pool carries its own tenantId directly (denormalized from its
@@ -315,7 +317,16 @@ object ManifestExporter extends LazyLogging:
               opaToken = t.acl.opaToken.map(_ => Redacted),
               sendStatementText = t.acl.sendStatementText
             )
-          )
+          ),
+          // Never a secret value: the marker only says one is stored (see ManifestTenantLocation).
+          locations = locationsByTenant
+            .get(t.id)
+            .map(_.sortBy(_.location).map { l =>
+              ManifestTenantLocation(
+                l.location,
+                ai.starlake.quack.model.TenantLocation.redacted(l.objectStore)
+              )
+            })
         ),
         manifestRoles,
         manifestGroups,

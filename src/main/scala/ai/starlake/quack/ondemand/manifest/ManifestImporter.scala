@@ -45,7 +45,11 @@ object ManifestImporter extends LazyLogging:
   // validate
   // ------------------------------------------------------------------
 
-  def validate(m: ConfigManifest, store: ControlPlaneStore): ValidationResult =
+  def validate(
+      m: ConfigManifest,
+      store: ControlPlaneStore,
+      tenantFilesRoot: Option[String] = None
+  ): ValidationResult =
     val errs = scala.collection.mutable.ListBuffer.empty[String]
 
     if m.apiVersion != ConfigManifest.ApiVersion then
@@ -201,6 +205,22 @@ object ManifestImporter extends LazyLogging:
       }
     }
 
+    // Authorized locations: the add rules and the redacted-secret rule, before apply() writes a
+    // single row.
+    m.tenants.foreach { t =>
+      t.locations.foreach { ls =>
+        val tenantId = storedTenants
+          .find(x => x.id == t.name || x.displayName == t.name)
+          .map(_.id)
+          .getOrElse(t.name.toLowerCase(java.util.Locale.ROOT))
+        val stored = store.listTenantLocations(tenantId)
+        dup(ls, _.location.trim, s"location within ${t.name}")
+        ls.foreach(l =>
+          resolveLocation(t.name, tenantId, l, stored, tenantFilesRoot).left.foreach(errs += _)
+        )
+      }
+    }
+
     if errs.isEmpty then Right(()) else Left(errs.toList)
 
   /** One error per manifest tenant-db whose metastore holds a key outside
@@ -264,9 +284,10 @@ object ManifestImporter extends LazyLogging:
       m: ConfigManifest,
       store: ControlPlaneStore,
       federatedStore: Option[FederatedSourceStore] = None,
-      requireEncryption: Boolean
+      requireEncryption: Boolean,
+      tenantFilesRoot: Option[String] = None
   ): ValidationResult =
-    validate(m, store).flatMap { _ =>
+    validate(m, store, tenantFilesRoot).flatMap { _ =>
       val errs = scala.collection.mutable.ListBuffer.empty[String]
 
       // 0. Snapshot the existing graph ONCE so the per-tenant loops below
@@ -416,6 +437,10 @@ object ManifestImporter extends LazyLogging:
             )
           )
           if mt.acl.isDefined then store.updateTenantAcl(tenantId, resolvedAcl)
+
+        mt.locations.foreach(ls =>
+          applyLocations(store, mt.name, tenantId, ls, tenantFilesRoot, errs)
+        )
 
         // ---- TenantDbs: delete-then-upsert.
         val keepDbNames = mt.tenantDbs.map(_.name).toSet
@@ -862,6 +887,97 @@ object ManifestImporter extends LazyLogging:
     * nothing-to-reuse case above: both are a hard error for the import, reported like any other
     * per-row validation failure.
     */
+  /** A manifest location as it would be stored: its redacted secret resolved against the tenant's
+    * `stored` locations, then the add rules (TenantLocationRules). The marker is kept only from a
+    * stored location with the same location, `s3_access_key_id` and `s3_endpoint`: a stored secret
+    * never follows a new endpoint or key id. No message carries a secret.
+    */
+  private def resolveLocation(
+      tenantName: String,
+      tenantId: String,
+      ml: ManifestTenantLocation,
+      stored: List[ai.starlake.quack.model.TenantLocation],
+      filesRoot: Option[String]
+  ): Either[String, (ai.starlake.quack.model.TenantLocationRules.Accepted, Map[String, String])] =
+    val label     = s"tenant '$tenantName' location '${ml.location.trim}'"
+    val secretKey = "s3_secret_access_key"
+    val objectStore: Either[String, Map[String, String]] = ml.objectStore.get(secretKey) match
+      case Some(FederatedSecret.RedactedMarker) =>
+        stored.find(_.location == ml.location.trim) match
+          case Some(s)
+              if s.objectStore.get("s3_access_key_id") == ml.objectStore.get("s3_access_key_id") &&
+                s.objectStore.get("s3_endpoint") == ml.objectStore.get("s3_endpoint") =>
+            s.objectStore
+              .get(secretKey)
+              .map(v => ml.objectStore.updated(secretKey, v))
+              .toRight(s"$label: s3_secret_access_key is redacted and none is stored; provide it")
+          case Some(_) =>
+            Left(
+              s"$label: s3_secret_access_key is redacted but the access key id or the endpoint " +
+                "changed; the stored secret never follows them: provide the secret"
+            )
+          case None =>
+            Left(
+              s"$label: s3_secret_access_key is redacted and the tenant holds no such location to " +
+                "keep it from; provide the secret, or add the location later with qod tenant location add"
+            )
+      case _ => Right(ml.objectStore)
+    objectStore.flatMap { os =>
+      ai.starlake.quack.model.TenantLocationRules
+        .validate(tenantId, ml.location, os, filesRoot)
+        .left
+        .map((code, msg) => s"$label: $code: $msg")
+        .map(a =>
+          a -> (if a.kind == ai.starlake.quack.model.TenantLocation.S3 then os else Map.empty)
+        )
+    }
+
+  /** Make `tenantId`'s stored locations equal `incoming` (validated by validate()): a stored
+    * location the manifest no longer lists, or lists with other credentials, is deleted; a listed
+    * one not stored as such is inserted under a fresh id. An unchanged location keeps its id, so
+    * its node secret keeps its name. Nothing is pushed to running nodes: they pick the change up at
+    * their next restart (the REST, MCP and UI surfaces push live).
+    */
+  private def applyLocations(
+      store: ControlPlaneStore,
+      tenantName: String,
+      tenantId: String,
+      incoming: List[ManifestTenantLocation],
+      filesRoot: Option[String],
+      errs: scala.collection.mutable.ListBuffer[String]
+  ): Unit =
+    val stored = store.listTenantLocations(tenantId)
+    val wanted = incoming.flatMap { ml =>
+      resolveLocation(tenantName, tenantId, ml, stored, filesRoot) match
+        case Left(err) =>
+          errs += err
+          None
+        case Right((accepted, os)) => Some(accepted.location -> (accepted, os))
+    }.toMap
+    val (kept, dropped) =
+      stored.partition(s => wanted.get(s.location).exists(_._2 == s.objectStore))
+    dropped.foreach(s => store.deleteTenantLocation(tenantId, s.id))
+    val keptLocations = kept.map(_.location).toSet
+    wanted.values.toList
+      .filterNot((a, _) => keptLocations.contains(a.location))
+      .sortBy(_._1.location)
+      .foldLeft(kept.map(_.id)) { case (taken, (a, os)) =>
+        val id = ai.starlake.quack.model.TenantLocationRules.newId(taken)
+        store.insertTenantLocation(
+          ai.starlake.quack.model.TenantLocation(
+            id,
+            tenantId,
+            a.kind,
+            a.location,
+            os,
+            System.currentTimeMillis(),
+            Some("manifest")
+          )
+        )
+        id :: taken
+      }
+    ()
+
   private def importAcl(
       tenantName: String,
       incoming: Option[ManifestTenantAcl],

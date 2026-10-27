@@ -23,7 +23,9 @@ final class ManifestHandlers(
       * database/create. An import is the other way a tenant-db row is created, so it has to honour
       * the policy or the deployment-wide guarantee is not one.
       */
-    requireEncryption: Boolean
+    requireEncryption: Boolean,
+    /** QOD_TENANT_FILES_ROOT: an imported local location must lie under it, as on location/add. */
+    tenantFilesRoot: Option[String] = None
 ):
   private val Yaml = Printer.builder.withDropNullKeys(true).build()
 
@@ -74,7 +76,13 @@ final class ManifestHandlers(
                 )
               )
             case Right((m, _)) =>
-              ManifestImporter.apply(m, store, federatedStore, requireEncryption) match
+              ManifestImporter.apply(
+                m,
+                store,
+                federatedStore,
+                requireEncryption,
+                tenantFilesRoot
+              ) match
                 case Left(errs) =>
                   Left(
                     StatusCode.BadRequest -> ErrorResponse("invalid-manifest", errs.mkString("; "))
