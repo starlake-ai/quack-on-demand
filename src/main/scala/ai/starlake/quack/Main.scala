@@ -640,6 +640,9 @@ object Main extends IOApp with LazyLogging:
       sharedUserS3 = Some(userS3)
     )
     supRef.set(sup)
+    // The tenants' local folders, the users' S3 scopes and every database data folder, read live
+    // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
+    val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
       sup.serverLivenessAll =
@@ -1134,28 +1137,9 @@ object Main extends IOApp with LazyLogging:
         opa = Some(opaAuthorizer),
         opaCfg = opaCfg
       )
-      // A tenant's authorized locations: changes reach its running nodes as system statements.
-      // The statements carry credentials; the push never logs them, nor a node's answer.
-      val tenantLocationPush = new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
-        nodesOf = sup.liveNodesOfTenant,
-        run = (n, sql) =>
-          adapter
-            .send(
-              n,
-              sql,
-              ai.starlake.quack.edge.authz.NodePrincipal.System,
-              session = None,
-              recordLoad = false
-            )
-            .map {
-              case QuackResponse.Ok(_, _, close) => close(); Right(())
-              case QuackResponse.Failed(_, _)    => Left("failed")
-            }
-      )
       val tenantLocationHandlers = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
         sup,
         mgrCfg.tenantFiles.rootOpt,
-        tenantLocationPush,
         auditRecorder
       )
       val aclValidator: StatementValidator =

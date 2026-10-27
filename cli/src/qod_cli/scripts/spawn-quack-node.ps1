@@ -39,14 +39,14 @@
   $env:QOD_NODE_BIN names it (an absolute path the launcher sets); otherwise the first `qod-node`
   on PATH.
 
-  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, tenantStoreSql, the
-  node token, the node key and the object-store credentials, see $SecretKeys below) NEVER arrive
-  through the environment or the command line: another process of the same user can read both. They
-  arrive as one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates
-  with an ACL granting only the current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the
-  keys it assembles into the init SQL and deletes each file right after; qod-node reads its own keys
-  (the node token and the node key) and removes the directory, which this script also removes when
-  it exits. A key still present in the environment is ignored with a warning.
+  Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, the node token, the
+  node key and the object-store credentials, see $SecretKeys below) NEVER arrive through the
+  environment or the command line: another process of the same user can read both. They arrive as
+  one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an
+  ACL granting only the current user (QOD_SECRETS_DIR_EPHEMERAL=1). This script reads the keys it
+  assembles into the init SQL and deletes each file right after; qod-node reads its own keys (the
+  node token and the node key) and removes the directory, which this script also removes when it
+  exits. A key still present in the environment is ignored with a warning.
 
   The init SQL reaches qod-node on its stdin (--init -), UTF-8 bytes down a pipe it reads once to
   the end: never on disk, and nothing else reaches the node's own connection through it. qod-node
@@ -84,7 +84,7 @@ $startDir = (Get-Location).ProviderPath
 
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.sh and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
-$SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql', 'tenantStoreSql',
+$SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql',
   'QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY', 'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY',
   'QOD_AZURE_CONNECTION_STRING', 'QOD_GCS_KEY_ID', 'QOD_GCS_SECRET')
 # The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
@@ -152,7 +152,6 @@ $dbInitSql      = [Environment]::GetEnvironmentVariable('dbInitSql')
 $extraSetupSql  = Secret-Or 'extraSetupSql' ''
 $lockdownSql    = [Environment]::GetEnvironmentVariable('lockdownSql')
 $objectStoreSql = Secret-Or 'objectStoreSql' ''
-$tenantStoreSql = Secret-Or 'tenantStoreSql' ''
 
 function Env-Or([string]$name, [string]$default) {
   $v = [Environment]::GetEnvironmentVariable($name)
@@ -574,11 +573,6 @@ if (-not [string]::IsNullOrEmpty($objectStoreSql)) { [void]$sb.AppendLine($objec
 # The data path's storage secret and extensions, for every kind, before any ATTACH (mirrors
 # spawn-quack-node.sh).
 if (-not [string]::IsNullOrEmpty($storageSql)) { [void]$sb.AppendLine($storageSql) }
-# The tenant's authorized S3 locations (TenantLocationSecrets.scala): one bucket-scoped secret per
-# line, before any ATTACH, as in spawn-quack-node.sh. The data path keeps its own credentials: its
-# qod_db_store or qod_data_s3 secret is scoped to it, longer than a bucket scope or tied with it at
-# a bucket root, a tie both win by name (exceptions: see spawn-quack-node.sh).
-if (-not [string]::IsNullOrEmpty($tenantStoreSql)) { [void]$sb.AppendLine($tenantStoreSql) }
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to
 # mbedtls, where 1.4.1+ REFUSES WRITES to an encrypted database file, and the symptom is a silently

@@ -7245,8 +7245,6 @@ components:
           type: string
         location:
           type: string
-        objectStore:
-          $ref: '#/components/schemas/Map_String'
     AuditActionsResponse:
       title: AuditActionsResponse
       type: object
@@ -8355,7 +8353,6 @@ components:
       - objectStoreSql
       - extraSetupSql
       - lockdownSql
-      - tenantStoreSql
       - nodeExtensions
       properties:
         epoch:
@@ -8383,8 +8380,6 @@ components:
         extraSetupSql:
           type: string
         lockdownSql:
-          type: string
-        tenantStoreSql:
           type: string
         nodeExtensions:
           $ref: '#/components/schemas/FleetNodeExtensionsDto'
@@ -10592,17 +10587,9 @@ components:
       type: object
       required:
       - location
-      - nodesUpdated
       properties:
         location:
           $ref: '#/components/schemas/TenantLocationDto'
-        nodesUpdated:
-          type: integer
-          format: int32
-        nodesFailed:
-          type: array
-          items:
-            type: string
     TenantLocationDto:
       title: TenantLocationDto
       type: object
@@ -10611,8 +10598,6 @@ components:
       - tenant
       - kind
       - location
-      - objectStore
-      - secretSet
       - createdAt
       properties:
         id:
@@ -10623,10 +10608,6 @@ components:
           type: string
         location:
           type: string
-        objectStore:
-          $ref: '#/components/schemas/Map_String'
-        secretSet:
-          type: boolean
         createdAt:
           type: integer
           format: int64

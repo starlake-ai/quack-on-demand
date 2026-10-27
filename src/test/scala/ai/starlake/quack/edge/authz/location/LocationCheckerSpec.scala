@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 class LocationCheckerSpec extends AnyFlatSpec with Matchers:
 
   private val Rules = LocationRules(
-    tenantBuckets = Set("acme-etl", "shared-lake"),
+    s3Scopes = List("s3://acme-etl/", "s3://shared-lake/"),
     tenantFolders =
       List("/srv/qod-files/acme/in/", "/srv/qod-files/acme/out/", "/srv/qod-files/acme/db/"),
     dataFolders = List(
@@ -20,7 +20,7 @@ class LocationCheckerSpec extends AnyFlatSpec with Matchers:
   )
 
   private val Windows = LocationRules(
-    tenantBuckets = Set.empty,
+    s3Scopes = Nil,
     tenantFolders = List("C:/qod/files/acme/in/", "C:/qod/files/acme/db/"),
     dataFolders = List("C:/qod/files/acme/db/lake/"),
     filesRoot = Some("C:/qod/files/")
@@ -304,3 +304,94 @@ class LocationCheckerSpec extends AnyFlatSpec with Matchers:
       "D:\\qod\\files\\acme\\in\\x.csv",
       "/qod/files/acme/in/x.csv"
     ).foreach(outside(_, Windows))
+
+  "an s3 scope" should "admit only what lies under it, on whole segments" in {
+    val r = Rules.copy(s3Scopes = List("s3://acme-etl/in/"))
+    ok("s3://acme-etl/in/x.parquet", r)
+    ok("s3://acme-etl/in/", r)
+    ok("s3://acme-etl/in/2026/*.parquet", r)
+    outside("s3://acme-etl/out/x.parquet", r)
+    outside("s3://acme-etl/in-2/x.parquet", r)
+    outside("s3://acme-etl/", r)
+    outside("s3://acme-etl/i*/x.parquet", r)
+    LocationChecker.check("s3://other/x", r) shouldBe
+      Left(s"s3://other/x ${LocationChecker.Outside} (${LocationChecker.NoCredential})")
+  }
+
+  it should "admit nothing when the user holds none" in
+    outside("s3://acme-etl/in/x.parquet", Rules.copy(s3Scopes = Nil))
+
+  "scopeError" should "refuse a scope at or under a data folder or its siblings, and admit an ancestor" in {
+    val d = List("s3://shared-lake/lake-1/", "/srv/qod-files/acme/db/lake/")
+    List(
+      "s3://shared-lake/lake-1/",
+      "s3://shared-lake/lake-1/main/",
+      "s3://shared-lake/LAKE-1/",
+      "s3://shared-lake/lake-1__br_0123abcd/",
+      "s3://shared-lake/lake-1.wal/"
+    ).foreach { s =>
+      withClue(s)(
+        LocationChecker.scopeError(s, d) shouldBe Some(s"$s ${LocationChecker.DataFolder}")
+      )
+    }
+    List(
+      "s3://shared-lake/",
+      "s3://shared-lake/lake-10/",
+      "s3://shared-lake/lake-2/",
+      "s3://other/"
+    )
+      .foreach(s => withClue(s)(LocationChecker.scopeError(s, d) shouldBe None))
+    LocationChecker.scopeError("s3://Bad/", d).isDefined shouldBe true
+  }
+
+  it should "refuse every scope of a bucket whose data path the checker cannot parse" in {
+    val d = List("s3://lake/x" + 1.toChar + "y/")
+    LocationChecker.scopeError("s3://lake/other/", d).isDefined shouldBe true
+    LocationChecker.scopeError("s3://lake2/other/", d) shouldBe None
+  }
+
+  "admittedBy" should "name the longest scope or folder that admits a location" in {
+    val r = Rules.copy(s3Scopes = List("s3://acme-etl/", "s3://acme-etl/in/"))
+    LocationChecker.admittedBy("s3://acme-etl/in/x.parquet", r) shouldBe Some("s3://acme-etl/in/")
+    LocationChecker.admittedBy("s3://acme-etl/out/x.parquet", r) shouldBe Some("s3://acme-etl/")
+    LocationChecker.admittedBy("/srv/qod-files/acme/in/x.csv", r) shouldBe
+      Some("/srv/qod-files/acme/in/")
+    LocationChecker.admittedBy("s3://other/x", r) shouldBe None
+  }
+
+  "an access point alias" should "be refused at use, whatever scope names it" in
+    List(
+      "s3://myap-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7-s3alias/x.parquet",
+      "s3://my-olap-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5--ol-s3/x.parquet",
+      "s3://mfzwi23gnjvgw.mrap/x.parquet"
+    ).foreach { url =>
+      val bucket = url.stripPrefix("s3://").takeWhile(_ != '/')
+      val r      = Rules.copy(s3Scopes = List(s"s3://$bucket/"))
+      withClue(url)(
+        LocationChecker.check(url, r) shouldBe
+          Left(s"$url ${LocationChecker.Outside} (an access point alias, not a bucket)")
+      )
+    }
+
+  "a data path the manager cannot place" should "refuse every local location, saying so" in {
+    val rules = Rules.copy(dataFolders = List(DataFolders.Unplaced))
+    LocationChecker.check("/srv/qod-files/acme/in/x.csv", rules) shouldBe
+      Left(
+        "/srv/qod-files/acme/in/x.csv is a database data folder (a database whose data path " +
+          "this manager cannot place may lie there)"
+      )
+    ok("s3://acme-etl/in/x.csv", rules)
+  }
+
+  "a reason" should "keep supplementary-plane format characters out, tag characters included" in {
+    // U+E0001 (LANGUAGE TAG), U+E0041 (TAG LATIN CAPITAL LETTER A), U+E007F (CANCEL TAG) and
+    // U+1D173 (MUSICAL SYMBOL BEGIN BEAM), each a surrogate pair.
+    LocationChecker.check(
+      "/etc/x\uDB40\uDC01y\uDB40\uDC41z\uDB40\uDC7F\uD834\uDD73.csv",
+      Rules
+    ) shouldBe
+      Left("/etc/xyz.csv is outside the tenant's authorized locations")
+    val tagged = "s3://shared-lake/lake-1\uDB40\uDC41/"
+    LocationChecker.scopeError(tagged, List(tagged)) shouldBe
+      Some(s"s3://shared-lake/lake-1/ ${LocationChecker.DataFolder}")
+  }

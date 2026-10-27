@@ -224,14 +224,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
-    val locations   = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
-      sup,
-      None,
-      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
-        _ => Nil,
-        (_, _) => cats.effect.IO.pure(Right(()))
-      )
-    )
+    val locations   = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(sup, None)
     new McpIdentityTools(tenants, users, groups, roles, memberships, superuserScope, locations)
 
   private def accessTools: McpAccessTools =

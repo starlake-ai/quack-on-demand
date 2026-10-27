@@ -101,8 +101,7 @@ final class FleetQuackBackend(
       dbInitSql = NodeResourceSql.render(spec.cpu, spec.memory) + spec.dbInitSql,
       objectStoreSql = spec.objectStoreSql,
       extraSetupSql = spec.extraSetupSql,
-      lockdownSql = spec.lockdownSql,
-      tenantStoreSql = Option(spec.tenantStoreSql).filter(_.nonEmpty)
+      lockdownSql = spec.lockdownSql
     )
 
   private def requiredMemoryBytes(spec: NodeSpec): Option[Long] =

@@ -1,42 +1,20 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{
-  NodeSpec,
-  PoolKey,
-  RoleDistribution,
-  RunningNode,
-  Tenant,
-  TenantDbKind
-}
-import ai.starlake.quack.ondemand.runtime.{QuackBackend, TenantLocationSecrets}
+import ai.starlake.quack.model.{Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
-import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.util.concurrent.ConcurrentLinkedQueue
-import scala.jdk.CollectionConverters.*
-
 class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
 
-  private final class RecordingBackend extends QuackBackend:
-    val specs                                     = new ConcurrentLinkedQueue[NodeSpec]()
-    private val inner                             = StubQuackBackend.noop()
-    def start(s: NodeSpec): IO[RunningNode]       = IO(specs.add(s)) *> inner.start(s)
-    def stop(key: PoolKey, id: String): IO[Unit]  = inner.stop(key, id)
-    def isAlive(id: String): Boolean              = inner.isAlive(id)
-    def discoverExisting(): IO[List[RunningNode]] = inner.discoverExisting()
-    def cleanup(): IO[Unit]                       = inner.cleanup()
-
-  private val Keys = Map("s3_access_key_id" -> "AKIA", "s3_secret_access_key" -> "sekr3t")
+  private val Root = Some("/srv/qod")
 
   private def fixture() =
-    val backend = new RecordingBackend
-    val store   = new InMemoryControlPlaneStore()
-    val sup     = new PoolSupervisor(backend, new NodeLoadTracker, store)
+    val store = new InMemoryControlPlaneStore()
+    val sup   = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, store)
     sup.restore()
     List("acme", "globex").foreach { t =>
       sup.createTenant(Tenant(t)).unsafeRunSync()
@@ -44,38 +22,15 @@ class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
         .createTenantDb(t, "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
         .unsafeRunSync()
     }
-    (sup, backend, store)
+    (sup, store)
 
-  "a serving node" should "boot with its tenant's location secrets, and another tenant's not" in {
-    val (sup, backend, _) = fixture()
-    val l                 = sup
-      .addTenantLocation("acme", "s3://acme-etl/", Keys, None, Some("alice"))
-      .unsafeRunSync()
-      .toOption
-      .get
-    sup.createPool(PoolKey("acme", "acme_default", "bi"), RoleDistribution(0, 0, 1)).unsafeRunSync()
-    sup
-      .createPool(PoolKey("globex", "globex_default", "bi"), RoleDistribution(0, 0, 1))
-      .unsafeRunSync()
-    val specs = backend.specs.asScala.toList
-    specs.filter(_.poolKey.tenant == "acme").map(_.tenantStoreSql) shouldBe
-      List(TenantLocationSecrets.initSql(List(l)))
-    specs.filter(_.poolKey.tenant == "globex").map(_.tenantStoreSql) shouldBe List("")
-  }
-
-  "a maintenance node" should "get no tenant location secret" in {
-    val (sup, _, _) = fixture()
-    sup.addTenantLocation("acme", "s3://acme-etl/", Keys, None, None).unsafeRunSync()
-    sup.maintenanceNodeSpec("acme", "acme_default").map(_.tenantStoreSql) shouldBe Some("")
-  }
+  private def add(sup: PoolSupervisor, tenant: String, loc: String) =
+    sup.addTenantLocation(tenant, loc, Root, Some("alice")).unsafeRunSync()
 
   "the supervisor" should "keep the locations in step with its store, across a restore" in {
-    val (sup, _, store) = fixture()
-    val l               = sup
-      .addTenantLocation("acme", "s3://acme-etl/", Keys, None, None)
-      .unsafeRunSync()
-      .toOption
-      .get
+    val (sup, store) = fixture()
+    val l            = add(sup, "acme", "/srv/qod/acme/in").toOption.get
+    l.location shouldBe "/srv/qod/acme/in/"
     sup.tenantLocations("acme") shouldBe List(l)
     store.deleteTenantLocation("acme", l.id)
     sup.tenantLocations("acme") shouldBe List(l)
@@ -83,13 +38,20 @@ class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
     sup.tenantLocations("acme") shouldBe Nil
   }
 
+  it should "refuse an s3 location: S3 access is per user" in {
+    val (sup, _) = fixture()
+    add(sup, "acme", "s3://acme-etl/").left.map(_.message) match
+      case Left(m)  => m should startWith("invalid_location: ")
+      case Right(l) => fail(s"stored ${l.location}")
+    sup.tenantLocations("acme") shouldBe Nil
+  }
+
   it should "bump the tenant's policy version on add and remove" in {
-    val (sup, _, _) = fixture()
+    val (sup, _) = fixture()
     // Every bump takes the next value of one shared sequence: only the direction is pinned.
     val v0 = sup.policyVersions.current("acme")
     val g0 = sup.policyVersions.current("globex")
-    val l  =
-      sup.addTenantLocation("acme", "s3://acme-etl/", Keys, None, None).unsafeRunSync().toOption.get
+    val l  = add(sup, "acme", "/srv/qod/acme/in/").toOption.get
     val v1 = sup.policyVersions.current("acme")
     v1 should be > v0
     sup.removeTenantLocation("acme", l.id).unsafeRunSync().isRight shouldBe true
@@ -98,35 +60,9 @@ class PoolSupervisorTenantLocationSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "forget a deleted tenant's locations" in {
-    val (sup, _, _) = fixture()
-    sup.addTenantLocation("globex", "s3://globex-etl/", Keys, None, None).unsafeRunSync()
+    val (sup, _) = fixture()
+    add(sup, "globex", "/srv/qod/globex/in/")
     sup.deleteTenantDb("globex", "globex_default").unsafeRunSync()
     sup.deleteTenant("globex").unsafeRunSync() shouldBe Right(())
     sup.tenantLocations("globex") shouldBe Nil
-  }
-
-  it should "store the credentials trimmed" in {
-    val (sup, _, _) = fixture()
-    val l           = sup
-      .addTenantLocation(
-        "acme",
-        "s3://acme-etl/",
-        Map(
-          "s3_access_key_id"     -> " AKIA ",
-          "s3_secret_access_key" -> "sekr3t\t",
-          "s3_region"            -> " eu-west-3"
-        ),
-        None,
-        None
-      )
-      .unsafeRunSync()
-      .toOption
-      .get
-    l.objectStore shouldBe
-      Map(
-        "s3_access_key_id"     -> "AKIA",
-        "s3_secret_access_key" -> "sekr3t",
-        "s3_region"            -> "eu-west-3"
-      )
-    sup.tenantLocations("acme").map(_.objectStore) shouldBe List(l.objectStore)
   }

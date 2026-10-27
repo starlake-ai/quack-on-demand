@@ -183,7 +183,8 @@ def opa_test(
 
 
 location_app = typer.Typer(
-    help="Authorized locations: the S3 buckets and local folders a tenant's users may read and write files in."
+    help="Authorized locations: the local folders a tenant's users may read and write files in "
+    "(S3 is per user: qod profile s3)."
 )
 app.add_typer(location_app, name="location")
 
@@ -191,68 +192,19 @@ app.add_typer(location_app, name="location")
 @location_app.command("list")
 @covers("POST", "/api/tenant/location/list", {"tenant": "TENANT"})
 def location_list(ctx: typer.Context, tenant: str = typer.Argument(..., metavar="TENANT")):
-    """List the tenant's authorized locations. A bucket's secret is never shown (secretSet says one is stored)."""
+    """List the tenant's authorized local folders."""
     call(ctx, "POST", "/api/tenant/location/list", body={"tenant": tenant})
 
 
-def _read_s3_secret(stdin: bool, prompt: bool) -> str | None:
-    """The bucket's secret access key, read without it ever touching argv (shell history, `ps`)."""
-    if stdin and prompt:
-        raise typer.BadParameter("pass at most one of --secret-access-key-stdin / --secret-access-key-prompt")
-    if stdin:
-        value = sys.stdin.read().rstrip("\r\n")
-    elif prompt:
-        value = typer.prompt("Secret access key", hide_input=True, confirmation_prompt=True)
-    else:
-        return None
-    if not value.strip():
-        raise typer.BadParameter("the secret access key read is blank")
-    return value
-
-
 @location_app.command("add")
-@covers(
-    "POST",
-    "/api/tenant/location/add",
-    {
-        "tenant": "TENANT",
-        "location": "LOCATION",
-        "objectStore": "--access-key-id/--secret-access-key-stdin/--secret-access-key-prompt/--region/--endpoint/--url-style",
-    },
-)
+@covers("POST", "/api/tenant/location/add", {"tenant": "TENANT", "location": "LOCATION"})
 def location_add(
     ctx: typer.Context,
     tenant: str = typer.Argument(..., metavar="TENANT"),
-    location: str = typer.Argument(..., metavar="LOCATION", help="s3://<bucket>/ or an absolute folder under <QOD_TENANT_FILES_ROOT>/<tenant>/."),
-    access_key_id: str = typer.Option(None, "--access-key-id", help="The bucket's access key id (s3 only)."),
-    secret_access_key_stdin: bool = typer.Option(
-        False, "--secret-access-key-stdin", help="Read the bucket's secret access key from stdin (write-only)."
-    ),
-    secret_access_key_prompt: bool = typer.Option(
-        False, "--secret-access-key-prompt", help="Prompt for the bucket's secret access key (hidden, confirmed)."
-    ),
-    region: str = typer.Option(None, "--region", help="Default us-east-1."),
-    endpoint: str = typer.Option(None, "--endpoint", help="host[:port], http:// for a plain-HTTP store such as MinIO."),
-    url_style: str = typer.Option(None, "--url-style", help="path | vhost (default path)."),
+    location: str = typer.Argument(..., metavar="LOCATION", help="An absolute folder under <QOD_TENANT_FILES_ROOT>/<tenant>/."),
 ):
-    """Authorize a location for the tenant's users. An S3 bucket needs its own credentials; the
-    tenant's running nodes receive them at once. A database's data folder stays unreachable."""
-    secret = _read_s3_secret(secret_access_key_stdin, secret_access_key_prompt)
-    store = {
-        k: v
-        for k, v in (
-            ("s3_access_key_id", access_key_id),
-            ("s3_secret_access_key", secret),
-            ("s3_region", region),
-            ("s3_endpoint", endpoint),
-            ("s3_url_style", url_style),
-        )
-        if v is not None
-    }
-    body: dict = {"tenant": tenant, "location": location}
-    if store:
-        body["objectStore"] = store
-    call(ctx, "POST", "/api/tenant/location/add", body=body)
+    """Authorize a local folder for the tenant's users. A database's data folder stays unreachable."""
+    call(ctx, "POST", "/api/tenant/location/add", body={"tenant": tenant, "location": location})
 
 
 @location_app.command("remove")
@@ -262,5 +214,5 @@ def location_remove(
     tenant: str = typer.Argument(..., metavar="TENANT"),
     location_id: str = typer.Argument(..., metavar="ID", help="The location id (from `qod tenant location list`)."),
 ):
-    """Remove an authorized location; the tenant's running nodes drop its secret at once."""
+    """Remove an authorized location."""
     call(ctx, "POST", "/api/tenant/location/remove", body={"tenant": tenant, "id": location_id})

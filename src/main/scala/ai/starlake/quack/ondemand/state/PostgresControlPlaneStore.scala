@@ -3149,14 +3149,14 @@ final class PostgresControlPlaneStore(
   // ---------------- Tenant authorized locations ----------------
 
   private val SelectTenantLocations: String =
-    "SELECT id, tenant_id, kind, location, object_store, created_at, created_by " +
+    "SELECT id, tenant_id, kind, location, created_at, created_by " +
       "FROM qodstate_tenant_location"
 
   def insertTenantLocation(l: TenantLocation): Boolean = withConn { c =>
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_location
-        |  (id, tenant_id, kind, location, object_store, created_at, created_by)
-        |VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
+        |  (id, tenant_id, kind, location, created_at, created_by)
+        |VALUES (?, ?, ?, ?, ?, ?)
         |ON CONFLICT (tenant_id, location) DO NOTHING""".stripMargin
     )
     try
@@ -3164,9 +3164,8 @@ final class PostgresControlPlaneStore(
       ps.setString(2, l.tenantId)
       ps.setString(3, l.kind)
       ps.setString(4, l.location)
-      ps.setString(5, mapToJson(l.objectStore))
-      ps.setTimestamp(6, new Timestamp(l.createdAt))
-      setNullable(ps, 7, l.createdBy)
+      ps.setTimestamp(5, new Timestamp(l.createdAt))
+      setNullable(ps, 6, l.createdBy)
       ps.executeUpdate() == 1
     finally ps.close()
   }
@@ -3174,7 +3173,7 @@ final class PostgresControlPlaneStore(
   def deleteTenantLocation(tenantId: String, id: String): Option[TenantLocation] = withConn { c =>
     val ps = c.prepareStatement(
       """DELETE FROM qodstate_tenant_location WHERE tenant_id = ? AND id = ?
-        |RETURNING id, tenant_id, kind, location, object_store, created_at, created_by""".stripMargin
+        |RETURNING id, tenant_id, kind, location, created_at, created_by""".stripMargin
     )
     try
       ps.setString(1, tenantId)
@@ -3208,7 +3207,6 @@ final class PostgresControlPlaneStore(
       tenantId = rs.getString("tenant_id"),
       kind = rs.getString("kind"),
       location = rs.getString("location"),
-      objectStore = jsonToMap(rs.getString("object_store")),
       createdAt = rs.getTimestamp("created_at").getTime,
       createdBy = Option(rs.getString("created_by"))
     )

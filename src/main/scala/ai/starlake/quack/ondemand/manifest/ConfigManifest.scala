@@ -153,18 +153,11 @@ final case class ManifestTenantAcl(
     s"ManifestTenantAcl(mode=$mode,opaUrl=$opaUrl,opaPolicyPath=$opaPolicyPath,opaToken=${opaToken
         .map(_ => ai.starlake.quack.model.FederatedSecret.RedactedMarker)},sendStatementText=$sendStatementText)"
 
-/** One authorized location of a tenant (TenantLocation). An export writes the secret
-  * (`s3_secret_access_key`) as FederatedSecret.RedactedMarker; an import keeps the stored secret
-  * only from the tenant's stored location of the same location, `s3_access_key_id` and
-  * `s3_endpoint` (a stored secret never follows a new endpoint), and refuses the marker otherwise.
+/** One authorized local folder of a tenant (TenantLocation). Users' own S3 credentials are never in
+  * a manifest (decision 23): users enter them again after an import. A row an earlier export wrote
+  * with an `objectStore` still decodes (the member is ignored) and its `s3://` location is refused.
   */
-final case class ManifestTenantLocation(
-    location: String,
-    objectStore: Map[String, String] = Map.empty
-):
-  override def toString: String =
-    s"ManifestTenantLocation(location=$location," +
-      s"objectStore=${ai.starlake.quack.model.TenantLocation.redacted(objectStore)})"
+final case class ManifestTenantLocation(location: String)
 
 final case class ManifestTenant(
     // The tenant slug key (e.g. "acme").

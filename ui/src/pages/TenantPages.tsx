@@ -92,7 +92,7 @@ export function AccessControlPage() {
         : error
           ? <div className="login-err">Error: {error}</div>
           : <div className="loading">Loading...</div>}
-      {/* Keyed on the tenant: a typed secret must never survive a change of tenant. */}
+      {/* Keyed on the tenant: a half-typed folder must never survive a change of tenant. */}
       <AuthorizedLocationsSection key={tenant} tenant={tenant} />
     </>
   );

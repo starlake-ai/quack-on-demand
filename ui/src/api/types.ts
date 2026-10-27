@@ -367,16 +367,13 @@ export interface SetTenantAclRequest {
   sendStatementText?: boolean;
 }
 
-/** One authorized location of a tenant (`POST /api/tenant/location/list`): an S3 bucket with its
-  * own credentials, or a local folder under the operator's QOD_TENANT_FILES_ROOT. `objectStore`
-  * never carries the secret access key: `secretSet` says whether one is stored. */
+/** One authorized local folder of a tenant (`POST /api/tenant/location/list`), under the operator's
+  * QOD_TENANT_FILES_ROOT. S3 is per user (`/api/profile/s3/*`). */
 export interface TenantLocation {
   id: string;
   tenant: string;
-  kind: 's3' | 'local';
+  kind: 'local';
   location: string;
-  objectStore: Record<string, string>;
-  secretSet: boolean;
   createdAt: number;
   createdBy?: string | null;
 }
@@ -388,7 +385,6 @@ export interface TenantLocationListResponse {
 export interface AddTenantLocationRequest {
   tenant: string;
   location: string;
-  objectStore?: Record<string, string>;
 }
 
 export interface RemoveTenantLocationRequest {
@@ -398,8 +394,6 @@ export interface RemoveTenantLocationRequest {
 
 export interface TenantLocationChangeResponse {
   location: TenantLocation;
-  nodesUpdated: number;
-  nodesFailed: string[];
 }
 
 export interface TenantListResponse {

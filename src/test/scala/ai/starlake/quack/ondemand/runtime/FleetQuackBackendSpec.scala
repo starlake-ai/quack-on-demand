@@ -219,18 +219,6 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     )
   }
 
-  it should "carry the tenant's location secrets in the assignment, and none when it has none" in {
-    val (store, backend, _, _) = fixture()
-    val agent                  = new FakeAgent(store, "srv-1"); agent.beat()
-    val sql                    = "CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3);"
-    withAgent(agent)(backend.start(spec("n1").copy(tenantStoreSql = sql)))
-    store.get("srv-1").get.assignment.get.tenantStoreSql shouldBe Some(sql)
-    val (store2, backend2, _, _) = fixture()
-    val agent2                   = new FakeAgent(store2, "srv-1"); agent2.beat()
-    withAgent(agent2)(backend2.start(spec("n1")))
-    store2.get("srv-1").get.assignment.get.tenantStoreSql shouldBe None
-  }
-
   it should "raise NoFreeServer with a reason" in {
     val (store, backend, _, _) = fixture()
     the[NoFreeServer] thrownBy backend.start(spec("n1")).unsafeRunSync() should have message

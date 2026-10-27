@@ -12,9 +12,7 @@ import java.util.Locale
   */
 object ObjectStoreSecret:
 
-  /** Sorts before every tenant location secret (`qod_tl_<id8>`): DuckDB breaks a scope tie on the
-    * name, first in alphabetical order, and a bucket-root data path ties a bucket scope.
-    */
+  /** The per-database object-store secret's name. */
   val SecretName = "qod_db_store"
 
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -57,30 +55,6 @@ object ObjectStoreSecret:
         case "gs"                     => gcsSecret(objectStore, scopes)
         case "az" | "azure" | "abfss" => azureSecret(objectStore, scopes)
         case _                        => ""
-
-  /** One s3 secret named `name`, scoped to `scope`, as a single-line statement: a tenant's
-    * authorized locations (TenantLocationSecrets). The same options as the per-database secret.
-    */
-  def s3Statement(name: String, m: Map[String, String], scope: String): String =
-    s"CREATE OR REPLACE SECRET $name (${bucketOptions(m, scope).mkString(", ")});"
-
-  private def bucketOptions(m: Map[String, String], scope: String): List[String] =
-    val region      = m.getOrElse("s3_region", "us-east-1")
-    val urlStyle    = m.getOrElse("s3_url_style", "path")
-    val rawEndpoint = m.get("s3_endpoint").map(_.trim).filter(_.nonEmpty)
-    // http:// (e.g. a local MinIO) means TLS is off; https:// or no endpoint at all keeps the
-    // secure default. No separate s3_use_ssl key: the endpoint scheme is the one signal.
-    val useSsl   = !rawEndpoint.exists(_.startsWith("http://"))
-    val endpoint = rawEndpoint.map { e =>
-      val stripped = e.stripPrefix("https://").stripPrefix("http://").stripSuffix("/")
-      s"ENDPOINT ${lit(stripped)}"
-    }
-    List(
-      "TYPE s3",
-      s"KEY_ID ${lit(m.getOrElse("s3_access_key_id", ""))}",
-      s"SECRET ${lit(m.getOrElse("s3_secret_access_key", ""))}",
-      s"REGION ${lit(region)}"
-    ) ++ endpoint ++ List(s"URL_STYLE ${lit(urlStyle)}", s"USE_SSL $useSsl", s"SCOPE ${lit(scope)}")
 
   private def scopeList(scopes: List[String]): String = scopes.map(lit).mkString("[", ", ", "]")
 

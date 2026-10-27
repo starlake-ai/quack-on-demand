@@ -8,20 +8,17 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicReference}
 
 class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
 
-  private val Creds = Map("s3_access_key_id" -> "AKIA", "s3_secret_access_key" -> "s")
+  private def loc(id: String, tenant: String, kind: String, location: String) =
+    TenantLocation(id, tenant, kind, location, 0L, None)
 
-  private def loc(
-      id: String,
-      tenant: String,
-      kind: String,
-      location: String,
-      store: Map[String, String] = Map.empty
-  ) = TenantLocation(id, tenant, kind, location, store, 0L, None)
+  // Each user's own S3 credential scopes (decision 23); a malformed stored one never admits.
+  private val Scopes = Map(
+    "u-1" -> List("s3://acme-etl/", "s3://acme-etl/", "not-a-scope", "/srv/qod-files/acme/in/"),
+    "u-3" -> List("s3://other-etl/in/")
+  )
 
   private val Locations = Map(
     "acme" -> List(
-      loc("tl-1", "acme", "s3", "s3://acme-etl/", Creds),
-      loc("tl-2", "acme", "s3", "s3://no-creds/"),
       loc("tl-3", "acme", "local", "/srv/qod-files/acme/in/"),
       loc("tl-4", "acme", "local", "/srv/qod-files/globex/in/"),
       loc("tl-5", "acme", "local", "/etc/")
@@ -41,75 +38,76 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
         List("s3://managed/acme_old-0f0f0f0f/")
       },
       tenantLocations = t => Locations.getOrElse(t, Nil),
+      userScopes = u => Scopes.getOrElse(u, Nil),
       filesRoot = filesRoot,
       sameHost = false,
       clock = () => clock.get()
     )
 
-  "rulesFor" should "keep the tenant's credentialed buckets and its folders under root/tenant" in {
+  "rulesFor" should "keep the user's own S3 scopes and the tenant's folders under root/tenant" in {
     val f = new Fixture()
-    val r = f.rules.rulesFor("acme").toOption.get
-    r.tenantBuckets shouldBe Set("acme-etl")
+    val r = f.rules.rulesFor("acme", "u-1").toOption.get
+    r.s3Scopes shouldBe List("s3://acme-etl/")
     r.tenantFolders shouldBe List("/srv/qod-files/acme/in/")
     r.filesRoot shouldBe Some("/srv/qod-files/")
   }
 
   it should "build the deny set from the supervisor and the store" in {
     val f = new Fixture()
-    f.rules.rulesFor("acme").toOption.get.dataFolders.toSet shouldBe
+    f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders.toSet shouldBe
       Set("s3://lake/acme_tpch-1a2b3c4d/", "./ducklake/tpch", "s3://managed/acme_old-0f0f0f0f/")
   }
 
-  it should "give a tenant with no locations nothing but the deny set" in {
+  it should "give a user with no credential and a tenant with no locations nothing but the deny set" in {
     val f = new Fixture()
-    val r = f.rules.rulesFor("globex").toOption.get
-    r.tenantBuckets shouldBe Set.empty
+    val r = f.rules.rulesFor("globex", "u-2").toOption.get
+    r.s3Scopes shouldBe Nil
     r.tenantFolders shouldBe Nil
     r.dataFolders should not be empty
   }
 
   it should "authorize no folder without a files root, or with a relative one" in
     List(None, Some("files"), Some("  ")).foreach { root =>
-      val r = new Fixture(root).rules.rulesFor("acme").toOption.get
+      val r = new Fixture(root).rules.rulesFor("acme", "u-1").toOption.get
       r.filesRoot shouldBe None
       r.tenantFolders shouldBe Nil
     }
 
   it should "keep a removed data path for RecentMs" in {
     val f = new Fixture()
-    f.rules.rulesFor("acme")
+    f.rules.rulesFor("acme", "u-1")
     f.paths.set(List("./ducklake/tpch"))
-    f.rules.rulesFor("acme").toOption.get.dataFolders should contain(
+    f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders should contain(
       "s3://lake/acme_tpch-1a2b3c4d/"
     )
     f.clock.addAndGet(LiveLocationRules.RecentMs + 1)
-    val later = f.rules.rulesFor("acme").toOption.get.dataFolders
+    val later = f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders
     later should not contain "s3://lake/acme_tpch-1a2b3c4d/"
   }
 
   it should "read the store at most once per StoreTtlMs" in {
     val f = new Fixture()
-    f.rules.rulesFor("acme")
-    f.rules.rulesFor("acme")
+    f.rules.rulesFor("acme", "u-1")
+    f.rules.rulesFor("acme", "u-1")
     f.storeReads.get() shouldBe 1
     f.clock.addAndGet(LiveLocationRules.StoreTtlMs)
-    f.rules.rulesFor("acme")
+    f.rules.rulesFor("acme", "u-1")
     f.storeReads.get() shouldBe 2
   }
 
   it should "be unavailable while the store fails, and recover" in {
     val f = new Fixture()
     f.storeFails.set(true)
-    f.rules.rulesFor("acme") shouldBe Left("the database data folders could not be read")
+    f.rules.rulesFor("acme", "u-1") shouldBe Left("the database data folders could not be read")
     f.storeFails.set(false)
-    f.rules.rulesFor("acme").isRight shouldBe true
+    f.rules.rulesFor("acme", "u-1").isRight shouldBe true
   }
 
   it should "refuse every path of a bucket whose root is a data path, either spelling" in
     List("s3://acme-etl/", "s3://acme-etl", "s3://ACME-ETL").foreach { root =>
       val f = new Fixture()
       f.paths.set(List(root))
-      val r = f.rules.rulesFor("acme").toOption.get
+      val r = f.rules.rulesFor("acme", "u-1").toOption.get
       List("s3://acme-etl/", "s3://acme-etl/in/x.csv", "s3://acme-etl/**").foreach(p =>
         withClue(s"$root / $p")(
           LocationChecker.check(p, r) shouldBe Left(s"$p ${LocationChecker.DataFolder}")
@@ -120,7 +118,7 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
   it should "deny every local location for an unreadable local data path, fail closed" in {
     val f = new Fixture()
     f.paths.set(List("/srv/qod-files/acme/in/x\u0000y"))
-    val r = f.rules.rulesFor("acme").toOption.get
+    val r = f.rules.rulesFor("acme", "u-1").toOption.get
     LocationChecker.check("/srv/qod-files/acme/in/x.csv", r) shouldBe
       Left(
         "/srv/qod-files/acme/in/x.csv is a database data folder (a relative data path of this " +
@@ -138,10 +136,11 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
         dataPaths = () => Nil,
         unpurgedPrefixes = () => Nil,
         tenantLocations = t => Locations.getOrElse(t, Nil),
+        userScopes = u => Scopes.getOrElse(u, Nil),
         filesRoot = Some("/srv/qod-files/"),
         sameHost = true,
         realPath = real
-      ).rulesFor("acme").toOption.get
+      ).rulesFor("acme", "u-1").toOption.get
       r.tenantFolders shouldBe Nil
       LocationChecker.check("/srv/qod-files/globex/in/x.csv", r).isLeft shouldBe true
     }
@@ -152,14 +151,52 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
       dataPaths = () => List("/srv/qod-files/acme/in/lake"),
       unpurgedPrefixes = () => Nil,
       tenantLocations = t => Locations.getOrElse(t, Nil),
+      userScopes = u => Scopes.getOrElse(u, Nil),
       filesRoot = Some("/srv/qod-files/"),
       sameHost = true,
       realPath = real
-    ).rulesFor("acme").toOption.get
+    ).rulesFor("acme", "u-1").toOption.get
     r.filesRoot shouldBe Some("/private/srv/qod-files/")
     r.tenantFolders shouldBe List("/private/srv/qod-files/acme/in/")
     r.dataFolders.toSet shouldBe
       Set("/srv/qod-files/acme/in/lake/", "/private/srv/qod-files/acme/in/lake/")
     LocationChecker.check("/private/srv/qod-files/acme/in/x.csv", r) shouldBe Right(())
     LocationChecker.check("/private/srv/qod-files/acme/in/lake/x", r).isLeft shouldBe true
+  }
+
+  "rulesFor" should "give each user of a tenant their own scopes" in {
+    val f = new Fixture()
+    f.rules.rulesFor("acme", "u-3").toOption.get.s3Scopes shouldBe List("s3://other-etl/in/")
+    f.rules.rulesFor("acme", "u-3").toOption.get.tenantFolders shouldBe
+      List("/srv/qod-files/acme/in/")
+    LocationChecker
+      .check("s3://acme-etl/in/x.csv", f.rules.rulesFor("acme", "u-3").toOption.get)
+      .isLeft shouldBe true
+  }
+
+  "dataFolderOverlap" should "refuse a scope at a data folder, admit its ancestor, and fail closed" in {
+    val f = new Fixture()
+    f.rules.dataFolderOverlap("s3://lake/acme_tpch-1a2b3c4d/main/") shouldBe
+      Right(Some(s"s3://lake/acme_tpch-1a2b3c4d/main/ ${LocationChecker.DataFolder}"))
+    f.rules.dataFolderOverlap("s3://lake/") shouldBe Right(None)
+    f.rules.dataFolderOverlap("s3://managed/acme_old-0f0f0f0f/").map(_.isDefined) shouldBe Right(
+      true
+    )
+    f.storeFails.set(true)
+    f.clock.addAndGet(LiveLocationRules.StoreTtlMs)
+    f.rules.dataFolderOverlap("s3://lake/") shouldBe Left(
+      "the database data folders could not be read"
+    )
+  }
+
+  it should "reuse the deny set while nothing it is built from changes" in {
+    val f     = new Fixture()
+    val first = f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders
+    f.rules.rulesFor("acme", "u-3").toOption.get.dataFolders should be theSameInstanceAs first
+    f.paths.set(List("./ducklake/tpch"))
+    val second = f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders
+    second should not be theSameInstanceAs(first)
+    // The dropped path is still denied for RecentMs, so the set itself is the same.
+    second.toSet shouldBe first.toSet
+    f.rules.rulesFor("acme", "u-1").toOption.get.dataFolders should be theSameInstanceAs second
   }

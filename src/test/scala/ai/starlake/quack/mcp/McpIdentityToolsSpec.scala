@@ -90,15 +90,8 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
 
-    val locations = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
-      sup,
-      Some("/srv/qod"),
-      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
-        _ => Nil,
-        (_, _) => cats.effect.IO.pure(Right(()))
-      )
-    )
-    val tools =
+    val locations = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(sup, Some("/srv/qod"))
+    val tools     =
       new McpIdentityTools(tenants, users, groups, roles, memberships, scopeOf, locations)
 
     def call(name: String, principal: McpPrincipal, args: (String, Json)*): Either[String, Json] =
@@ -609,24 +602,18 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
     out.isLeft shouldBe true
   }
 
-  "add_tenant_location" should "authorize a bucket for its tenant's admin, never echoing its secret" in {
+  "add_tenant_location" should "authorize a folder for its tenant's admin, and refuse an s3 location" in {
     val f     = new Fixture
     f.call("create_tenant", McpSuperuserPat.principal, "id" -> Json.fromString("acme"))
     val added = f.call(
       "add_tenant_location",
       adminPat(),
-      "tenant"       -> Json.fromString("acme"),
-      "location"     -> Json.fromString("s3://acme-etl/"),
-      "object_store" -> Json.obj(
-        "s3_access_key_id"     -> Json.fromString("AKIAEXAMPLE"),
-        "s3_secret_access_key" -> Json.fromString("mcp-sekr3t")
-      )
+      "tenant"   -> Json.fromString("acme"),
+      "location" -> Json.fromString("/srv/qod/acme/in/")
     )
     added.isRight shouldBe true
-    added.toOption.get.noSpaces should not include "mcp-sekr3t"
     val listed = f.call("list_tenant_locations", adminPat(), "tenant" -> Json.fromString("acme"))
-    listed.toOption.get.noSpaces should include("s3://acme-etl/")
-    listed.toOption.get.noSpaces should not include "mcp-sekr3t"
+    listed.toOption.get.noSpaces should include("/srv/qod/acme/in/")
     val id = added.toOption.get.hcursor.downField("location").get[String]("id").toOption.get
     f.call(
       "remove_tenant_location",
@@ -634,6 +621,14 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
       "tenant" -> Json.fromString("acme"),
       "id"     -> Json.fromString(id)
     ).isRight shouldBe true
+    f.call(
+      "add_tenant_location",
+      adminPat(),
+      "tenant"   -> Json.fromString("acme"),
+      "location" -> Json.fromString("s3://acme-etl/")
+    ).left
+      .toOption
+      .get should include("invalid_location")
   }
 
   it should "refuse an admin of another tenant" in {

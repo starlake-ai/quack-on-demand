@@ -3,10 +3,10 @@ databaseChangeLog:
       id: 0051-tenant-location
       author: qod
       changes:
-        # The S3 buckets and local folders a tenant authorized for its non-superuser users' file
-        # access (in-engine authorization, decisions 15 and 18). location is stored normalized:
-        # s3://<bucket>/ (a bucket only) or an absolute folder ending in '/'. object_store holds an
-        # s3 location's own credentials, which nodes receive as a secret scoped to the bucket.
+        # The local folders a tenant authorized for its non-superuser users' file access
+        # (in-engine authorization, decision 15), under the operator's root. location is stored
+        # normalized: an absolute folder ending in '/'. S3 is per user (decision 23, Liquibase 0052),
+        # never a tenant location: kind allows 'local' only.
         - createTable:
             tableName: qodstate_tenant_location
             columns:
@@ -14,11 +14,10 @@ databaseChangeLog:
               - column: { name: tenant_id,    type: TEXT, constraints: { nullable: false, foreignKeyName: fk_qodstate_tenant_location_tenant, references: 'qodstate_tenant(id)', deleteCascade: true } }
               - column: { name: kind,         type: TEXT, constraints: { nullable: false } }
               - column: { name: location,     type: TEXT, constraints: { nullable: false } }
-              - column: { name: object_store, type: JSONB, defaultValueComputed: "'{}'::jsonb", constraints: { nullable: false } }
               - column: { name: created_at,   type: TIMESTAMP WITH TIME ZONE, defaultValueComputed: "NOW()", constraints: { nullable: false } }
               - column: { name: created_by,   type: TEXT }
         - sql:
-            sql: "ALTER TABLE qodstate_tenant_location ADD CONSTRAINT qodstate_tenant_location_kind_check CHECK (kind IN ('s3','local'))"
+            sql: "ALTER TABLE qodstate_tenant_location ADD CONSTRAINT qodstate_tenant_location_kind_check CHECK (kind IN ('local'))"
         - addUniqueConstraint:
             tableName:      qodstate_tenant_location
             columnNames:    tenant_id, location

@@ -318,15 +318,10 @@ object ManifestExporter extends LazyLogging:
               sendStatementText = t.acl.sendStatementText
             )
           ),
-          // Never a secret value: the marker only says one is stored (see ManifestTenantLocation).
+          // Local folders only: S3 access is per user (decision 23) and never in a manifest.
           locations = locationsByTenant
             .get(t.id)
-            .map(_.sortBy(_.location).map { l =>
-              ManifestTenantLocation(
-                l.location,
-                ai.starlake.quack.model.TenantLocation.redacted(l.objectStore)
-              )
-            })
+            .map(_.sortBy(_.location).map(l => ManifestTenantLocation(l.location)))
         ),
         manifestRoles,
         manifestGroups,

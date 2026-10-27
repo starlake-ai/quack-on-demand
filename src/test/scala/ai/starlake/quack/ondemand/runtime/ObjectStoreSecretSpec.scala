@@ -147,11 +147,3 @@ class ObjectStoreSecretSpec extends AnyFlatSpec with Matchers:
       .dataScopes("s3://lake/acme__br_0123abcd/", "ducklake")
       .exists("s3://lake/acme-10/x".startsWith) shouldBe false
   }
-
-  "the secret name" should "sort before every tenant location secret, so it wins a bucket-root tie" in {
-    // DuckDB breaks a scope tie on the secret name, first in alphabetical order. A bucket-root
-    // data path scopes to s3://<bucket>/, the scope of the tenant's qod_tl_<id8> for that bucket.
-    ObjectStoreSecret.SecretName shouldBe "qod_db_store"
-    (ObjectStoreSecret.SecretName < "qod_tl_00000000") shouldBe true
-    (ObjectStoreSecret.SecretName < "qod_tl_") shouldBe true
-  }

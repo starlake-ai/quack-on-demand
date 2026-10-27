@@ -354,7 +354,6 @@ final case class FleetAssignmentDto(
     objectStoreSql: String,
     extraSetupSql: String,
     lockdownSql: String,
-    tenantStoreSql: String,
     nodeExtensions: FleetNodeExtensionsDto
 )
 
@@ -507,17 +506,14 @@ final case class SetTenantAclRequest(
     sendStatementText: Option[Boolean] = None
 )
 
-/** One authorized location of a tenant (`POST /api/tenant/location/{list,add,remove}`).
-  * `objectStore` never carries `s3_secret_access_key` (TenantLocation.SecretKeys): `secretSet` says
-  * whether one is stored. `createdAt` is epoch milliseconds.
+/** One authorized local folder of a tenant (`POST /api/tenant/location/{list,add,remove}`).
+  * `createdAt` is epoch milliseconds. S3 is per user (`/api/profile/s3/{list,add,remove}`).
   */
 final case class TenantLocationDto(
     id: String,
     tenant: String,
     kind: String,
     location: String,
-    objectStore: Map[String, String],
-    secretSet: Boolean,
     createdAt: Long,
     createdBy: Option[String]
 )
@@ -526,30 +522,15 @@ final case class TenantLocationListRequest(tenant: String)
 
 final case class TenantLocationListResponse(locations: List[TenantLocationDto])
 
-/** Authorize `location` for `tenant`: `s3://<bucket>/` with `objectStore` holding the bucket's own
-  * credentials (`s3_access_key_id` and `s3_secret_access_key` required; `s3_region`, `s3_endpoint`,
-  * `s3_url_style` optional), or an absolute folder under `<QOD_TENANT_FILES_ROOT>/<tenant>/`. The
-  * secret is write-only: no response carries it back.
+/** Authorize `location`, an absolute folder under `<QOD_TENANT_FILES_ROOT>/<tenant>/`, for
+  * `tenant`.
   */
-final case class AddTenantLocationRequest(
-    tenant: String,
-    location: String,
-    objectStore: Option[Map[String, String]] = None
-):
-  override def toString: String =
-    s"AddTenantLocationRequest(tenant=$tenant,location=$location," +
-      s"objectStore=${objectStore.map(ai.starlake.quack.model.TenantLocation.redacted)})"
+final case class AddTenantLocationRequest(tenant: String, location: String)
 
 final case class RemoveTenantLocationRequest(tenant: String, id: String)
 
-/** The location added or removed, and how the change reached the tenant's running nodes:
-  * `nodesFailed` names the nodes that did not take it (they do at their next restart).
-  */
-final case class TenantLocationChangeResponse(
-    location: TenantLocationDto,
-    nodesUpdated: Int,
-    nodesFailed: List[String]
-)
+/** The location added or removed. A local folder needs nothing pushed to running nodes. */
+final case class TenantLocationChangeResponse(location: TenantLocationDto)
 
 /** OPA dry run: builds the exact input the edge would send for `user` on `pool` (a `connect`
   * decision without `sql`, a `statement` decision with it) and evaluates it against the tenant's

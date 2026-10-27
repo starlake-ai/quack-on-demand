@@ -596,14 +596,7 @@ object ManagerServerHarness:
 
     // MCP endpoint over the SAME handler instances the REST surface uses, mirroring
     // Main's wiring (total scopeOf; PAT resolution via patAuth).
-    val tenantLocationHandlers = new TenantLocationHandlers(
-      sup,
-      None,
-      new ai.starlake.quack.ondemand.runtime.TenantLocationPush(
-        _ => Nil,
-        (_, _) => IO.pure(Right(()))
-      )
-    )
+    val tenantLocationHandlers                       = new TenantLocationHandlers(sup, None)
     val mcpRoutes: Option[org.http4s.HttpRoutes[IO]] =
       if !mcpEnabled then None
       else

@@ -56,7 +56,6 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       ),
       extraSetupSql = "fed",
       objectStoreSql = "",
-      tenantStoreSql = "",
       token = "tok",
       authzKey = "ab" * 32,
       inheritedEnv = Map(
@@ -86,7 +85,6 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       ),
       extraSetupSql = "",
       objectStoreSql = "",
-      tenantStoreSql = "",
       token = "tok",
       authzKey = "ab" * 32,
       inheritedEnv = Map.empty
@@ -96,21 +94,6 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "QOD_NODE_TOKEN"     -> "tok",
       "QOD_NODE_AUTHZ_KEY" -> "ab" * 32
     )
-  }
-
-  it should "deliver the tenant's location secrets under tenantStoreSql, never from a metastore" in {
-    val values = NodeSecretFiles.collect(
-      metastore = Map("tenantStoreSql" -> "from-metastore"),
-      extraSetupSql = "",
-      objectStoreSql = "",
-      tenantStoreSql = "CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3);",
-      token = "tok",
-      authzKey = "ab" * 32,
-      inheritedEnv = Map.empty
-    )
-    values.get(NodeSecretFiles.TenantStoreKey) shouldBe
-      Some("CREATE OR REPLACE SECRET qod_tl_0123abcd (TYPE s3);")
-    values.values should not contain "from-metastore"
   }
 
   "isInheritedSecret" should "drop the manager's own credentials but keep cloud SDK and plain settings" in {

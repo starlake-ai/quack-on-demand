@@ -163,8 +163,8 @@ open class QuackHttpClient(
         case e: QuackHttpClient.HandleRefused => QuackError.Transient(e.getMessage)
         case other                            =>
           QuackError.Permanent(Option(other.getMessage).getOrElse(other.toString))
-      // Without DuckDB's statement excerpt: a failed statement can carry credentials (a tenant
-      // location's CREATE SECRET), and the excerpt would put them in the log.
+      // Without DuckDB's statement excerpt: a failed statement can carry credentials (a node's
+      // own CREATE SECRET), and the excerpt would put them in the log.
       logger.debug(
         s"native query failed: ${ai.starlake.quack.edge.authz.NodeHandles.refusalText(String.valueOf(t.getMessage))}"
       )

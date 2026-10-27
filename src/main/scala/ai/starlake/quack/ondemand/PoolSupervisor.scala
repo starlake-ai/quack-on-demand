@@ -30,8 +30,7 @@ import ai.starlake.quack.ondemand.runtime.{
   NodePaths,
   NodeProcess,
   ObjectStoreSecret,
-  QuackBackend,
-  TenantLocationSecrets
+  QuackBackend
 }
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
@@ -184,7 +183,20 @@ final class PoolSupervisor(
   // Surrogate-id-indexed caches of the persisted state.
   private val tenants   = TrieMap.empty[String, Tenant]   // id -> Tenant
   private val tenantDbs = TrieMap.empty[String, TenantDb] // id -> TenantDb
-  private val poolRows  = TrieMap.empty[String, Pool]     // id -> Pool
+
+  /** Moves on every change of [[tenantDbs]] (restore included): [[dataPaths]] derives the data
+    * paths again only after one.
+    */
+  private val tenantDbsVersion = new java.util.concurrent.atomic.AtomicLong(0L)
+
+  private def putTenantDbRow(td: TenantDb): Unit =
+    tenantDbs.put(td.id, td)
+    tenantDbsVersion.incrementAndGet()
+
+  private def removeTenantDbRow(id: String): Unit =
+    tenantDbs.remove(id)
+    tenantDbsVersion.incrementAndGet()
+  private val poolRows = TrieMap.empty[String, Pool] // id -> Pool
 
   // Runtime cache keyed by the natural PoolKey for fast routing.
   private val pools = TrieMap.empty[PoolKey, PoolState]
@@ -313,8 +325,8 @@ final class PoolSupervisor(
     */
   private val locationCache = TrieMap.empty[String, List[TenantLocation]]
 
-  /** The locations `tenantId` authorized, as this replica last read them: what its serving nodes'
-    * secrets are built from and what file access is checked against.
+  /** The locations `tenantId` authorized, as this replica last read them: what local file access is
+    * checked against.
     */
   def tenantLocations(tenantId: String): List[TenantLocation] =
     locationCache.getOrElse(tenantId, Nil)
@@ -340,7 +352,6 @@ final class PoolSupervisor(
   def addTenantLocation(
       tenant: String,
       location: String,
-      objectStore: Map[String, String],
       filesRoot: Option[String],
       createdBy: Option[String]
   ): IO[Either[SupervisorError, TenantLocation]] = IO.blocking {
@@ -348,8 +359,7 @@ final class PoolSupervisor(
       getTenant(tenant) match
         case None    => Left(SupervisorError.NotFound(s"tenant not found: $tenant"))
         case Some(t) =>
-          val trimmed = TenantLocationRules.trimValues(objectStore)
-          TenantLocationRules.validate(t.id, location, trimmed, filesRoot) match
+          TenantLocationRules.validate(t.id, location, filesRoot) match
             case Left((code, msg)) => Left(SupervisorError.InvalidArgument(s"$code: $msg"))
             case Right(accepted)   =>
               val row = TenantLocation(
@@ -357,7 +367,6 @@ final class PoolSupervisor(
                 tenantId = t.id,
                 kind = accepted.kind,
                 location = accepted.location,
-                objectStore = if accepted.kind == TenantLocation.S3 then trimmed else Map.empty,
                 createdAt = System.currentTimeMillis(),
                 createdBy = createdBy
               )
@@ -584,7 +593,7 @@ final class PoolSupervisor(
     }.toSet
 
     tenants.keys.toList.filterNot(snapTenantIds).foreach(tenants.remove)
-    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(tenantDbs.remove)
+    tenantDbs.keys.toList.filterNot(snapTenantDbIds).foreach(removeTenantDbRow)
     poolRows.keys.toList.filterNot(snapPoolIds).foreach(poolRows.remove)
     // A pool a peer deleted directly in the store leaves this replica holding stale placement /
     // locality state (PlacementDirectory + LocalityTracker never auto-expire), so fire the teardown
@@ -602,7 +611,7 @@ final class PoolSupervisor(
     duckLakeInitPending.keys.toList.filterNot(snapTenantDbIds).foreach(duckLakeInitPending.remove)
 
     snap.tenants.foreach(t => tenants.put(t.id, t))
-    snap.tenantDbs.foreach(td => tenantDbs.put(td.id, td))
+    snap.tenantDbs.foreach(td => putTenantDbRow(td))
     snap.pools.foreach(p => poolRows.put(p.id, p))
     // Federation blob resolution, per tenant-db and cached for the duration of this restore()
     // call: createPool resolves it via federationBlobOf and stores it on PoolState.extraSetupSql,
@@ -1002,7 +1011,6 @@ final class PoolSupervisor(
         state.metastore.getOrElse("dataPath", ""),
         state.kindWire
       ),
-      tenantStoreSql = TenantLocationSecrets.initSql(tenantLocations(key.tenant)),
       placement = placement,
       cpu = Option(state.cpu).filter(_.nonEmpty),
       memory = Option(state.memory).filter(_.nonEmpty),
@@ -1157,7 +1165,7 @@ final class PoolSupervisor(
             Left(SupervisorError.AlreadyExists(s"tenant-db '${td.name}' already exists"))
           else
             store.upsertTenantDb(td)
-            tenantDbs.put(td.id, td)
+            putTenantDbRow(td)
             publish.topologyChanged()
             events.emit(ManagerEvent.TenantDbCreated(td.tenantId, td.name))
             Right(td)
@@ -1646,25 +1654,55 @@ final class PoolSupervisor(
     * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
     * metastore `dataPath` as written. A DuckLake or duckdb-file row whose nodes get none (the spawn
     * script then picks a folder of its own), or one the derivation fails on, counts as
-    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]]. Then the default metastore's
-    * own path. Branch rows are tenant-db rows. Feeds the location checker's data-folder deny set
-    * (edge.authz.location.LiveLocationRules), which adds the managed prefixes still within their
-    * retention window. In memory, like [[duckLakeBuckets]], so HA replicas stay fresh through the
-    * topology refresh.
+    * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]], and is named once in a WARN.
+    * Then the default metastore's own path. Branch rows are tenant-db rows. Feeds the location
+    * checker's data-folder deny set (edge.authz.location.LiveLocationRules), which adds the managed
+    * prefixes still within their retention window. In memory, like [[duckLakeBuckets]], so HA
+    * replicas stay fresh through the topology refresh; derived again only after a tenant-db change
+    * (the same list until then).
     */
   def dataPaths(): List[String] =
+    val version   = tenantDbsVersion.get()
+    val (at, got) = dataPathsMemo
+    if at == version then got
+    else
+      val fresh = deriveDataPaths()
+      dataPathsMemo = (version, fresh)
+      fresh
+
+  @volatile private var dataPathsMemo: (Long, List[String]) = (-1L, Nil)
+
+  /** The unplaced tenant-dbs already named in a WARN: once per row while it stays unplaced. */
+  private val unplacedWarned = TrieMap.empty[String, Unit]
+
+  private def deriveDataPaths(): List[String] =
     val unplaced = ai.starlake.quack.edge.authz.location.DataFolders.Unplaced
-    val perRow   = tenantDbs.values.toList.flatMap { td =>
+    val rows     = tenantDbs.values.toList
+    val perRow   = rows.map { td =>
       val effective =
         try
           effectiveMetastoreFor(td).get("dataPath").map(_.trim).filter(_.nonEmpty) match
-            case Some(p)                                  => List(p)
-            case None if td.kind == TenantDbKind.InMemory => Nil
-            case None                                     => List(unplaced)
-        catch case scala.util.control.NonFatal(_) => List(unplaced)
-      effective ++ (td.dataPath :: td.metastore.get("dataPath").toList)
+            case Some(p)                                  => Right(List(p))
+            case None if td.kind == TenantDbKind.InMemory => Right(Nil)
+            case None                                     => Left("its nodes get no data path")
+        catch case scala.util.control.NonFatal(_) => Left("its data path cannot be derived")
+      td -> effective
     }
-    (perRow ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+    val unplacedNow = perRow.collect { case (td, Left(_)) => td.id }.toSet
+    unplacedWarned.filterInPlace((id, _) => unplacedNow.contains(id))
+    perRow.foreach {
+      case (td, Left(why)) if unplacedWarned.putIfAbsent(td.id, ()).isEmpty =>
+        logger.warn(
+          s"location rules: tenant-db ${td.tenantId}/${td.name} (${td.id}): $why (no dataPath of " +
+            "its own and none in the default metastore), so its nodes pick a folder of their " +
+            "own: every tenant's local file locations are refused until it gets a data path"
+        )
+      case _ => ()
+    }
+    val paths = perRow.flatMap { (td, effective) =>
+      effective.getOrElse(List(unplaced)) ++ (td.dataPath :: td.metastore.get("dataPath").toList)
+    }
+    (paths ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
 
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>
@@ -1925,7 +1963,7 @@ final class PoolSupervisor(
               // Same tombstone stamp as deleteTenantDb: a cascaded delete must not strand a
               // managed prefix un-eligible, or its objects would be billed forever.
               stampManagedPrefixDeleted(td.id, td.name, purgeManagedData = false)
-              tenantDbs.remove(td.id)
+              removeTenantDbRow(td.id)
               try onTenantDbDeleted(name.toLowerCase(Locale.ROOT), td.name)
               catch case _: Throwable => ()
               dbAdmin.dropDatabase(td.name) match
@@ -2089,7 +2127,7 @@ final class PoolSupervisor(
                                   )
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
-                                  tenantDbs.put(td.id, td)
+                                  putTenantDbRow(td)
                                   publish.topologyChanged()
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
@@ -2115,14 +2153,14 @@ final class PoolSupervisor(
                                       case _ => ()
                                     store.upsertTenantDb(td)
                                     recordManagedPrefix()
-                                    tenantDbs.put(td.id, td)
+                                    putTenantDbRow(td)
                                     publish.topologyChanged()
                                     events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                     Right(td)
                           case TenantDbKind.DuckDbFile | TenantDbKind.InMemory =>
                             store.upsertTenantDb(td)
                             recordManagedPrefix()
-                            tenantDbs.put(td.id, td)
+                            putTenantDbRow(td)
                             publish.topologyChanged()
                             events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                             Right(td)
@@ -2205,7 +2243,7 @@ final class PoolSupervisor(
                 else
                   store.deleteTenantDb(td.id)
                   stampManagedPrefixDeleted(td.id, tenantDbName, purgeManagedData)
-                  tenantDbs.remove(td.id)
+                  removeTenantDbRow(td.id)
                   dataPathBlocked.remove(td.id)
                   duckLakeInitPending.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
@@ -2298,7 +2336,7 @@ final class PoolSupervisor(
               val refresh = withCacheRecoveryIO("updateTenantDb") {
                 IO.blocking {
                   store.upsertTenantDb(merged)
-                  tenantDbs.put(merged.id, merged)
+                  putTenantDbRow(merged)
                   // Node-affecting edit is the documented remediation for a boot-time
                   // DataPathMismatchException, so clear any block rather than skipping this
                   // tenant-db's pools forever. Optimistic: a wrong fix re-blocks on the next boot.

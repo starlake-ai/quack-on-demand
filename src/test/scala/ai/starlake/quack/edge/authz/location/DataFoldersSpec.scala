@@ -55,7 +55,7 @@ class DataFoldersSpec extends AnyFlatSpec with Matchers:
 
   it should "deny its folder to the checker, and every local location when it cannot be placed" in {
     val rules = LocationRules(
-      tenantBuckets = Set("acme-etl"),
+      s3Scopes = List("s3://acme-etl/"),
       tenantFolders = List("/srv/qod-files/acme/out/"),
       dataFolders = remote("file:///srv/qod-files/acme/out/lake"),
       filesRoot = Some("/srv/qod-files/")

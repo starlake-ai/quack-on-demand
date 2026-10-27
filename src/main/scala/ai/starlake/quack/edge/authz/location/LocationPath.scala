@@ -1,5 +1,7 @@
 package ai.starlake.quack.edge.authz.location
 
+import ai.starlake.quack.model.S3BucketName
+
 import java.util.Locale
 
 /** Where a location lives: an object-store bucket (lowercase name), a POSIX filesystem, or a
@@ -28,9 +30,13 @@ private[location] final case class LocationPath(space: Space, segments: Vector[S
     val g = segments.indexWhere(LocationPath.isGlob)
     if g < 0 then segments.length else g
 
+  /** The segments as denial compares them ([[LocationPath.foldForDenial]]), folded once per path: a
+    * cached deny entry folds its data folder once for every statement it judges.
+    */
+  lazy val denialSegments: Vector[String] = segments.map(LocationPath.foldForDenial)
+
 private[location] object LocationPath:
 
-  private val BucketRe  = "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$".r
   private val DriveRe   = "(?s)^[A-Za-z]:[\\\\/].*$".r
   private val ShortName = "(?s)^.*~[0-9].*$".r
   private val GlobChars = "*?[]{}"
@@ -73,12 +79,15 @@ private[location] object LocationPath:
       )
 
   /** A segment as denial compares it: NFC (APFS opens a name by any normalization of it, and the
-    * node cannot canonicalize a tail that does not exist yet), then lowercase.
+    * node cannot canonicalize a tail that does not exist yet), then lowercase. ASCII is its own
+    * NFC.
     */
-  private def foldForDenial(segment: String): String =
-    java.text.Normalizer
-      .normalize(segment, java.text.Normalizer.Form.NFC)
-      .toLowerCase(Locale.ROOT)
+  def foldForDenial(segment: String): String =
+    if segment.forall(_ < 0x80) then segment.toLowerCase(Locale.ROOT)
+    else
+      java.text.Normalizer
+        .normalize(segment, java.text.Normalizer.Form.NFC)
+        .toLowerCase(Locale.ROOT)
 
   /** Whether `p` reaches data folder `d`: names it or something below it, one of its derived
     * siblings (`<last>.<suffix>`, `<last>__br_<suffix>`), an ancestor of it, or a glob whose
@@ -90,8 +99,8 @@ private[location] object LocationPath:
       val n = d.segments.length
       val k = math.min(p.literalLength, n)
       (0 until k).forall { i =>
-        val a = foldForDenial(p.segments(i))
-        val b = foldForDenial(d.segments(i))
+        val a = p.denialSegments(i)
+        val b = d.denialSegments(i)
         a == b || (k == n && i == n - 1 && (a.startsWith(b + ".") || a.startsWith(b + "__br_")))
       }
     }
@@ -125,8 +134,8 @@ private[location] object LocationPath:
     else
       val bucket = rest.substring(0, slash)
       val key    = rest.substring(slash + 1)
-      if !BucketRe.matches(bucket) || bucket.contains("..") then
-        Left("not a lowercase S3 bucket name")
+      if S3BucketName.isAlias(bucket) then Left("an access point alias, not a bucket")
+      else if !S3BucketName.valid(bucket) then Left("not a lowercase S3 bucket name")
       else if key.exists(c => c == '?' || c == '#' || c == '\\') then
         Left("a '?', '#' or '\\' in the key")
       else segments(key, windows = false).map(LocationPath(Space.Bucket(bucket), _))

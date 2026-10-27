@@ -45,9 +45,6 @@ object NodeSecretFiles extends LazyLogging:
     */
   val AuthzKey: String = "QOD_NODE_AUTHZ_KEY"
 
-  /** File holding the tenant's authorized-location secrets (TenantLocationSecrets.initSql). */
-  val TenantStoreKey: String = "tenantStoreSql"
-
   /** Env var naming the node's id, which qod-node checks every session handle against. Not a
     * secret.
     */
@@ -75,7 +72,6 @@ object NodeSecretFiles extends LazyLogging:
       TenantDb.EncryptionKeyName,
       "extraSetupSql",
       "objectStoreSql",
-      TenantStoreKey,
       TokenKey,
       AuthzKey
     ) ++ CloudCredKeys
@@ -117,7 +113,6 @@ object NodeSecretFiles extends LazyLogging:
       metastore: Map[String, String],
       extraSetupSql: String,
       objectStoreSql: String,
-      tenantStoreSql: String,
       token: String,
       authzKey: String,
       inheritedEnv: Map[String, String]
@@ -129,11 +124,8 @@ object NodeSecretFiles extends LazyLogging:
       .flatMap { case (k, v) => canonical(k).map(c => (c, k == c, v)) }
       .groupBy(_._1)
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }
-    val sql = Seq(
-      "extraSetupSql"  -> extraSetupSql,
-      "objectStoreSql" -> objectStoreSql,
-      TenantStoreKey   -> tenantStoreSql
-    ).filter(_._2.nonEmpty)
+    val sql = Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql)
+      .filter(_._2.nonEmpty)
     (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey))
       .filter(_._2.nonEmpty)
 

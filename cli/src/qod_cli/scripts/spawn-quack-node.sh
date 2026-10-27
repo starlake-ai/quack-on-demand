@@ -74,7 +74,7 @@ START_DIR="${START_DIR%/}"
 
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.ps1 and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
-SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql tenantStoreSql QOD_NODE_TOKEN
+SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql QOD_NODE_TOKEN
   QOD_NODE_AUTHZ_KEY QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING
   QOD_GCS_KEY_ID QOD_GCS_SECRET)
 # The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
@@ -563,17 +563,6 @@ fi
 # ATTACH.
 if [[ -n "$STORAGE_SQL" ]]; then
   INIT_SQL+="$STORAGE_SQL"$'\n'
-fi
-
-# The tenant's authorized S3 locations (tenantStoreSql, authored by TenantLocationSecrets.scala): one
-# CREATE OR REPLACE SECRET qod_tl_<id8> per bucket, scoped to it, so the tenant's users reach exactly
-# the buckets it holds keys for. Every kind, before any ATTACH. The database's data path keeps its
-# own credentials: its qod_db_store (objectStoreSql) or qod_data_s3 (STORAGE_SQL) secret is scoped
-# to the data path, longer than a bucket scope or tied with it at a bucket root, a tie both win by
-# name. The exceptions (a branch of a bucket-root database, a database on neither credential
-# source) are listed beside qod_data_s3 above.
-if [[ -n "${tenantStoreSql:-}" ]]; then
-  INIT_SQL+="$tenantStoreSql"$'\n'
 fi
 
 # Encryption needs OpenSSL, which the httpfs extension provides. Without it DuckDB falls back to

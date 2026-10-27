@@ -253,10 +253,10 @@ object BootFactories extends LazyLogging:
           .isOpa(opaCfg.defaultMode)
     )
 
-  /** The live location rules of the decision pipeline (spec decisions 15 and 18): the supervisor's
-    * data paths and tenant locations, the store's unpurged managed prefixes, the operator's files
-    * root. Real-path resolution only on the local runtime, the one whose nodes share this host's
-    * filesystem and working directory.
+  /** The live location rules of the decision pipeline (spec decisions 15, 18 and 23): the
+    * supervisor's data paths, tenant locations and users' S3 credential scopes, the store's
+    * unpurged managed prefixes, the operator's files root. Real-path resolution only on the local
+    * runtime, the one whose nodes share this host's filesystem and working directory.
     */
   def locationRules(
       mgrCfg: ManagerConfig,
@@ -267,6 +267,7 @@ object BootFactories extends LazyLogging:
       dataPaths = () => sup.dataPaths(),
       unpurgedPrefixes = () => store.unpurgedManagedPrefixes().map(_.prefix),
       tenantLocations = sup.tenantLocations,
+      userScopes = userId => sup.userS3.of(userId).map(_.scope),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
       sameHost = mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local"
     )

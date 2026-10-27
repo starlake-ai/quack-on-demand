@@ -230,22 +230,21 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     TenantDb(id = s"td-$name", tenantId = "acme", name = name, kind = kind,
       metastore = Map.empty, dataPath = "")
 
-  /** The location rules `sup` feeds a tenant that authorized bucket `lake` and the local folder
-    * `/srv/qod-files/acme/lake/`. */
+  /** The location rules `sup` feeds a user holding an S3 credential for `s3://lake/`, of a tenant
+    * that authorized the local folder `/srv/qod-files/acme/lake/`. */
   private def rulesOf(sup: PoolSupervisor) =
-    val creds = Map("s3_access_key_id" -> "AKIA", "s3_secret_access_key" -> "s")
     val locs = List(
-      ai.starlake.quack.model.TenantLocation("tl-1", "acme", "s3", "s3://lake/", creds, 0L, None),
       ai.starlake.quack.model.TenantLocation(
-        "tl-2", "acme", "local", "/srv/qod-files/acme/lake/", Map.empty, 0L, None)
+        "tl-2", "acme", "local", "/srv/qod-files/acme/lake/", 0L, None)
     )
     new ai.starlake.quack.edge.authz.location.LiveLocationRules(
       dataPaths = () => sup.dataPaths(),
       unpurgedPrefixes = () => Nil,
       tenantLocations = _ => locs,
+      userScopes = _ => List("s3://lake/"),
       filesRoot = Some("/srv/qod-files"),
       sameHost = false
-    ).rulesFor("acme").toOption.get
+    ).rulesFor("acme", "u-1").toOption.get
 
   private def checked(path: String, rules: ai.starlake.quack.edge.authz.location.LocationRules) =
     ai.starlake.quack.edge.authz.location.LocationChecker.check(path, rules)
@@ -285,11 +284,47 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val rules = rulesOf(sup)
     checked("/srv/qod-files/acme/lake/x.csv", rules) shouldBe
       Left(
-        "/srv/qod-files/acme/lake/x.csv is a database data folder (a relative data path of this " +
-          "deployment may lie there)"
+        "/srv/qod-files/acme/lake/x.csv is a database data folder (a database whose data path " +
+          "this manager cannot place may lie there)"
       )
     checked("s3://lake/x.csv", rules) shouldBe Right(())
     supWithRows(Map.empty, List(pathless("m", TenantDbKind.InMemory))).dataPaths() shouldBe Nil
+
+  it should "name each unplaced tenant-db in one WARN, however often the rules are read" in:
+    val (_, events) =
+      ai.starlake.quack.ondemand.runtime.testkit.LogCapture.logged(classOf[PoolSupervisor].getName) {
+        val sup = supWithRows(Map.empty, List(pathless("a"), pathless("f", TenantDbKind.DuckDbFile)))
+        (1 to 3).foreach(_ => rulesOf(sup))
+        sup.restore()
+        (1 to 3).foreach(_ => rulesOf(sup))
+      }
+    val warned = events.filter(e =>
+      e.getLevel == ch.qos.logback.classic.Level.WARN &&
+        e.getFormattedMessage.startsWith("location rules: tenant-db ")
+    )
+    warned.size shouldBe 2
+    warned.map(_.getFormattedMessage).exists(_.contains("acme/a (td-a)")) shouldBe true
+    warned.map(_.getFormattedMessage).exists(_.contains("acme/f (td-f)")) shouldBe true
+
+  it should "derive the data paths once, and again only after a tenant-db change" in:
+    val sup   = supWithRows(Map("dataPath" -> "s3://lake/qod/tpch"), List(pathless("a")))
+    val first = sup.dataPaths()
+    sup.dataPaths() should be theSameInstanceAs first
+    sup
+      .createTenantDb(
+        "acme",
+        "sales",
+        TenantDbKind.DuckDbFile,
+        Map("dbName" -> "acme_sales", "schemaName" -> "main"),
+        dataPath = "/var/data/sales/duck.db"
+      )
+      .unsafeRunSync()
+      .isRight shouldBe true
+    val second = sup.dataPaths()
+    second should not be theSameInstanceAs(first)
+    second should contain("/var/data/sales/duck.db")
+    sup.restore()
+    sup.dataPaths() should contain("/var/data/sales/duck.db")
 
   // ---------- createPool / scale / setMaxConcurrent / stopPool ----------
 

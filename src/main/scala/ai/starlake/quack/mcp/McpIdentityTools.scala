@@ -183,8 +183,8 @@ final class McpIdentityTools(
 
   private val listTenantLocationsTool = McpToolDef(
     name = "list_tenant_locations",
-    description = "List the S3 buckets and local folders a tenant authorized for its users' file " +
-      "access. A bucket's secret access key is never returned (secretSet says one is stored).",
+    description = "List the local folders a tenant authorized for its users' file access (S3 is " +
+      "per user: each user's own credentials, not a tenant location).",
     inputSchema =
       objectSchema(required = List("tenant"), props = "tenant" -> strProp("Tenant id.")),
     adminOnly = true,
@@ -200,16 +200,13 @@ final class McpIdentityTools(
   private val addTenantLocationTool = McpToolDef(
     name = "add_tenant_location",
     description =
-      "Authorize a location for a tenant's non-superuser users: s3://<bucket>/ (a bucket only) " +
-        "with that bucket's own credentials in object_store (s3_access_key_id and " +
-        "s3_secret_access_key required; s3_region, s3_endpoint, s3_url_style optional), or an " +
-        "absolute folder under <QOD_TENANT_FILES_ROOT>/<tenant>/. A database's data folder stays " +
-        "unreachable whatever is authorized. The tenant's running nodes receive the change at once.",
+      "Authorize a local folder for a tenant's non-superuser users: an absolute folder under " +
+        "<QOD_TENANT_FILES_ROOT>/<tenant>/. A database's data folder stays unreachable whatever is " +
+        "authorized. S3 is per user (the user's own credentials).",
     inputSchema = objectSchema(
       required = List("tenant", "location"),
       props = "tenant" -> strProp("Tenant id."),
-      "location"     -> strProp("s3://<bucket>/ or an absolute local folder."),
-      "object_store" -> objProp("The bucket's credentials (s3 only; the secret is write-only).")
+      "location" -> strProp("An absolute local folder.")
     ),
     adminOnly = true,
     run = (principal, args) =>
@@ -221,7 +218,7 @@ final class McpIdentityTools(
         case Right((tenant, location)) =>
           locations
             .add(
-              AddTenantLocationRequest(tenant, location, mapArgOpt(args, "object_store")),
+              AddTenantLocationRequest(tenant, location),
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))
@@ -229,8 +226,7 @@ final class McpIdentityTools(
 
   private val removeTenantLocationTool = McpToolDef(
     name = "remove_tenant_location",
-    description = "Remove an authorized location of a tenant by id (from list_tenant_locations). " +
-      "The tenant's running nodes drop the bucket's secret at once.",
+    description = "Remove an authorized location of a tenant by id (from list_tenant_locations).",
     inputSchema = objectSchema(
       required = List("tenant", "id"),
       props = "tenant" -> strProp("Tenant id."),
