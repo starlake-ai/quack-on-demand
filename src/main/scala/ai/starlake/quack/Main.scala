@@ -468,6 +468,13 @@ object Main extends IOApp with LazyLogging:
     // supervisor refreshes it after RBAC mutations and restores. One instance for both.
     val policyVersions =
       new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
+    // Each user's own S3 credentials (Liquibase 0052): NodeKeys digests them into every handle,
+    // the supervisor refreshes them with the policy versions, the internal credentials endpoint
+    // serves them to nodes. One instance for the three.
+    val userS3 =
+      new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
+    // The nonces of the handles this replica mints: the credentials endpoint answers only those.
+    val issuedHandles = new ai.starlake.quack.edge.authz.IssuedHandles()
     // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
     // every node key derives from it, so it must outlive this process and agree across replicas.
     val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
@@ -478,7 +485,9 @@ object Main extends IOApp with LazyLogging:
           new ai.starlake.quack.edge.authz.NodeKeys(
             secret,
             mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
-            versions = policyVersions
+            versions = policyVersions,
+            creds = userS3,
+            issued = Some(issuedHandles)
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -627,7 +636,8 @@ object Main extends IOApp with LazyLogging:
       events = supEvents,
       lockdownEnabled = lockdownCfg.enabled,
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
-      sharedPolicyVersions = Some(policyVersions)
+      sharedPolicyVersions = Some(policyVersions),
+      sharedUserS3 = Some(userS3)
     )
     supRef.set(sup)
     // Fleet mode: the pool listing shows each node's server and its liveness.

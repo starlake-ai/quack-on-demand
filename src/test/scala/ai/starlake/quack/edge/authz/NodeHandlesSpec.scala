@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.authz
 
 import ai.starlake.acl.parser.Verb
-import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
+import ai.starlake.quack.model.{PoolKey, Role, RunningNode, UserS3Credential}
 import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{
@@ -55,6 +55,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "acme/acme_db/bi",
       policyVersion = 42L,
       ctx = golden("ctx"),
+      creds = golden("creds"),
       nowMs = 1761200000000L,
       nonce = "0123456789abcdef0123456789abcdef"
     )
@@ -64,8 +65,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "expire the handle LifetimeMs after minting and use a fresh nonce each time" in {
-    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L)
-    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L)
+    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L)
+    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L)
     val pa = HandleInspector.payload(a.text)
     pa.hcursor.get[Long]("exp") shouldBe Right(1000L + NodeHandles.LifetimeMs)
     pa.hcursor.get[String]("nonce") shouldBe Right(a.nonce)
@@ -76,7 +77,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse to vouch for no principal" in {
     val e = intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, "", 1000L)
     )
     e.getMessage should include("no principal is bound to this statement")
   }
@@ -85,12 +86,12 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 63, "A" * 64, "g" * 64, Ctx0 + "0").foreach { bad =>
       withClue(s"ctx '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, 1000L)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, "", 1000L)
         ).getMessage should include("ctx")
       }
     }
     intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, "", 1000L)
     ).getMessage should include("policy version")
   }
 
@@ -98,10 +99,37 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 31, "a" * 33, "A" * 32, "g" * 32).foreach { bad =>
       withClue(s"nonce '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, 1000L, nonce = bad)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L, nonce = bad)
         ).getMessage should include("nonce")
       }
     }
+
+  it should "refuse a creds that is neither empty nor 64 lowercase hex digits" in
+    List("a" * 63, "A" * 64, "g" * 64, "a" * 65).foreach { bad =>
+      withClue(s"creds '$bad': ") {
+        intercept[IllegalArgumentException](
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, bad, 1000L)
+        ).getMessage should include("creds")
+      }
+    }
+
+  "the credentials digest" should "be the golden one, over the golden credential set" in {
+    val c = UserS3Credential(
+      "0123456789abcdef0123456789abcdef",
+      "u-1",
+      "s3://acme-etl/",
+      "AKIAEXAMPLE",
+      "s",
+      None,
+      None,
+      None,
+      None,
+      1761000000000L,
+      1761100000000L
+    )
+    CanonicalJson.render(UserS3Credentials.digestJson(List(c))) shouldBe golden("credentials")
+    UserS3Credentials.digestOf(List(c)) shouldBe golden("creds")
+  }
 
   "a node key" should "differ per node and per secret" in {
     NodeHandles.nodeKeyHex("a" * 32, "n1") should not be NodeHandles.nodeKeyHex("a" * 32, "n2")
@@ -252,6 +280,28 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L)
     HandleInspector.payload(keys.handle(Node2, Alice)).hcursor.get[Long]("policyVersion") shouldBe
       Right(0L)
+  }
+
+  it should "carry the principal's credential digest, none for the system, and record the nonce" in {
+    val digests: UserS3Credentials = new UserS3Credentials:
+      def of(userId: String)     = Nil
+      def digest(userId: String) = if userId == "u-1" then "d" * 64 else ""
+    val issued = new IssuedHandles(clock = () => 5000L)
+    val keys   = new NodeKeys(
+      "k" * 32,
+      "http://127.0.0.1:20900",
+      () => 5000L,
+      creds = digests,
+      issued = Some(issued)
+    )
+    val p = HandleInspector.payload(keys.handle(Node2, Alice))
+    p.hcursor.get[String]("creds") shouldBe Right("d" * 64)
+    val nonce = p.hcursor.get[String]("nonce").toOption.get
+    issued.get(nonce) shouldBe Some(IssuedHandles.Issued(Node2.nodeId, "u-1"))
+    val s = HandleInspector.payload(keys.handle(Node2, NodePrincipal.System))
+    s.hcursor.get[String]("creds") shouldBe Right("")
+    issued.get(s.hcursor.get[String]("nonce").toOption.get) shouldBe None
+    keys.key(Node2.nodeId).toSeq shouldBe NodeHandles.nodeKey("k" * 32, Node2.nodeId).toSeq
   }
 
   "NodePrincipal.of" should "name the user, flag a superuser, and map the system caller" in {

@@ -1,10 +1,10 @@
 package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.model.PoolKey
-import io.circe.Json
+import io.circe.{Decoder, HCursor, Json}
 
 import java.nio.charset.StandardCharsets
-import java.security.SecureRandom
+import java.security.{MessageDigest, SecureRandom}
 import java.util.Base64
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -14,14 +14,27 @@ import javax.crypto.spec.SecretKeySpec
   */
 final case class MintedHandle(text: String, nonce: String, expiresAt: Long)
 
+/** A handle this manager minted, as [[NodeHandles.verify]] reads it back for a node's call. */
+final case class VerifiedHandle(
+    node: String,
+    replica: String,
+    pool: String,
+    principal: NodePrincipal,
+    policyVersion: Long,
+    nonce: String,
+    exp: Long,
+    ctx: String,
+    creds: String
+)
+
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
   * docs/superpowers/specs/2026-10-23-in-engine-authorization-design.md, section 2).
   *
   * The manager sends one as [[prelude]], its own PREPARE right before every statement on a node
   * connection; qod-node verifies it and installs the principal on that connection. A handle is
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
-  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `nonce`, `exp`): the MAC
-  * covers the bytes as sent, so the two sides never have to agree on a canonical form.
+  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `nonce`, `exp`):
+  * the MAC covers the bytes as sent, so the two sides never have to agree on a canonical form.
   * native/qod-node/src/handle.cpp reads it; a nonce makes it single-use and `exp` bounds it to
   * [[LifetimeMs]].
   *
@@ -94,12 +107,14 @@ object NodeHandles:
   val EmptyContextDigest: String = contextDigest(None)
 
   private val ContextDigestPattern = "[0-9a-f]{64}".r
+  private val CredsPattern         = "([0-9a-f]{64})?".r
   private val NoncePattern         = "[0-9a-f]{32}".r
 
   /** The handle for one statement on `nodeId`, minted by `replica` (the URL nodes call back for
-    * verdicts) for `principal` on `pool` at `nowMs`, carrying the tenant's `policyVersion` and the
-    * session's `ctx` ([[contextDigest]]). Refuses [[NodePrincipal.Unbound]]: there is no one to
-    * vouch for.
+    * verdicts) for `principal` on `pool` at `nowMs`, carrying the tenant's `policyVersion`, the
+    * session's `ctx` ([[contextDigest]]) and the principal's S3 credential digest `creds`
+    * (`UserS3Credentials.digestOf`, empty for none). Refuses [[NodePrincipal.Unbound]]: there is no
+    * one to vouch for.
     */
   def mint(
       secret: String,
@@ -109,12 +124,14 @@ object NodeHandles:
       pool: String,
       policyVersion: Long,
       ctx: String,
+      creds: String,
       nowMs: Long,
       nonce: String = newNonce()
   ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
     require(policyVersion >= 0L, "a policy version is never negative")
     require(ContextDigestPattern.matches(ctx), "ctx must be 64 lowercase hex digits")
+    require(CredsPattern.matches(creds), "creds must be empty or 64 lowercase hex digits")
     require(NoncePattern.matches(nonce), "a nonce is 32 lowercase hex digits")
     val exp     = nowMs + LifetimeMs
     val payload = Json
@@ -132,6 +149,7 @@ object NodeHandles:
         "pool"          -> Json.fromString(pool),
         "policyVersion" -> Json.fromLong(policyVersion),
         "ctx"           -> Json.fromString(ctx),
+        "creds"         -> Json.fromString(creds),
         "nonce"         -> Json.fromString(nonce),
         "exp"           -> Json.fromLong(exp)
       )
@@ -147,9 +165,90 @@ object NodeHandles:
     */
   def prelude(handle: String): String = s"CALL system.main.qod_session('$handle')"
 
-  private def hmac(key: Array[Byte], data: Array[Byte]): Array[Byte] =
+  /** How long past its `exp` a handle still authenticates a node's call to this replica (decide,
+    * credentials): a node calls with the handle its connection installed last.
+    */
+  val DecideGraceMs: Long = 5 * 60_000L
+
+  private val MacText = "[0-9a-f]{64}".r
+
+  /** `text`, a handle a node presents to this replica, read back: the MAC under `nodeKey`
+    * (constant-time, over the payload bytes as sent), then `v`, the node, `exp` (with
+    * [[DecideGraceMs]] of grace) and the payload's shape (`ctx` 64 hex digits, `creds` empty or
+    * 64). The nonce is not checked against use here: it is single-use on the node, and each
+    * endpoint resolves it in its own registry. Left names the first failed check and never echoes
+    * the handle.
+    */
+  def verify(
+      text: String,
+      nodeKey: Array[Byte],
+      expectedNode: String,
+      nowMs: Long
+  ): Either[String, VerifiedHandle] =
+    text.split("\\.", -1).toList match
+      case List(body, mac) if MacText.matches(mac) =>
+        val payload =
+          try Some(Base64.getUrlDecoder.decode(body))
+          catch case _: IllegalArgumentException => None
+        payload match
+          case None        => Left("malformed handle")
+          case Some(bytes) =>
+            val expected = hex(hmac(nodeKey, bytes)).getBytes(StandardCharsets.US_ASCII)
+            if !MessageDigest.isEqual(expected, mac.getBytes(StandardCharsets.US_ASCII)) then
+              Left("handle does not verify")
+            else readPayload(bytes, expectedNode, nowMs)
+      case _ => Left("malformed handle")
+
+  private def readPayload(
+      bytes: Array[Byte],
+      expectedNode: String,
+      nowMs: Long
+  ): Either[String, VerifiedHandle] =
+    io.circe.parser.parse(new String(bytes, StandardCharsets.UTF_8)) match
+      case Left(_)     => Left("malformed handle payload")
+      case Right(json) =>
+        val c                                                                = json.hcursor
+        def field[A: Decoder](cur: HCursor, name: String): Either[String, A] =
+          cur.get[A](name).left.map(_ => "malformed handle payload")
+        field[Int](c, "v").flatMap { v =>
+          if v != 1 then Left("unsupported handle version")
+          else
+            for
+              node    <- field[String](c, "node")
+              _       <- Either.cond(node == expectedNode, (), "handle names another node")
+              exp     <- field[Long](c, "exp")
+              _       <- Either.cond(nowMs <= exp + DecideGraceMs, (), "handle expired")
+              replica <- field[String](c, "replica")
+              pool    <- field[String](c, "pool")
+              version <- field[Long](c, "policyVersion")
+              nonce   <- field[String](c, "nonce")
+              _       <- Either.cond(NoncePattern.matches(nonce), (), "malformed handle payload")
+              ctx     <- field[String](c, "ctx")
+              _ <- Either.cond(ContextDigestPattern.matches(ctx), (), "malformed handle payload")
+              creds  <- field[String](c, "creds")
+              _      <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
+              p      <- c.downField("principal").success.toRight("malformed handle payload")
+              id     <- field[String](p, "id")
+              name   <- field[String](p, "name")
+              tenant <- field[Option[String]](p, "tenant")
+              su     <- field[Boolean](p, "superuser")
+              system <- field[Boolean](p, "system")
+            yield VerifiedHandle(
+              node,
+              replica,
+              pool,
+              NodePrincipal(id, name, tenant, superuser = su, system = system),
+              version,
+              nonce,
+              exp,
+              ctx,
+              creds
+            )
+        }
+
+  private[authz] def hmac(key: Array[Byte], data: Array[Byte]): Array[Byte] =
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(new SecretKeySpec(key, "HmacSHA256"))
     mac.doFinal(data)
 
-  private def hex(bytes: Array[Byte]): String = bytes.map(b => f"${b & 0xff}%02x").mkString
+  private[authz] def hex(bytes: Array[Byte]): String = bytes.map(b => f"${b & 0xff}%02x").mkString

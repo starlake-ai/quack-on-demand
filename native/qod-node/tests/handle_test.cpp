@@ -63,6 +63,13 @@ std::string PayloadWithCtx(const std::string &ctx_json) {
 	return payload;
 }
 
+//! A handle with a valid ctx and the given creds member (raw JSON).
+std::string PayloadWithCreds(const std::string &creds_json) {
+	auto payload = PayloadWithCtx("\"" + kCtx + "\"");
+	payload.insert(payload.find(",\"nonce\""), ",\"creds\":" + creds_json);
+	return payload;
+}
+
 // The golden handle NodeHandlesSpec (Scala) mints from fixed inputs, and its prelude: both sides agree
 // on the handle's format and on the prelude's spelling.
 void VerifyGolden(const std::string &path) {
@@ -72,7 +79,7 @@ void VerifyGolden(const std::string &path) {
 		failures++;
 		return;
 	}
-	std::string line, key_hex, text, prelude, ctx;
+	std::string line, key_hex, text, prelude, ctx, creds;
 	while (std::getline(in, line)) {
 		if (line.rfind("key=", 0) == 0) {
 			key_hex = line.substr(4);
@@ -80,6 +87,8 @@ void VerifyGolden(const std::string &path) {
 			text = line.substr(7);
 		} else if (line.rfind("ctx=", 0) == 0) {
 			ctx = line.substr(4);
+		} else if (line.rfind("creds=", 0) == 0) {
+			creds = line.substr(6);
 		} else if (line.rfind("prelude=", 0) == 0) {
 			prelude = line.substr(8);
 		}
@@ -96,6 +105,7 @@ void VerifyGolden(const std::string &path) {
 		           handle.exp == 1761200060000,
 		       "golden version, nonce, exp");
 		Expect(!ctx.empty() && handle.ctx == ctx, "golden ctx");
+		Expect(!creds.empty() && handle.creds == creds, "golden creds");
 	} catch (std::invalid_argument &error) {
 		std::cerr << "FAIL: the golden handle does not verify: " << error.what() << std::endl;
 		failures++;
@@ -169,6 +179,21 @@ int main(int argc, char **argv) {
 	              "bad ctx", "an uppercase ctx");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("42")), kKey, kNode, kNow); }, "malformed handle",
 	              "a ctx that is no string");
+
+	// ---- the user's S3 credential digest (optional until node protocol 3)
+	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx + "\"")), kKey, kNode, kNow).creds.empty(),
+	       "a handle without creds");
+	Expect(qod::VerifyHandle(Sign(PayloadWithCreds("\"\"")), kKey, kNode, kNow).creds.empty(),
+	       "an empty creds: no credential");
+	Expect(qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'd') + "\"")), kKey, kNode, kNow).creds ==
+	           std::string(64, 'd'),
+	       "the handle's creds");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(63, 'd') + "\"")), kKey, kNode, kNow); },
+	              "bad creds", "a short creds");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'D') + "\"")), kKey, kNode, kNow); },
+	              "bad creds", "an uppercase creds");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("7")), kKey, kNode, kNow); }, "malformed handle",
+	              "a creds that is no string");
 
 	// ---- nonce ledger
 	qod::NonceLedger ledger;

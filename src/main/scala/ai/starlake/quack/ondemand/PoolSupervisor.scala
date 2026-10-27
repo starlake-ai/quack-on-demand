@@ -18,7 +18,9 @@ import ai.starlake.quack.model.{
   TenantDb,
   TenantDbKind,
   TenantLocation,
-  TenantLocationRules
+  TenantLocationRules,
+  UserS3Credential,
+  UserS3CredentialRules
 }
 import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
 import ai.starlake.quack.ondemand.fleet.MissingSlots
@@ -155,7 +157,11 @@ final class PoolSupervisor(
     /** The policy-version cache Main shares with NodeKeys, which mints every session handle. None
       * (tests) still keeps a real cache, over this supervisor's own store.
       */
-    sharedPolicyVersions: Option[ai.starlake.quack.edge.authz.PolicyVersionCache] = None
+    sharedPolicyVersions: Option[ai.starlake.quack.edge.authz.PolicyVersionCache] = None,
+    /** The user S3 credential cache Main shares with NodeKeys (handle digests) and the internal
+      * credentials endpoint. None (tests) still keeps a real cache, over this supervisor's store.
+      */
+    sharedUserS3: Option[ai.starlake.quack.edge.authz.UserS3CredentialCache] = None
 ) extends LazyLogging:
 
   /** Each tenant's policy version (Liquibase 0050), refreshed after every local RBAC or ACL
@@ -164,6 +170,15 @@ final class PoolSupervisor(
   val policyVersions: ai.starlake.quack.edge.authz.PolicyVersionCache =
     sharedPolicyVersions.getOrElse(
       new ai.starlake.quack.edge.authz.PolicyVersionCache(() => store.policyVersions())
+    )
+
+  /** Each user's own S3 credentials (Liquibase 0052), as this replica last read them: what session
+    * handles digest (`creds`), what the internal credentials endpoint serves a node, and the scopes
+    * the location rules admit a user's `s3://` URLs under. Refreshed with the policy versions.
+    */
+  val userS3: ai.starlake.quack.edge.authz.UserS3CredentialCache =
+    sharedUserS3.getOrElse(
+      new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
     )
 
   // Surrogate-id-indexed caches of the persisted state.
@@ -273,14 +288,16 @@ final class PoolSupervisor(
       .maximumSize(10_000L)
       .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
 
-  /** Drop every cached `EffectiveSet` and reload the tenants' policy versions, without
-    * broadcasting. Used by [[restore]] and by peer notification handlers: broadcasting from those
-    * paths would echo forever across replicas. Every RBAC mutator reaches it through
-    * [[invalidateEffectiveCache]], so handles minted after a grant change carry the new version.
+  /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
+    * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
+    * broadcasting from those paths would echo forever across replicas. Every RBAC mutator (the
+    * credential writes included) reaches it through [[invalidateEffectiveCache]], so handles minted
+    * after a change carry the new version and the new credential digest.
     */
   private def invalidateEffectiveCacheLocal(): Unit =
     effectiveCache.invalidateAll()
     policyVersions.refresh()
+    userS3.refresh()
 
   /** Drop every cached `EffectiveSet` and notify peers, so a freshly-granted role or pool
     * permission takes effect on the next handshake, not after a TTL window.
@@ -377,6 +394,81 @@ final class PoolSupervisor(
               locationCache.put(t.id, store.listTenantLocations(t.id))
               invalidateEffectiveCache()
               Right(row)
+    }
+  }
+
+  // ---------- Users' own S3 credentials (in-engine authorization, decision 23) ----------
+
+  /** User `userId`'s stored credentials, read from the store so another replica's fresh change is
+    * listed too.
+    */
+  def listUserS3Credentials(userId: String): Either[SupervisorError, List[UserS3Credential]] =
+    store.getUserById(userId) match
+      case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+      case Some(_) => Right(store.listUserS3Credentials(userId))
+
+  /** Store `accepted` for user `userId` ([[UserS3CredentialRules.validate]] made it, and the caller
+    * ran the data-folder check): a new credential, or the replacement of the one the user holds for
+    * that scope, which keeps its id. At most [[UserS3Credential.MaxPerUser]] per user: one more is
+    * `InvalidArgument("too_many_credentials: ...")`.
+    */
+  def putUserS3Credential(
+      userId: String,
+      accepted: UserS3CredentialRules.Accepted
+  ): IO[Either[SupervisorError, UserS3Credential]] = IO.blocking {
+    withCacheRecovery("putUserS3Credential") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(_) =>
+          val held = store.listUserS3Credentials(userId)
+          if !held.exists(_.scope == accepted.scope) && held.size >= UserS3Credential.MaxPerUser
+          then
+            Left(
+              SupervisorError.InvalidArgument(
+                s"too_many_credentials: a user holds at most ${UserS3Credential.MaxPerUser} " +
+                  "S3 credentials; remove one first"
+              )
+            )
+          else
+            val stored = store.putUserS3Credential(
+              UserS3Credential(
+                id = UserS3CredentialRules.newId(held.map(_.id)),
+                userId = userId,
+                scope = accepted.scope,
+                accessKeyId = accepted.accessKeyId,
+                secretAccessKey = accepted.secretAccessKey,
+                sessionToken = accepted.sessionToken,
+                region = accepted.region,
+                endpoint = accepted.endpoint,
+                urlStyle = accepted.urlStyle,
+                createdAt = 0L,
+                updatedAt = 0L
+              )
+            )
+            // The write bumped the user's tenant's policy version (Liquibase 0052); the rbac
+            // NOTIFY has peers restore(), which reloads the credentials.
+            invalidateEffectiveCache()
+            Right(stored)
+    }
+  }
+
+  /** Remove credential `id` of user `userId` and return it. An id of another user is `NotFound`:
+    * nothing is removed.
+    */
+  def removeUserS3Credential(
+      userId: String,
+      id: String
+  ): IO[Either[SupervisorError, UserS3Credential]] = IO.blocking {
+    withCacheRecovery("removeUserS3Credential") {
+      store.getUserById(userId) match
+        case None    => Left(SupervisorError.NotFound(s"user not found: $userId"))
+        case Some(_) =>
+          store.deleteUserS3Credential(userId, id) match
+            case None =>
+              Left(SupervisorError.NotFound(s"user $userId has no S3 credential $id"))
+            case Some(c) =>
+              invalidateEffectiveCache()
+              Right(c)
     }
   }
 

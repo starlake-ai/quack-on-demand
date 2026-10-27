@@ -55,6 +55,8 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 		handle.nonce = json.Get("nonce", JsonValue::Kind::STRING).string;
 		auto ctx = json.GetOptional("ctx", JsonValue::Kind::STRING);
 		handle.ctx = ctx ? ctx->string : "";
+		auto creds = json.GetOptional("creds", JsonValue::Kind::STRING);
+		handle.creds = creds ? creds->string : "";
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;
@@ -72,6 +74,9 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 	}
 	if (!handle.ctx.empty() && (handle.ctx.size() != 64 || !IsLowerHex(handle.ctx))) {
 		throw std::invalid_argument("malformed handle: bad ctx");
+	}
+	if (!handle.creds.empty() && (handle.creds.size() != 64 || !IsLowerHex(handle.creds))) {
+		throw std::invalid_argument("malformed handle: bad creds");
 	}
 	if (handle.node != node_id) {
 		throw std::invalid_argument("handle is for another node");
