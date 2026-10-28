@@ -1,9 +1,9 @@
 // Plan enforcement on a DuckLake catalog, for a tenant user: an insert, a flush of the inlined rows and
 // reads run under verdicts, and DuckLake's own metadata queries, which bind on ClientContexts of their
 // own (CONTRACT Addendum 4 items 7 and 8), are never decided as the user's statements. A secure view
-// over a DuckLake table (in the node's memory catalog: DuckLake has none of its own) reads once the
-// manager's USE prelude recorded the connection's set paths (item 16). Exits 77 (CTest skip) when
-// ducklake cannot be installed or loaded here.
+// over a DuckLake table (in the node's memory catalog: DuckLake has none of its own) reads under the
+// session default path the handle carries, the target of the manager's USE prelude (item 22). Exits 77
+// (CTest skip) when ducklake cannot be installed or loaded here.
 
 #include "authz.hpp"
 #include "decide_client.hpp"
@@ -42,6 +42,15 @@ void Fail(const std::string &what) {
 struct FakeQuackSession : public duckdb::ClientContextState {};
 
 int64_t now_ms = 1761200000000;
+
+//! The prelude of a fresh handle for `principal_id` on a pool whose USE prelude targets `path`.
+std::string HandleOn(const std::string &principal_id, const std::string &path) {
+	qod_test::MintSpec spec;
+	spec.principal_id = principal_id;
+	spec.exp = now_ms + 60000;
+	spec.path = path;
+	return qod_test::Prelude(qod_test::MintWith(spec));
+}
 
 //! Every description the stand-in decision endpoint was asked about, oldest first.
 std::vector<std::string> decided;
@@ -97,7 +106,7 @@ int main() {
 	tina.context->registered_state->Insert(qod::kQuackSessionKey, duckdb::make_shared_ptr<FakeQuackSession>());
 	// Each statement as the router sends it: a fresh handle, then the USE prelude and the statement.
 	auto as_tina = [&](const std::string &sql) {
-		auto installed = Run(tina, qod_test::Prelude(qod_test::Mint("u-tina", now_ms + 60000)));
+		auto installed = Run(tina, HandleOn("u-tina", "lake.main"));
 		if (installed.rfind("ERROR: ", 0) == 0) {
 			return installed;
 		}
@@ -116,21 +125,15 @@ int main() {
 	}
 	expect("tina reads the flushed rows", as_tina("SELECT string_agg(v, ',' ORDER BY id) FROM t"), "a,b");
 	expect("tina reads through the secure view", as_tina("SELECT count(*) FROM memory.main.sv"), "2");
-	// Before the manager's USE prelude ran, the set paths are held to the session default: a session's
-	// own USE (sent alone) is never recorded.
+	// A path other than the handle's, a session's own leading USE included, never passes.
 	duckdb::Connection uma(db);
 	uma.context->registered_state->Insert(qod::kQuackSessionKey, duckdb::make_shared_ptr<FakeQuackSession>());
-	auto handle = [&] {
-		return Run(uma, qod_test::Prelude(qod_test::Mint("u-uma", now_ms + 60000)));
-	};
-	expect("uma installs", handle(), "true");
-	expect("uma's own USE", Run(uma, "USE lake.main"), "");
-	expect("uma's next handle", handle(), "true");
-	auto unrecorded = Run(uma, "SELECT count(*) FROM memory.main.sv");
-	if (unrecorded.find("search path differs") == std::string::npos) {
-		Fail("a secure-view read before the manager's USE prelude: " + unrecorded);
+	expect("uma installs", Run(uma, HandleOn("u-uma", "lake.main")), "true");
+	auto elsewhere = Run(uma, "USE memory.main; SELECT count(*) FROM memory.main.sv");
+	if (elsewhere.find("search path differs") == std::string::npos) {
+		Fail("a secure-view read under a path other than the handle's: " + elsewhere);
 	}
-	expect("uma's next handle", handle(), "true");
+	expect("uma's next handle", Run(uma, HandleOn("u-uma", "lake.main")), "true");
 	expect("uma reads through the secure view after the prelude",
 	       Run(uma, "USE lake.main; SELECT count(*) FROM memory.main.sv"), "2");
 

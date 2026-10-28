@@ -717,6 +717,7 @@ private:
 	void InView(const std::string &catalog, const std::string &via);
 	std::string ChangedSetting();
 	bool SessionDefaultPaths(const vector<CatalogSearchEntry> &paths);
+	bool ExpectedPaths(const vector<CatalogSearchEntry> &paths, const std::string &expected);
 	std::string ViewKind(const QualifiedName &name);
 
 	// ---- per operator
@@ -1530,10 +1531,29 @@ void Walker::CheckSession() {
 		Unsupported("a secure view while the session has changed the setting " + changed);
 	}
 	auto &paths = ClientData::Get(context_).catalog_search_path->GetSetPaths();
-	auto recorded = context_.registered_state->Get<SessionPaths>(SessionPaths::kKey);
-	if (recorded ? CatalogSearchEntry::ListToString(paths) != CatalogSearchEntry::ListToString(recorded->set_paths)
-	             : !SessionDefaultPaths(paths)) {
+	auto expected = context_.registered_state->Get<SessionPaths>(SessionPaths::kKey);
+	if (expected && !expected->expected.empty() ? !ExpectedPaths(paths, expected->expected)
+	                                            : !SessionDefaultPaths(paths)) {
 		Unsupported("a secure view while the session's search path differs from the one it was given");
+	}
+}
+
+//! Exactly one set path, naming the catalog and schema of `expected` (`<catalog>.<schema>`, as the
+//! manager's USE prelude names them), case aside as DuckDB resolves names. A malformed `expected`
+//! matches nothing.
+bool Walker::ExpectedPaths(const vector<CatalogSearchEntry> &paths, const std::string &expected) {
+	if (paths.size() != 1) {
+		return false;
+	}
+	auto lower = [](const Identifier &name) {
+		return StringUtil::Lower(Text(name));
+	};
+	try {
+		auto want = CatalogSearchEntry::Parse(expected);
+		return !IsInvalidCatalog(want.GetCatalog()) && lower(paths[0].GetCatalog()) == lower(want.GetCatalog()) &&
+		       lower(paths[0].GetSchema()) == lower(want.GetSchema());
+	} catch (std::exception &) {
+		return false;
 	}
 }
 
@@ -1940,9 +1960,8 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 	return Described {canonical, Hex(Sha256(canonical))};
 }
 
-void RecordSessionPaths(duckdb::ClientContext &context) {
-	auto paths = context.registered_state->GetOrCreate<SessionPaths>(SessionPaths::kKey);
-	paths->set_paths = duckdb::ClientData::Get(context).catalog_search_path->GetSetPaths();
+void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path) {
+	context.registered_state->GetOrCreate<SessionPaths>(SessionPaths::kKey)->expected = path;
 }
 
 std::string RedactedUrl(const std::string &text) {

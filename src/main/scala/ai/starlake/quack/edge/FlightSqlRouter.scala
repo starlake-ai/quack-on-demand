@@ -1126,22 +1126,9 @@ final class FlightSqlRouter(
     // else `dbName`: see TenantDb.catalogAlias.
     state match
       case Some(st) if !skip =>
-        Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty) match
-          case Some(db) =>
-            // The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`.
-            // `execute` already builds ValidationContext.defaultSchema from the same field, so
-            // reading a different one here made the ACL validator and the engine disagree about
-            // which schema is current for the same statement: the validator qualified unqualified
-            // refs against `defaultSchema` while the engine ran `USE <db>.<schemaName>`. With the
-            // demo's settings (defaultSchema=tpch1, schemaName=main) that surfaced as issue #112,
-            // where a native `quack:` client pushes down a schema-relative name and the node could
-            // not resolve it. Where two schemas hold a same-named table it would instead let the
-            // validator check one table while the engine read the other.
-            val schema = st.defaultSchema
-              .filter(_.nonEmpty)
-              .orElse(st.metastore.get("schemaName").filter(_.nonEmpty))
-              .getOrElse("main")
-            val use = s"USE $db.$schema;"
+        FlightSqlRouter.usePath(st) match
+          case Some(path) =>
+            val use = s"USE $path;"
             if endsTxFirst then
               // Splice into the ORIGINAL text at the start of the first statement that does not
               // end a transaction (just past its separating `;`), so what reaches the node is
@@ -1255,6 +1242,29 @@ final class FlightSqlRouter(
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  /** The target of the USE prelude [[wrapWithDefaultSchema]] sends before a pool's statements,
+    * `<alias>.<schema>`, or None when it sends none (no catalog alias). Every session handle for
+    * the pool carries it as its `path` (NodeKeys), and the node judges secure views against it
+    * (CONTRACT Addendum 4 item 22), so both read it here.
+    *
+    * The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`. `execute` already
+    * builds ValidationContext.defaultSchema from the same field, so reading a different one here
+    * made the ACL validator and the engine disagree about which schema is current for the same
+    * statement: the validator qualified unqualified refs against `defaultSchema` while the engine
+    * ran `USE <db>.<schemaName>`. With the demo's settings (defaultSchema=tpch1, schemaName=main)
+    * that surfaced as issue #112, where a native `quack:` client pushes down a schema-relative name
+    * and the node could not resolve it. Where two schemas hold a same-named table it would instead
+    * let the validator check one table while the engine read the other.
+    */
+  def usePath(st: ai.starlake.quack.ondemand.PoolState): Option[String] =
+    Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty).map { db =>
+      val schema = st.defaultSchema
+        .filter(_.nonEmpty)
+        .orElse(st.metastore.get("schemaName").filter(_.nonEmpty))
+        .getOrElse("main")
+      s"$db.$schema"
+    }
 
   /** Audit-detail keys QoD writes itself on the routed path; a validator's `Denied.meta` can never
     * set them.

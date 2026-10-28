@@ -318,6 +318,13 @@ final class PoolSupervisor(
     invalidateEffectiveCacheLocal()
     publish.rbacChanged()
 
+  /** A tenant-db came, went, or changed its metastore or data path: the database data folders, a
+    * deny set every tenant's verdicts depend on, moved, and Liquibase 0054 bumped every tenant's
+    * policy version (CONTRACT Addendum 4 item 23). Reloaded here, and on every peer, so the next
+    * handles carry the new versions and no node verdict taken before outlives the change.
+    */
+  private def dataFoldersChanged(): Unit = invalidateEffectiveCache()
+
   // ---------- Tenant authorized locations (in-engine authorization) ----------
 
   /** tenant id -> its authorized locations (Liquibase 0051), by location. Rebuilt by [[restore]]
@@ -1166,6 +1173,7 @@ final class PoolSupervisor(
           else
             store.upsertTenantDb(td)
             putTenantDbRow(td)
+            dataFoldersChanged()
             publish.topologyChanged()
             events.emit(ManagerEvent.TenantDbCreated(td.tenantId, td.name))
             Right(td)
@@ -1987,6 +1995,7 @@ final class PoolSupervisor(
                   )
               events.emit(ManagerEvent.TenantDbDeleted(name, td.name))
             }
+            if tdbs.nonEmpty then dataFoldersChanged()
             store.deleteTenant(t.id)
             tenants.remove(t.id)
             // The store cascaded the tenant's locations away.
@@ -2141,6 +2150,7 @@ final class PoolSupervisor(
                                   store.upsertTenantDb(td)
                                   recordManagedPrefix()
                                   putTenantDbRow(td)
+                                  dataFoldersChanged()
                                   publish.topologyChanged()
                                   events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                   Right(td)
@@ -2167,6 +2177,7 @@ final class PoolSupervisor(
                                     store.upsertTenantDb(td)
                                     recordManagedPrefix()
                                     putTenantDbRow(td)
+                                    dataFoldersChanged()
                                     publish.topologyChanged()
                                     events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                                     Right(td)
@@ -2174,6 +2185,7 @@ final class PoolSupervisor(
                             store.upsertTenantDb(td)
                             recordManagedPrefix()
                             putTenantDbRow(td)
+                            dataFoldersChanged()
                             publish.topologyChanged()
                             events.emit(ManagerEvent.TenantDbCreated(tenantName, td.name))
                             Right(td)
@@ -2257,6 +2269,7 @@ final class PoolSupervisor(
                   store.deleteTenantDb(td.id)
                   stampManagedPrefixDeleted(td.id, tenantDbName, purgeManagedData)
                   removeTenantDbRow(td.id)
+                  dataFoldersChanged()
                   dataPathBlocked.remove(td.id)
                   duckLakeInitPending.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
@@ -2350,6 +2363,8 @@ final class PoolSupervisor(
                 IO.blocking {
                   store.upsertTenantDb(merged)
                   putTenantDbRow(merged)
+                  if merged.metastore != td.metastore || merged.dataPath != td.dataPath then
+                    dataFoldersChanged()
                   // Node-affecting edit is the documented remediation for a boot-time
                   // DataPathMismatchException, so clear any block rather than skipping this
                   // tenant-db's pools forever. Optimistic: a wrong fix re-blocks on the next boot.

@@ -121,9 +121,13 @@ def _reader_for(filename: str) -> str | None:
 
 def _view(name: str, reader: str, target: str, hive: bool) -> str:
     # A secure view: tenants read the files through a read grant on the view, the reader running
-    # with the view owner's rights (the node's init), not with theirs on a path they never authorized.
+    # with the view owner's rights (the node's init), not with theirs on a path they never
+    # authorized. The reader is qualified: unqualified, a macro of that name a user creates in the
+    # view's schema would be what the view binds, and the node refuses a secure view naming one (so
+    # no served file could be read any more).
     args = _sql_str(target) + (", hive_partitioning = true" if hive else "")
-    return f"CREATE OR REPLACE SECURE VIEW {_sql_ident(name)} AS SELECT * FROM {reader}({args});"
+    body = f"SELECT * FROM system.main.{reader}({args})"
+    return f"CREATE OR REPLACE SECURE VIEW {_sql_ident(name)} AS {body};"
 
 
 def _parse_tables(tables: list[str]) -> list[tuple[str, str]]:

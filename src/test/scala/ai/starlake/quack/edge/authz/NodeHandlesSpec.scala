@@ -56,6 +56,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       policyVersion = 42L,
       ctx = golden("ctx"),
       creds = golden("creds"),
+      path = golden("path"),
       nowMs = 1761200000000L,
       nonce = "0123456789abcdef0123456789abcdef"
     )
@@ -65,8 +66,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "expire the handle LifetimeMs after minting and use a fresh nonce each time" in {
-    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L)
-    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L)
+    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
+    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
     val pa = HandleInspector.payload(a.text)
     pa.hcursor.get[Long]("exp") shouldBe Right(1000L + NodeHandles.LifetimeMs)
     pa.hcursor.get[String]("nonce") shouldBe Right(a.nonce)
@@ -75,9 +76,31 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     a.nonce should fullyMatch regex "[0-9a-f]{32}"
   }
 
-  it should "refuse to vouch for no principal" in {
+  it should "carry the session default path, empty for none" in {
+    val withPath =
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "acme_db.tpch1", 1000L)
+    HandleInspector.payload(withPath.text).hcursor.get[String]("path") shouldBe Right(
+      "acme_db.tpch1"
+    )
+    val none = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
+    HandleInspector.payload(none.text).hcursor.get[String]("path") shouldBe Right("")
+  }
+
+  "NodeKeys" should "stamp each pool's USE prelude target into its handles" in {
+    val pool  = PoolKey("acme", "acme_db", "bi")
+    val node  = RunningNode("n-1", pool, Role.Dual, "127.0.0.1", 1, "t", None, None, Instant.EPOCH)
+    val keys  = new NodeKeys("s" * 32, "r", paths = k => if k == pool then "acme_db.tpch1" else "")
+    val other = node.copy(poolKey = PoolKey("acme", "other_db", "bi"))
+    HandleInspector.payload(keys.handle(node, Alice)).hcursor.get[String]("path") shouldBe
+      Right("acme_db.tpch1")
+    HandleInspector.payload(keys.handle(other, Alice)).hcursor.get[String]("path") shouldBe Right(
+      ""
+    )
+  }
+
+  "mint" should "refuse to vouch for no principal" in {
     val e = intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, "", 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, "", "", 1000L)
     )
     e.getMessage should include("no principal is bound to this statement")
   }
@@ -86,12 +109,12 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 63, "A" * 64, "g" * 64, Ctx0 + "0").foreach { bad =>
       withClue(s"ctx '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, "", 1000L)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, "", "", 1000L)
         ).getMessage should include("ctx")
       }
     }
     intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, "", 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, "", "", 1000L)
     ).getMessage should include("policy version")
   }
 
@@ -99,7 +122,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 31, "a" * 33, "A" * 32, "g" * 32).foreach { bad =>
       withClue(s"nonce '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", 1000L, nonce = bad)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L, nonce = bad)
         ).getMessage should include("nonce")
       }
     }
@@ -108,7 +131,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("a" * 63, "A" * 64, "g" * 64, "a" * 65).foreach { bad =>
       withClue(s"creds '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, bad, 1000L)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, bad, "", 1000L)
         ).getMessage should include("creds")
       }
     }

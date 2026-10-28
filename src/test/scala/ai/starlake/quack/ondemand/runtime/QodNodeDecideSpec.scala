@@ -11,7 +11,9 @@ import ai.starlake.quack.edge.authz.{
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
-import ai.starlake.quack.model.{PoolKey, Tenant, TenantDbKind}
+import ai.starlake.quack.edge.FlightSqlRouter
+import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
+import ai.starlake.quack.ondemand.PoolState
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
@@ -48,18 +50,32 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
   private val FilePool   = PoolKey("acme", "acme_file", "bi")
   private val Alias      = "custom_alias"
 
-  /** Each pool's database, as the supervisor holds it: its kind and metastore. */
-  private val databases = Map(
-    MemoryPool -> (TenantDbKind.InMemory.wireValue, Map("dbName" -> "acme_mem")),
-    FilePool   -> (
-      TenantDbKind.DuckDbFile.wireValue,
-      Map(
-        "dbName"       -> "acme_file",
-        "schemaName"   -> "main",
-        "catalogAlias" -> Alias
-      )
+  /** Each pool as the supervisor holds it: its kind and effective metastore. A kind=memory database
+    * has an empty metastore, which the supervisor's effective metastore names `memory`
+    * (PoolSupervisor.effectiveMetastoreFor); the duckdb-file one is attached under a custom alias.
+    */
+  private val pools = Map(
+    MemoryPool -> PoolState(
+      MemoryPool,
+      Nil,
+      RoleDistribution(0, 0, 1),
+      Map("dbName" -> "memory"),
+      Map.empty,
+      kindWire = TenantDbKind.InMemory.wireValue
+    ),
+    FilePool -> PoolState(
+      FilePool,
+      Nil,
+      RoleDistribution(0, 0, 1),
+      Map("dbName" -> "acme_file", "schemaName" -> "main", "catalogAlias" -> Alias),
+      Map.empty,
+      kindWire = TenantDbKind.DuckDbFile.wireValue
     )
   )
+
+  /** The router's USE prelude for `pool` (FlightSqlRouter.wrapWithDefaultSchema), then `sql`. */
+  private def routed(pool: PoolKey, sql: String): String =
+    FlightSqlRouter.usePath(pools(pool)).fold(sql)(path => s"USE $path; $sql")
 
   private val secret         = NodeKeys.randomSecret()
   private val minted         = new MintedHandles()
@@ -69,7 +85,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     tenantOf = t => Option.when(t == "acme")(Tenant("acme")),
     tenantCatalogs = t => if t == "acme" then Set("acme_mem", "acme_file") else Set.empty,
     poolCatalog = key =>
-      databases.get(key).flatMap((kind, meta) => AuthzDecider.attachedCatalog(kind, meta)),
+      pools.get(key).flatMap(st => AuthzDecider.attachedCatalog(st.kindWire, st.metastore)),
     parentPoolsOf = _ => Nil,
     locations = new LocationRulesSource {
       def rulesFor(tenantId: String, userId: String): Either[String, LocationRules] =
@@ -105,7 +121,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       keys = new NodeKeys(
         secret,
         s"http://127.0.0.1:${server.getAddress.getPort}",
-        minted = Some(minted)
+        minted = Some(minted),
+        paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse("")
       )
       val app = new DecideRoute(keys, minted, decider).routes.orNotFound
       server.createContext(
@@ -157,31 +174,43 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     assume(live != null, "no qod-node binary (QOD_NODE_BIN or a local build)")
     live
 
-  /** `sql` as `who` on `pool`'s node (this one node serves both pools' handles). */
+  /** `sql` as `who` on `pool`'s node (this one node serves both pools' handles), as the router
+    * sends it: its USE prelude, then the statement.
+    */
   private def as(who: EffectiveSet, pool: PoolKey, sql: String): Either[String, List[String]] =
     val principal = NodePrincipal.of(Some(who), pool)
     val onPool    = node.node.copy(poolKey = pool)
     LiveQodNode.lines(
       client
-        .query(node.endpoint, node.token, sql, None, () => keys.prelude(onPool, principal))
+        .query(
+          node.endpoint,
+          node.token,
+          routed(pool, sql),
+          None,
+          () => keys.prelude(onPool, principal)
+        )
         .unsafeRunSync()
     )
 
+  "the router" should "send the USE prelude a real pool of each kind gets" in {
+    routed(MemoryPool, "SELECT 1") shouldBe "USE memory.main; SELECT 1"
+    routed(FilePool, "SELECT 1") shouldBe s"USE $Alias.main; SELECT 1"
+  }
+
   "a tenant user with qod_all_tables" should "read a table of a kind=memory database" in {
-    as(AllTables, MemoryPool, "SELECT v FROM memory.main.t") shouldBe Right(List("1"))
+    as(AllTables, MemoryPool, "SELECT v FROM t") shouldBe Right(List("1"))
   }
 
   it should "read a table of a duckdb-file database attached under a custom catalogAlias" in {
-    // As the router sends it: the USE prelude on the alias, then the statement.
-    as(AllTables, FilePool, s"USE $Alias.main; SELECT v FROM t") shouldBe Right(List("2"))
+    as(AllTables, FilePool, "SELECT v FROM t") shouldBe Right(List("2"))
   }
 
   it should "not read another pool's catalog: a wildcard catalog grant covers its own pool's" in {
-    as(AllTables, MemoryPool, s"SELECT v FROM $Alias.main.t").left.toOption.get should include(
-      "QoD: "
-    )
+    as(AllTables, MemoryPool, s"SELECT v FROM $Alias.main.t") shouldBe
+      Left(s"Permission Error: QoD: user:u-mia lacks grants on $Alias.main.t:read")
   }
 
   "a tenant user without a grant on the database" should "be refused by the decision pipeline" in {
-    as(OtherDb, MemoryPool, "SELECT v FROM memory.main.t").left.toOption.get should include("QoD: ")
+    as(OtherDb, MemoryPool, "SELECT v FROM t") shouldBe
+      Left("Permission Error: QoD: user:u-ned lacks grants on memory.main.t:read")
   }

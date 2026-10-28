@@ -47,9 +47,9 @@ def test_local_directory_becomes_views(tmp_path):
     assert t.kind == "memory"
     assert t.name == "data"
     assert t.data_path == ""
-    assert 'CREATE OR REPLACE SECURE VIEW "customers" AS SELECT * FROM read_parquet(' in t.init_sql
-    assert 'CREATE OR REPLACE SECURE VIEW "regions" AS SELECT * FROM read_csv(' in t.init_sql
-    assert 'CREATE OR REPLACE SECURE VIEW "orders" AS SELECT * FROM read_parquet(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "customers" AS SELECT * FROM system.main.read_parquet(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "regions" AS SELECT * FROM system.main.read_csv(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "orders" AS SELECT * FROM system.main.read_parquet(' in t.init_sql
     assert "hive_partitioning = true" in t.init_sql
     assert "_ignored" not in t.init_sql
 
@@ -65,6 +65,8 @@ def test_served_files_are_never_plain_views(tmp_path):
     t = resolve(str(data), data_root=tmp_path)
     views = [line for line in t.init_sql.splitlines() if " VIEW " in line]
     assert views and all(v.startswith("CREATE OR REPLACE SECURE VIEW ") for v in views)
+    # The reader is qualified: no macro a user creates in the view's schema can stand in for it.
+    assert all(" AS SELECT * FROM system.main.read_" in v for v in views)
 
 def test_empty_directory_is_an_error(tmp_path):
     empty = tmp_path / "empty"

@@ -112,9 +112,10 @@ object NodeHandles:
 
   /** The handle for one statement on `nodeId`, minted by `replica` (the URL nodes call back for
     * verdicts) for `principal` on `pool` at `nowMs`, carrying the tenant's `policyVersion`, the
-    * session's `ctx` ([[contextDigest]]) and the principal's S3 credential digest `creds`
-    * (`UserS3Credentials.digestOf`, empty for none). Refuses [[NodePrincipal.Unbound]]: there is no
-    * one to vouch for.
+    * session's `ctx` ([[contextDigest]]), the principal's S3 credential digest `creds`
+    * (`UserS3Credentials.digestOf`, empty for none) and the session default `path` the node expects
+    * (`FlightSqlRouter.usePath`, the target of the pool's USE prelude; empty when the router sends
+    * none). Refuses [[NodePrincipal.Unbound]]: there is no one to vouch for.
     */
   def mint(
       secret: String,
@@ -125,6 +126,7 @@ object NodeHandles:
       policyVersion: Long,
       ctx: String,
       creds: String,
+      path: String,
       nowMs: Long,
       nonce: String = newNonce()
   ): MintedHandle =
@@ -150,6 +152,7 @@ object NodeHandles:
         "policyVersion" -> Json.fromLong(policyVersion),
         "ctx"           -> Json.fromString(ctx),
         "creds"         -> Json.fromString(creds),
+        "path"          -> Json.fromString(path),
         "nonce"         -> Json.fromString(nonce),
         "exp"           -> Json.fromLong(exp)
       )

@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.authz
 
-import ai.starlake.quack.model.RunningNode
+import ai.starlake.quack.model.{PoolKey, RunningNode}
 
 import java.security.SecureRandom
 import java.util.Base64
@@ -12,7 +12,11 @@ import java.util.Base64
   * credentials, digested into every handle; `issued` the registry of minted nonces the credentials
   * endpoint answers (None: nothing is recorded, so every credentials fetch is refused as expired);
   * `minted`, the registry of the contexts handles were minted with (None: nothing is registered, so
-  * every decide call for a user statement is refused as expired).
+  * every decide call for a user statement is refused as expired); `paths`, each pool's session
+  * default path (`FlightSqlRouter.usePath`, empty when the router sends no USE prelude), carried in
+  * every handle so the node judges secure views against it. The default, empty for every pool,
+  * makes the node hold every connection to the session default, so a secure view read after a USE
+  * prelude is refused, never admitted.
   */
 final class NodeKeys(
     secret: String,
@@ -21,7 +25,8 @@ final class NodeKeys(
     versions: PolicyVersions = PolicyVersions.zero,
     creds: UserS3Credentials = UserS3Credentials.none,
     issued: Option[IssuedHandles] = None,
-    minted: Option[MintedHandles] = None
+    minted: Option[MintedHandles] = None,
+    paths: PoolKey => String = _ => ""
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
@@ -47,6 +52,7 @@ final class NodeKeys(
       policyVersion = versions.current(node.poolKey.tenant),
       ctx = ctx,
       creds = if principal.system then "" else creds.digest(principal.id),
+      path = paths(node.poolKey),
       nowMs = clock()
     )
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.

@@ -45,11 +45,11 @@ const std::string kNonce = "0123456789abcdef0123456789abcdef";
 
 const std::string kCtx(64, 'c');
 
-//! A handle payload; `members` goes right before "nonce". Node protocol 3: every handle carries ctx and
-//! creds.
+//! A handle payload; `members` goes right before "nonce". Node protocol 3: every handle carries ctx,
+//! creds and path.
 std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000,
                     const std::string &tenant = "\"acme\"",
-                    const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\"") {
+                    const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"") {
 	return std::string("{\"v\":1,\"node\":\"") + node +
 	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
 	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
@@ -60,14 +60,20 @@ std::string Sign(const std::string &payload, const std::string &key = kKey) {
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(key, payload));
 }
 
-//! A handle with the given ctx member (raw JSON) and an empty creds.
+//! A handle with the given ctx member (raw JSON), an empty creds and an empty path.
 std::string PayloadWithCtx(const std::string &ctx_json) {
-	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":" + ctx_json + ",\"creds\":\"\"");
+	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":" + ctx_json + ",\"creds\":\"\",\"path\":\"\"");
 }
 
-//! A handle with a valid ctx and the given creds member (raw JSON).
+//! A handle with a valid ctx, the given creds member (raw JSON) and an empty path.
 std::string PayloadWithCreds(const std::string &creds_json) {
-	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\",\"creds\":" + creds_json);
+	return Payload(kNode, kNow + 60000, "\"acme\"",
+	               ",\"ctx\":\"" + kCtx + "\",\"creds\":" + creds_json + ",\"path\":\"\"");
+}
+
+//! A handle with a valid ctx, an empty creds and the given path members (raw JSON, none: "").
+std::string PayloadWithPath(const std::string &path_members) {
+	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\"" + path_members);
 }
 
 // The golden handle NodeHandlesSpec (Scala) mints from fixed inputs, and its prelude: both sides agree
@@ -79,7 +85,7 @@ void VerifyGolden(const std::string &path) {
 		failures++;
 		return;
 	}
-	std::string line, key_hex, text, prelude, ctx, creds;
+	std::string line, key_hex, text, prelude, ctx, creds, use_path;
 	while (std::getline(in, line)) {
 		if (line.rfind("key=", 0) == 0) {
 			key_hex = line.substr(4);
@@ -89,6 +95,8 @@ void VerifyGolden(const std::string &path) {
 			ctx = line.substr(4);
 		} else if (line.rfind("creds=", 0) == 0) {
 			creds = line.substr(6);
+		} else if (line.rfind("path=", 0) == 0) {
+			use_path = line.substr(5);
 		} else if (line.rfind("prelude=", 0) == 0) {
 			prelude = line.substr(8);
 		}
@@ -106,6 +114,7 @@ void VerifyGolden(const std::string &path) {
 		       "golden version, nonce, exp");
 		Expect(!ctx.empty() && handle.ctx == ctx, "golden ctx");
 		Expect(!creds.empty() && handle.creds == creds, "golden creds");
+		Expect(!use_path.empty() && handle.path == use_path, "golden path");
 	} catch (std::invalid_argument &error) {
 		std::cerr << "FAIL: the golden handle does not verify: " << error.what() << std::endl;
 		failures++;
@@ -162,7 +171,8 @@ int main(int argc, char **argv) {
 	              "bad base64");
 	auto no_principal = std::string("{\"v\":1,\"node\":\"") + kNode +
 	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
-	                    "\",\"creds\":\"\",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
+	                    "\",\"creds\":\"\",\"path\":\"\",\"nonce\":\"" + kNonce +
+	                    "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
 	auto v2 = Payload();
 	v2.replace(v2.find("\"v\":1"), 5, "\"v\":2");
@@ -223,7 +233,7 @@ int main(int argc, char **argv) {
 	auto without_ctx = std::string("{\"v\":1,\"node\":\"") + kNode +
 	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
 	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
-	                   "\"policyVersion\":42,\"creds\":\"\",\"nonce\":\"" +
+	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"nonce\":\"" +
 	                   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(without_ctx), kKey, kNode, kNow); }, "ctx", "a handle without ctx");
 	auto null_ctx = without_ctx;
@@ -242,12 +252,23 @@ int main(int argc, char **argv) {
 	// ---- node protocol 3: and the digest of the principal's S3 credentials (decision 23)
 	ExpectRefused(
 	    [&] {
-		    qod::VerifyHandle(Sign(Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\"")), kKey, kNode,
-		                      kNow);
+		    qod::VerifyHandle(Sign(Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\",\"path\":\"\"")),
+		                      kKey, kNode, kNow);
 	    },
 	    "creds", "a handle without creds");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("null")), kKey, kNode, kNow); }, "creds", "a null creds");
 	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).creds.empty(), "an empty creds is no credential");
+	// ---- node protocol 3: and the session default path the manager expects (CONTRACT Addendum 4 item 22)
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithPath("")), kKey, kNode, kNow); }, "path",
+	              "a handle without path");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithPath(",\"path\":null")), kKey, kNode, kNow); }, "path",
+	              "a null path");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithPath(",\"path\":7")), kKey, kNode, kNow); }, "path",
+	              "a path that is no string");
+	Expect(qod::VerifyHandle(Sign(PayloadWithPath(",\"path\":\"acme_db.main\"")), kKey, kNode, kNow).path ==
+	           "acme_db.main",
+	       "the handle's path");
+	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).path.empty(), "an empty path: no USE prelude");
 
 	if (failures == 0) {
 		std::cout << "handle_test: all passed" << std::endl;

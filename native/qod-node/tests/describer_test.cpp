@@ -255,7 +255,7 @@ void CheckLocationHelpers() {
 
 //! Session state a secure view's body depends on, and failures inside Describe:
 //!  - a time-travel read through a boundary is refused (Addendum 4 item 12);
-//!  - the set paths are held to the session default, then to what RecordSessionPaths recorded (item 11 a);
+//!  - the set paths are held to the session default, then to the expected path (items 11 a and 22);
 //!  - an exception other than a refusal becomes "QoD: statement could not be described" (review M5).
 void CheckSessionState() {
 	duckdb::DuckDB db(nullptr);
@@ -282,13 +282,19 @@ void CheckSessionState() {
 		}
 	};
 	qod::RunStrict(con, "USE m1.main", "use");
-	read("another set path, none recorded", paths_refused);
-	qod::RecordSessionPaths(*con.context);
-	read("the recorded set path", "");
+	read("another set path, none expected", paths_refused);
+	qod::ExpectSessionPath(*con.context, "m1.main");
+	read("the expected path", "");
+	qod::ExpectSessionPath(*con.context, "M1.Main");
+	read("the expected path, case aside", "");
 	qod::RunStrict(con, "USE memory.main", "use");
-	read("a set path other than the recorded one", paths_refused);
-	qod::RecordSessionPaths(*con.context);
-	read("the recorded set path, again", "");
+	read("a set path other than the expected one", paths_refused);
+	qod::ExpectSessionPath(*con.context, "memory.main");
+	read("the expected path, again", "");
+	qod::ExpectSessionPath(*con.context, "main");
+	read("an expected path without its catalog matches nothing", paths_refused);
+	qod::ExpectSessionPath(*con.context, "");
+	read("no expected path: the session default", "");
 
 	// A boundary read AT another snapshot, built by hand: an in-memory database has no time travel.
 	con.BeginTransaction();

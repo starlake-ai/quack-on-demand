@@ -486,6 +486,13 @@ object Main extends IOApp with LazyLogging:
     // The authorization context of every handle this replica mints, by nonce: the decision
     // endpoint judges a node's statement with the context its handle was minted for.
     val mintedHandles = new ai.starlake.quack.edge.authz.MintedHandles()
+    // Each pool's session default path, the target of the router's USE prelude, carried in every
+    // handle (CONTRACT Addendum 4 item 22). Read from the supervisor, built after the keys: until it
+    // is set every handle carries none, and the node admits no secure view read after a USE.
+    val usePaths =
+      new java.util.concurrent.atomic.AtomicReference[ai.starlake.quack.model.PoolKey => String](
+        _ => ""
+      )
     // The node-key secret (QOD_NODE_KEY_SECRET, else the control plane's, created on first boot):
     // every node key derives from it, so it must outlive this process and agree across replicas.
     val nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
@@ -499,7 +506,8 @@ object Main extends IOApp with LazyLogging:
             versions = policyVersions,
             creds = servedUserS3,
             issued = Some(issuedHandles),
-            minted = Some(mintedHandles)
+            minted = Some(mintedHandles),
+            paths = key => usePaths.get()(key)
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -652,6 +660,7 @@ object Main extends IOApp with LazyLogging:
       sharedUserS3 = Some(userS3)
     )
     supRef.set(sup)
+    usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
     // The tenants' local folders, the users' S3 scopes and every database data folder, read live
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)

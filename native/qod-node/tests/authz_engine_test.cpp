@@ -582,6 +582,20 @@ int main() {
 	}
 	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's own handle");
 	ExpectQuery(frank, "SELECT 12", "", "makes it frank's again");
+	ExpectQuery(frank, "EXPLAIN ANALYZE SELECT * FROM forbidden", "QoD: denied by test",
+	            "EXPLAIN ANALYZE runs what it wraps: decided like it");
+	// A prepared statement DuckDB rebinds because the catalog changed is described and decided again:
+	// the name it read now names a view over a table the endpoint refuses.
+	ExpectQuery(internal, "CREATE TABLE swap AS SELECT 1 AS x", "", "a table frank may read");
+	auto swapped = frank.Prepare("SELECT x FROM swap");
+	Check(swapped->HasError() ? swapped->GetError() : "", swapped->HasError(), "", "frank prepares over it");
+	ExpectQuery(internal, "DROP TABLE swap", "", "the table goes");
+	ExpectQuery(internal, "CREATE VIEW swap AS SELECT x FROM forbidden", "", "a view over forbidden takes its name");
+	if (!swapped->HasError()) {
+		auto executed = swapped->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "QoD: denied by test",
+		      "the rebound statement is decided again, and refused");
+	}
 
 	// ---- superusers and the manager are admitted on the node, and still meet the local refusals
 	duckdb::Connection boss(db);
@@ -599,38 +613,41 @@ int main() {
 	ExpectAsked(before, false, "a system statement");
 	ExpectQuery(manager, "RESET disabled_optimizers", "cannot be changed", "nor can the manager's statements");
 
-	// ---- the set paths a secure view is judged against are recorded once, after the manager's USE
-	// prelude (CONTRACT Addendum 4 items 11 and 16): the router sends `USE <db>.<schema>; <statement>`
-	// as one submission, a session's own USE alone.
+	// ---- secure views are judged against the session default path the handle carries (CONTRACT
+	// Addendum 4 items 11 and 22), the target of the router's USE prelude; nothing a statement does
+	// changes what passes
 	ExpectQuery(internal, "ATTACH ':memory:' AS lake", "", "a second catalog");
 	ExpectQuery(internal, "CREATE SCHEMA lake.other", "", "with another schema");
 	ExpectQuery(internal, "CREATE TABLE lake.main.t AS SELECT 5 AS id", "", "a base table");
 	ExpectQuery(internal, "CREATE SECURE VIEW lake.main.sv AS SELECT id FROM lake.main.t", "", "a secure view over it");
+	MintSpec on_lake;
+	on_lake.principal_id = "u-nina";
+	on_lake.path = "lake.main";
+	auto lake_handle = [&] {
+		on_lake.exp = now_ms + 60000;
+		return Prelude(MintWith(on_lake));
+	};
 	duckdb::Connection nina(db);
 	TagAsQuackSession(nina);
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "nina installs");
-	ExpectQuery(nina, "USE lake.main", "", "nina's own USE, first on her connection");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
-	ExpectQuery(nina, "SELECT id FROM lake.main.sv", "search path differs",
-	            "her USE did not become the record: the session default still holds");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, lake_handle(), "", "nina installs, her pool's path lake.main");
+	ExpectQuery(nina, "USE lake.other; SELECT id FROM lake.main.sv", "search path differs",
+	            "her own leading USE, first on her connection, is not the expected path");
+	ExpectQuery(nina, lake_handle(), "", "her next handle");
 	ExpectQuery(nina, "USE lake.main; SELECT id FROM sv", "", "a secure-view read after the manager's USE prelude");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
-	ExpectQuery(nina, "USE lake.other", "", "nina moves her search path");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
-	ExpectQuery(nina, "SELECT id FROM lake.main.sv", "search path differs", "a secure-view read off the recorded path");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, lake_handle(), "", "her next handle");
 	ExpectQuery(nina, "USE lake.main; USE lake.other; SELECT id FROM lake.main.sv", "search path differs",
-	            "a USE batched after the manager's moves off the record");
-	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
-	ExpectQuery(nina, "USE lake.main; SELECT id FROM sv", "", "the manager's prelude puts the recorded path back");
-	duckdb::Connection otto(db);
-	TagAsQuackSession(otto);
-	ExpectQuery(otto, Prelude(Fresh("u-otto")), "", "otto installs");
-	ExpectQuery(otto, "BEGIN", "", "otto opens a transaction");
-	ExpectQuery(otto, Prelude(Fresh("u-otto")), "", "his next handle");
-	ExpectQuery(otto, "COMMIT; USE lake.main; SELECT id FROM sv", "",
-	            "the prelude spliced after a leading COMMIT is the manager's too");
+	            "a USE batched after the manager's");
+	ExpectQuery(nina, lake_handle(), "", "her next handle");
+	ExpectQuery(nina, "BEGIN", "", "nina opens a transaction");
+	ExpectQuery(nina, lake_handle(), "", "her next handle");
+	ExpectQuery(nina, "COMMIT; USE lake.main; SELECT id FROM sv", "", "the prelude spliced after a leading COMMIT");
+	ExpectQuery(nina, lake_handle(), "", "her next handle");
+	ExpectQuery(nina, "USE lake.main; SELECT id FROM sv", "", "the manager's prelude puts the expected path back");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "a handle whose pool has no USE prelude (empty path)");
+	ExpectQuery(nina, "USE lake.main; SELECT id FROM lake.main.sv", "search path differs",
+	            "with an empty path only the session default passes");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle, still no path");
+	ExpectQuery(nina, "USE memory.main; SELECT id FROM lake.main.sv", "", "the session default does");
 
 	// The prelude itself is never described: its argument is a credential. (dave's macros named
 	// qod_session are objects, not this table function entry.)

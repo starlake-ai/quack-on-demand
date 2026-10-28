@@ -29,9 +29,9 @@ struct Principal {
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
 //! {"v":1,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
-//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"nonce":..,"exp":..}, every member required ("ctx"
-//! and "creds" since node protocol 3). The MAC covers the payload bytes as sent, so no canonical form
-//! has to agree between the two sides.
+//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"nonce":..,"exp":..}, every member
+//! required ("ctx", "creds" and "path" since node protocol 3). The MAC covers the payload bytes as
+//! sent, so no canonical form has to agree between the two sides.
 struct Handle {
 	std::string node;
 	//! The manager replica that minted it, which decides this statement's verdicts.
@@ -47,6 +47,10 @@ struct Handle {
 	//! none; required, as a string, since node protocol 3. The node fetches the credentials when it
 	//! differs from the one its connection secrets were made from (Task 7).
 	std::string creds;
+	//! The session default path the manager expects on the connection, `<catalog>.<schema>`: the
+	//! target of the USE prelude the router sends before the pool's statements, empty when it sends
+	//! none. Required, as a string, since node protocol 3 (CONTRACT Addendum 4 item 22).
+	std::string path;
 	std::string nonce;
 	//! Epoch milliseconds.
 	int64_t exp = 0;

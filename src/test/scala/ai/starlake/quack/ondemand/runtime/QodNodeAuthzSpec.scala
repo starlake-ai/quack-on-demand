@@ -45,7 +45,7 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         dir,
         s"""CREATE TABLE answers AS SELECT 42 AS v;
            |COPY (SELECT 7 AS n) TO '$served' (FORMAT parquet);
-           |CREATE OR REPLACE SECURE VIEW "served" AS SELECT * FROM read_parquet('$served');
+           |CREATE OR REPLACE SECURE VIEW "served" AS SELECT * FROM system.main.read_parquet('$served');
            |INSTALL ducklake;
            |LOAD ducklake;
            |ATTACH 'ducklake:$root/lake.ducklake' AS lake (DATA_PATH '$root/lake_data/');
@@ -57,8 +57,8 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   override def afterAll(): Unit =
     try
-      if live != null then live.stop()
-      decide.stop()
+      try if live != null then live.stop()
+      finally decide.stop()
       allocator.close()
     finally
       // The node is gone (stop waits for it), so nothing holds the directory any more.
@@ -312,20 +312,23 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     decide.principals.drop(before).distinct shouldBe List("u-1")
   }
 
-  "a secure view" should "be read after the manager's USE prelude, never after a session's own USE" in {
+  "a secure view" should "be read under the path the handle carries, never one a statement set" in {
     assume(lakeAttached, "the ducklake extension is not installed on this host")
+    // The keys of a pool whose USE prelude targets lake.main: every handle carries that path.
+    val onLake = new NodeKeys(secret, decide.url, paths = _ => "lake.main")
     withConnection { conn =>
       def as(sql: String): Either[String, String] =
-        first(conn, node.keys.prelude(node.node, Alice)) shouldBe Right("true")
+        first(conn, onLake.prelude(node.node, Alice)) shouldBe Right("true")
         first(conn, sql)
-      // Her own USE, sent alone, is not the manager's prelude: the set paths are held to the
-      // session default, which lake.main is not.
-      as("USE lake.main") shouldBe Right("")
-      as("SELECT count(*) FROM memory.main.lake_sv").left.toOption.get should include(
-        "search path differs"
-      )
-      // The manager's USE prelude records them, once for the connection.
+      // Her own leading USE, first on the connection, is not the path the handle names.
+      as("USE memory.main; SELECT count(*) FROM memory.main.lake_sv").left.toOption.get should
+        include("search path differs")
+      // The manager's USE prelude sets the path the handle names.
       as("USE lake.main; SELECT count(*) FROM memory.main.lake_sv").isRight shouldBe true
+      as(
+        "USE lake.main; USE memory.main; SELECT 1 FROM memory.main.lake_sv"
+      ).left.toOption.get should
+        include("search path differs")
       as("USE lake.main; SELECT 1 FROM memory.main.lake_sv LIMIT 1").isRight shouldBe true
     }
   }

@@ -227,8 +227,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     // The node stops (and its directory goes) whether or not the front door stopped cleanly.
     try if server != null then server.stop()
     finally
-      if live != null then live.stop()
-      decide.stop()
+      try if live != null then live.stop()
+      finally decide.stop()
       if dir != null then
         Thread.sleep(200)
         try

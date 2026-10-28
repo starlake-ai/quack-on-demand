@@ -25,8 +25,6 @@
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_prepare.hpp"
-#include "duckdb/planner/operator/logical_set.hpp"
-#include "duckdb/planner/operator/logical_transaction.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
 #include <iostream>
@@ -97,10 +95,9 @@ public:
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce,
-		                      handle.ctx,       text,                  handle.replica};
+		                      handle.ctx,       text,                  handle.replica,    handle.path};
 		installed_ = true;
 		authz_ = &authz;
-		paths_watch_ = paths_recorded_ ? PathsWatch::IDLE : PathsWatch::WATCHING;
 	}
 
 	//! Called first by every qod_session bind: until this prelude succeeds whole (Install, then
@@ -109,7 +106,6 @@ public:
 	void BeginPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
 		ready_ = false;
-		paths_watch_ = PathsWatch::IDLE;
 	}
 
 	//! True when a principal is installed, its handle has not expired at `now_ms`, and the last prelude
@@ -240,41 +236,6 @@ public:
 		       !RebindRequired(&*pending_, current_, authz_->Now());
 	}
 
-	//! Follows the statements a handle runs, to record the connection's set paths once, right after the
-	//! manager's USE prelude (CONTRACT Addendum 4 items 11 and 16): true when `plan`, bound in
-	//! post_bind, is the one to record them before. The router prepends `USE
-	//! <db>.<schema>;` to every submission it does not send alone, after the transaction-ending
-	//! statements it opens with (FlightSqlRouter.wrapWithDefaultSchema), and a fresh session handle
-	//! precedes every PREPARE the manager sends: so the manager's USE is the first statement under its
-	//! handle that does not end a transaction, and another statement follows it under the same handle.
-	//! A session's own USE is sent alone, so a prelude, never a statement of its handle, follows it. The
-	//! paths are recorded at the bind of that next statement, after the USE ran and before the
-	//! statement does; never at qod_session, which the manager sends before every statement, the USE
-	//! prelude's included.
-	bool RecordPathsBefore(LogicalOperator &plan) {
-		std::lock_guard<std::mutex> guard(lock_);
-		if (!query_active_ || paths_recorded_) {
-			return false;
-		}
-		if (paths_watch_ == PathsWatch::USE_RAN && query_seq_ != use_seq_) {
-			paths_watch_ = PathsWatch::IDLE;
-			paths_recorded_ = true;
-			return true;
-		}
-		if (paths_watch_ == PathsWatch::WATCHING) {
-			if (EndsTransaction(plan)) {
-				return false;
-			}
-			if (plan.type == LogicalOperatorType::LOGICAL_SET && plan.Cast<LogicalSet>().name == "schema") {
-				paths_watch_ = PathsWatch::USE_RAN;
-				use_seq_ = query_seq_;
-			} else {
-				paths_watch_ = PathsWatch::IDLE;
-			}
-		}
-		return false;
-	}
-
 	// ---- ClientContextState
 	//! True arms OnFinalizePrepare: DuckDB calls it only when a state can request a rebind
 	//! (duckdb: src/main/client_context.cpp, CreatePreparedStatement).
@@ -285,7 +246,6 @@ public:
 	void QueryBegin(ClientContext &context) override {
 		std::lock_guard<std::mutex> guard(lock_);
 		query_active_ = true;
-		query_seq_++;
 		pending_.reset();
 	}
 
@@ -293,17 +253,16 @@ public:
 		std::lock_guard<std::mutex> guard(lock_);
 		query_active_ = false;
 		pending_.reset();
-		// A USE that failed changed nothing: no paths are recorded after it.
-		if (paths_watch_ == PathsWatch::USE_RAN && use_seq_ == query_seq_ && error && error->HasError()) {
-			paths_watch_ = PathsWatch::IDLE;
-		}
 	}
 
 	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared_statement,
 	                                  PreparedStatementMode mode) override {
 		std::lock_guard<std::mutex> guard(lock_);
 		auto privileged = installed_ && (current_.principal.superuser || current_.principal.system);
-		auto refusal = FinalizeRefusal(installed_, privileged, pending_.has_value());
+		// A verdict for this session, still valid: not one left by another principal, policy version or
+		// context, nor one that expired.
+		auto has_verdict = pending_.has_value() && authz_ && !RebindRequired(&*pending_, current_, authz_->Now());
+		auto refusal = FinalizeRefusal(installed_, privileged, has_verdict);
 		pending_.reset();
 		if (!refusal.empty()) {
 			throw PermissionException(refusal);
@@ -326,23 +285,10 @@ public:
 	}
 
 private:
-	//! COMMIT or ROLLBACK: the router puts its USE prelude after the ones a submission opens with.
-	static bool EndsTransaction(LogicalOperator &plan) {
-		if (plan.type != LogicalOperatorType::LOGICAL_TRANSACTION) {
-			return false;
-		}
-		auto type = plan.Cast<LogicalTransaction>().info->type;
-		return type == TransactionType::COMMIT || type == TransactionType::ROLLBACK;
-	}
-
 	struct Stored {
 		weak_ptr<PreparedStatementData> statement;
 		Admitted admitted;
 	};
-
-	//! Where RecordPathsBefore is in the statements of the current handle: looking for its first one
-	//! that does not end a transaction, past a USE that ran first, or done.
-	enum class PathsWatch { WATCHING, USE_RAN, IDLE };
 
 	std::mutex lock_;
 	bool installed_ = false;
@@ -350,12 +296,6 @@ private:
 	//! The node's checks (its clock), set at the first install; outlives the connection.
 	NodeAuthz *authz_ = nullptr;
 	bool query_active_ = false;
-	//! Counts the queries (statements) this connection has begun; use_seq_ is the USE prelude's.
-	uint64_t query_seq_ = 0;
-	uint64_t use_seq_ = 0;
-	PathsWatch paths_watch_ = PathsWatch::IDLE;
-	//! RecordSessionPaths ran for this connection: once for its life.
-	bool paths_recorded_ = false;
 	std::optional<Admitted> pending_;
 	std::map<const PreparedStatementData *, Stored> prepared_;
 	//! The digest the user credential secrets were last made from, their prints (UserSecretPrints)
@@ -436,6 +376,9 @@ unique_ptr<FunctionData> SessionBind(ClientContext &context, TableFunctionBindIn
 	// the connection's s3:// locations against their scopes.
 	session->SyncCredentials(context, authz, handle, text);
 	authz.RecordCredentialScopes(handle.nonce, session->CredentialScopes(), handle.exp);
+	// The session default path the manager expects (CONTRACT Addendum 4 item 22), signed with the
+	// handle: secure views are judged against it, never against a path a statement set.
+	ExpectSessionPath(context, handle.path);
 	return_types.push_back(LogicalType::BOOLEAN);
 	names.emplace_back("installed");
 	return make_uniq<TableFunctionData>();
@@ -651,10 +594,8 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 }
 
 //! Describes `plan` and makes it the statement's: the verdict already held when it covers this plan,
-//! else a new one. Throws kNoPrincipal on a quack connection whose principal is not current. From
-//! post_bind it first records the connection's set paths when the manager's USE prelude just ran
-//! (SessionState::RecordPathsBefore).
-void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan, bool post_bind) {
+//! else a new one. Throws kNoPrincipal on a quack connection whose principal is not current.
+void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
 	Installed installed;
 	if (!session || !session->Snapshot(gate.authz->Now(), installed)) {
@@ -663,9 +604,6 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan, bool pos
 	if (IsPrelude(plan)) {
 		session->AdmitPrelude();
 		return;
-	}
-	if (post_bind && session->RecordPathsBefore(plan)) {
-		RecordSessionPaths(context);
 	}
 	auto text = session->StatementText(context);
 	auto described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
@@ -691,7 +629,7 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		}
 		return;
 	}
-	Enforce(context, gate, *statement.plan, true);
+	Enforce(context, gate, *statement.plan);
 }
 
 //! Extensions loaded after qod-node may register a post_bind of their own that changes the plan
@@ -701,7 +639,7 @@ void PreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &pl
 	if (!plan || !IsQuackSession(context)) {
 		return;
 	}
-	Enforce(context, *static_cast<GateOptimizerInfo &>(*input.info).gate, *plan, false);
+	Enforce(context, *static_cast<GateOptimizerInfo &>(*input.info).gate, *plan);
 }
 
 } // namespace

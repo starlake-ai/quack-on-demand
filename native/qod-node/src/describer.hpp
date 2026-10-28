@@ -35,20 +35,22 @@ Handling ExpressionHandling(duckdb::ExpressionClass expression_class);
 //! switches that would let a plan reach execution in another shape than the one described.
 bool IsLockedSetting(const std::string &name);
 
-//! The catalog set paths (USE, SET schema, SET search_path) a connection had when qod_session
-//! installed its principal (CONTRACT Addendum 4 item 11): a statement with a secure view is refused
-//! while the connection's set paths differ from them. Task 10 records them (RecordSessionPaths); a
-//! connection with none recorded is held to the session default, no set path or the database it
-//! connected to with its default schema.
+//! The session default path the manager expects on a connection (CONTRACT Addendum 4 items 11 and
+//! 22): the `path` of the handle qod_session last installed, `<catalog>.<schema>`, the target of the
+//! USE prelude the router sends before the connection's statements, or empty when it sends none. A
+//! statement with a secure view is refused unless the connection's set paths (USE, SET schema, SET
+//! search_path) are exactly that one entry; with an empty or no expected path, unless they are the
+//! session default (no set path, or the database the connection connected to with its default
+//! schema).
 class SessionPaths : public duckdb::ClientContextState {
 public:
 	static constexpr const char *kKey = "qod_session_paths";
 
-	duckdb::vector<duckdb::CatalogSearchEntry> set_paths;
+	std::string expected;
 };
 
-//! Records the set paths `context` has now as its SessionPaths.
-void RecordSessionPaths(duckdb::ClientContext &context);
+//! Makes `path` (a verified handle's) the session default path expected on `context`.
+void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path);
 
 //! Describes `plan`, bound on `context` for `principal`.
 //!
@@ -74,7 +76,7 @@ void RecordSessionPaths(duckdb::ClientContext &context);
 //! or ambiguously; and a statement with a
 //! secure view on a session holding user variables, temporary entries other than tables and
 //! sequences, a changed setting other than schema and search_path, or set paths other than its
-//! SessionPaths (getvariable() folds to a constant at bind, and a temporary macro, view or type, a
+//! expected SessionPaths (getvariable() folds to a constant at bind, and a temporary macro, view or type, a
 //! setting or a search path steers a body that runs with its owner's rights without a trace in the
 //! plan). For a principal that is neither superuser nor system, also a location the node cannot
 //! resolve. Anything else that goes wrong while describing is refused as "QoD: statement could not be

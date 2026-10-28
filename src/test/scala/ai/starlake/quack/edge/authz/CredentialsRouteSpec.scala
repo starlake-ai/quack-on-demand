@@ -207,6 +207,7 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
         0L,
         NodeHandles.EmptyContextDigest,
         "",
+        "",
         f.clock.get(),
         nonce = nonce
       )

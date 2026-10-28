@@ -331,3 +331,48 @@ class PolicyVersionTriggerSpec extends AnyFlatSpec with Matchers:
       rs.getInt(1) shouldBe 0
     finally st.close()
   }
+
+  /** Runs `sql` and checks that every tenant's version moved above every version issued before. */
+  private def bumpsEveryTenant(c: Connection)(sql: String): Unit =
+    val before = versions(c)
+    val issued = lastIssued(c)
+    exec(c)(sql)
+    val after = versions(c)
+    before.keySet.foreach { t =>
+      withClue(s"$t after $sql: ")(after(t) should be > issued)
+      withClue(s"$t after $sql: ")(after(t) should be > before(t))
+    }
+
+  // Liquibase 0054 (CONTRACT Addendum 4 item 23): the data folders are a deny set every tenant's
+  // verdicts depend on.
+  "a database data folder" should "bump every tenant when a tenant-db comes, goes or moves" in
+    withDb { (c, _) =>
+      bumpsEveryTenant(c)(
+        "INSERT INTO qodstate_tenant_db (id, tenant_id, name, kind, data_path) " +
+          "VALUES ('td-1', 'acme', 'acme_db', 'ducklake', '/data/acme_db/')"
+      )
+      bumpsEveryTenant(c)(
+        "UPDATE qodstate_tenant_db SET data_path = '/data/elsewhere/' WHERE id = 'td-1'"
+      )
+      bumpsEveryTenant(c)(
+        "UPDATE qodstate_tenant_db SET metastore_params = '{\"dataPath\":\"/x/\"}'::jsonb " +
+          "WHERE id = 'td-1'"
+      )
+      delta(c)("UPDATE qodstate_tenant_db SET disabled = true WHERE id = 'td-1'") shouldBe Nothing
+      bumpsEveryTenant(c)("DELETE FROM qodstate_tenant_db WHERE id = 'td-1'")
+    }
+
+  it should "bump every tenant when a managed prefix is added, purged or removed" in withDb {
+    (c, _) =>
+      bumpsEveryTenant(c)(
+        "INSERT INTO qodstate_managed_prefix (id, tenant, tenant_db_name, prefix, created_at) " +
+          "VALUES ('mp-1', 'acme', 'acme_db', 's3://b/acme_db-01234567/', now())"
+      )
+      // A tombstone keeps the prefix in the deny set until it is purged.
+      delta(c)(
+        "UPDATE qodstate_managed_prefix SET deleted_at = now(), purge_eligible_at = now() " +
+          "WHERE id = 'mp-1'"
+      ) shouldBe Nothing
+      bumpsEveryTenant(c)("UPDATE qodstate_managed_prefix SET purged_at = now() WHERE id = 'mp-1'")
+      bumpsEveryTenant(c)("DELETE FROM qodstate_managed_prefix WHERE id = 'mp-1'")
+  }

@@ -48,6 +48,8 @@ struct Installed {
 	std::string handle;
 	//! The replica that minted it, which decides the connection's statements.
 	std::string replica;
+	//! The handle's path: the session default path the manager expects (CONTRACT Addendum 4 item 22).
+	std::string path;
 };
 
 //! What one verdict admitted: the plan it was taken for and the session it holds for.

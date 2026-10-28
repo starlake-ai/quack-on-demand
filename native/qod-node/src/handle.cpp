@@ -44,6 +44,7 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 		handle.nonce = json.Get("nonce", JsonValue::Kind::STRING).string;
 		handle.ctx = json.Get("ctx", JsonValue::Kind::STRING).string;
 		handle.creds = json.Get("creds", JsonValue::Kind::STRING).string;
+		handle.path = json.Get("path", JsonValue::Kind::STRING).string;
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;

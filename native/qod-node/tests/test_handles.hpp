@@ -30,6 +30,8 @@ struct MintSpec {
 	std::string ctx = std::string(64, 'c');
 	//! The digest of the principal's S3 credentials (decision 23); empty: none.
 	std::string creds;
+	//! The session default path the manager expects (CONTRACT Addendum 4 item 22); empty: none.
+	std::string path;
 };
 
 //! A handle as `spec` says, with a fresh nonce.
@@ -43,7 +45,8 @@ inline std::string MintWith(const MintSpec &spec) {
 	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
 	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
 	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
-	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"nonce\":\"" + nonce +
+	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
+	               "\",\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(spec.exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }

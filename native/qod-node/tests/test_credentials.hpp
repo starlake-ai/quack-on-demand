@@ -27,7 +27,8 @@ inline std::string MintFrom(const std::string &replica, const std::string &princ
 	               "\",\"tenant\":" + tenant + ",\"superuser\":" + (superuser ? "true" : "false") +
 	               ",\"system\":" + (system ? "true" : "false") +
 	               "},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":1,\"ctx\":\"" + std::string(64, 'c') +
-	               "\",\"creds\":\"" + creds + "\",\"nonce\":\"" + nonce + "\",\"exp\":" + std::to_string(exp) + "}";
+	               "\",\"creds\":\"" + creds + "\",\"path\":\"\",\"nonce\":\"" + nonce +
+	               "\",\"exp\":" + std::to_string(exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }
 
