@@ -36,9 +36,15 @@ constexpr int kMaxQueryNesting = 8;
 //! resource functions, a table function in table position that is neither a judged reader or query
 //! function nor in kAdmittedTableFunctions, computed reader or COPY file names, a COPY option naming a
 //! path, a computed query() string, unknown statement forms;
+//! a call to a function function-classes.tsv classes superuser, anywhere (function_classes.hpp), and in
+//! the slots DuckDB evaluates while binding (SET values, table-function arguments, EXECUTE parameters,
+//! AT clauses, LIMIT and OFFSET, PIVOT IN lists, COLUMNS(), type expressions, unnest's parameters,
+//! CREATE VIEW bodies, ALTER TABLE ADD COLUMN, ALTER COLUMN TYPE USING, COPY options) any function not
+//! classed allowed and nextval, currval and setval (CONTRACT Addendum 4 item 9);
 //! screens a literal query() string like the outer SQL; collects every reader and COPY location
 //! (MakeLocation refusals are refusals here). A reader or query() call the tokens show but the walk did
-//! not judge is refused, so a statement form the walk does not follow fails closed. Never throws.
+//! not judge is refused, and so is a superuser-class call the tokens show anywhere, so a statement form
+//! the walk does not follow fails closed. Never throws.
 ScreenOutcome ScreenStatement(duckdb::ClientContext &context, const std::string &sql);
 
 } // namespace qod

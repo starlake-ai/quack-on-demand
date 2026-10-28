@@ -144,6 +144,7 @@ set(QOD_NODE_CORE_SOURCES
   src/crypto.cpp
   src/decide_client.cpp
   src/describer.cpp
+  src/function_classes.cpp
   src/functions_list.cpp
   src/handle.cpp
   src/http_post.cpp

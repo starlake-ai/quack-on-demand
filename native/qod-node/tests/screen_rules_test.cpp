@@ -126,7 +126,8 @@ int main() {
 	Refused("SELECT list_transform([1], lambda x: (SELECT count(*) FROM read_csv('x.csv')))", "QoD: x.csv ",
 	        "a lambda");
 	Refused("VALUES ((SELECT count(*) FROM read_csv('x.csv')))", "QoD: x.csv ", "a VALUES list");
-	Refused("SELECT * FROM t AT (VERSION => (SELECT count(*) FROM read_csv('x.csv')))", "QoD: x.csv ", "an AT clause");
+	Refused("SELECT * FROM t AT (VERSION => (SELECT count(*) FROM read_csv('x.csv')))",
+	        "QoD: read_csv is not allowed in an AT clause", "a reader in an AT clause (a bind-time slot)");
 	Refused("PIVOT read_csv('x.csv') ON c USING sum(v)", "QoD: x.csv ",
 	        "a PIVOT source (2.0 also reads its values through CREATE TYPE ... AS ENUM)");
 	Refused("INSERT INTO t SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "INSERT ... SELECT");
@@ -135,7 +136,11 @@ int main() {
 	Refused("DELETE FROM t USING read_csv('x.csv') s", "QoD: x.csv ", "DELETE ... USING");
 	Refused("MERGE INTO t USING read_csv('x.csv') s ON t.a = s.a WHEN MATCHED THEN DELETE", "QoD: x.csv ", "MERGE");
 	Admitted("CREATE TABLE t2 AS SELECT * FROM read_csv('s3://acme-etl/x.csv')", 1, "CREATE TABLE AS");
-	Admitted("CREATE VIEW v AS SELECT * FROM read_csv('s3://acme-etl/x.csv')", 1, "CREATE VIEW");
+	// A view body is bound at creation, outside any plan the manager judges: only allowed functions
+	// (CONTRACT Addendum 4 item 9).
+	Refused("CREATE VIEW v AS SELECT * FROM read_csv('s3://acme-etl/x.csv')",
+	        "QoD: read_csv is not allowed in a CREATE VIEW body", "CREATE VIEW over a reader");
+	Admitted("CREATE VIEW v AS SELECT upper(a) FROM t", 0, "CREATE VIEW over a table");
 	Refused("CALL read_text('x.csv')", "QoD: x.csv ", "CALL");
 	Refused("SELECT * FROM \"read_csv\" ('x.csv')", "QoD: x.csv ", "a quoted name and a blank before the parenthesis");
 
@@ -459,6 +464,118 @@ int main() {
 	// ---- a kind=memory pool's own catalog is the plan verdict's to judge (Task 6 covers it for `*` grants)
 	Admitted("SELECT * FROM memory.main.x", 0, "a read of memory.main.x");
 	Admitted("INSERT INTO memory.main.x VALUES (1)", 0, "a write to memory.main.x");
+
+	// ---- Task 9 review C1 (CONTRACT Addendum 4 item 9): (i) a superuser-class function anywhere
+	for (auto anywhere : {"SELECT current_setting('memory_limit')",
+	                      "SELECT system.main.current_setting('memory_limit')",
+	                      "SELECT \"CURRENT_SETTING\"('memory_limit')", "SELECT 'memory_limit'.current_setting()",
+	                      "SELECT write_log('x')", "SELECT 1 WHERE quack_check_token('t') IS NOT NULL",
+	                      "SELECT json_serialize_plan('SELECT 1')", "SELECT postgres_pin_connection('db')",
+	                      "SELECT setval('seq1', 5)", "SELECT * FROM t ORDER BY current_setting('threads')",
+	                      "SELECT (SELECT current_setting('threads'))", "INSERT INTO t VALUES (current_setting('x'))",
+	                      "UPDATE t SET a = current_setting('x')",
+	                      "SELECT * FROM query('SELECT current_setting(''x'')')",
+	                      "SELECT list_transform([1], lambda x: current_setting('threads'))",
+	                      // where the walk does not go: the token count refuses them too
+	                      "ALTER TABLE t ALTER COLUMN a SET DEFAULT current_setting('memory_limit')",
+	                      "CREATE TABLE t4 (a VARCHAR DEFAULT current_setting('memory_limit'))",
+	                      "CREATE TABLE t5 (a INT CHECK (length(current_setting('threads')) > 0))"}) {
+		Refused(anywhere, "is reserved to superusers", anywhere);
+	}
+	Refused("SELECT current_setting('memory_limit')", "QoD: current_setting is reserved to superusers",
+	        "the refusal names the function");
+	Admitted("SELECT nextval('seq1'), currval('seq1'), upper('a')", 0,
+	         "sequence and allowed functions outside the bind-time slots (the plan shows them)");
+
+	// ---- (ii) the review's reproductions, refused before bind
+	Refused("SELECT * FROM range(setval('seq1', 5))", "setval is reserved to superusers", "range(setval(..))");
+	Refused("SET default_order = CASE WHEN setval('seq1', 42) > 0 THEN 'ASC' END", "setval is reserved to superusers",
+	        "SET ... setval");
+	Refused("PIVOT (SELECT 1 AS v) ON v IN (current_setting('temp_directory')) USING count(*)",
+	        "current_setting is reserved to superusers", "PIVOT ... IN (current_setting(..))");
+	Refused("ALTER TABLE x ADD COLUMN w VARCHAR DEFAULT current_setting('memory_limit')",
+	        "current_setting is reserved to superusers", "ADD COLUMN DEFAULT current_setting(..)");
+	Refused("ALTER TABLE x ALTER v TYPE VARCHAR USING setval('seq1', 99)::VARCHAR", "setval is reserved to superusers",
+	        "ALTER ... TYPE ... USING setval(..)");
+	Refused("EXPLAIN EXECUTE p(setval('seq1', 88))", "setval is reserved to superusers",
+	        "EXPLAIN EXECUTE p(setval(..))");
+
+	// ---- (ii) one test per bind-time slot: a sequence function, and anything not classed allowed
+	struct Slot {
+		const char *sql;
+		const char *refusal;
+	};
+	for (auto &slot : std::vector<Slot> {
+	         {"SET default_order = CASE WHEN nextval('seq1') > 0 THEN 'ASC' END",
+	          "QoD: nextval is not allowed in a SET value"},
+	         {"SET SESSION threads = currval('seq1')", "currval is not allowed in a SET value"},
+	         {"SELECT * FROM range(nextval('seq1'))", "QoD: nextval is not allowed in a table function's arguments"},
+	         {"SELECT * FROM read_csv('s3://acme-etl/x.csv', sample_size = nextval('seq1'))",
+	          "nextval is not allowed in a table function's arguments"},
+	         {"CALL range(currval('seq1'))", "currval is not allowed in a table function's arguments"},
+	         {"EXECUTE p(nextval('seq1'))", "QoD: nextval is not allowed in EXECUTE parameters"},
+	         {"EXPLAIN EXECUTE p(currval('seq1'))", "currval is not allowed in EXECUTE parameters"},
+	         {"SELECT * FROM t AT (VERSION => nextval('seq1'))", "QoD: nextval is not allowed in an AT clause"},
+	         {"SELECT * FROM t AT (TIMESTAMP => now() - to_days(currval('seq1')))",
+	          "currval is not allowed in an AT clause"},
+	         {"SELECT 1 LIMIT nextval('seq1')", "QoD: nextval is not allowed in LIMIT and OFFSET"},
+	         {"SELECT 1 LIMIT 1 OFFSET currval('seq1')", "currval is not allowed in LIMIT and OFFSET"},
+	         {"SELECT 1 LIMIT (SELECT count(*) FROM duckdb_tables())",
+	          "duckdb_tables is not allowed in LIMIT and OFFSET"},
+	         {"PIVOT (SELECT 1 AS v) ON v IN (nextval('seq1')) USING count(*)",
+	          "QoD: nextval is not allowed in a PIVOT IN list"},
+	         {"SELECT COLUMNS(CASE WHEN nextval('seq1') > 0 THEN 'a' END) FROM t",
+	          "QoD: nextval is not allowed in COLUMNS()"},
+	         {"SELECT unnest([[1]], max_depth := nextval('seq1'))",
+	          "QoD: nextval is not allowed in unnest's parameters"},
+	         {"SELECT unnest([[1]], recursive := currval('seq1') > 0)",
+	          "currval is not allowed in unnest's parameters"},
+	         {"CREATE VIEW v AS SELECT nextval('seq1') AS n", "QoD: nextval is not allowed in a CREATE VIEW body"},
+	         {"CREATE VIEW v AS SELECT * FROM t LIMIT currval('seq1')", "currval is not allowed in a CREATE VIEW body"},
+	         {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT nextval('seq1')",
+	          "QoD: nextval is not allowed in ALTER TABLE ADD COLUMN"},
+	         // IF NOT EXISTS keeps the plain ALTER, which runs the default itself (transform_alter.cpp:52-60)
+	         {"ALTER TABLE x ADD COLUMN IF NOT EXISTS w BIGINT DEFAULT nextval('seq1')",
+	          "nextval is not allowed in ALTER TABLE ADD COLUMN"},
+	         {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT (SELECT count(*) FROM duckdb_tables())",
+	          "duckdb_tables is not allowed in ALTER TABLE ADD COLUMN"},
+	         {"ALTER TABLE x ALTER v TYPE BIGINT USING nextval('seq1')",
+	          "QoD: nextval is not allowed in ALTER COLUMN TYPE USING"},
+	         {"ALTER TABLE x ALTER COLUMN v SET DATA TYPE BIGINT USING currval('seq1')",
+	          "currval is not allowed in ALTER COLUMN TYPE USING"},
+	         {"COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE nextval('seq1'))",
+	          "QoD: nextval is not allowed in a COPY option"},
+	         // a name the screen cannot resolve to a class: a macro, another catalog's function
+	         {"SELECT 1 LIMIT my_macro()", "QoD: my_macro is not allowed in LIMIT and OFFSET"},
+	         {"SELECT * FROM range(memory.main.upper('a'))", "upper is not allowed in a table function's arguments"},
+	         {"SET threads = date_add(1, 2)", "date_add is not allowed in a SET value"},
+	         // nor is nesting a way around it
+	         {"SELECT * FROM range((SELECT nextval('seq1')))",
+	          "nextval is not allowed in a table function's arguments"},
+	         {"SELECT 1 LIMIT (SELECT max(n) FROM (SELECT nextval('seq1') AS n))",
+	          "nextval is not allowed in LIMIT and OFFSET"}}) {
+		Refused(slot.sql, slot.refusal, slot.sql);
+	}
+	Refused("SELECT 1::DECIMAL(nextval('seq1'), 2)", "QoD:",
+	        "a function as a type modifier (DuckDB 2.0's parser refuses it before the type slot could)");
+
+	// ---- allowed functions still pass in every slot
+	for (auto allowed : {"SELECT * FROM range(10)", "SELECT * FROM range(5 + 1)", "SELECT * FROM range(abs(-3))",
+	                     "SELECT * FROM generate_series(1, 10, 2)", "SELECT 1 LIMIT 5 + 1",
+	                     "SELECT 1 LIMIT greatest(2, 3) OFFSET 1", "SET threads = 2 * 2",
+	                     "SET default_order = CASE WHEN length('ab') > 0 THEN 'ASC' END",
+	                     "EXECUTE p(1 + 1, upper('a'))", "SELECT * FROM t AT (VERSION => 1 + 1)",
+	                     "PIVOT (SELECT 1 AS v) ON v IN (1 + 0, 2) USING count(*)",
+	                     "SELECT COLUMNS(lower('A')) FROM t", "SELECT unnest([[1]], max_depth := 1 + 1)",
+	                     "ALTER TABLE x ADD COLUMN w VARCHAR DEFAULT upper('a')",
+	                     "ALTER TABLE x ALTER v TYPE VARCHAR USING upper(v::VARCHAR)",
+	                     "SELECT * FROM range(3) LIMIT 2", "SELECT 1::DECIMAL(10, 2)",
+	                     "ALTER TABLE x ADD COLUMN IF NOT EXISTS w VARCHAR DEFAULT upper('a')"}) {
+		Admitted(allowed, 0, allowed);
+	}
+	Admitted("COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE 100 * 1000)", 1, "a computed allowed COPY option");
+	Admitted("SELECT * FROM read_csv('s3://acme-etl/x.csv', header = true, sample_size = 10 * 10)", 1,
+	         "a reader's literal and computed allowed arguments");
 
 	// ---- what the parser cannot read is refused
 	Refused("SELEC 1", "QoD: the statement does not parse", "a syntax error");

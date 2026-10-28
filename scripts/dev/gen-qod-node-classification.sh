@@ -4,10 +4,12 @@
 #     --list-settings, every extension a node may load installed and loaded first), then through
 #     scripts/dev/classify-qod-node.py:
 #   src/main/resources/authz/function-classes.tsv, src/main/resources/authz/setting-classes.tsv,
-#   native/qod-node/file-functions.txt, native/qod-node/admitted-table-functions.txt.
+#   native/qod-node/file-functions.txt, native/qod-node/admitted-table-functions.txt;
+#   and through scripts/dev/gen-qod-node-function-classes.py, native/qod-node/src/function_classes.inc.
 #
 # Run it at every DuckDB pin bump and whenever qod-node registers a function; then rebuild qod-node
-# (CMake embeds the two .txt lists) and run FunctionClassesSpec and SettingClassesSpec. Local: it runs
+# (CMake embeds the two .txt lists, the parse screen includes the .inc) and run FunctionClassesSpec,
+# FunctionClassesHeaderSpec and SettingClassesSpec. Local: it runs
 # the host's qod-node build ($QOD_NODE_BIN, else native/qod-node/build/qod-node), which downloads the
 # extensions into DuckDB's default extension directory when they are missing there.
 set -euo pipefail
@@ -50,3 +52,4 @@ list() {
 list list-functions "$root/native/qod-node/functions.json"
 list list-settings "$root/native/qod-node/settings.json"
 python3 "$root/scripts/dev/classify-qod-node.py"
+python3 "$root/scripts/dev/gen-qod-node-function-classes.py"

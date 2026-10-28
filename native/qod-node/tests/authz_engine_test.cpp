@@ -338,7 +338,37 @@ int main() {
 	            "a superuser's statement skips the content rules");
 	ExpectQuery(internal, ScreenCall("c-root", "CREATE SECRET s IN connection (TYPE s3)"), "",
 	            "a superuser's secret is not the screen's to refuse");
+	// Task 9 review C1: superuser-class functions and bind-time slots are a superuser's own.
+	for (auto own : {"SELECT current_setting('memory_limit')", "SELECT * FROM range(setval('seq1', 5))",
+	                 "ALTER TABLE x ALTER v TYPE VARCHAR USING setval('seq1', 99)::VARCHAR",
+	                 "EXPLAIN EXECUTE p(setval('seq1', 88))", "SELECT 1 LIMIT nextval('seq1')"}) {
+		ExpectQuery(internal, ScreenCall("c-root", own), "", std::string("a superuser's: ") + own);
+	}
 	Check("", replica.Requests() != asked, "", "and asks no verdict");
+
+	// ---- Task 9 review C1: the node-kill forms are refused before bind, and the node stays valid. On an
+	// unscreened instance (below) each raises an INTERNAL error and invalidates the database.
+	std::vector<std::string> kills {"ALTER TABLE x ALTER v TYPE VARCHAR USING setval('seq1', 99)::VARCHAR",
+	                                "EXPLAIN EXECUTE p(setval('seq1', 88))",
+	                                "ALTER TABLE x ALTER v TYPE BIGINT USING nextval('seq1')",
+	                                "EXPLAIN EXECUTE p(nextval('seq1'))"};
+	asked = replica.Requests();
+	for (auto &kill : kills) {
+		ExpectQuery(internal, ScreenCall("c-judy", kill), "QoD: ", "a node-kill form for a user: " + kill);
+	}
+	Check("", replica.Requests() != asked, "", "refused on the node, before any verdict");
+	ExpectQuery(internal, "SELECT 42", "", "the node's database is still valid");
+	duckdb::Connection after(db);
+	ExpectQuery(after, "SELECT 42", "", "and so is a new connection's");
+	{
+		duckdb::DuckDB unscreened(nullptr);
+		duckdb::Connection con(unscreened);
+		ExpectQuery(con, "CREATE SEQUENCE seq1", "", "the unscreened instance's sequence");
+		ExpectQuery(con, "CREATE TEMP TABLE x (v INT)", "", "its temp table");
+		ExpectQuery(con, "INSERT INTO x VALUES (1)", "", "a row");
+		ExpectQuery(con, kills[0], "read-only but has made changes", "what the screen prevents: an INTERNAL error");
+		ExpectQuery(con, "SELECT 42", "database has been invalidated", "then every statement fails");
+	}
 	std::error_code ignored;
 	std::filesystem::remove(std::filesystem::u8path(csv), ignored);
 

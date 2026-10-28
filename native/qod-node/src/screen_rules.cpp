@@ -4,6 +4,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/expression/list.hpp"
+#include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
@@ -18,6 +19,7 @@
 #include "duckdb/parser/statement/multi_statement.hpp"
 #include "duckdb/parser/tableref/list.hpp"
 #include "file_functions.hpp"
+#include "function_classes.hpp"
 
 #include <map>
 #include <stdexcept>
@@ -244,8 +246,8 @@ std::string CallName(const std::string &text) {
 	return StringUtil::Lower(unquoted);
 }
 
-//! How many times `sql`'s tokens call each judged or refused name: an identifier (quoted or not) or a
-//! keyword right before '(', comments skipped.
+//! How many times `sql`'s tokens call each judged, refused or superuser-class name: an identifier
+//! (quoted or not) or a keyword right before '(', comments skipped.
 std::map<std::string, idx_t> CallsInTokens(const std::string &sql) {
 	auto tokens = Parser::Tokenize(sql);
 	std::map<std::string, idx_t> calls;
@@ -255,7 +257,7 @@ std::map<std::string, idx_t> CallsInTokens(const std::string &sql) {
 			continue;
 		}
 		auto name = CallName(TokenText(sql, tokens, i));
-		if (!IsJudgedCall(name) && !IsRefusedCall(name)) {
+		if (!IsJudgedCall(name) && !IsRefusedCall(name) && !IsSuperuserFunction(name)) {
 			continue;
 		}
 		auto next = i + 1;
@@ -371,7 +373,11 @@ public:
 			Statement(*statement);
 		}
 		for (auto &call : calls) {
-			if (judged_.back()[call.first] < call.second) {
+			if (IsSuperuserFunction(call.first)) {
+				// Wherever the walk does not go (a column default, a CHECK, a trigger body) as well.
+				Refuse(call.first + " is reserved to superusers");
+			}
+			if (IsJudgedCall(call.first) && judged_.back()[call.first] < call.second) {
 				Refuse(call.first + " is called where QoD cannot check its arguments");
 			}
 		}
@@ -382,6 +388,117 @@ public:
 	std::vector<Location> locations;
 
 private:
+	//! Marks the walk as inside a slot DuckDB evaluates while binding (CONTRACT Addendum 4 item 9), for
+	//! its scope: only functions classed allowed may be called there, and no sequence function. The
+	//! outermost slot names the refusal.
+	class InSlot {
+	public:
+		InSlot(Screener &screener, const char *slot) : screener_(screener), outer_(screener.slot_) {
+			if (outer_.empty()) {
+				screener_.slot_ = slot;
+			}
+		}
+		~InSlot() {
+			screener_.slot_ = outer_;
+		}
+
+	private:
+		Screener &screener_;
+		std::string outer_;
+	};
+
+	//! A call in a bind-time slot: refused unless it is a built-in function classed allowed under one of
+	//! `types`, and is no sequence function (nextval, currval and setval run, or read, a sequence while
+	//! binding: what the plan, and so the manager, never sees). A name the screen cannot resolve to a
+	//! class (a macro, a function of another catalog or schema, one loaded at runtime) is not allowed.
+	void SlotCall(const QualifiedName &qualified, const std::string &name, std::initializer_list<const char *> types) {
+		if (slot_.empty()) {
+			return;
+		}
+		auto why = " is not allowed in " + slot_ + ": DuckDB evaluates it while binding, before QoD judges the plan";
+		if (name == "nextval" || name == "currval" || name == "setval") {
+			Refuse(name + why);
+		}
+		auto system = (qualified.Catalog().empty() || qualified.Catalog() == "system") &&
+		              (qualified.Schema().empty() || qualified.Schema() == "main");
+		auto allowed = false;
+		for (auto type : types) {
+			auto cls = FunctionClassOf(name, type);
+			allowed = allowed || (cls && *cls == FunctionClass::Allowed);
+		}
+		if (!system || !allowed) {
+			Refuse(name + why);
+		}
+	}
+
+	//! A function name the walk reaches, wherever it is: a superuser-class one is refused (rule (i) of
+	//! Addendum 4 item 9), whatever catalog or schema qualifies it.
+	static void SuperuserCall(const std::string &name) {
+		if (IsSuperuserFunction(name)) {
+			Refuse(name + " is reserved to superusers");
+		}
+	}
+
+	//! A type expression (a CAST target, a column's type): its parameters are folded while binding
+	//! (Binder::BindLogicalType, bind_type_expression.cpp:76-104).
+	void TypeSlot(const LogicalType &type) {
+		if (!type.IsUnbound()) {
+			return;
+		}
+		auto &expression = UnboundType::GetTypeExpression(type);
+		if (expression) {
+			InSlot slot(*this, "a type expression");
+			Expression(*expression);
+		}
+	}
+
+	//! A column an ALTER TABLE adds: its type, and its default and generated expressions, which DuckDB
+	//! binds and runs for the existing rows when the ALTER executes, in no plan the manager sees.
+	void AddedColumn(const ColumnDefinition &column, const char *slot) {
+		TypeSlot(column.Type());
+		InSlot in(*this, slot);
+		if (column.HasDefaultValue()) {
+			Expression(column.DefaultValue());
+		}
+		if (column.Generated()) {
+			Expression(column.GeneratedExpression());
+		}
+	}
+
+	static bool IsAddColumn(const AlterInfo &info) {
+		return info.type == AlterType::ALTER_TABLE &&
+		       info.Cast<AlterTableInfo>().alter_table_type == AlterTableType::ADD_COLUMN;
+	}
+
+	//! ALTER TABLE: the expressions an ALTER runs at execution (ADD COLUMN ... DEFAULT, ALTER COLUMN ...
+	//! TYPE ... USING), as bind-time slots. The others (SET DEFAULT, constraints) run in later plans; a
+	//! judged call in one fails the token count, and a superuser-class one is refused by it.
+	void Alter(AlterInfo &info) {
+		if (info.type != AlterType::ALTER_TABLE) {
+			return;
+		}
+		auto &table = info.Cast<AlterTableInfo>();
+		switch (table.alter_table_type) {
+		case AlterTableType::ADD_COLUMN:
+			AddedColumn(table.Cast<AddColumnInfo>().new_column, "ALTER TABLE ADD COLUMN");
+			break;
+		case AlterTableType::ADD_FIELD:
+			AddedColumn(table.Cast<AddFieldInfo>().new_field, "ALTER TABLE ADD COLUMN");
+			break;
+		case AlterTableType::ALTER_COLUMN_TYPE: {
+			auto &change = table.Cast<ChangeColumnTypeInfo>();
+			TypeSlot(change.target_type);
+			InSlot slot(*this, "ALTER COLUMN TYPE USING");
+			Walk(change.expression);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	//! The slot the walk is in, empty outside every one.
+	std::string slot_;
 	//! Counts one level of the walk's nesting, refusing past kMaxDepth.
 	class Deeper {
 	public:
@@ -441,16 +558,29 @@ private:
 		case StatementType::PREPARE_STATEMENT:
 			Statement(*statement.Cast<PrepareStatement>().statement);
 			break;
-		case StatementType::EXECUTE_STATEMENT:
+		case StatementType::EXECUTE_STATEMENT: {
+			// bind_execute.cpp:63: every parameter is evaluated while binding, EXPLAIN EXECUTE included.
+			InSlot slot(*this, "EXECUTE parameters");
 			for (auto &value : statement.Cast<ExecuteStatement>().named_values) {
 				Walk(value.second);
 			}
 			break;
-		case StatementType::MULTI_STATEMENT:
-			for (auto &child : statement.Cast<MultiStatement>().statements) {
+		}
+		case StatementType::MULTI_STATEMENT: {
+			// Only the parser writes one (a request's statements arrive one by one). DuckDB 2.0 rewrites ALTER
+			// TABLE ... ADD COLUMN ... DEFAULT <expression> into one: the column added with DEFAULT NULL, an
+			// UPDATE that sets it to the expression for the existing rows, then SET DEFAULT
+			// (transform_alter.cpp:32-90, 236-266). The whole rewrite is the ADD COLUMN's slot.
+			auto &multi = statement.Cast<MultiStatement>();
+			auto adds_column = !multi.statements.empty() &&
+			                   multi.statements[0]->type == StatementType::ALTER_STATEMENT &&
+			                   IsAddColumn(*multi.statements[0]->Cast<AlterStatement>().info);
+			InSlot slot(*this, adds_column ? "ALTER TABLE ADD COLUMN" : "");
+			for (auto &child : multi.statements) {
 				Statement(*child);
 			}
 			break;
+		}
 		case StatementType::SET_STATEMENT: {
 			auto &set = statement.Cast<SetStatement>();
 			auto name = StringUtil::Lower(set.name.GetIdentifierName());
@@ -458,6 +588,8 @@ private:
 				Refuse("SET and RESET of " + name + " are reserved to superusers");
 			}
 			if (set.set_type == SetType::SET) {
+				// bind_set.cpp:20-27: a setting's value is evaluated while binding; a variable's is a query.
+				InSlot slot(*this, set.scope == SetScope::VARIABLE ? "" : "a SET value");
 				Walk(statement.Cast<SetVariableStatement>().value);
 			}
 			break;
@@ -480,6 +612,8 @@ private:
 			}
 			break;
 		case StatementType::ALTER_STATEMENT:
+			Alter(*statement.Cast<AlterStatement>().info);
+			break;
 		case StatementType::TRANSACTION_STATEMENT:
 		case StatementType::VACUUM_STATEMENT:
 		case StatementType::ANALYZE_STATEMENT:
@@ -618,8 +752,38 @@ private:
 			Refuse("statement uses query node type " + std::to_string(static_cast<int>(node.type)) +
 			       ", which QoD does not support");
 		}
-		ParsedExpressionIterator::EnumerateQueryNodeModifiers(
-		    node, [&](unique_ptr<ParsedExpression> &child) { Walk(child); });
+		for (auto &modifier : node.modifiers) {
+			switch (modifier->type) {
+			case ResultModifierType::LIMIT_MODIFIER: {
+				// bind_select_node.cpp:60-78: a foldable LIMIT or OFFSET is evaluated while binding.
+				auto &limit = modifier->Cast<LimitModifier>();
+				InSlot slot(*this, "LIMIT and OFFSET");
+				Walk(limit.limit);
+				Walk(limit.offset);
+				break;
+			}
+			case ResultModifierType::LEGACY_LIMIT_PERCENT_MODIFIER: {
+				auto &limit = modifier->Cast<LegacyLimitPercentModifier>();
+				InSlot slot(*this, "LIMIT and OFFSET");
+				Walk(limit.limit);
+				Walk(limit.offset);
+				break;
+			}
+			case ResultModifierType::ORDER_MODIFIER:
+				for (auto &order : modifier->Cast<OrderModifier>().orders) {
+					Walk(order.expression);
+				}
+				break;
+			case ResultModifierType::DISTINCT_MODIFIER:
+				for (auto &target : modifier->Cast<DistinctModifier>().distinct_on_targets) {
+					Walk(target);
+				}
+				break;
+			default:
+				Refuse("statement uses result modifier type " + std::to_string(static_cast<int>(modifier->type)) +
+				       ", which QoD does not support");
+			}
+		}
 		for (auto &entry : node.cte_map.map) {
 			if (entry.second->query_node) {
 				Node(*entry.second->query_node);
@@ -633,6 +797,8 @@ private:
 		case TableReferenceType::BASE_TABLE: {
 			auto &base = ref.Cast<BaseTableRef>();
 			if (base.at_clause) {
+				// bind_basetableref.cpp:111-117 (BindAtClause).
+				InSlot slot(*this, "an AT clause");
 				Walk(base.at_clause->ExpressionMutable());
 			}
 			break;
@@ -679,6 +845,8 @@ private:
 					Walk(expression);
 				}
 				for (auto &entry : column.entries) {
+					// bind_pivot.cpp:542-608 (BindPivotInList): folded while binding.
+					InSlot slot(*this, "a PIVOT IN list");
 					Walk(entry.expr);
 				}
 				if (column.subquery) {
@@ -707,22 +875,86 @@ private:
 
 	void Expression(const ParsedExpression &expression) {
 		Deeper deeper(depth_);
-		if (expression.GetExpressionClass() == ExpressionClass::FUNCTION) {
-			Call(expression.Cast<FunctionExpression>());
-		} else if (expression.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+		switch (expression.GetExpressionClass()) {
+		case ExpressionClass::FUNCTION: {
+			auto &call = expression.Cast<FunctionExpression>();
+			Call(call, false);
+			auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
+			if (name == "unnest" || name == "unlist") {
+				// bind_unnest_expression.cpp:155-170: every parameter after the list is folded while binding.
+				auto first = true;
+				for (auto &argument : call.GetArguments()) {
+					if (first) {
+						first = false;
+						Expression(argument.GetExpression());
+					} else {
+						InSlot slot(*this, "unnest's parameters");
+						Expression(argument.GetExpression());
+					}
+				}
+				if (call.Filter()) {
+					Expression(*call.Filter());
+				}
+				if (call.OrderBy()) {
+					for (auto &order : call.OrderBy()->orders) {
+						Expression(*order.expression);
+					}
+				}
+				return;
+			}
+			break;
+		}
+		case ExpressionClass::WINDOW: {
+			auto &window = expression.Cast<WindowExpression>();
+			auto name = StringUtil::Lower(window.GetQualifiedName().Name().GetIdentifierName());
+			SuperuserCall(name);
+			SlotCall(window.GetQualifiedName(), name, {"window", "aggregate"});
+			break;
+		}
+		case ExpressionClass::SUBQUERY: {
 			auto &subquery = expression.Cast<SubqueryExpression>().Subquery();
 			if (subquery) {
 				Node(*subquery->node);
 			}
+			break;
+		}
+		case ExpressionClass::CAST: {
+			// The target type is no child of the cast's (util_parsed_expression.cpp:62-66): its parameters.
+			InSlot slot(*this, "a type expression");
+			Expression(expression.Cast<CastExpression>().TargetType());
+			break;
+		}
+		case ExpressionClass::STAR: {
+			// bind_star_expression.cpp:440-453: COLUMNS(<expression>) is folded while binding.
+			auto &star = expression.Cast<StarExpression>();
+			for (auto &item : star.ReplaceList()) {
+				Expression(*item.second);
+			}
+			if (star.Expression()) {
+				InSlot slot(*this, "COLUMNS()");
+				Expression(*star.Expression());
+			}
+			return;
+		}
+		default:
+			break;
 		}
 		ParsedExpressionIterator::EnumerateChildren(expression,
 		                                            [&](const ParsedExpression &child) { Expression(child); });
 	}
 
-	void Call(const FunctionExpression &call) {
+	//! A function call: a scalar or aggregate one, or (`table_position`) the table function of a FROM,
+	//! JOIN or CALL, whose own name TableFunction already checked.
+	void Call(const FunctionExpression &call, bool table_position) {
 		auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
 		if (IsRefusedCall(name)) {
 			Refuse(name + " is reserved to superusers: it runs SQL no screen sees");
+		}
+		SuperuserCall(name);
+		if (table_position) {
+			SlotCall(call.GetQualifiedName(), name, {"table"});
+		} else {
+			SlotCall(call.GetQualifiedName(), name, {"scalar", "aggregate"});
 		}
 		if (!IsJudgedCall(name)) {
 			return;
@@ -769,11 +1001,17 @@ private:
 		if (!function || function->GetExpressionClass() != ExpressionClass::FUNCTION) {
 			Refuse("statement uses a table function the screen cannot read, which QoD does not support");
 		}
-		auto name = StringUtil::Lower(function->Cast<FunctionExpression>().FunctionName().GetIdentifierName());
+		auto &call = function->Cast<FunctionExpression>();
+		auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
 		if (!IsJudgedCall(name) && !IsRefusedCall(name) && !Contains(kAdmittedTableFunctions, name)) {
 			Refuse("table function " + name + " is not available to non-superusers");
 		}
-		Expression(*function);
+		Deeper deeper(depth_);
+		Call(call, true);
+		// bind_table_function.cpp:151 and function_binder.cpp:503-508 (FoldArgument): the arguments are
+		// folded while binding, before any plan exists.
+		InSlot slot(*this, "a table function's arguments");
+		ParsedExpressionIterator::EnumerateChildren(call, [&](const ParsedExpression &child) { Expression(child); });
 	}
 
 	//! A text a COPY option holds that could name a path of its own (FILENAME_PATTERN '../x_{i}').
@@ -879,7 +1117,11 @@ private:
 			return core && Contains(kCopyNonPathOptions, name);
 		};
 		for (auto &option : info.parsed_options) {
-			Walk(option.second);
+			{
+				// bind_copy.cpp:729-750 (BindCopyOption): every option is evaluated while binding.
+				InSlot slot(*this, "a COPY option");
+				Walk(option.second);
+			}
 			auto name = StringUtil::Lower(option.first.GetIdentifierName());
 			if (Contains(kCopyFileNameOptions, name)) {
 				// The parser keeps a single string (or name) in CopyInfo.options; anything here is a list,
@@ -933,11 +1175,17 @@ private:
 			if (table.query) {
 				Node(*table.query->node);
 			}
+			// The column types are bound at creation (Binder::BindLogicalType, bind_create.cpp:615-636).
+			for (auto &column : table.columns.Logical()) {
+				TypeSlot(column.Type());
+			}
 			break;
 		}
 		case CatalogType::VIEW_ENTRY: {
 			auto &view = info.Cast<CreateViewInfo>();
 			if (view.query) {
+				// Bound at creation, which evaluates its bind-time slots, and in no plan of the CREATE.
+				InSlot slot(*this, "a CREATE VIEW body");
 				Node(*view.query->node);
 			}
 			break;
