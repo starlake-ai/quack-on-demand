@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.{
   EdgeHandshake,
   FlightSqlRouter,
   HandshakeFailure,
+  NodeRows,
   Routed,
   RouterFailure
 }
@@ -252,7 +253,8 @@ final class QuackFrontDoor(
         softPinOverCapacity = catalogRead,
         // The one edge that relays SEND_DATA on the statement's own node connection, so the
         // one edge where a 2.0 client's scan_data_from_quack_client can ever be fed.
-        clientDataScans = true
+        clientDataScans = true,
+        evaluate = Some(evaluateSend(s, cq))
       )
       .flatMap {
         case Left(fail) =>
@@ -488,6 +490,67 @@ final class QuackFrontDoor(
             }
         }
       }(node, wrappedSql, prelude, recordLoad, principal)
+
+  /** The router's [[FlightSqlRouter.NodeSend]] that reads a small result back for the manager
+    * ([[NodeRows]]): a SUMMARIZE's columns. Inside a client transaction it runs on the
+    * transaction's link, else on a fresh link released at once; failures on the link are handled as
+    * [[relaySend]]'s are. The node's chunks are decoded by the native bridge, as on the Arrow path,
+    * never encoded.
+    */
+  private def evaluateSend(s: QuackSession, cq: Long): FlightSqlRouter.NodeSend[NodeRows] =
+    (node, wrappedSql, _, recordLoad, principal) =>
+      router.adapter.tracked(node, recordLoad) {
+        IO.monotonic.flatMap { t0 =>
+          val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
+          val authorize               = router.adapter.authorizer(node, principal)
+          val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] =
+            s.txLink.get().filter(_._1 == node.nodeId).map(_._2) match
+              case Some(l) => IO.pure(Right((l, true)))
+              case None    =>
+                QuackNodeLink
+                  .open(transport, node, s.hello, cq, authorize)
+                  .map(_.map { case (l, _) => (l, false) })
+          openIO.flatMap {
+            case Left(fail)            => elapsed().map(ms => toOutcome[NodeRows](fail, ms))
+            case Right((link, reused)) =>
+              link.collect(wrappedSql, cq).flatMap {
+                case Left(fail) =>
+                  linkFailed[NodeRows](s, link, reused, fail, elapsed, clientCommit = false)
+                case Right(Left(nodeError)) =>
+                  dropLink(link, reused) *> elapsed()
+                    .map(ms => NodeOutcome.Permanent(nodeError, ms))
+                case Right(Right(messages)) =>
+                  dropLink(link, reused) *> IO.blocking(decoded(messages)).flatMap { rows =>
+                    elapsed().map { ms =>
+                      rows.fold(
+                        why => NodeOutcome.Permanent(why, ms),
+                        NodeOutcome.Ok(_, ms, () => ())
+                      )
+                    }
+                  }
+              }
+          }
+        }
+      }
+
+  /** Arrow for the readers of [[decoded]]. */
+  private lazy val allocator = new org.apache.arrow.memory.RootAllocator()
+
+  /** The rows of a node's response messages (a PREPARE_RESPONSE, then FETCH_RESPONSEs), through the
+    * native bridge.
+    */
+  private def decoded(messages: List[Array[Byte]]): Either[String, NodeRows] =
+    val readers = scala.collection.mutable.ListBuffer.empty[org.apache.arrow.vector.ipc.ArrowReader]
+    try
+      messages.foreach { m =>
+        readers += ai.starlake.quack.edge.adapter.QuackArrowImport
+          .importStream(allocator, QuackNativeBridge.extractArrowStream(m))
+      }
+      NodeRows.readAll(readers.toList)
+    catch
+      case scala.util.control.NonFatal(e) =>
+        Left(s"cannot read the node's result: ${Option(e.getMessage).getOrElse(e.toString)}")
+    finally readers.foreach(r => scala.util.Try(r.close()))
 
   private def quoteIdent(s: String): String = "\"" + s.replace("\"", "\"\"") + "\""
 

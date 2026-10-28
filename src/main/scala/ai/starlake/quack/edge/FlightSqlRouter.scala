@@ -14,6 +14,7 @@ import ai.starlake.quack.edge.sql.{
   LockdownScreen,
   NodeSettingScreen,
   NodeStateScreen,
+  RefusedForms,
   StatementValidator,
   TriggerScreen,
   ValidationContext,
@@ -410,7 +411,8 @@ final class FlightSqlRouter(
           preferredNode = preferredNode,
           recordExecution = recordExecution,
           prepareDurationMs = prepareDurationMs,
-          patId = patId
+          patId = patId,
+          evaluate = Some(adapterEvaluate)
         ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
 
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
@@ -428,6 +430,28 @@ final class FlightSqlRouter(
           stampPrelude = prelude
         )
         .map(NodeOutcome.fromQuackResponse)
+
+  /** The Arrow transport reading a small result back for the manager ([[NodeRows]]): the statement
+    * runs as [[adapterSend]] runs it, its rows are read and its reader closed inside the call.
+    */
+  private val adapterEvaluate: FlightSqlRouter.NodeSend[NodeRows] =
+    (node, wrappedSql, prelude, recordLoad, principal) =>
+      adapter
+        .send(node, wrappedSql, principal, session = None, recordLoad = recordLoad)
+        .flatMap {
+          case QuackResponse.Ok(rows, latency, close) =>
+            IO.blocking {
+              try NodeRows.read(rows)
+              finally close()
+            }.map {
+              case Right(read) => NodeOutcome.Ok(read, latency, () => ())
+              case Left(why)   => NodeOutcome.Permanent(why, latency)
+            }
+          case QuackResponse.Failed(QuackError.Transient(m), latency) =>
+            IO.pure(NodeOutcome.Transient(m, latency))
+          case QuackResponse.Failed(QuackError.Permanent(m), latency) =>
+            IO.pure(NodeOutcome.Permanent(m, latency))
+        }
 
   /** Run a statement through the whole pipeline (session, lockdown, ACL, protected-write guard,
     * CLS, RLS, metadata filter, pool resume, pin and placement, kill registry, history and audit,
@@ -469,17 +493,147 @@ final class FlightSqlRouter(
         * routable and role-compatible). Set by the native front door for its catalog reads, whose
         * two listings are only coherent on one node; see `Router.softPinUsable`.
         */
-      softPinOverCapacity: Boolean = false
+      softPinOverCapacity: Boolean = false,
+      /** How this front door runs a statement for the principal and reads its small result back
+        * itself, on its own node connection (inside a client transaction, the transaction's):
+        * SUMMARIZE learns its columns this way ([[RefusedForms]]). None (the default) leaves such a
+        * statement unchanged, so the node refuses it as before.
+        */
+      evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]] = None
+  ): IO[Either[RouterFailure, Routed[A]]] =
+    def run(statement: String, pin: Option[String]): IO[Either[RouterFailure, Routed[A]]] =
+      executeGuarded(
+        connectionId,
+        user,
+        poolKey,
+        statement,
+        sql,
+        effectiveSet,
+        send,
+        source,
+        pin,
+        recordExecution,
+        prepareDurationMs,
+        patId,
+        edge,
+        clientDataScans,
+        softPinOverCapacity
+      )
+    // Task 19: a statement the node refuses whose answer an ordinary statement gets, for a tenant
+    // principal only (a superuser's statement runs as written). The rewrite is what runs from here
+    // on, through every screen, as if the client had written it; history records the client's.
+    val form =
+      if !FlightSqlRouter.rewritable(effectiveSet) then None
+      else
+        TooDeep.orElse(Option.empty[RefusedForms.Form])(
+          RefusedForms.recognize(
+            sql,
+            supervisor.get(poolKey).flatMap(FlightSqlRouter.sessionPath),
+            name => ai.starlake.quack.edge.authz.SettingClasses.of(name).isDefined
+          )
+        )
+    form match
+      case None                                               => run(sql, preferredNode)
+      case Some(RefusedForms.Form.Rewritten(other))           => run(other, preferredNode)
+      case Some(RefusedForms.Form.Summarize(columns, target)) =>
+        evaluate match
+          case None     => run(sql, preferredNode)
+          case Some(ev) =>
+            // The columns are read first, judged like any statement; the summary then runs on the
+            // node that answered (a soft pin), so both see the same catalog.
+            openSession(connectionId, user, poolKey, recordExecution, source)
+            readBack(connectionId, user, poolKey, columns, effectiveSet, ev, source, edge, patId)
+              .flatMap {
+                case Left(failure) =>
+                  IO {
+                    if recordExecution then
+                      record(
+                        user,
+                        poolKey,
+                        nodeId = "-",
+                        sql,
+                        durationMs = 0,
+                        FlightSqlRouter.failureStatus(failure),
+                        Some(failure.reason),
+                        StatementKind.Select,
+                        realm = "tenant",
+                        patId = patId,
+                        source = source
+                      )
+                    Left(failure)
+                  }
+                case Right((rows, nodeId)) =>
+                  FlightSqlRouter.summarizeColumns(rows) match
+                    case Some(cols) => run(RefusedForms.summarizeSql(target, cols), Some(nodeId))
+                    case None       => run(sql, preferredNode)
+              }
+
+  /** Run `statement` for `effectiveSet`'s principal through the whole pipeline and read its small
+    * result back ([[NodeRows]]) instead of handing it to a client, with no history row, no load
+    * booked and no rewrite of its own: SUMMARIZE's column listing. The node that answered comes
+    * with the rows.
+    */
+  private def readBack(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      statement: String,
+      effectiveSet: Option[EffectiveSet],
+      evaluate: FlightSqlRouter.NodeSend[NodeRows],
+      source: String,
+      edge: String,
+      patId: Option[String]
+  ): IO[Either[RouterFailure, (NodeRows, String)]] =
+    executeGuarded[NodeRows](
+      connectionId,
+      user,
+      poolKey,
+      statement,
+      statement,
+      effectiveSet,
+      evaluate,
+      source,
+      preferredNode = None,
+      recordExecution = false,
+      prepareDurationMs = None,
+      patId = patId,
+      edge = edge,
+      clientDataScans = false,
+      softPinOverCapacity = false
+    ).flatMap {
+      case Left(failure) => IO.pure(Left(failure))
+      case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
+    }
+
+  private def executeGuarded[A](
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      clientSql: String,
+      effectiveSet: Option[EffectiveSet],
+      send: FlightSqlRouter.NodeSend[A],
+      source: String,
+      preferredNode: Option[String],
+      recordExecution: Boolean,
+      prepareDurationMs: Option[Long],
+      patId: Option[String],
+      edge: String,
+      clientDataScans: Boolean,
+      softPinOverCapacity: Boolean
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
     // instead of escaping as a StackOverflowError, which would halt the manager.
-    TooDeep.orElse(tooDeepDenied(user, poolKey, sql, effectiveSet, recordExecution, patId, source))(
+    TooDeep.orElse(
+      tooDeepDenied(user, poolKey, clientSql, effectiveSet, recordExecution, patId, source)
+    )(
       executeUnguarded(
         connectionId,
         user,
         poolKey,
         sql,
+        clientSql,
         effectiveSet,
         send,
         source,
@@ -492,6 +646,22 @@ final class FlightSqlRouter(
         softPinOverCapacity
       )
     )
+
+  /** The router session of `connectionId`, opened (and announced, unless `recordExecution` is
+    * false: probes emit nothing) on its first statement.
+    */
+  private def openSession(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      recordExecution: Boolean,
+      source: String
+  ): Session =
+    sessions.get(connectionId).getOrElse {
+      val opened = sessions.open(connectionId, user, poolKey)
+      if recordExecution then events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, source))
+      opened
+    }
 
   private def tooDeepDenied[A](
       user: String,
@@ -518,11 +688,15 @@ final class FlightSqlRouter(
       )
     IO.pure(Left(RouterFailure.AccessDenied(s"access denied: ${TooDeep.Reason}")))
 
+  /** `sql` is the statement that runs, `clientSql` the one the client sent (they differ when a
+    * refused form was rewritten): history, audit and the kill registry show the client's.
+    */
   private def executeUnguarded[A](
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       sql: String,
+      clientSql: String,
       effectiveSet: Option[EffectiveSet],
       send: FlightSqlRouter.NodeSend[A],
       source: String,
@@ -535,12 +709,8 @@ final class FlightSqlRouter(
       softPinOverCapacity: Boolean
   ): IO[Either[RouterFailure, Routed[A]]] =
     val resolvedEdge = if edge.isEmpty then source else edge
-    val s            = sessions.get(connectionId).getOrElse {
-      val opened = sessions.open(connectionId, user, poolKey)
-      // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
-      if recordExecution then events.emit(ManagerEvent.SessionOpened(poolKey.tenant, user, source))
-      opened
-    }
+    // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
+    val s    = openSession(connectionId, user, poolKey, recordExecution, source)
     val kind = classifier.classify(sql)
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
@@ -600,7 +770,7 @@ final class FlightSqlRouter(
           user,
           poolKey,
           nodeId,
-          sql,
+          clientSql,
           durationMs,
           status,
           error,
@@ -1007,7 +1177,14 @@ final class FlightSqlRouter(
                         if recordExecution then
                           Some(
                             registry
-                              .register(user, poolKey.tenant, poolKey.pool, nodeId, sql, patId)
+                              .register(
+                                user,
+                                poolKey.tenant,
+                                poolKey.pool,
+                                nodeId,
+                                clientSql,
+                                patId
+                              )
                           )
                         else None
                       // Locality + placement are computed from `refs` (pre-rewrite `sql`, NOT
@@ -1295,13 +1472,44 @@ object FlightSqlRouter:
     * let the validator check one table while the engine read the other.
     */
   def usePath(st: ai.starlake.quack.ondemand.PoolState): Option[String] =
+    sessionPath(st).map(p => s"${p.catalog}.${p.schema}")
+
+  /** [[usePath]] as its catalog and schema: the session's current catalog and schema for every
+    * statement of the pool, which a refused form is qualified with ([[RefusedForms]]).
+    */
+  def sessionPath(st: ai.starlake.quack.ondemand.PoolState): Option[RefusedForms.SessionPath] =
     Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty).map { db =>
-      val schema = st.defaultSchema
-        .filter(_.nonEmpty)
-        .orElse(st.metastore.get("schemaName").filter(_.nonEmpty))
-        .getOrElse("main")
-      s"$db.$schema"
+      RefusedForms.SessionPath(db, defaultSchemaOf(st))
     }
+
+  private def defaultSchemaOf(st: ai.starlake.quack.ondemand.PoolState): String =
+    st.defaultSchema
+      .filter(_.nonEmpty)
+      .orElse(st.metastore.get("schemaName").filter(_.nonEmpty))
+      .getOrElse("main")
+
+  /** Whether the statements of `effectiveSet`'s principal get Task 19's rewrites: a tenant
+    * principal's, never a superuser's (its statement runs as written), the system principal's, or a
+    * statement no principal is bound for (which the validator refuses).
+    */
+  def rewritable(effectiveSet: Option[EffectiveSet]): Boolean =
+    effectiveSet.exists(e => e.user.tenant.nonEmpty && !e.system)
+
+  /** The history status of a failure answered before any node ran the statement. */
+  def failureStatus(failure: RouterFailure): String = failure match
+    case RouterFailure.AccessDenied(_) => "denied"
+    case RouterFailure.Unavailable(_)  => "transient"
+    case _                             => "permanent"
+
+  /** SUMMARIZE's columns from the rows of its DESCRIBE rewrite (`column_name`, `column_type`
+    * first), or None when a row is not two VARCHARs or there is none.
+    */
+  def summarizeColumns(rows: NodeRows): Option[List[(String, String)]] =
+    val cols = rows.rows.map {
+      case NodeValue.Text(name) :: NodeValue.Text(tpe) :: _ => Some((name, tpe))
+      case _                                                => None
+    }
+    Option.when(cols.nonEmpty && cols.forall(_.isDefined))(cols.flatten)
 
   /** Audit-detail keys QoD writes itself on the routed path; a validator's `Denied.meta` can never
     * set them.

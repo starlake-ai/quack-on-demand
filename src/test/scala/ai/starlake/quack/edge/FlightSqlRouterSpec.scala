@@ -1685,8 +1685,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "SELECT 1 WHERE EXISTS (SELECT 1 FROM (PIVOT customer ON c_region USING count(*)))",
       "EXPLAIN ANALYZE SELECT error(string_agg(c_email, ',')) FROM customer",
       "EXPLAIN SELECT * FROM customer",
-      "PIVOT customer ON c_region USING count(*)",
-      "SUMMARIZE customer"
+      "PIVOT customer ON c_region USING count(*)"
     ).foreach { sql =>
       val (router, capturedSql, _) =
         setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
@@ -1698,6 +1697,39 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturedSql() shouldBe ""
       }
     }
+
+  it should "summarize an RLS table through its row filter: SUMMARIZE is a SELECT now (Task 19)" in:
+    // The gateway once refused SUMMARIZE over an RLS table (F21): the row rewrite had no slot
+    // for it. Task 19 sends a tenant's SUMMARIZE as its column listing, then DuckDB's own
+    // aggregate SELECT, which the row rewrite filters like any read.
+    val calls   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val columns = () =>
+      if calls.getAndIncrement() == 0 then
+        QuackResponse.Ok(
+          TestArrow.readerFor(
+            "SELECT * FROM (VALUES ('c_id', 'INTEGER'), ('c_region', 'VARCHAR')) " +
+              "AS c(column_name, column_type)"
+          ),
+          1L,
+          () => ()
+        )
+      else TestArrow.okResponse()
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer, stub = columns)
+    val out = router
+      .execute(
+        "rls-t19",
+        "alice",
+        poolKey,
+        "SUMMARIZE customer",
+        Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      .unsafeRunSync()
+    out.foreach(_.close())
+    out shouldBe a[Right[?, ?]]
+    calls.get() shouldBe 2
+    capturedSql() should include("unnest(list_value('c_id', 'c_region'))")
+    capturedSql() should include("c_region = 'X'")
 
   it should "refuse EXPORT DATABASE to a local path under lockdown with the ACL off (audit F23)" in:
     // No policy, allow-all validator: lockdown is the only screen standing, as in the default
@@ -3635,14 +3667,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturedSql() should include("FROM information_schema.tables")
     capturedSql() should not include "qod_meta"
 
-  it should "replace a plain SHOW TABLES with the filtered listing" in:
+  it should "narrow a plain SHOW TABLES, rewritten to a catalog function listing (Task 19)" in:
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
     val out                      = router
       .execute("meta-4", "alice", poolKey, "SHOW TABLES", effectiveSet = customerOnly)
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_name AS name")
-    capturedSql() should include("table_schema = 'main'")
+    capturedSql() should include("lower(schema_name) = lower('main')")
+    capturedSql() should include("duckdb_tables() WHERE database_name = 'memory'")
 
   it should "deny a SHOW TABLES variant without ever reaching a node" in:
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)

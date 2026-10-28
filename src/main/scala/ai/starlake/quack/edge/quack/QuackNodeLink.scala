@@ -105,6 +105,79 @@ final class QuackNodeLink(
       case Right(()) => run(sql, clientQueryId)
     }
 
+  /** Run `sql` on this connection after a fresh session handle and keep its result: the
+    * PREPARE_RESPONSE, then every FETCH_RESPONSE that carries chunks, as the node sent them, for
+    * the manager to decode itself (a SUMMARIZE's columns, Task 19). The node's ERROR_RESPONSE is
+    * `Right(Left(message))`: the node answered, the link is sound. A failed handle is
+    * [[LinkFailure.HandleFailed]] and `sql` was not sent; a result past `maxBytes` is `Permanent`.
+    */
+  def collect(
+      sql: String,
+      clientQueryId: Long,
+      maxBytes: Long = QuackNodeLink.MaxCollectBytes
+  ): IO[Either[LinkFailure, Either[String, List[Array[Byte]]]]] =
+    authorized(clientQueryId).flatMap {
+      case Left(f)   => IO.pure(Left(f))
+      case Right(()) =>
+        val prep = QuackWire.encodePrepareRequest(
+          nodeConnectionId,
+          clientQueryId,
+          QuackWire.PrepareRequest(sql, Some(QuackNodeLink.randomUuid()), None)
+        )
+        relay(prep).flatMap {
+          case Left(f)     => IO.pure(Left(f))
+          case Right(resp) =>
+            QuackWire.messageType(resp) match
+              case QuackWire.Type.ErrorResponse   => IO.pure(Right(Left(errorMessage(resp))))
+              case QuackWire.Type.PrepareResponse =>
+                val more = QuackNodeLink.nativeNeedsMore(resp).getOrElse(false)
+                QuackNodeLink.nativeResultUuid(resp) match
+                  case Some(uuid) if more =>
+                    collectFetches(
+                      uuid,
+                      clientQueryId,
+                      1L,
+                      List(resp),
+                      resp.length.toLong,
+                      maxBytes
+                    )
+                  case _ => IO.pure(Right(Right(List(resp))))
+              case other =>
+                IO.pure(
+                  Left(LinkFailure.Permanent(s"unexpected response type $other after PREPARE"))
+                )
+        }
+    }
+
+  /** [[drain]], keeping each FETCH_RESPONSE that carries chunks. */
+  private def collectFetches(
+      uuid: QuackWire.Hugeint,
+      clientQueryId: Long,
+      batch: Long,
+      kept: List[Array[Byte]],
+      bytes: Long,
+      maxBytes: Long
+  ): IO[Either[LinkFailure, Either[String, List[Array[Byte]]]]] =
+    if batch > QuackNodeLink.MaxDrainRounds || bytes > maxBytes then
+      IO.pure(Left(LinkFailure.Permanent("the result is too large for the manager to read")))
+    else
+      relay(QuackWire.encodeFetchRequest(nodeConnectionId, clientQueryId, uuid, batch)).flatMap {
+        case Left(f)     => IO.pure(Left(f))
+        case Right(resp) =>
+          if QuackWire.messageType(resp) == QuackWire.Type.ErrorResponse then
+            IO.pure(Right(Left(errorMessage(resp))))
+          else if QuackWire.isTerminalFetch(resp) then IO.pure(Right(Right(kept.reverse)))
+          else
+            collectFetches(
+              uuid,
+              clientQueryId,
+              batch + 1,
+              resp :: kept,
+              bytes + resp.length,
+              maxBytes
+            )
+      }
+
   /** The session handle prelude, drained. Any failure of the prelude itself is `HandleFailed`, and
     * the statement is not sent: a node error on it (the node refused the handle, and its text is
     * kept as is but for DuckDB's excerpt of the statement, which would carry the handle) and a
@@ -189,6 +262,9 @@ final class QuackNodeLink(
 object QuackNodeLink:
 
   private val MaxDrainRounds = 1_000_000L
+
+  /** The most response bytes [[QuackNodeLink.collect]] keeps. */
+  val MaxCollectBytes: Long = 16L << 20
 
   /** A fresh query uuid for a statement the manager runs itself. */
   private[quack] def randomUuid(): QuackWire.Hugeint =
