@@ -47,8 +47,9 @@ def _dead_pid():
 
 
 def test_the_init_sql_holds_no_dot_command_and_passes_values_through(tmp_path):
-    res = _dry_run(tmp_path, secrets={"extraSetupSql": "SELECT 1.5 AS x;\nSELECT '.not a command';"},
-                   dbInitSql="SET threads = 2;\n  SELECT 2;", lockdownSql="SET enable_external_access = false;")
+    res = _dry_run(tmp_path, secrets={"extraSetupSql": "SELECT 1.5 AS x;\nSELECT '.not a command';",
+                                      "tenantDbInitSql": "SET threads = 2;\n  SELECT 2;"},
+                   lockdownSql="SET enable_external_access = false;")
     assert res.returncode == 0, res.stderr
     dots = [line for line in res.stdout.splitlines() if line.lstrip().startswith(".")]
     assert dots == []

@@ -834,3 +834,17 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         |"extraSetupSql":"","lockdownSql":"","tenantStoreSql":"x"}""".stripMargin
     io.circe.parser.decode[FleetAssignment](json).map(_.nodeId) shouldBe Right("n1")
   }
+
+  // Task 20: an assignment stored before the tenant's initSql travelled apart carried it in
+  // dbInitSql, together with the manager's resource SETs. Nothing reads that field any more, so its
+  // SQL never runs as the manager's.
+  it should "drop the dbInitSql of an earlier manager rather than trust it" in {
+    import FleetAssignment.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"dbInitSql":"CREATE VIEW v AS SELECT 1;",
+        |"objectStoreSql":"","extraSetupSql":"","lockdownSql":""}""".stripMargin
+    val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
+    (a.resourceSql, a.tenantDbInitSql, a.tenantDbInitTrusted) shouldBe ("", "", false)
+    io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "CREATE VIEW"
+  }

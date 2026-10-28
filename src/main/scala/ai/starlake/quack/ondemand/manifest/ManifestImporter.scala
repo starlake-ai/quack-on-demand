@@ -165,6 +165,20 @@ object ManifestImporter extends LazyLogging:
           "built-ins, and a built-in group carries no roles"
     }
 
+    // The line the node launchers write around a tenant's initSql section (InitSqlTrust).
+    m.tenants.foreach { t =>
+      t.tenantDbs.foreach { d =>
+        ai.starlake.quack.ondemand.initsql.InitSqlTrust
+          .markerRefusal(d.initSql)
+          .foreach(msg => errs += s"tenant '${t.name}' tenant-db '${d.name}': $msg")
+      }
+      t.pools.foreach { p =>
+        ai.starlake.quack.ondemand.initsql.InitSqlTrust
+          .markerRefusal(p.initSql)
+          .foreach(msg => errs += s"tenant '${t.name}' pool '${p.name}': $msg")
+      }
+    }
+
     // Pools reference their tenant-db by name (sibling check, no DB lookup needed)
     m.tenants.foreach { t =>
       val dbNames = t.tenantDbs.map(_.name).toSet

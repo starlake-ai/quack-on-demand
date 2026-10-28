@@ -4,7 +4,8 @@ import io.fabric8.kubernetes.api.model.Quantity
 import scala.util.Try
 
 /** Engine-enforced cpu / memory for fleet nodes: the pool's Kubernetes quantities become DuckDB
-  * SETs prepended to dbInitSql (a later operator SET still wins). Kernel limits are a v1 non-goal.
+  * SETs, the assignment's `resourceSql`, which the spawn script runs before the tenant-db's initSql
+  * (a later operator SET still wins). Kernel limits are a v1 non-goal.
   */
 object NodeResourceSql:
   private val MiB = BigDecimal(1024L * 1024L)

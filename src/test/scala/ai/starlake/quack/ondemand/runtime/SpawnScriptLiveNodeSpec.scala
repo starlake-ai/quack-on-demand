@@ -246,7 +246,11 @@ class SpawnScriptLiveNodeSpec
   // of it, and nothing the DuckDB CLI would have run as a dot-command.
   "the node init SQL" should "leave the secret directory to qod-node and hold no dot-command" in {
     val dir = NodeSecretFiles.writePrivateDir(
-      Map(NodeSecretFiles.TokenKey -> Token, "pgPassword" -> "p"),
+      Map(
+        NodeSecretFiles.TokenKey        -> Token,
+        "pgPassword"                    -> "p",
+        NodeSecretFiles.TenantDbInitKey -> "SELECT 'db-init';"
+      ),
       Some(tempDir)
     )
     val lines = Process(
@@ -258,7 +262,6 @@ class SpawnScriptLiveNodeSpec
       "schemaName"                 -> "main",
       "dbName"                     -> "acme_lake",
       "dataPath"                   -> tempDir.resolve("lake").toString,
-      "dbInitSql"                  -> "SELECT 'db-init';",
       NodeSecretFiles.DirEnv       -> dir.toString,
       NodeSecretFiles.EphemeralEnv -> "1"
     ).!!.linesIterator.filter(_.trim.nonEmpty).toVector

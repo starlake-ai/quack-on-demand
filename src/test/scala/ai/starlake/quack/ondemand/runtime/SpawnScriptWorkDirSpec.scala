@@ -71,7 +71,7 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
   private def dir(name: String): Path = Files.createDirectories(tempDir.resolve(name))
 
   "the node init SQL" should "spill to an absolute per-node directory, before the operator's own SQL" in {
-    val sql   = dryRun(dir("start"), (memory :+ ("dbInitSql" -> "SELECT 'db-init';"))*)
+    val sql   = dryRun(dir("start"), (memory :+ ("tenantDbInitSql" -> "SELECT 'db-init';"))*)
     val spill = TempDirRe.findFirstMatchIn(sql).map(_.group(1)).getOrElse(fail(sql))
     Paths.get(spill).isAbsolute shouldBe true
     // Per node: never the shared default `.tmp` every node of the host would write to.
@@ -241,7 +241,10 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
 
   "the node init SQL" should "install httpfs and avro without loading them, before the operator's SQL" in {
     val lines =
-      dryRun(dir("start"), (memory :+ ("dbInitSql" -> "SELECT 'db-init';"))*).linesIterator.toList
+      dryRun(
+        dir("start"),
+        (memory :+ ("tenantDbInitSql" -> "SELECT 'db-init';"))*
+      ).linesIterator.toList
     lines should contain("INSTALL httpfs;")
     lines should contain("INSTALL avro;")
     lines.indexOf("INSTALL avro;") should be < lines.indexOf("SELECT 'db-init';")

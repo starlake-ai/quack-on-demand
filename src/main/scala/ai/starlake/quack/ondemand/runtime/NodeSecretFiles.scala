@@ -50,6 +50,26 @@ object NodeSecretFiles extends LazyLogging:
     */
   val NodeIdEnv: String = "QOD_NODE_ID"
 
+  /** Files holding the tenant-db's and the pool's initSql. Secrets like the federation SQL: a
+    * tenant's init SQL may carry credentials.
+    */
+  val TenantDbInitKey: String   = "tenantDbInitSql"
+  val TenantPoolInitKey: String = "tenantPoolInitSql"
+
+  /** Env vars saying whether [[TenantDbInitKey]] / [[TenantPoolInitKey]] are trusted (`1`: written
+    * by a superuser or the manager, run as written) or not (anything else: run by qod-node under
+    * its tenant initSql allowlist). Not secrets; every launcher sets both, always.
+    */
+  val InitTrustedDbEnv: String   = "QOD_INIT_TRUSTED_DB"
+  val InitTrustedPoolEnv: String = "QOD_INIT_TRUSTED_POOL"
+
+  /** The values of [[InitTrustedDbEnv]] and [[InitTrustedPoolEnv]] for `spec`. */
+  def initTrustEnv(spec: ai.starlake.quack.model.NodeSpec): Map[String, String] =
+    Map(
+      InitTrustedDbEnv   -> (if spec.tenantDbInitTrusted then "1" else "0"),
+      InitTrustedPoolEnv -> (if spec.tenantPoolInitTrusted then "1" else "0")
+    )
+
   /** Object-store credentials the spawn script turns into a global `CREATE SECRET` for a remote
     * `dataPath`. Read from the manager's (or fleet join process's) own environment, never forwarded
     * as env.
@@ -73,7 +93,9 @@ object NodeSecretFiles extends LazyLogging:
       "extraSetupSql",
       "objectStoreSql",
       TokenKey,
-      AuthzKey
+      AuthzKey,
+      TenantDbInitKey,
+      TenantPoolInitKey
     ) ++ CloudCredKeys
 
   require(
@@ -113,6 +135,8 @@ object NodeSecretFiles extends LazyLogging:
       metastore: Map[String, String],
       extraSetupSql: String,
       objectStoreSql: String,
+      tenantDbInitSql: String = "",
+      tenantPoolInitSql: String = "",
       token: String,
       authzKey: String,
       inheritedEnv: Map[String, String]
@@ -124,8 +148,12 @@ object NodeSecretFiles extends LazyLogging:
       .flatMap { case (k, v) => canonical(k).map(c => (c, k == c, v)) }
       .groupBy(_._1)
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }
-    val sql = Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql)
-      .filter(_._2.nonEmpty)
+    val sql = Seq(
+      "extraSetupSql"   -> extraSetupSql,
+      "objectStoreSql"  -> objectStoreSql,
+      TenantDbInitKey   -> tenantDbInitSql,
+      TenantPoolInitKey -> tenantPoolInitSql
+    ).filter(_._2.nonEmpty)
     (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey))
       .filter(_._2.nonEmpty)
 

@@ -96,6 +96,42 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     )
   }
 
+  // Task 20: a tenant's initSql may carry credentials, so both travel by file; a metastore never
+  // supplies either.
+  it should "deliver the tenant-db's and the pool's initSql by file, never from a metastore" in {
+    val values = NodeSecretFiles.collect(
+      metastore = Map("tenantDbInitSql" -> "from-metastore", "TenantPoolInitSql" -> "x"),
+      extraSetupSql = "",
+      objectStoreSql = "",
+      tenantDbInitSql = "SET threads = 2;",
+      tenantPoolInitSql = "SET threads = 3;",
+      token = "tok",
+      authzKey = "ab" * 32,
+      inheritedEnv = Map("tenantDbInitSql" -> "from-env")
+    )
+    values shouldBe Map(
+      NodeSecretFiles.TenantDbInitKey   -> "SET threads = 2;",
+      NodeSecretFiles.TenantPoolInitKey -> "SET threads = 3;",
+      "QOD_NODE_TOKEN"                  -> "tok",
+      "QOD_NODE_AUTHZ_KEY"              -> "ab" * 32
+    )
+    // Their trust is plain env, both values always, `1` only when trusted.
+    NodeSecretFiles.initTrustEnv(
+      ai.starlake.quack.model.NodeSpec(
+        ai.starlake.quack.model.PoolKey("t", "d", "p"),
+        "n",
+        ai.starlake.quack.model.Role.Dual,
+        Map.empty,
+        Map.empty,
+        tenantPoolInitTrusted = true
+      )
+    ) shouldBe Map(
+      NodeSecretFiles.InitTrustedDbEnv   -> "0",
+      NodeSecretFiles.InitTrustedPoolEnv -> "1"
+    )
+    NodeSecretFiles.isKey(NodeSecretFiles.InitTrustedDbEnv) shouldBe false
+  }
+
   "isInheritedSecret" should "drop the manager's own credentials but keep cloud SDK and plain settings" in {
     Seq(
       "QOD_API_KEY",

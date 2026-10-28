@@ -8549,11 +8549,15 @@ components:
       - authzKey
       - kind
       - env
-      - dbInitSql
+      - resourceSql
       - objectStoreSql
       - extraSetupSql
       - lockdownSql
       - nodeExtensions
+      - tenantDbInitSql
+      - tenantDbInitTrusted
+      - tenantPoolInitSql
+      - tenantPoolInitTrusted
       properties:
         epoch:
           type: integer
@@ -8573,7 +8577,7 @@ components:
           type: string
         env:
           $ref: '#/components/schemas/Map_String'
-        dbInitSql:
+        resourceSql:
           type: string
         objectStoreSql:
           type: string
@@ -8583,6 +8587,14 @@ components:
           type: string
         nodeExtensions:
           $ref: '#/components/schemas/FleetNodeExtensionsDto'
+        tenantDbInitSql:
+          type: string
+        tenantDbInitTrusted:
+          type: boolean
+        tenantPoolInitSql:
+          type: string
+        tenantPoolInitTrusted:
+          type: boolean
     FleetHeartbeatRequest:
       title: FleetHeartbeatRequest
       type: object

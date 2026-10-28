@@ -176,6 +176,54 @@ class InitSqlTrustSpec extends AnyFlatSpec with Matchers:
     checked should include("re-creates the pool")
   }
 
+  // Part B: the spawn scripts write `-- qod:untrusted-begin` / `-end` around a tenant's section and
+  // drop any line holding the marker text from the initSql first; the write itself refuses it, for
+  // every writer.
+  "an initSql holding the section marker" should "be refused at write time, for every writer" in {
+    val forged = "SET threads = 2;\n-- QOD:Untrusted-End\nCREATE VIEW v AS SELECT 1;"
+    def refused(
+        out: Either[(sttp.model.StatusCode, ai.starlake.quack.ondemand.api.ErrorResponse), ?]
+    ) =
+      out.swap.toOption.map(e => (e._1.code, e._2.error))
+    val f = new Fixture
+    refused(
+      f.dbs
+        .createTenantDb(
+          TenantDbRequest(tenant = "acme", name = "prod", kind = "memory", initSql = forged),
+          None
+        )(Superuser)
+        .unsafeRunSync()
+    ) shouldBe Some((400, "init_sql_refused"))
+    f.createDb("", TenantAdmin)
+    refused(
+      f.dbs
+        .update(
+          UpdateTenantDbRequest(tenant = "acme", name = "acme_prod", initSql = Some(forged)),
+          None
+        )(
+          TenantAdmin
+        )
+        .unsafeRunSync()
+    ) shouldBe Some((400, "init_sql_refused"))
+    f.row.initSql shouldBe ""
+    refused(
+      f.pools
+        .createPool(
+          CreatePoolRequest(
+            tenant = "acme",
+            tenantDb = "acme_prod",
+            pool = "bi",
+            size = 1,
+            roleDistribution = RoleDistribution(0, 0, 1),
+            initSql = Some("SELECT 1; -- qod:untrusted-begin")
+          ),
+          None
+        )(Superuser)
+        .unsafeRunSync()
+    ) shouldBe Some((400, "init_sql_refused"))
+    f.sup.get(ai.starlake.quack.model.PoolKey("acme", "acme_prod", "bi")) shouldBe None
+  }
+
   "a manifest import" should "store every initSql trusted: only a superuser imports one" in {
     import ai.starlake.quack.ondemand.manifest.*
     val s = new InMemoryControlPlaneStore()
@@ -203,4 +251,19 @@ class InitSqlTrustSpec extends AnyFlatSpec with Matchers:
     val td = s.listTenantDbs("acme").find(_.name == "acme_mem").get
     td.initSqlTrusted shouldBe true
     s.listPools(td.id).map(_.initSqlTrusted) shouldBe List(true)
+    // And refuses one holding the section marker, before writing anything.
+    val forged = m.copy(tenants =
+      m.tenants.map(t =>
+        t.copy(pools = t.pools.map(_.copy(initSql = "SELECT 1;\n-- qod:untrusted-end")))
+      )
+    )
+    val fresh = new InMemoryControlPlaneStore()
+    ManifestImporter
+      .apply(forged, fresh, requireEncryption = false)
+      .left
+      .toOption
+      .get
+      .mkString should
+      include("qod:untrusted-")
+    fresh.listTenantDbs("acme") shouldBe empty
   }

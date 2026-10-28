@@ -4,6 +4,7 @@ import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -240,6 +241,18 @@ final class PoolHandlers(
               (
                 StatusCode.BadRequest,
                 ErrorResponse("invalid_distribution", "role counts do not sum to size")
+              )
+            )
+          )
+        else if req.initSql.flatMap(InitSqlTrust.markerRefusal).isDefined then
+          IO.pure(
+            Left(
+              (
+                StatusCode.BadRequest,
+                ErrorResponse(
+                  "init_sql_refused",
+                  req.initSql.flatMap(InitSqlTrust.markerRefusal).getOrElse("")
+                )
               )
             )
           )

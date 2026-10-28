@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
@@ -128,6 +129,10 @@ final class TenantDbHandlers(
       initSqlTrusted = td.initSqlTrusted
     )
 
+  /** `400 init_sql_refused` with `message`. */
+  private def initSqlRefused(message: String): (StatusCode, ErrorResponse) =
+    (StatusCode.BadRequest, ErrorResponse("init_sql_refused", message))
+
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[TenantDbResponse] =
@@ -160,12 +165,16 @@ final class TenantDbHandlers(
             )
           )
         else
-          metastoreKeyRefusal(TenantDb.metastoreKeyError(req.metastore)).orElse(
-            validateObjectStore(req.objectStore)
-              .orElse(validateManagedStorage(req))
-              .orElse(validateEncryption(req))
-              .map(msg => (StatusCode.BadRequest, ErrorResponse("invalid", msg)))
-          ) match
+          metastoreKeyRefusal(TenantDb.metastoreKeyError(req.metastore))
+            .orElse(
+              InitSqlTrust.markerRefusal(req.initSql).map(initSqlRefused)
+            )
+            .orElse(
+              validateObjectStore(req.objectStore)
+                .orElse(validateManagedStorage(req))
+                .orElse(validateEncryption(req))
+                .map(msg => (StatusCode.BadRequest, ErrorResponse("invalid", msg)))
+            ) match
             case Some(err) =>
               IO.pure(Left(err))
             case None =>
@@ -334,6 +343,7 @@ final class TenantDbHandlers(
       case None =>
         req.metastore
           .flatMap(m => metastoreKeyRefusal(TenantDb.metastoreUpdateKeyError(m)))
+          .orElse(req.initSql.flatMap(InitSqlTrust.markerRefusal).map(initSqlRefused))
           .orElse(
             req.objectStore
               .flatMap(validateObjectStore)

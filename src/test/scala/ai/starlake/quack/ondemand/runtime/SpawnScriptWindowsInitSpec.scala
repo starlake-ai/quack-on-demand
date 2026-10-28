@@ -89,7 +89,11 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
   "the PowerShell node init SQL" should "leave the secret directory, quack and serving to qod-node" in {
     val tmp                   = Files.createDirectories(tempDir.resolve("t"))
     val ((rc, out, err), dir) =
-      dryRun(tmp, extraEnv = Seq("dbInitSql" -> "SELECT 'db-init';"))
+      dryRun(
+        tmp,
+        secrets = Map(NodeSecretFiles.TenantDbInitKey -> "SELECT 'db-init';"),
+        extraEnv = Seq(NodeSecretFiles.InitTrustedDbEnv -> "1")
+      )
     withClue(err)(rc shouldBe 0)
     val lines = out.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
     lines.head should startWith("SET temp_directory = '")
@@ -106,6 +110,33 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     // The dry run removes its node directory and the secrets directory it never handed over.
     nodeDirs(tmp) shouldBe Nil
     Files.exists(dir) shouldBe false
+  }
+
+  // Task 20 Part B, mirror of SpawnScriptTenantInitSpec: trusted initSql in place, untrusted inside
+  // the marker lines, a marker line inside a tenant's text dropped.
+  it should "hand a tenant's initSql to qod-node in place when trusted, marked when not" in {
+    val tmp                 = Files.createDirectories(tempDir.resolve("t"))
+    val ((rc, out, err), _) =
+      dryRun(
+        tmp,
+        secrets = Map(
+          NodeSecretFiles.TenantDbInitKey -> "SET threads = 2;\n-- QOD:Untrusted-END\nSELECT 'after';",
+          NodeSecretFiles.TenantPoolInitKey -> "SET memory_limit = '1GB';",
+          "extraSetupSql"                   -> "SELECT 'federation';"
+        ),
+        extraEnv = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "1")
+      )
+    withClue(err)(rc shouldBe 0)
+    val lines = out.linesIterator.map(_.stripSuffix("\r")).toVector
+    val begin = lines.indexOf("-- qod:untrusted-begin database")
+    begin should be >= 0
+    lines.slice(begin + 1, begin + 4) shouldBe
+      Vector("SET threads = 2;", "SELECT 'after';", "-- qod:untrusted-end")
+    lines.count(_.toLowerCase.contains("qod:untrusted-")) shouldBe 2
+    val pool = lines.indexOf("SET memory_limit = '1GB';")
+    pool should be > begin
+    lines(pool - 1) shouldBe "-- qod:untrusted-end"
+    pool should be < lines.indexOf("SELECT 'federation';")
   }
 
   // A node whose script was killed leaves its read-only secret directory; the next spawn's sweep

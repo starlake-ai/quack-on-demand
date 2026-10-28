@@ -346,7 +346,7 @@ object FleetHandlers:
       authzKey,
       a.kind,
       a.env,
-      a.dbInitSql,
+      a.resourceSql,
       a.objectStoreSql,
       a.extraSetupSql,
       a.lockdownSql,
@@ -354,5 +354,9 @@ object FleetHandlers:
         extensions.allowCommunity,
         extensions.allowUnsigned,
         extensions.autoinstallKnown
-      )
+      ),
+      a.tenantDbInitSql,
+      a.tenantDbInitTrusted,
+      a.tenantPoolInitSql,
+      a.tenantPoolInitTrusted
     )

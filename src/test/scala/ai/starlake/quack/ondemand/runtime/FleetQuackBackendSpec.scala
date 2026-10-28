@@ -131,16 +131,24 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     n.token should not be empty
   }
 
-  it should "prepend the pool's cpu/memory as DuckDB SETs to dbInitSql and pass memory to the claim" in {
+  it should "send the pool's cpu/memory as DuckDB SETs apart from the tenant's initSql" in {
     val (store, backend, _, _) = fixture()
     val small = new FakeAgent(store, "small", memoryBytes = Some(512L << 20)); small.beat()
     val big   = new FakeAgent(store, "big", memoryBytes = Some(64L << 30)); big.beat()
     val sized =
-      spec("n1").copy(cpu = Some("2"), memory = Some("1Gi"), dbInitSql = "SET threads = 8;")
+      spec("n1").copy(
+        cpu = Some("2"),
+        memory = Some("1Gi"),
+        tenantDbInitSql = "SET threads = 8;",
+        tenantPoolInitSql = "SET threads = 4;",
+        tenantPoolInitTrusted = true
+      )
     val n = withAgent(big)(backend.start(sized))
     n.serverName shouldBe Some("big")
-    store.get("big").get.assignment.map(_.dbInitSql) shouldBe
-      Some("SET threads = 2;\nSET memory_limit = '1024MiB';\nSET threads = 8;")
+    val a = store.get("big").get.assignment.get
+    a.resourceSql shouldBe "SET threads = 2;\nSET memory_limit = '1024MiB';\n"
+    (a.tenantDbInitSql, a.tenantDbInitTrusted) shouldBe ("SET threads = 8;", false)
+    (a.tenantPoolInitSql, a.tenantPoolInitTrusted) shouldBe ("SET threads = 4;", true)
   }
 
   it should "hand servers the node-facing Postgres address of the managed metastore" in {

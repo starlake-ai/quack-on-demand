@@ -75,8 +75,8 @@ START_DIR="${START_DIR%/}"
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.ps1 and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
 SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql QOD_NODE_TOKEN
-  QOD_NODE_AUTHZ_KEY QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING
-  QOD_GCS_KEY_ID QOD_GCS_SECRET)
+  QOD_NODE_AUTHZ_KEY tenantDbInitSql tenantPoolInitSql QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY
+  QOD_AZURE_CONNECTION_STRING QOD_GCS_KEY_ID QOD_GCS_SECRET)
 # The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
 # script never reads them.
 QOD_NODE_KEYS=" QOD_NODE_TOKEN QOD_NODE_AUTHZ_KEY "
@@ -529,18 +529,65 @@ fi
 #                 no ATTACH needed. Federation aliases (in extraSetupSql)
 #                 are typically the only catalogs available.
 
+# A tenant's initSql (tenantDbInitSql, tenantPoolInitSql: secret files) as qod-node gets it. As
+# written when its trust flag (QOD_INIT_TRUSTED_DB, QOD_INIT_TRUSTED_POOL) is exactly 1: a superuser
+# or the manager wrote it. Otherwise between the lines `-- qod:untrusted-begin <label>` and
+# `-- qod:untrusted-end`, a section qod-node runs under its tenant initSql allowlist, statement by
+# statement. Every line holding the marker text, in any case, is dropped first (the manager refuses
+# it at write time), so no initSql can end its own section or open one over the SQL after it.
+strip_init_markers() {
+  local rest="$1" line out="" restore_case=1
+  shopt -q nocasematch && restore_case=0
+  shopt -s nocasematch
+  while [[ -n "$rest" ]]; do
+    if [[ "$rest" == *$'\n'* ]]; then
+      line="${rest%%$'\n'*}"
+      rest="${rest#*$'\n'}"
+    else
+      line="$rest"
+      rest=""
+    fi
+    [[ "$line" == *qod:untrusted-* ]] || out+="$line"$'\n'
+  done
+  if (( restore_case )); then
+    shopt -u nocasematch
+  fi
+  printf '%s' "$out"
+}
+# Prints the section for one initSql (nothing for an empty one), newline-terminated.
+tenant_init_sql() {
+  local label="$1" sql trusted="$3"
+  sql="$(strip_init_markers "$2")"
+  [[ -n "$sql" ]] || return 0
+  if [[ "$trusted" == "1" ]]; then
+    printf '%s\n' "$sql"
+  else
+    printf -- '-- qod:untrusted-begin %s\n%s\n-- qod:untrusted-end\n' "$label" "$sql"
+  fi
+}
+# Appends tenant_init_sql's section to INIT_SQL (a command substitution drops the final newline).
+append_tenant_init_sql() {
+  local section
+  section="$(tenant_init_sql "$1" "$2" "$3")"
+  if [[ -n "$section" ]]; then
+    INIT_SQL+="$section"$'\n'
+  fi
+}
+
 # Build init SQL piecemeal based on $kind so kind=memory and
 # kind=duckdb-file skip DuckLake-specific setup entirely. qod-node runs it after setting the secret
 # directory (SECRET_PATH, see above: DuckDB then refuses to change it from any session) and before
 # loading quack and serving.
 INIT_SQL=""
 INIT_SQL+="$PROXY_SQL"$'\n'
-# Cgroup-derived memory_limit / temp_directory / threads (see above) run
-# right after the proxy settings and before dbInitSql, so an operator's
-# own "SET memory_limit=..." / "SET threads=..." in dbInitSql or
-# extraSetupSql still wins - DuckDB's SET is a plain reassignment, so the
-# later statement is the one that sticks.
+# Cgroup-derived memory_limit / temp_directory / threads (see above) and a fleet assignment's pool
+# cpu/memory SETs (resourceSql, the manager's) run right after the proxy settings and before the
+# tenant's initSql, so an operator's own "SET memory_limit=..." / "SET threads=..." there still
+# wins - DuckDB's SET is a plain reassignment, so the later statement is the one that sticks.
 INIT_SQL+="$RESOURCE_SQL"
+if [[ -n "${resourceSql:-}" ]]; then
+  INIT_SQL+="$resourceSql"$'\n'
+fi
 # qod-node opens the database with autoinstall_known_extensions off (decision 17), so a statement no
 # longer downloads the known extension it needs. Install, without loading, the two QoD's own setup
 # reached only that way: httpfs (s3 and http reads, and Iceberg REST catalogs, on a node whose data
@@ -548,13 +595,11 @@ INIT_SQL+="$RESOURCE_SQL"
 # first use. Best effort like every init statement: a node offline with neither installed logs it and
 # starts.
 INIT_SQL+=$'INSTALL httpfs;\nINSTALL avro;\n'
-# Per-database init SQL (tenant-db initSql, `dbInitSql` env var). Runs before the catalog ATTACH,
-# right after the proxy settings, and long before qod-node loads quack, so engine-level defaults
-# (SET memory_limit, SET temp_directory, extension INSTALLs) are already in effect when quack
-# starts. Pool initSql + federation SQL ride $extraSetupSql further down.
-if [[ -n "${dbInitSql:-}" ]]; then
-  INIT_SQL+="$dbInitSql"$'\n'
-fi
+# Per-database init SQL (the tenant-db's initSql). Runs before the catalog ATTACH, right after the
+# proxy and resource settings, and long before qod-node loads quack, so engine-level defaults
+# (SET memory_limit, extension INSTALLs) are already in effect when quack starts. The pool's
+# initSql and the federation SQL run further down.
+append_tenant_init_sql database "${tenantDbInitSql:-}" "${QOD_INIT_TRUSTED_DB:-}"
 
 # Per-database object-store secret (objectStoreSql env, authored by ObjectStoreSecret.scala).
 # A scoped CREATE SECRET for this database's own bucket/credentials, emitted for EVERY kind:
@@ -626,6 +671,9 @@ case "$kind" in
     ;;
 esac
 
+# The pool's initSql, before the federation SQL, so its PRAGMAs and SETs are in effect before any
+# federated source is attached.
+append_tenant_init_sql pool "${tenantPoolInitSql:-}" "${QOD_INIT_TRUSTED_POOL:-}"
 if [[ -n "${extraSetupSql:-}" ]]; then
   INIT_SQL+="$extraSetupSql"$'\n'
 fi

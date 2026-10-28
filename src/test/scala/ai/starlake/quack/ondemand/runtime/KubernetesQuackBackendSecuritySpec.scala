@@ -240,7 +240,13 @@ class KubernetesQuackBackendSecuritySpec
           "quack-nodeenv-noenv",
           lakeMeta ++ Map("pgPassword" -> "p", "encryptionKey" -> "k")
         )
-          .copy(extraSetupSql = "SELECT 1;", objectStoreSql = "SELECT 2;")
+          .copy(
+            extraSetupSql = "SELECT 1;",
+            objectStoreSql = "SELECT 2;",
+            tenantDbInitSql = "SET threads = 2;",
+            tenantPoolInitSql = "SET threads = 3;",
+            tenantPoolInitTrusted = true
+          )
       )
       .unsafeRunSync()
     val env = podEnv("quack-nodeenv-noenv")
@@ -253,8 +259,19 @@ class KubernetesQuackBackendSecuritySpec
         "extraSetupSql",
         "objectStoreSql",
         "QOD_NODE_TOKEN",
-        "QOD_NODE_AUTHZ_KEY"
+        "QOD_NODE_AUTHZ_KEY",
+        NodeSecretFiles.TenantDbInitKey,
+        NodeSecretFiles.TenantPoolInitKey
       )
+    // Task 20: the tenant initSql shares the pool's init SQL Secret; its trust rides plain env.
+    val values = env.map(e => e.getName -> e.getValue).toMap
+    values.get(NodeSecretFiles.InitTrustedDbEnv) shouldBe Some("0")
+    values.get(NodeSecretFiles.InitTrustedPoolEnv) shouldBe Some("1")
+    secretPayload("qod-fedsql-acme-acme-lake-bi").value shouldBe Map(
+      "extraSetupSql"                   -> "SELECT 1;",
+      NodeSecretFiles.TenantDbInitKey   -> "SET threads = 2;",
+      NodeSecretFiles.TenantPoolInitKey -> "SET threads = 3;"
+    )
 
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
@@ -282,6 +299,8 @@ class KubernetesQuackBackendSecuritySpec
       "QOD_NODE_BIN"             -> "/nonexistent/sec1-marker-node-bin",
       "lockdownSql"              -> "SELECT 'sec1-marker-lockdown';",
       "dbInitSql"                -> "SELECT 'sec1-marker-db-init';",
+      "tenantDbInitSql"          -> "SELECT 'sec1-marker-tenant-db-init';",
+      "QOD_INIT_TRUSTED_DB"      -> "sec1-marker-trusted",
       "kind"                     -> "sec1-marker-kind",
       "QOD_SECRETS_DIR"          -> "/nonexistent/sec1-marker-secrets",
       "QOD_NODE_PORT"            -> "1",
@@ -306,6 +325,7 @@ class KubernetesQuackBackendSecuritySpec
     names.distinct shouldBe names
     names.toSet shouldBe allowed.keySet ++
       Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
+      Set(NodeSecretFiles.InitTrustedDbEnv, NodeSecretFiles.InitTrustedPoolEnv) ++
       ai.starlake.quack.NodeExtensionsConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
@@ -313,6 +333,8 @@ class KubernetesQuackBackendSecuritySpec
     values.get(NodeSecretFiles.DirEnv) shouldBe Some(KubernetesQuackBackend.SecretsMountPath)
     values.get("QOD_NODE_PORT") shouldBe Some("8080")
     values.get(NodeSecretFiles.NodeIdEnv) shouldBe Some("quack-nodeenv-sec1")
+    values.get(NodeSecretFiles.InitTrustedDbEnv) shouldBe Some("0")
+    values.get(NodeSecretFiles.InitTrustedPoolEnv) shouldBe Some("0")
     withClue("a metastore marker in the pod env: ")(
       env.exists(e => Option(e.getValue).exists(_.contains("sec1-marker"))) shouldBe false
     )

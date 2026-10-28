@@ -78,7 +78,7 @@ def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
     return {"epoch": epoch, "nodeId": node_id, "poolKey": {"tenant": "acme", "tenantDb": "db", "pool": "bi"},
             "port": port, "token": "tok", "authzKey": "ab" * 32, "kind": "memory",
             "env": {"pgHost": "h", "pgPassword": "pw"},
-            "dbInitSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
+            "resourceSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
 
 
 def read_secrets(env):
@@ -263,6 +263,7 @@ def test_refuses_plain_http_without_insecure(tmp_path):
 def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp_path, monkeypatch):
     monkeypatch.setenv("QOD_FLEET_JOIN_TOKEN", "fleet-wide-secret")
     monkeypatch.setenv("lockdownSql", "X")
+    monkeypatch.setenv("QOD_INIT_TRUSTED_DB", "1")
     monkeypatch.setenv("SOME_RANDOM_SECRET", "nope")
     monkeypatch.setenv("QOD_S3_ENDPOINT", "minio:9000")
     envs = []
@@ -273,7 +274,9 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
     env = envs[0]
     assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
     assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
-    assert env["lockdownSql"] == "" and env["dbInitSql"] == ""
+    assert env["lockdownSql"] == "" and env["resourceSql"] == ""
+    # No tenant initSql in the assignment: both untrusted, never from this process's environment.
+    assert env["QOD_INIT_TRUSTED_DB"] == "0" and env["QOD_INIT_TRUSTED_POOL"] == "0"
     assert env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
 
 
@@ -322,6 +325,8 @@ SEC1_ALLOWED = {"pgHost": "h", "pgPort": "5432", "pgUser": "u", "dbName": "lake"
 SEC1_HOSTILE = {"BASH_ENV": "/nonexistent/sec1-marker-bash-env", "PATH": "/nonexistent/sec1-marker-path",
                 "QOD_NODE_BIN": "/nonexistent/sec1-marker-node-bin", "lockdownSql": "SELECT 'sec1-marker-lockdown';",
                 "dbInitSql": "SELECT 'sec1-marker-db-init';", "kind": "sec1-marker-kind",
+                "resourceSql": "SELECT 'sec1-marker-resource';", "tenantDbInitSql": "SELECT 'sec1-marker-tdb';",
+                "QOD_INIT_TRUSTED_DB": "sec1-marker-trusted",
                 "QOD_NODE_ID": "sec1-marker-node-id", "QOD_NODE_BIND": "sec1-marker-bind",
                 "extraSetupSql": "SELECT 'sec1-marker-extra';", "QOD_S3_SECRET_ACCESS_KEY": "sec1-marker-s3-secret",
                 "QOD_NODE_TOKEN": "sec1-marker-token", "sec1Unknown": "sec1-marker-unknown"}
@@ -345,13 +350,31 @@ def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, c
     assert [k for k in ("BASH_ENV", "sec1Unknown", "QOD_NODE_BIN") if k in env] == []
     own_path = env.get("PATH") == os.environ.get("PATH")
     assert own_path, "the node's PATH is not this process's own"
-    assert [env.get(k) for k in ("lockdownSql", "dbInitSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
+    assert [env.get(k) for k in ("lockdownSql", "resourceSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
         ["", "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
+    assert "dbInitSql" not in env
     assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
     err = capsys.readouterr().err
     named = "'BASH_ENV'" in err and "'sec1Unknown'" in err
     assert named, "the dropped keys are not named on stderr"
     assert "sec1-marker" not in err, "a dropped value was printed"
+
+
+def test_tenant_init_sql_goes_to_files_and_its_trust_to_env(tmp_path):
+    # Task 20: the tenant-db's and the pool's initSql are secret files; whether each runs as written
+    # rides QOD_INIT_TRUSTED_DB / _POOL, "1" only for a JSON true.
+    a = dict(assignment(1), tenantDbInitSql="SET threads = 2;", tenantDbInitTrusted=True,
+             tenantPoolInitSql="SET threads = 3;", tenantPoolInitTrusted="true")
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append((env, read_secrets(env))); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    env, secrets = seen[0]
+    assert secrets["tenantDbInitSql"] == "SET threads = 2;"
+    assert secrets["tenantPoolInitSql"] == "SET threads = 3;"
+    assert "SET threads" not in "".join(env.values())
+    assert env["QOD_INIT_TRUSTED_DB"] == "1" and env["QOD_INIT_TRUSTED_POOL"] == "0"
 
 
 EXTENSION_ENV = ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",

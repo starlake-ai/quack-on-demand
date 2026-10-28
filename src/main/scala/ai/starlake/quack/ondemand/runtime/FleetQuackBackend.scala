@@ -96,12 +96,16 @@ final class FleetQuackBackend(
         cfg.nodePgHost,
         cfg.nodePgPort
       ),
-      // Pool cpu/memory as DuckDB SETs, ahead of the tenant-db's own dbInitSql so an explicit
-      // operator SET there still wins (later SET overrides).
-      dbInitSql = NodeResourceSql.render(spec.cpu, spec.memory) + spec.dbInitSql,
+      // Pool cpu/memory as DuckDB SETs, which the spawn script runs ahead of the tenant-db's own
+      // initSql, so an explicit operator SET there still wins (later SET overrides).
+      resourceSql = NodeResourceSql.render(spec.cpu, spec.memory),
       objectStoreSql = spec.objectStoreSql,
       extraSetupSql = spec.extraSetupSql,
-      lockdownSql = spec.lockdownSql
+      lockdownSql = spec.lockdownSql,
+      tenantDbInitSql = spec.tenantDbInitSql,
+      tenantDbInitTrusted = spec.tenantDbInitTrusted,
+      tenantPoolInitSql = spec.tenantPoolInitSql,
+      tenantPoolInitTrusted = spec.tenantPoolInitTrusted
     )
 
   private def requiredMemoryBytes(spec: NodeSpec): Option[Long] =

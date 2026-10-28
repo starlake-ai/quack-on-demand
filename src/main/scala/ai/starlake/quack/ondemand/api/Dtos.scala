@@ -353,11 +353,15 @@ final case class FleetAssignmentDto(
     authzKey: String,
     kind: String,
     env: Map[String, String],
-    dbInitSql: String,
+    resourceSql: String,
     objectStoreSql: String,
     extraSetupSql: String,
     lockdownSql: String,
-    nodeExtensions: FleetNodeExtensionsDto
+    nodeExtensions: FleetNodeExtensionsDto,
+    tenantDbInitSql: String,
+    tenantDbInitTrusted: Boolean,
+    tenantPoolInitSql: String,
+    tenantPoolInitTrusted: Boolean
 )
 
 /** `approval` is approved | pending: a pending server gets no assignment until it is approved (`qod

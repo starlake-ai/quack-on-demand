@@ -11,7 +11,8 @@ import scala.collection.concurrent.TrieMap
   * non-secret keys into an environment variable of the node's launcher: `BASH_ENV` (bash expands it
   * before running the spawn script), `PATH`, `LD_PRELOAD` or `QOD_NODE_BIN` then ran commands as
   * the manager's user (local), inside the node pod before node lockdown applied (Kubernetes) or on
-  * a fleet server, and `lockdownSql` / `dbInitSql` replaced what the manager set. Now only
+  * a fleet server, and `lockdownSql` / `dbInitSql` (since split into the trusted `resourceSql` and
+  * the tenant's own `tenantDbInitSql`) replaced what the manager set. Now only
   * [[TenantDb.NodeEnvKeys]] become environment variables ([[env]]), only the metastore's own
   * secrets become files ([[secrets]]), and every other key reaches no node ([[dropped]]), named
   * once per pool and key by [[DroppedKeys]]. The API refuses such keys

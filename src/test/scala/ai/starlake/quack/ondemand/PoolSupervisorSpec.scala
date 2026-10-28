@@ -445,15 +445,15 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .isLeft shouldBe true
 
-  // ---- initSql: free-form per-pool SQL prepended to the federation blob ----
+  // ---- initSql: free-form per-pool SQL, on its own beside the federation blob ----
   //
   // Operators set things like `SET memory_limit='8GB';` or `INSTALL httpfs;`
-  // here. spawn-quack-node.sh just dumps $extraSetupSql into the init pipe, so
-  // the per-pool initSql rides the same env var; PoolSupervisor concatenates
-  // initSql FIRST then the resolved federation blob so PRAGMAs are in effect
-  // before any federation ATTACH runs.
+  // here. It travels as NodeSpec.tenantPoolInitSql with its trust flag, never
+  // inside extraSetupSql (the manager's own SQL), so qod-node can run a tenant
+  // admin's text under its tenant initSql allowlist; the spawn script still runs
+  // it before the federation blob.
 
-  it should "prepend initSql to NodeSpec.extraSetupSql when no federation blob is present" in:
+  it should "ship initSql as NodeSpec.tenantPoolInitSql, untrusted for a tenant admin's" in:
     val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
@@ -461,7 +461,18 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val pragma = "SET memory_limit='8GB';"
     sup.createPool(key, RoleDistribution(0, 0, 1), initSql = pragma).unsafeRunSync()
     backend.specs.size shouldBe 1
-    backend.specs.head.extraSetupSql.trim shouldBe pragma
+    backend.specs.head.tenantPoolInitSql shouldBe pragma
+    backend.specs.head.tenantPoolInitTrusted shouldBe false
+    backend.specs.head.extraSetupSql shouldBe ""
+
+  it should "mark a superuser's pool initSql trusted on the NodeSpec" in:
+    val (sup, backend) = freshSupervisorWithBackend()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
+      .unsafeRunSync()
+    sup.createPool(key, RoleDistribution(0, 0, 1), initSql = "SET threads=2;", initSqlTrusted = true)
+      .unsafeRunSync()
+    backend.specs.head.tenantPoolInitTrusted shouldBe true
 
   it should "expose initSql on the PoolState so the UI can render it later" in:
     val (sup, _) = freshSupervisorWithBackend()
@@ -2163,21 +2174,21 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     tracker.snapshot(nodeId).quarantined shouldBe true
   }
 
-  // ---------- per-database boot SQL (NodeSpec.dbInitSql) ----------
+  // ---------- per-database boot SQL (NodeSpec.tenantDbInitSql) ----------
   //
-  // The tenant-db initSql executes BEFORE the quack extension loads (and after
-  // the proxy http settings), so it must NOT be folded into extraSetupSql,
-  // which spawn-quack-node.sh runs after LOAD quack + the catalog ATTACH. It
-  // rides its own NodeSpec.dbInitSql field / dbInitSql env var instead.
+  // The tenant-db initSql executes BEFORE the catalog ATTACH (and after the
+  // proxy and resource settings), so it must NOT be folded into extraSetupSql,
+  // which spawn-quack-node.sh runs after the catalog ATTACH. It rides its own
+  // NodeSpec.tenantDbInitSql field (a secret file) with its trust flag instead.
 
-  "joinInitAndBlob" should "join pool initSql and federation blob, skipping blanks" in {
+  "joinInitAndBlob" should "join two fragments of the manager's SQL, skipping blanks" in {
     PoolSupervisor.joinInitAndBlob("SET b=2;", "ATTACH x;") shouldBe "SET b=2;\nATTACH x;"
     PoolSupervisor.joinInitAndBlob("SET b=2;", "") shouldBe "SET b=2;"
     PoolSupervisor.joinInitAndBlob("", "ATTACH x;") shouldBe "ATTACH x;"
     PoolSupervisor.joinInitAndBlob("  ", "") shouldBe ""
   }
 
-  "createPool" should "ship the tenant-db initSql on NodeSpec.dbInitSql, not in extraSetupSql" in {
+  "createPool" should "ship each initSql on its own NodeSpec field, never in extraSetupSql" in {
     val b   = new CapturingBackend
     val sup = new PoolSupervisor(b, new NodeLoadTracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant("acme")).unsafeRunSync()
@@ -2188,22 +2199,24 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     val poolKey2 = PoolKey("acme", "acme_mem1", "bi")
     sup.createPool(poolKey2, RoleDistribution(0, 0, 1), initSql = "SET threads = 2;").unsafeRunSync()
     val spec = b.specs.head
-    spec.dbInitSql shouldBe "SET memory_limit = '2GB';"
-    spec.extraSetupSql should include("SET threads = 2;")
-    spec.extraSetupSql should not include "memory_limit"
+    spec.tenantDbInitSql shouldBe "SET memory_limit = '2GB';"
+    spec.tenantDbInitTrusted shouldBe false
+    spec.tenantPoolInitSql shouldBe "SET threads = 2;"
+    spec.extraSetupSql shouldBe ""
   }
 
-  "restore" should "carry the tenant-db initSql into PoolState.dbInitSql" in {
+  "restore" should "carry the tenant-db initSql and its trust into PoolState" in {
     val store2 = new InMemoryControlPlaneStore()
     val sup2   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store2)
     sup2.createTenant(Tenant("acme")).unsafeRunSync()
     sup2.createTenantDb(
       tenantName = "acme", suffix = "default", kind = TenantDbKind.InMemory,
-      metastore = Map.empty, dataPath = "", initSql = "SET x=1;"
+      metastore = Map.empty, dataPath = "", initSql = "SET x=1;", initSqlTrusted = true
     ).unsafeRunSync()
     sup2.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     sup2.restore()
     sup2.get(key).get.dbInitSql shouldBe "SET x=1;"
+    sup2.get(key).get.dbInitSqlTrusted shouldBe true
   }
 
   it should "carry the tenant-db session defaults into PoolState (demo regression)" in {

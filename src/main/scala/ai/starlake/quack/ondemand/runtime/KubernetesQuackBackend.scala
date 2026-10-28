@@ -20,8 +20,11 @@ import scala.jdk.CollectionConverters._
   * (`qod-node-secrets`, mode 0400, mounted at [[KubernetesQuackBackend.SecretsMountPath]] and named
   * by `QOD_SECRETS_DIR`), never as env vars: a node user with SQL can read its own process
   * environment back.
-  *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the resolved federation SQL when
-  *     `spec.extraSetupSql` is non-empty; all pods of the pool share it.
+  *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the pool's init SQL: the resolved
+  *     federation SQL (`spec.extraSetupSql`) and the tenant-db's and the pool's own initSql
+  *     (`spec.tenantDbInitSql`, `spec.tenantPoolInitSql`), each key only when non-empty, the Secret
+  *     only when one is; all pods of the pool share it. Whether each initSql is trusted rides plain
+  *     env ([[NodeSecretFiles.initTrustEnv]]).
   *   - per-pool `qod-nodeenv-${tenant}-${tenantDb}-${pool}` holds the sensitive metastore values
   *     ([[ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys]]: `pgPassword`, `encryptionKey`,
   *     taken from the metastore by [[NodeMetastore.secrets]]) plus the manager's own object-store
@@ -146,16 +149,15 @@ final class KubernetesQuackBackend(
     kindEnv.setName("kind")
     kindEnv.setValue(spec.kindWire)
     envs.add(kindEnv)
-    // Tenant-db initSql: spawn-quack-node.sh emits it after the proxy
-    // settings and before `INSTALL quack; LOAD quack;`. Inlined like `kind`:
-    // it carries engine defaults (SET memory_limit, temp_directory, extension
-    // INSTALLs), not credentials - those belong in the federation blob.
-    if spec.dbInitSql.nonEmpty then
-      val dbInitEnv = new EnvVar()
-      dbInitEnv.setName("dbInitSql")
-      dbInitEnv.setValue(spec.dbInitSql)
-      envs.add(dbInitEnv)
-    // Engine lockdown block (NodeLockdown.sql). Inlined like dbInitSql (not
+    // Whether the tenant-db's and the pool's initSql (files of the pool's init SQL Secret) run as
+    // written or under qod-node's tenant initSql allowlist. Not secrets; both, always.
+    NodeSecretFiles.initTrustEnv(spec).toList.sorted.foreach { case (k, v) =>
+      val e = new EnvVar()
+      e.setName(k)
+      e.setValue(v)
+      envs.add(e)
+    }
+    // Engine lockdown block (NodeLockdown.sql). Inlined like `kind` (not
     // credential-bearing): spawn-quack-node.sh appends it right before
     // quack_serve, so the value restrictions are in effect before the node
     // serves any tenant statement.
@@ -336,10 +338,10 @@ final class KubernetesQuackBackend(
         Option.when(nodeEnvItems.nonEmpty)(
           projection(nodeEnvSecretNameFor(spec.poolKey), nodeEnvItems)
         ) ++
-        Option.when(spec.extraSetupSql.nonEmpty)(
+        Option.when(initSqlValues(spec).nonEmpty)(
           projection(
             secretNameFor(spec.poolKey),
-            Seq(KubernetesQuackBackend.FederationSecretKey -> "extraSetupSql")
+            initSqlValues(spec).keys.toSeq.sorted.map(k => k -> k)
           )
         ) ++
         Option.when(spec.objectStoreSql.nonEmpty)(
@@ -480,7 +482,8 @@ final class KubernetesQuackBackend(
       // An overwritten pre-existing Secret must survive cleanup (it may be an incumbent's
       // live credentials, e.g. a racing start against a still-running node).
       if !tokenSecretExisted then created.add("tokenSecret")
-      if spec.extraSetupSql.nonEmpty then ensureFederationSecret(spec.poolKey, spec.extraSetupSql)
+      val initSql = initSqlValues(spec)
+      if initSql.nonEmpty then ensureFederationSecret(spec.poolKey, initSql)
       // Per-pool like the federation Secret above, and deliberately NOT tracked in `created`: it is
       // shared by every pod of the pool, so a partial-start rollback must not delete it out from
       // under a live sibling. stop() GCs it with the pool's last pod.
@@ -828,7 +831,17 @@ final class KubernetesQuackBackend(
     * so concurrent ensure-calls for the same pool either both succeed (latest wins) or one races on
     * resourceVersion (auto-retried by fabric8).
     */
-  private def ensureFederationSecret(key: PoolKey, sql: String): Unit =
+  /** The pool's init SQL Secret ([[secretNameFor]]): its non-empty values by key, which is also
+    * each file's name in the secrets volume (the names the spawn script reads).
+    */
+  private def initSqlValues(spec: NodeSpec): Map[String, String] =
+    Map(
+      KubernetesQuackBackend.FederationSecretKey -> spec.extraSetupSql,
+      NodeSecretFiles.TenantDbInitKey            -> spec.tenantDbInitSql,
+      NodeSecretFiles.TenantPoolInitKey          -> spec.tenantPoolInitSql
+    ).filter(_._2.nonEmpty)
+
+  private def ensureFederationSecret(key: PoolKey, values: Map[String, String]): Unit =
     val name = secretNameFor(key)
     val meta = new ObjectMeta()
     meta.setName(name)
@@ -841,7 +854,7 @@ final class KubernetesQuackBackend(
     val secret = new Secret()
     secret.setMetadata(meta)
     val data = new java.util.HashMap[String, String]()
-    data.put(KubernetesQuackBackend.FederationSecretKey, sql)
+    values.foreach { case (k, v) => data.put(k, v) }
     secret.setStringData(data)
     val ops = client.secrets.inNamespace(namespace).resource(secret)
     // fabric8 6.x replaced createOrReplace with createOr(r => r.update())

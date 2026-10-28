@@ -708,7 +708,9 @@ final class PoolSupervisor(
             disabled = p.disabled,
             suspended = p.suspended,
             dbInitSql = td.initSql,
+            dbInitSqlTrusted = td.initSqlTrusted,
             initSql = p.initSql,
+            initSqlTrusted = p.initSqlTrusted,
             extraSetupSql = extraSetupSql,
             // Session defaults for SQL validation / policy-rewrite. Omitting these degraded every
             // restored pool to the metastore's schemaName ("main"), so schema-qualified refs
@@ -1015,8 +1017,11 @@ final class PoolSupervisor(
       s3 = state.s3,
       maxConcurrent = maxConcurrent,
       kindWire = state.kindWire,
-      extraSetupSql = PoolSupervisor.joinInitAndBlob(state.initSql, state.extraSetupSql),
-      dbInitSql = state.dbInitSql,
+      extraSetupSql = state.extraSetupSql,
+      tenantDbInitSql = state.dbInitSql,
+      tenantDbInitTrusted = state.dbInitSqlTrusted,
+      tenantPoolInitSql = state.initSql,
+      tenantPoolInitTrusted = state.initSqlTrusted,
       lockdownSql =
         NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
       objectStoreSql = ObjectStoreSecret.sql(
@@ -1142,10 +1147,11 @@ final class PoolSupervisor(
         s3 = s3,
         maxConcurrent = 1,
         kindWire = kindWire,
-        extraSetupSql = donor
-          .map(s => PoolSupervisor.joinInitAndBlob(s.initSql, s.extraSetupSql))
-          .getOrElse(""),
-        dbInitSql = donor.map(_.dbInitSql).getOrElse(""),
+        extraSetupSql = donor.map(_.extraSetupSql).getOrElse(""),
+        tenantDbInitSql = donor.map(_.dbInitSql).getOrElse(""),
+        tenantDbInitTrusted = donor.exists(_.dbInitSqlTrusted),
+        tenantPoolInitSql = donor.map(_.initSql).getOrElse(""),
+        tenantPoolInitTrusted = donor.exists(_.initSqlTrusted),
         lockdownSql = NodeLockdown.sql(dataPath, effectiveLockdown(key)),
         objectStoreSql = ObjectStoreSecret.sql(s3, dataPath, kindWire)
       )
@@ -2400,6 +2406,7 @@ final class PoolSupervisor(
                           metastore = effectiveMetastoreFor(merged),
                           s3 = merged.objectStore,
                           dbInitSql = merged.initSql,
+                          dbInitSqlTrusted = merged.initSqlTrusted,
                           defaultDatabase = merged.defaultDatabase,
                           defaultSchema = merged.defaultSchema
                         )
@@ -2490,8 +2497,8 @@ final class PoolSupervisor(
       // init still runs) and cold-starts on the first statement or explicit resume. Signup's
       // mass-provisioning depends on this being cheap.
       startSuspended: Boolean = false,
-      // Free-form per-pool SQL prepended to the federation blob, shipped via $extraSetupSql. Order
-      // matters: initSql runs FIRST so PRAGMAs are in effect before any federation source's ATTACH.
+      // Free-form per-pool SQL, shipped as NodeSpec.tenantPoolInitSql. It runs before any
+      // federation source's ATTACH, so PRAGMAs are in effect by then.
       initSql: String = "",
       // Whether a superuser or the manager wrote `initSql` (see createTenantDb's initSqlTrusted).
       initSqlTrusted: Boolean = false,
@@ -2575,12 +2582,9 @@ final class PoolSupervisor(
               val merged   = effectiveMetastoreFor(td)
               val kindWire = td.kind.wireValue
               federationBlobOf(td.id).flatMap { blobOpt =>
-                // initSql runs first so PRAGMAs/INSTALL land before the federation blob's ATTACHes;
-                // both ship via NodeSpec.extraSetupSql.
-                val fedBlob = blobOpt.getOrElse("")
-                // state.extraSetupSql keeps the federation blob ONLY, so a restart that re-projects
-                // PoolState still has initSql separately and respawn re-concatenates without
-                // double-prepending.
+                // The pool's initSql runs before the federation blob's ATTACHes, as its own value
+                // (NodeSpec.tenantPoolInitSql): state.extraSetupSql keeps the federation blob ONLY.
+                val fedBlob    = blobOpt.getOrElse("")
                 val poolEntity = Pool(
                   id = newId("p"),
                   tenantId = td.tenantId,
@@ -2626,10 +2630,12 @@ final class PoolSupervisor(
                     disabled = disabled,
                     suspended = startSuspended,
                     kindWire = kindWire,
-                    // Federation blob only; respawn concatenates with initSql fresh.
+                    // Federation blob only: the pool's initSql travels on its own.
                     extraSetupSql = fedBlob,
                     dbInitSql = td.initSql,
+                    dbInitSqlTrusted = td.initSqlTrusted,
                     initSql = initSql,
+                    initSqlTrusted = poolEntity.initSqlTrusted,
                     defaultDatabase = td.defaultDatabase,
                     defaultSchema = td.defaultSchema,
                     cpu = cpu,
@@ -4405,17 +4411,14 @@ object PoolSupervisor:
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
 
-  /** Concatenate per-pool [[ai.starlake.quack.ondemand.PoolState.initSql]] with the federation blob
-    * for shipment as a single `extraSetupSql` to spawn-quack-node.sh. Order: `initSql` FIRST
-    * (PRAGMAs / SET / INSTALL before any federation ATTACH), blob SECOND, with a forced newline
-    * between the two non-empty fragments (spawn-quack-node.sh echoes the value into a `duckdb`
-    * pipe, which needs the statement terminator). Empty fragments are dropped. The tenant-db
-    * initSql is NOT joined here: it must run before the quack extension is loaded, so it rides
-    * [[ai.starlake.quack.model.NodeSpec.dbInitSql]] instead.
+  /** Two fragments of the manager's own SQL as one `extraSetupSql` (a merge node's federation blob
+    * and its branch attach), `first` FIRST, with a forced newline between two non-empty fragments.
+    * Empty fragments are dropped. Never for a tenant's initSql, which travels on its own
+    * ([[ai.starlake.quack.model.NodeSpec.tenantPoolInitSql]]) so qod-node can tell it apart.
     */
-  def joinInitAndBlob(initSql: String, federationBlob: String): String =
-    val a = Option(initSql).getOrElse("").trim
-    val b = Option(federationBlob).getOrElse("").trim
+  def joinInitAndBlob(first: String, second: String): String =
+    val a = Option(first).getOrElse("").trim
+    val b = Option(second).getOrElse("").trim
     (a, b) match
       case ("", "") => ""
       case (i, "")  => i
