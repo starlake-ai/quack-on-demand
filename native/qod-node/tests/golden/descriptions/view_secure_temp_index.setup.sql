@@ -1,0 +1,2 @@
+CREATE TEMP TABLE ti (x INTEGER);
+CREATE INDEX ti_x ON ti (x);

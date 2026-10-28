@@ -1,0 +1,10 @@
+CREATE MACRO main.mc9() AS 1;
+CREATE MACRO main.mc8() AS main.mc9();
+CREATE MACRO main.mc7() AS main.mc8();
+CREATE MACRO main.mc6() AS main.mc7();
+CREATE MACRO main.mc5() AS main.mc6();
+CREATE MACRO main.mc4() AS main.mc5();
+CREATE MACRO main.mc3() AS main.mc4();
+CREATE MACRO main.mc2() AS main.mc3();
+CREATE MACRO main.mc1() AS main.mc2();
+CREATE SECURE VIEW sv_md AS SELECT main.mc1() AS m;

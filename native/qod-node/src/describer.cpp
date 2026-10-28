@@ -9,6 +9,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
@@ -21,6 +22,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/function/lambda_functions.hpp"
+#include "duckdb/function/scalar_macro_function.hpp"
+#include "duckdb/function/table_macro_function.hpp"
 #include "duckdb/function/scalar/sequence_utils.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_config.hpp"
@@ -241,14 +244,18 @@ private:
 	void Table(const BaseTableRef &table, const std::set<std::string> &scope);
 	QualifiedName Resolved(const QualifiedName &name, const std::string &what);
 	optional_ptr<CatalogEntry> Lookup(CatalogType type, const QualifiedName &name);
-	void Unqualified(CatalogType type, const QualifiedName &name, const std::string &what);
+	optional_ptr<CatalogEntry> Unqualified(CatalogType type, const QualifiedName &name, const std::string &what);
 	void Function(const QualifiedName &name, CatalogType type, const std::string &what);
+	void Macro(CatalogEntry &entry);
 	void Sequence(const FunctionExpression &call);
 	void Type(const TypeExpression &type);
 
 	ClientContext &context_;
 	std::string view_catalog_;
 	unique_ptr<CatalogEntryRetriever> retriever_;
+	//! How deep macros may expand inside a definition (item 20).
+	static constexpr int kMaxMacroDepth = 8;
+	int macro_depth_ = 0;
 };
 
 unique_ptr<CatalogEntryRetriever> Definition::ViewRetriever(const std::string &catalog, const std::string &schema) {
@@ -295,12 +302,14 @@ bool BuiltIn(CatalogEntry &entry) {
 }
 
 //! An unqualified name of `type` the body would resolve outside the system catalog.
-void Definition::Unqualified(CatalogType type, const QualifiedName &name, const std::string &what) {
+optional_ptr<CatalogEntry> Definition::Unqualified(CatalogType type, const QualifiedName &name,
+                                                   const std::string &what) {
 	auto entry = Lookup(type, name);
 	if (entry && !BuiltIn(*entry)) {
 		Unsupported("a secure view whose definition names the " + what + " " + Text(name.Name()) +
 		            " without its schema");
 	}
+	return entry;
 }
 
 //! A function call as the binder looks it up: ColumnQualifier::QualifyFunction for a scalar function
@@ -308,14 +317,58 @@ void Definition::Unqualified(CatalogType type, const QualifiedName &name, const 
 //! binds by the bare name), Binder::Bind(TableFunctionRef&) for a table function, and the window
 //! binder's direct lookup for a window or aggregate in OVER.
 void Definition::Function(const QualifiedName &name, CatalogType type, const std::string &what) {
+	optional_ptr<CatalogEntry> entry;
 	if (name.Path().size() <= 1) {
-		Unqualified(type, Binder::BindTableName(*retriever_, name), what);
+		entry = Unqualified(type, Binder::BindTableName(*retriever_, name), what);
+	} else {
+		entry = Lookup(type, Resolved(name, what));
+		if (!entry && type == CatalogType::SCALAR_FUNCTION_ENTRY) {
+			entry = Unqualified(type, QualifiedName(name.Name()), what);
+		}
+	}
+	if (entry) {
+		Macro(*entry);
+	}
+}
+
+//! Item 20: a macro's body expands inside the boundary and runs with the owner's rights, so a macro that
+//! is not DuckDB's own is held to the definition's rules, transitively. DuckDB v2.0.0 binds the body
+//! where it is called, with the caller's search path: a scalar macro's expression is copied in place and
+//! bound by the calling ExpressionBinder (ExpressionBinder::UnfoldMacroExpression and BindMacro,
+//! src/planner/binder/expression/bind_macro_expression.cpp:170-216), a table macro's query node by a
+//! child of the calling binder (Binder::BindTableMacro, src/planner/binder/query_node/
+//! bind_table_macro_node.cpp:20-49; Binder::Bind(TableFunctionRef&), src/planner/binder/tableref/
+//! bind_table_function.cpp:430-437), which inherits its retriever (Binder::Binder,
+//! src/planner/binder.cpp:59-66). So the body is walked with this definition's retriever, its
+//! parameters' defaults included, and with no CTE in scope.
+void Definition::Macro(CatalogEntry &entry) {
+	if ((entry.type != CatalogType::MACRO_ENTRY && entry.type != CatalogType::TABLE_MACRO_ENTRY) || BuiltIn(entry)) {
 		return;
 	}
-	auto bound = Resolved(name, what);
-	if (!Lookup(type, bound) && type == CatalogType::SCALAR_FUNCTION_ENTRY) {
-		Unqualified(type, QualifiedName(name.Name()), what);
+	if (++macro_depth_ > kMaxMacroDepth) {
+		Unsupported("a secure view whose definition nests macros too deep");
 	}
+	for (auto &macro : entry.Cast<MacroCatalogEntry>().macros) {
+		for (auto &parameter : macro->default_parameters) {
+			if (parameter.second) {
+				Expr(*parameter.second, {});
+			}
+		}
+		if (macro->type == MacroType::SCALAR_MACRO) {
+			auto &body = macro->Cast<ScalarMacroFunction>().expression;
+			if (body) {
+				Expr(*body, {});
+			}
+		} else if (macro->type == MacroType::TABLE_MACRO) {
+			auto &body = macro->Cast<TableMacroFunction>().query_node;
+			if (body) {
+				Query(*body, {});
+			}
+		} else {
+			Unsupported("a secure view whose definition calls a macro of a kind QoD does not know");
+		}
+	}
+	macro_depth_--;
 }
 
 //! nextval, currval and setval resolve their sequence from their first argument at bind (NextValBind,
@@ -387,15 +440,24 @@ void Definition::Type(const TypeExpression &type) {
 }
 
 void Definition::Query(const QueryNode &node, std::set<std::string> scope) {
-	// A WITH clause's names are in scope in its own bodies (a later one, or a recursive one, may read
-	// them) and in the query it heads, subqueries included; not outside it.
+	// A WITH clause's CTEs bind in order (item 20, as DuckDB v2.0.0 binds them): each body sees the
+	// enclosing scope and the CTEs before it, and its own name only when it is recursive (a
+	// RECURSIVE_CTE_NODE, which adds it below). A reference to its own name in a plain CTE, or to a later
+	// CTE, binds to a table of that name, so it gets every table rule. The query the clause heads, and its
+	// subqueries, see every name.
 	for (auto &entry : node.cte_map.map) {
-		scope.insert(StringUtil::Lower(Text(entry.first)));
-	}
-	for (auto &entry : node.cte_map.map) {
-		if (entry.second && entry.second->query_node) {
-			Query(*entry.second->query_node, scope);
+		if (entry.second) {
+			if (entry.second->query_node) {
+				Query(*entry.second->query_node, scope);
+			}
+			for (auto &expr : entry.second->key_targets) {
+				Expr(*expr, scope);
+			}
+			for (auto &expr : entry.second->payload_aggregates) {
+				Expr(*expr, scope);
+			}
 		}
+		scope.insert(StringUtil::Lower(Text(entry.first)));
 	}
 	switch (node.type) {
 	case QueryNodeType::SELECT_NODE: {
@@ -433,10 +495,10 @@ void Definition::Query(const QueryNode &node, std::set<std::string> scope) {
 	}
 	case QueryNodeType::CTE_NODE: {
 		auto &cte = node.Cast<CTENode>();
-		scope.insert(StringUtil::Lower(Text(cte.ctename)));
 		if (cte.query) {
 			Query(*cte.query, scope);
 		}
+		scope.insert(StringUtil::Lower(Text(cte.ctename)));
 		if (cte.child) {
 			Query(*cte.child, scope);
 		}
@@ -547,11 +609,16 @@ void Definition::Expr(const ParsedExpression &expr, const std::set<std::string> 
 		break;
 	}
 	case ExpressionClass::WINDOW: {
+		// The window binder looks the name up directly; a macro found there expands (BindWindowExpression).
 		auto &name = expr.Cast<WindowExpression>().GetQualifiedName();
+		optional_ptr<CatalogEntry> entry;
 		if (name.Path().size() <= 1) {
-			Unqualified(CatalogType::SCALAR_FUNCTION_ENTRY, name, "function");
+			entry = Unqualified(CatalogType::SCALAR_FUNCTION_ENTRY, name, "function");
 		} else {
-			Resolved(name, "function");
+			entry = Lookup(CatalogType::SCALAR_FUNCTION_ENTRY, Resolved(name, "function"));
+		}
+		if (entry) {
+			Macro(*entry);
 		}
 		break;
 	}
@@ -1442,8 +1509,10 @@ void Walker::CheckSession() {
 		                 CatalogType::COLLATION_ENTRY, CatalogType::COORDINATE_SYSTEM_ENTRY, CatalogType::TYPE_ENTRY,
 		                 CatalogType::SCHEMA_ENTRY}) {
 			schema.Scan(context_, set, [&](CatalogEntry &entry) {
+				// Item 21: an index changes no rows a query returns and no query names one.
 				if (!entry.internal && entry.type != CatalogType::TABLE_ENTRY &&
-				    entry.type != CatalogType::SEQUENCE_ENTRY && !IsPivotEnum(entry)) {
+				    entry.type != CatalogType::SEQUENCE_ENTRY && entry.type != CatalogType::INDEX_ENTRY &&
+				    !IsPivotEnum(entry)) {
 					shadowing = true;
 				}
 			});
