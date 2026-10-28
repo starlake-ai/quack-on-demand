@@ -91,6 +91,13 @@ final class MetadataFilterRewriter(enabled: Boolean = true):
   import MetadataFilterOutcome._
   import MetadataFilterRewriter._
 
+  /** Whether the filter narrows `eff`'s catalog reads in `ctx` at all: off, for a superuser, for a
+    * principal holding `*.*.* ALL` or an explicit information_schema grant, it passes them through.
+    */
+  def narrows(eff: EffectiveSet, ctx: SchemaContext): Boolean =
+    enabled && eff.user.tenant.nonEmpty && !hasWildcardAll(eff) &&
+      !readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema))
+
   def rewrite(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
     if !enabled then Passthrough
     else if eff.user.tenant.isEmpty then Passthrough // superuser: unfiltered, as today

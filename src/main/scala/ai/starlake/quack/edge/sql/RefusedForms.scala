@@ -13,26 +13,32 @@ import java.util.Locale
   *
   * The gateway decides nothing here. It recognizes a small fixed set of shapes on DuckDB's own
   * tokens ([[SqlLexer]], never JSqlParser, so a parser bump cannot change what is recognized) and
-  * turns each into an ordinary SELECT the client could have written itself: the listing functions
-  * the metadata filter narrows (`duckdb_columns()`, `duckdb_tables()`, `duckdb_views()`), and, for
-  * every form that describes one object, `EXISTS (SELECT 1 FROM <c>.<s>.<t> LIMIT 0)`, a read of
-  * that object in the plan, so the node requires a read grant on it (a secure view: its own grant).
-  * The result then goes through every gateway screen and the node like any client statement. A
-  * misread name answers wrongly or is refused, never reaches more: whatever the rewrite names, the
-  * client could have named. Anything else, `DESCRIBE (<query>)` and `SUMMARIZE (<query>)` included
-  * (their rows would need a result schema the manager cannot encode on the native front door), is
-  * None and reaches the node unchanged.
+  * turns each into an ordinary SELECT the client could have written itself: the listings the
+  * metadata filter narrows (`information_schema.columns`, `duckdb_tables()`, `duckdb_views()`),
+  * and, for every form that describes one object, `NOT EXISTS (SELECT 1 FROM <c>.<s>.<t> LIMIT 0)`,
+  * a read of that object in the plan, so the node requires a read grant on it (a secure view: its
+  * own grant). The result then goes through every gateway screen and the node like any client
+  * statement. A misread name answers wrongly or is refused, never reaches more: whatever the
+  * rewrite names, the client could have named. Anything else, `DESCRIBE (<query>)` and
+  * `SUMMARIZE (<query>)` included (their rows would need a result schema the manager cannot encode
+  * on the native front door), is None and reaches the node unchanged.
   *
   * Names are qualified with the session's catalog and schema (the router's USE prelude, `path`)
   * only where the client left them out: `t` is `<catalog>.<schema>.t` and a two-part `s.t` is
-  * `<catalog>.s.t`, so the EXISTS read and the listing's WHERE always name the same object. The
+  * `<catalog>.s.t`, so the EXISTS read and the listing's WHERE always name the same object; a
+  * two-part name whose head names a catalog (the session's or an attached one, which DuckDB may
+  * bind catalog-first) is left unchanged rather than guessed. SHOW TABLES and SHOW ALL TABLES are
+  * rewritten only when the metadata filter narrows the principal's listings (`listingsNarrowed`),
+  * the reason they are rewritten at all; otherwise the node's own SHOW TABLES runs as before. The
   * WHERE compares names in lower case, as DuckDB's catalog does (and as its own SHOW TABLES query
   * does, pragma_queries.cpp).
   */
 private[quack] object RefusedForms:
 
-  /** The session's current catalog and schema: the target of the router's USE prelude. */
-  final case class SessionPath(catalog: String, schema: String)
+  /** The session's current catalog and schema: the target of the router's USE prelude. `catalogs`:
+    * the catalog names a two-part name's head may name instead of a schema.
+    */
+  final case class SessionPath(catalog: String, schema: String, catalogs: Set[String] = Set.empty)
 
   /** One object, fully qualified, each part as the client wrote it (unquoted). */
   final case class Target(catalog: String, schema: String, name: String):
@@ -52,9 +58,12 @@ private[quack] object RefusedForms:
     */
   def recognize(
       sql: String,
-      path: Option[SessionPath],
-      isSetting: String => Boolean
+      session: Option[SessionPath],
+      isSetting: String => Boolean,
+      listingsNarrowed: Boolean = true,
+      attachedCatalogs: Set[String] = Set.empty
   ): Option[Form] =
+    val path = session.map(p => p.copy(catalogs = (attachedCatalogs + p.catalog).map(lower)))
     val view = SqlLexer.engineView(Option(sql).getOrElse(""))
     val all  = SqlLexer.tokens(view).filterNot(_.isTrivia)
     // One statement: a single trailing `;` at most.
@@ -70,9 +79,10 @@ private[quack] object RefusedForms:
           r.target(r.skipWord(1, "table"), path).map(t => Form.Summarize(describe(t), t))
         case Some("show") =>
           r.word(1) match
-            case Some("tables") if toks.length == 2 => path.map(p => Form.Rewritten(showTables(p)))
+            case Some("tables") if toks.length == 2 =>
+              path.filter(_ => listingsNarrowed).map(p => Form.Rewritten(showTables(p)))
             case Some("all") if toks.length == 3 && r.word(2).contains("tables") =>
-              path.map(p => Form.Rewritten(showAllTables(p)))
+              path.filter(_ => listingsNarrowed).map(p => Form.Rewritten(showAllTables(p)))
             case _ =>
               // SHOW <name> of a table (DuckDB's AUTO show_behavior describes a table that
               // exists, else shows a setting); DuckDB's own listing names are left alone.
@@ -167,9 +177,10 @@ private[quack] object RefusedForms:
   private def qualify(parts: List[String], path: Option[SessionPath]): Option[Target] =
     parts match
       case List(c, s, t) => Some(Target(c, s, t))
-      case List(s, t)    => path.map(p => Target(p.catalog, s, t))
-      case List(t)       => path.map(p => Target(p.catalog, p.schema, t))
-      case _             => None
+      case List(s, t)    =>
+        path.filter(p => !p.catalogs(lower(s))).map(p => Target(p.catalog, s, t))
+      case List(t) => path.map(p => Target(p.catalog, p.schema, t))
+      case _       => None
 
   /** A qualified name in a string, as DuckDB's `QualifiedName::Parse` reads it: `.` separates the
     * parts; a part is either wholly double-quoted (`""` for a quote, and it may hold dots) or holds
@@ -204,32 +215,37 @@ private[quack] object RefusedForms:
 
   private def lit(s: String): String = SqlLiterals.duckdbLiteral(s)
 
-  /** The rows of `t`'s columns in `duckdb_columns()`, and the read of `t` that puts it in the plan:
-    * `NOT EXISTS` over an empty read is always true, and binding it requires `t` to exist.
+  private def lower(s: String): String = s.toLowerCase(Locale.ROOT)
+
+  /** The rows of `t`'s columns in `information_schema.columns`, and the read of `t` that puts it in
+    * the plan: `NOT EXISTS` over an empty read is always true, and binding it requires `t` to
+    * exist. information_schema rather than `duckdb_columns()`: the metadata filter narrows both,
+    * but the column policy rewriter resolves information_schema's columns and cannot model a table
+    * function next to a table, so beside the read of `t` a listing through `duckdb_columns()` was
+    * refused to every principal holding a column policy.
     */
   private def columnsOf(t: Target): String =
-    s"FROM duckdb_columns() WHERE lower(database_name) = lower(${lit(t.catalog)}) " +
-      s"AND lower(schema_name) = lower(${lit(t.schema)}) " +
+    s"FROM information_schema.columns WHERE lower(table_catalog) = lower(${lit(t.catalog)}) " +
+      s"AND lower(table_schema) = lower(${lit(t.schema)}) " +
       s"AND lower(table_name) = lower(${lit(t.name)}) " +
-      s"AND NOT EXISTS (SELECT 1 FROM ${t.sql} LIMIT 0) ORDER BY column_index"
+      s"AND NOT EXISTS (SELECT 1 FROM ${t.sql} LIMIT 0) ORDER BY ordinal_position"
 
   /** DESCRIBE's columns (`column_name`, `column_type`, `null`, `key`, `default`, `extra`). `key` is
     * always NULL: the primary and unique keys are in `duckdb_constraints()`, which is
     * superuser-class.
     */
   def describe(t: Target): String =
-    "SELECT column_name, data_type AS column_type, " +
-      "CASE WHEN is_nullable THEN 'YES' ELSE 'NO' END AS \"null\", NULL::VARCHAR AS \"key\", " +
-      "column_default AS \"default\", NULL::VARCHAR AS extra " + columnsOf(t)
+    "SELECT column_name, data_type AS column_type, is_nullable AS \"null\", " +
+      "NULL::VARCHAR AS \"key\", column_default AS \"default\", NULL::VARCHAR AS extra " +
+      columnsOf(t)
 
   /** `PRAGMA table_info`'s columns (`cid`, `name`, `type`, `notnull`, `dflt_value`, `pk`); `pk` is
     * NULL for the same reason as DESCRIBE's `key`.
     */
   def tableInfo(t: Target): String =
-    "SELECT CAST(column_index - 1 AS INTEGER) AS cid, column_name AS name, data_type AS type, " +
-      "NOT is_nullable AS notnull, column_default AS dflt_value, NULL::BOOLEAN AS pk " + columnsOf(
-        t
-      )
+    "SELECT CAST(ordinal_position - 1 AS INTEGER) AS cid, column_name AS name, data_type AS type, " +
+      "is_nullable = 'NO' AS notnull, column_default AS dflt_value, NULL::BOOLEAN AS pk " +
+      columnsOf(t)
 
   private def inSchema(p: SessionPath): String =
     s"lower(database_name) = lower(${lit(p.catalog)}) AND lower(schema_name) = lower(${lit(p.schema)})"

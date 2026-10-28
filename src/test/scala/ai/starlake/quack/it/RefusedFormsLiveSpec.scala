@@ -269,7 +269,77 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     )
     server.start().unsafeRunSync()
     doors += server
+    frontDoors.put(port, frontDoor)
     port
+
+  /** Every native front door, by port, for [[Wire]], which drives one directly. */
+  private val frontDoors = TrieMap.empty[Int, QuackFrontDoor]
+
+  /** A Quack protocol 3 client of the front door on `port`, as `who`, speaking to it directly (the
+    * DuckDB CLI aborts its own transaction after any error and then sends only ROLLBACK, so it
+    * cannot show what the front door answers a transaction's later statements). Each statement's
+    * rows (Right, decoded by the native bridge as the manager decodes them) or its error (Left).
+    */
+  private final class Wire(port: Int, who: String):
+    import ai.starlake.quack.edge.quack.QuackWire.*
+    private val door = frontDoors(port)
+    private var cq   = 1L
+    private val id   = decodeConnectionResponse(
+      door
+        .handle(
+          encodeConnectionRequest(
+            ConnectionRequest(
+              s"tenant=acme&pool=bi&user=$who&password=x",
+              "v2.0.0",
+              "osx_arm64",
+              3L,
+              3L,
+              "qod-test",
+              30L
+            ),
+            cq
+          )
+        )
+        .unsafeRunSync()
+    ).fold(e => fail(s"no connection: $e"), _._1)
+
+    def run(sql: String): Either[String, List[String]] =
+      cq += 1
+      val u    = java.util.UUID.randomUUID()
+      val resp = door
+        .handle(
+          encodePrepareRequest(
+            id,
+            cq,
+            PrepareRequest(
+              sql,
+              Some(Hugeint(u.getMostSignificantBits, u.getLeastSignificantBits)),
+              None
+            )
+          )
+        )
+        .unsafeRunSync()
+      if messageType(resp) == Type.ErrorResponse then
+        Left(decodeErrorMessage(resp).getOrElse("node error"))
+      else
+        QuackNodeLink.nativeNeedsMore(resp) shouldBe Some(false)
+        val reader = QuackArrowImport.importStream(
+          TestArrow.sharedAllocator,
+          ai.starlake.quack.edge.adapter.QuackNativeBridge.extractArrowStream(resp)
+        )
+        try
+          val out  = List.newBuilder[String]
+          val root = reader.getVectorSchemaRoot
+          while reader.loadNextBatch() do
+            (0 until root.getRowCount).foreach { i =>
+              out += root.getFieldVectors.asScala
+                .map(v => Option(v.getObject(i)).map(_.toString).getOrElse(""))
+                .mkString(",")
+            }
+          Right(out.result())
+        finally reader.close()
+
+    def close(): Unit = door.handle(encodeDisconnect(id)).unsafeRunSync()
 
   override def afterAll(): Unit =
     try doors.foreach(d => scala.util.Try(d.stop()))
@@ -585,30 +655,122 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     Files.exists(Paths.get(s"$elsewhere/o.csv")) shouldBe false
   }
 
-  it should "stay refused inside a native front door transaction" in {
+  it should "be computed on a native front door transaction's own link (item 25)" in {
     assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
-    assume(duckdbPresent, "no DuckDB 2.0 CLI on PATH")
-    val token  = "tenant=acme&pool=bi&user=alice&password=x"
-    val inner  = s"SELECT * FROM read_csv(''$files/in/'' || ''20260115.csv'')"
-    val script =
-      s"""ATTACH 'quack:127.0.0.1:$openPort' AS q (TYPE quack, TOKEN '$token');
-         |BEGIN;
-         |SELECT count(*) FROM q.tpch1.t;
-         |SELECT * FROM quack_query_by_name('q', '$inner');
-         |ROLLBACK;
-         |""".stripMargin
-    val out = new StringBuilder
-    val err = new StringBuilder
-    (Process(Seq("duckdb", "-no-agent", "-csv", "-noheader")) #<
-      new java.io.ByteArrayInputStream(script.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-      .!(ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n')))
-    err.toString should include("read_csv needs a literal file name")
+    // A variable set in the transaction is seen by the evaluation: it ran on the same connection.
+    val w = Wire(gatedPort, "alice")
+    try
+      w.run("BEGIN TRANSACTION") shouldBe Right(Nil)
+      w.run(s"SET VARIABLE d = '$files/in/'") shouldBe Right(Nil)
+      w.run("SELECT * FROM read_csv(getvariable('d') || '20260115.csv')") shouldBe Right(
+        List("1,2")
+      )
+      w.run("ROLLBACK").isRight shouldBe true
+    finally w.close()
+    // Outside a transaction every statement has a node connection of its own: the variable is gone,
+    // the location evaluates to NULL and the statement is sent unchanged, refused as before.
+    val fresh = Wire(openPort, "alice")
+    try
+      fresh.run(s"SET VARIABLE d = '$files/in/'") shouldBe Right(Nil)
+      fresh.run("SELECT * FROM read_csv(getvariable('d') || '20260115.csv')") match
+        case Left(m) => m should include("read_csv needs a literal file name")
+        case other   => fail(s"expected the unchanged statement's refusal, got $other")
+    finally fresh.close()
+  }
+
+  it should "answer an evaluation the node refuses, whose transaction DuckDB then aborts (item 25)" in {
+    assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val w = Wire(gatedPort, "alice")
+    try
+      w.run("BEGIN TRANSACTION").isRight shouldBe true
+      w.run("SELECT count(*) FROM t") shouldBe Right(List("3"))
+      w.run("SELECT * FROM t, read_csv(t.v || '.csv')") match
+        case Left(m) =>
+          m should startWith("computing the file location: ")
+          m should not include "needs a literal file name"
+        case other => fail(s"expected the evaluation's error, got $other")
+      w.run("SELECT count(*) FROM t") match
+        case Left(m) => m should include("Current transaction is aborted")
+        case other   => fail(s"expected the aborted transaction's answer, got $other")
+      w.run("ROLLBACK").isRight shouldBe true
+      w.run("SELECT count(*) FROM t") shouldBe Right(List("3"))
+    finally w.close()
+  }
+
+  it should "answer a gateway refusal of the evaluation and leave the transaction open (item 25a)" in {
+    assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val w = Wire(gatedPort, "carol")
+    try
+      w.run("BEGIN TRANSACTION").isRight shouldBe true
+      w.run("SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')") match
+        case Left(m) =>
+          m should startWith("computing the file location: access denied: node: current_setting")
+        case other => fail(s"expected the gateway's refusal, got $other")
+      w.run("INSERT INTO t2 (id) VALUES (100)").isRight shouldBe true
+      w.run("COMMIT").isRight shouldBe true
+    finally w.close()
+    flight(open, "carol", "SELECT count(*) FROM t2 WHERE id = 100") shouldBe Right(List("1"))
+  }
+
+  it should "abort the transaction on a value no file location may be (item 25b)" in {
+    assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val answer =
+      "transaction aborted: computing the file location: the location is NULL; ROLLBACK to continue"
+    val w = Wire(gatedPort, "alice")
+    try
+      w.run("BEGIN TRANSACTION").isRight shouldBe true
+      w.run("SELECT * FROM read_csv(CAST(NULL AS VARCHAR))") shouldBe Left(answer)
+      w.run("SELECT count(*) FROM t") shouldBe Left(answer)
+      w.run("ROLLBACK").isRight shouldBe true
+      w.run("SELECT count(*) FROM t") shouldBe Right(List("3"))
+    finally w.close()
+  }
+
+  it should "be refused on the native front door as the literal location is (M9)" in {
+    for port <- List(gatedPort, openPort) do
+      List(
+        s"'$elsewhere/' || 'x.csv'"  -> s"'$elsewhere/x.csv'",
+        s"'$files/data/' || 'x.csv'" -> s"'$files/data/x.csv'",
+        "'x' || '.csv'"              -> "'x.csv'"
+      ).foreach { (computed, literal) =>
+        val (rc, _, err)   = native(port, "alice", s"SELECT * FROM read_csv($computed)")
+        val (rc2, _, err2) = native(port, "alice", s"SELECT * FROM read_csv($literal)")
+        withClue(s"$port $computed") {
+          rc should not be 0
+          rc2 should not be 0
+          err shouldBe err2
+        }
+      }
+    val (rc, _, err) = native(openPort, "alice", "SELECT * FROM t, read_csv(t.v || '.csv')")
+    rc should not be 0
+    err should include("read_csv needs a literal file name")
   }
 
   it should "run as written for a superuser" in {
     val dated =
       s"SELECT * FROM read_csv('$files/in/' || strftime(DATE '2026-01-15', '%Y%m%d') || '.csv')"
     flight(gated, "root", dated) shouldBe Right(List("1,2"))
+  }
+
+  "the gateway's posture (ACL and filter on)" should "admit a pure built-in macro in a slot (M9)" in {
+    flight(
+      gated,
+      "alice",
+      "SELECT id FROM t ORDER BY id LIMIT length(split_part('ab,c', ',', 1))"
+    ) shouldBe
+      Right(List("1", "2"))
+    val (rc, out, err) =
+      native(gatedPort, "alice", "SELECT id FROM t ORDER BY id LIMIT nullif(2, 0)")
+    withClue(err)(rc shouldBe 0)
+    out.split("\n").toList shouldBe List("1", "2")
+  }
+
+  it should "run ADD COLUMN ... DEFAULT nextval(...) only with the sequence grant (M9)" in {
+    flight(gated, "carol", "ALTER TABLE t2 ADD COLUMN g BIGINT DEFAULT nextval('s2')") shouldBe
+      Right(Nil)
+    flight(gated, "dave", "ALTER TABLE t2 ADD COLUMN h BIGINT DEFAULT nextval('s2')") match
+      case Left(m) => m should include("s2")
+      case other   => fail(s"expected a refusal, got $other")
   }
 
   "a superuser's DESCRIBE" should "run as written" in {

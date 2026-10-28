@@ -255,8 +255,9 @@ final class QuackFrontDoor(
         // one edge where a 2.0 client's scan_data_from_quack_client can ever be fed.
         clientDataScans = true,
         evaluate = Some(evaluateSend(s, cq)),
-        // An evaluation on the transaction's link that failed would abort the client's transaction.
-        computedLocationsInTransaction = false
+        // A computed file location inside a client transaction is computed on the transaction's
+        // link and fails hard (CONTRACT Addendum 4 items 25-25b).
+        failInTransaction = Some(answer => fenceTx(s, answer))
       )
       .flatMap {
         case Left(fail) =>
@@ -494,10 +495,11 @@ final class QuackFrontDoor(
       }(node, wrappedSql, prelude, recordLoad, principal)
 
   /** The router's [[FlightSqlRouter.NodeSend]] that reads a small result back for the manager
-    * ([[NodeRows]]): a SUMMARIZE's columns. Inside a client transaction it runs on the
-    * transaction's link, else on a fresh link released at once; failures on the link are handled as
-    * [[relaySend]]'s are. The node's chunks are decoded by the native bridge, as on the Arrow path,
-    * never encoded.
+    * ([[NodeRows]]): a SUMMARIZE's columns, a computed file location's value. Inside a client
+    * transaction it runs on the transaction's link, and is refused when the router routed it to
+    * another node (it is never computed outside the transaction); else on a fresh link released at
+    * once. Failures on the link are handled as [[relaySend]]'s are. The node's chunks are decoded
+    * by the native bridge, as on the Arrow path, never encoded.
     */
   private def evaluateSend(s: QuackSession, cq: Long): FlightSqlRouter.NodeSend[NodeRows] =
     (node, wrappedSql, _, recordLoad, principal) =>
@@ -506,9 +508,18 @@ final class QuackFrontDoor(
           val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
           val authorize               = router.adapter.authorizer(node, principal)
           val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] =
-            s.txLink.get().filter(_._1 == node.nodeId).map(_._2) match
-              case Some(l) => IO.pure(Right((l, true)))
-              case None    =>
+            s.txLink.get() match
+              case Some((id, l)) if id == node.nodeId => IO.pure(Right((l, true)))
+              case Some((id, _))                      =>
+                IO.pure(
+                  Left(
+                    LinkFailure.Permanent(
+                      s"the client transaction's node connection is on $id, not ${node.nodeId}: " +
+                        "a statement of the transaction is never computed outside it"
+                    )
+                  )
+                )
+              case None =>
                 QuackNodeLink
                   .open(transport, node, s.hello, cq, authorize)
                   .map(_.map { case (l, _) => (l, false) })
@@ -535,8 +546,23 @@ final class QuackFrontDoor(
         }
       }
 
-  /** Arrow for the readers of [[decoded]]. */
-  private lazy val allocator = new org.apache.arrow.memory.RootAllocator()
+  /** End the client transaction of `s` with `answer` ([[abortTx]]): the router's fence for a
+    * computed file location no literal may stand for (CONTRACT Addendum 4 item 25b).
+    */
+  private def fenceTx(s: QuackSession, answer: String): IO[Unit] =
+    s.txLink.get() match
+      case Some((_, link)) => abortTx(s, link, answer)
+      case None            =>
+        IO {
+          s.txAborted.set(Some(answer))
+          router.sessions.invalidatePin(s.connectionId)
+        }
+
+  /** Arrow for the readers of [[decoded]], bounded like what one read keeps
+    * ([[QuackNodeLink.MaxCollectBytes]], twice over for the decoded copy), closed with the door.
+    */
+  private val allocator =
+    new org.apache.arrow.memory.RootAllocator(2 * QuackNodeLink.MaxCollectBytes)
 
   /** The rows of a node's response messages (a PREPARE_RESPONSE, then FETCH_RESPONSEs), through the
     * native bridge.
@@ -762,7 +788,8 @@ final class QuackFrontDoor(
   /** Manager shutdown: release every node connection. Deferred like [[sweep]]: the listener holds
     * this IO from boot, and it must see the sessions that exist when it runs.
     */
-  def closeAll(): IO[Unit] = IO.defer(sessions.all.traverse_(expire))
+  def closeAll(): IO[Unit] =
+    IO.defer(sessions.all.traverse_(expire)) *> IO(scala.util.Try(allocator.close())).void
 
   def sessionCount: Int = sessions.size
 

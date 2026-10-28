@@ -25,15 +25,15 @@ class RefusedFormsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val T = Target("acme_db", "tpch1", "t")
 
-  "DESCRIBE" should "become a duckdb_columns() listing that reads the table" in {
+  "DESCRIBE" should "become an information_schema.columns listing that reads the table" in {
     form("DESCRIBE t") shouldBe Some(
       Form.Rewritten(
-        "SELECT column_name, data_type AS column_type, " +
-          "CASE WHEN is_nullable THEN 'YES' ELSE 'NO' END AS \"null\", NULL::VARCHAR AS \"key\", " +
-          "column_default AS \"default\", NULL::VARCHAR AS extra FROM duckdb_columns() " +
-          "WHERE lower(database_name) = lower('acme_db') AND lower(schema_name) = lower('tpch1') " +
-          "AND lower(table_name) = lower('t') " +
-          "AND NOT EXISTS (SELECT 1 FROM \"acme_db\".\"tpch1\".\"t\" LIMIT 0) ORDER BY column_index"
+        "SELECT column_name, data_type AS column_type, is_nullable AS \"null\", " +
+          "NULL::VARCHAR AS \"key\", column_default AS \"default\", NULL::VARCHAR AS extra " +
+          "FROM information_schema.columns WHERE lower(table_catalog) = lower('acme_db') " +
+          "AND lower(table_schema) = lower('tpch1') AND lower(table_name) = lower('t') " +
+          "AND NOT EXISTS (SELECT 1 FROM \"acme_db\".\"tpch1\".\"t\" LIMIT 0) " +
+          "ORDER BY ordinal_position"
       )
     )
   }
@@ -59,7 +59,7 @@ class RefusedFormsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     form("DESCRIBE \"a.b\".\"T \"\"q\"\"\"") shouldBe described(Target("acme_db", "a.b", "T \"q\""))
     form("DESCRIBE `x`.\"it's\"") shouldBe described(Target("acme_db", "x", "it's"))
     val sql = RefusedForms.describe(Target("acme_db", "a.b", "it's \"q\""))
-    sql should include("lower(schema_name) = lower('a.b')")
+    sql should include("lower(table_schema) = lower('a.b')")
     sql should include("lower(table_name) = lower('it''s \"q\"')")
     sql should include("FROM \"acme_db\".\"a.b\".\"it's \"\"q\"\"\" LIMIT 0")
   }

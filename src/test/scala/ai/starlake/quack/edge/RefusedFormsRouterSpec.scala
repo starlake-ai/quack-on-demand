@@ -35,9 +35,20 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
   private val superuser = EffectiveSet(RbacUser("u-0", None, "root", "admin"), Nil, Nil, Nil, Nil)
 
   /** A router over one in-memory pool (catalog `memory`, schema `main`) with the metadata filter
-    * mounted; every SQL the node is sent, in order, and the answer `answer` gives it.
+    * mounted (unless `filter` is false); every SQL the node is sent, in order, and the answer
+    * `answer` gives it.
     */
-  private def setup(answer: String => QuackResponse = _ => TestArrow.okResponse()) =
+  private def setup(
+      answer: String => QuackResponse = _ => TestArrow.okResponse(),
+      filter: Boolean = true,
+      journal: ai.starlake.quack.ondemand.telemetry.EventJournal =
+        ai.starlake.quack.ondemand.telemetry.EventJournal.noop,
+      columns: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
+        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+          new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+        ),
+      attached: Set[String] = Set.empty
+  ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
       def start(s: NodeSpec) = IO {
@@ -81,7 +92,10 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+      journal = journal,
+      columnPolicyRewriter = columns,
+      attachedCatalogsOf = _ => attached,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter)
     )
     (router, () => sent.synchronized(sent.toList))
 
@@ -111,7 +125,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     run(router, "DESCRIBE t", tenantUser).isRight shouldBe true
     val sql = sent().last
     sql should include("AND NOT EXISTS (SELECT 1 FROM \"memory\".\"main\".\"t\" LIMIT 0)")
-    sql should include("(SELECT * FROM duckdb_columns() WHERE database_name = 'memory'")
+    sql should include("(SELECT * FROM information_schema.columns WHERE")
+    sql should include("table_name = 't'")
     sql should not include "DESCRIBE"
     // History keeps what the client sent.
     router.history.snapshot(5).headOption.map(r => (r.sql, r.status)) shouldBe
@@ -134,7 +149,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
 
   /** The node's answer to the SUMMARIZE's column listing: `id INTEGER`, `v VARCHAR`. */
   private val columns: String => QuackResponse = sql =>
-    if sql.contains("duckdb_columns()") then
+    if sql.contains("information_schema.columns") then
       QuackResponse.Ok(
         TestArrow.readerFor(
           "SELECT * FROM (VALUES ('id', 'INTEGER', 'NO', NULL, NULL, NULL), " +
@@ -241,41 +256,239 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     sent().last should endWith(Computed)
   }
 
-  it should "stay unchanged inside a transaction on a transport that asks so" in {
-    val (router, sent) = setup(evaluatesTo("'s3://acme-etl/in/x.csv'"))
+  /** The Arrow transport's evaluator and relay, as a test passes them to `executeWith`. */
+  private def transport(router: FlightSqlRouter) =
     val evaluate: FlightSqlRouter.NodeSend[NodeRows] = (node, wrappedSql, _, _, principal) =>
       router.adapter.send(node, wrappedSql, principal, None).map {
         case QuackResponse.Ok(rows, ms, close) =>
           try
             NodeRows.read(rows).fold(NodeOutcome.Permanent(_, ms), NodeOutcome.Ok(_, ms, () => ()))
           finally close()
-        case QuackResponse.Failed(err, ms) => NodeOutcome.Permanent(err.toString, ms)
+        case QuackResponse.Failed(QuackError.Permanent(m), ms) => NodeOutcome.Permanent(m, ms)
+        case QuackResponse.Failed(QuackError.Transient(m), ms) => NodeOutcome.Transient(m, ms)
       }
     val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
       router.adapter.send(node, wrappedSql, principal, None).map {
         case QuackResponse.Ok(_, ms, close) => NodeOutcome.Ok((), ms, close)
         case QuackResponse.Failed(err, ms)  => NodeOutcome.Permanent(err.toString, ms)
       }
-    def statement(sql: String, inTransaction: Boolean) =
-      router
-        .executeWith(
-          "c-tx",
-          "alice",
-          poolKey,
-          sql,
-          Some(tenantUser),
-          relay,
-          evaluate = Some(evaluate),
-          computedLocationsInTransaction = inTransaction
-        )
-        .unsafeRunSync()
-        .foreach(_.close())
-    statement("BEGIN", inTransaction = false)
-    router.sessions.get("c-tx").exists(_.txOpen) shouldBe true
-    statement(Computed, inTransaction = false)
+    (evaluate, relay)
+
+  "inside a transaction on a front door that fails there (items 25-25b)" should
+    "evaluate the location and answer every failure, never the unchanged statement" in {
+      def scenario(answer: String => QuackResponse, sql: String = Computed) =
+        val (router, sent)          = setup(answer)
+        val (evaluate, relay)       = transport(router)
+        val fenced                  = scala.collection.mutable.ListBuffer.empty[String]
+        def statement(text: String) =
+          router
+            .executeWith(
+              "c-tx",
+              "alice",
+              poolKey,
+              text,
+              Some(tenantUser),
+              relay,
+              evaluate = Some(evaluate),
+              failInTransaction = Some(answer => IO(fenced += answer).void)
+            )
+            .unsafeRunSync()
+        statement("BEGIN").foreach(_.close())
+        router.sessions.get("c-tx").exists(_.txOpen) shouldBe true
+        val out = statement(sql)
+        out.foreach(_.close())
+        (out, sent(), fenced.toList, router)
+
+      // Evaluated on the transaction's own transport, then sent as a literal.
+      val (ok, okSent, okFenced, _) = scenario(evaluatesTo("'s3://acme-etl/in/x.csv'"))
+      ok.isRight shouldBe true
+      okSent.last should endWith("read_csv('s3://acme-etl/in/x.csv', header = true)")
+      okFenced shouldBe Nil
+
+      // A failure the node answers: its own error, prefixed; the statement is never sent.
+      val nodeError: String => QuackResponse = sql =>
+        if sql.endsWith(" AS location") then
+          QuackResponse.Failed(QuackError.Permanent("Binder Error: column t.v not found"))
+        else TestArrow.okResponse()
+      val (failed, failedSent, failedFenced, router) = scenario(nodeError)
+      failed.left.map(_.reason) shouldBe
+        Left("computing the file location: permanent failure: Binder Error: column t.v not found")
+      failedSent.exists(_.endsWith(Computed)) shouldBe false
+      failedFenced shouldBe Nil
+      router.history.snapshot(5).headOption.map(r => (r.sql, r.status)) shouldBe
+        Some((Computed, "permanent"))
+
+      // A gateway refusal of the evaluation: answered, the transaction left open.
+      val (refused, refusedSent, refusedFenced, _) = scenario(
+        evaluatesTo("'s3://acme-etl/in/x.csv'"),
+        "SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')"
+      )
+      refused.left.map(_.reason).left.toOption.get should
+        startWith("computing the file location: access denied: node: current_setting")
+      refusedSent.exists(_.contains("AS location")) shouldBe false
+      refusedFenced shouldBe Nil
+
+      // A value no literal may stand for: the transaction is fenced with the answer.
+      val (rejected, rejectedSent, rejectedFenced, _) = scenario(evaluatesTo("NULL::VARCHAR"))
+      val answer                                      =
+        "transaction aborted: computing the file location: the location is NULL; ROLLBACK to continue"
+      rejected.left.map(_.reason) shouldBe Left(answer)
+      rejectedFenced shouldBe List(answer)
+      rejectedSent.exists(_.endsWith(Computed)) shouldBe false
+    }
+
+  "the Arrow path" should "evaluate in a transaction too, and fall back there on a failure" in {
+    val (router, sent) = setup(evaluatesTo("NULL::VARCHAR"))
+    router.execute("c-ftx", "alice", poolKey, "BEGIN", Some(tenantUser)).unsafeRunSync()
+    router.sessions.get("c-ftx").exists(_.txOpen) shouldBe true
+    router
+      .execute("c-ftx", "alice", poolKey, Computed, Some(tenantUser))
+      .unsafeRunSync()
+      .foreach(_.close())
+    sent().exists(_.endsWith(Evaluated)) shouldBe true
     sent().last should endWith(Computed)
-    sent().exists(_.endsWith(Evaluated)) shouldBe false
-    // The Arrow path evaluates it in a transaction too: its statements share no node connection.
-    statement(Computed, inTransaction = true)
-    sent().last should endWith("read_csv('s3://acme-etl/in/x.csv', header = true)")
+  }
+
+  "an evaluation" should "be in the kill registry while it runs, and gone after" in {
+    var router: FlightSqlRouter = null
+    var seen                    = List.empty[String]
+    val (r, _)                  = setup { sql =>
+      if sql.endsWith(" AS location") then seen = router.registry.list().map(_.sql)
+      evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+    }
+    router = r
+    run(router, Computed, tenantUser).isRight shouldBe true
+    seen shouldBe List(Evaluated)
+    router.registry.list() shouldBe Nil
+  }
+
+  it should "keep a transaction's pin when it fails transiently" in {
+    val (router, _) = setup { sql =>
+      if sql.endsWith(" AS location") then QuackResponse.Failed(QuackError.Transient("gone"))
+      else TestArrow.okResponse()
+    }
+    router.execute("c-pin", "alice", poolKey, "BEGIN", Some(tenantUser)).unsafeRunSync()
+    val pinned = router.sessions.get("c-pin").flatMap(_.pinnedNodeId)
+    pinned should not be None
+    router
+      .execute("c-pin", "alice", poolKey, Computed, Some(tenantUser))
+      .unsafeRunSync()
+      .foreach(_.close())
+    router.sessions.get("c-pin").flatMap(_.pinnedNodeId) shouldBe pinned
+  }
+
+  "the audit trail" should "name the location a computed COPY wrote" in {
+    val store       = new ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+    val journal     = new ai.starlake.quack.ondemand.telemetry.EventJournal(store)
+    val (router, _) = setup(evaluatesTo("'s3://acme-etl/out/x.csv'"), journal = journal)
+    run(
+      router,
+      "COPY (SELECT 1 AS a) TO ('s3://acme-etl/out/' || 'x.csv')",
+      tenantUser
+    ).isRight shouldBe
+      true
+    journal.drainNow()
+    val write = store.events.find(_.family == "data-write").getOrElse(fail("no data-write event"))
+    write.detail.get("locations") shouldBe Some("'s3://acme-etl/out/x.csv'")
+    write.detail.get("sql") shouldBe Some(
+      "COPY (SELECT 1 AS a) TO ('s3://acme-etl/out/' || 'x.csv')"
+    )
+  }
+
+  "SHOW TABLES" should "reach the node as written when the metadata filter does not narrow it" in {
+    val (router, sent) = setup(filter = false)
+    run(router, "SHOW TABLES", tenantUser).isRight shouldBe true
+    sent().last should endWith("SHOW TABLES")
+    val all = EffectiveSet(
+      RbacUser("u-2", Some("acme"), "bob", "user"),
+      Nil,
+      Nil,
+      List(RolePermission("p-2", "r-2", "*", "*", "*", "ALL")),
+      Nil
+    )
+    val (router2, sent2) = setup()
+    run(router2, "SHOW ALL TABLES", all).isRight shouldBe true
+    sent2().last should endWith("SHOW ALL TABLES")
+  }
+
+  "a two-part name whose head is a catalog" should "reach the node unchanged" in {
+    val (router, sent) = setup(attached = Set("pg_fed"))
+    run(router, "DESCRIBE pg_fed.customers", tenantUser).isRight shouldBe true
+    sent().last should endWith("DESCRIBE pg_fed.customers")
+    run(router, "DESCRIBE memory.t", tenantUser).isRight shouldBe true
+    sent().last should endWith("DESCRIBE memory.t")
+  }
+
+  // ---- I2: column policies apply to the rewrites' reads
+
+  private val maskedUser = EffectiveSet(
+    RbacUser("u-3", Some("acme"), "carol", "user"),
+    Nil,
+    Nil,
+    List(RolePermission("p-3", "r-3", "memory", "main", "customer", "RO")),
+    Nil,
+    List(
+      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+        "cp-3",
+        "r-3",
+        "*",
+        "main",
+        "customer",
+        "c_email",
+        "mask",
+        Some("'***'")
+      ),
+      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
+        "cp-4",
+        "r-3",
+        "*",
+        "main",
+        "customer",
+        "c_secret",
+        "deny",
+        None
+      )
+    )
+  )
+
+  private val customerColumns = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
+    new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+      Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_secret"))
+    )
+  )
+
+  "a SUMMARIZE over a masked column" should "aggregate the masked values" in {
+    val listing: String => QuackResponse = sql =>
+      if sql.contains("information_schema.columns") then
+        QuackResponse.Ok(
+          TestArrow.readerFor(
+            "SELECT * FROM (VALUES ('c_id', 'INTEGER'), ('c_email', 'VARCHAR')) " +
+              "AS c(column_name, column_type)"
+          ),
+          1L,
+          () => ()
+        )
+      else TestArrow.okResponse()
+    val (router, sent) = setup(listing, columns = customerColumns)
+    // A denied column refuses the summary, as it refuses SELECT * of the table.
+    run(router, "SUMMARIZE customer", maskedUser).left.map(_.reason) shouldBe
+      Left("access denied: column customer.c_secret is denied")
+    val maskOnly = maskedUser.copy(columnPolicies = maskedUser.columnPolicies.take(1))
+    val out      = run(router, "SUMMARIZE customer", maskOnly)
+    withClue(out)(out.isRight shouldBe true)
+    val summary = sent().last
+    summary should include("unnest(list_value('c_id', 'c_email'))")
+    // Every aggregate of c_email reads the mask, and the derived table they read masks it too.
+    summary should include("CAST(min('***') AS VARCHAR)")
+    summary should include("CAST(max('***') AS VARCHAR)")
+    summary should include("approx_count_distinct('***')")
+    summary should include("'***' AS c_email")
+    summary should not include "min(\"c_email\")"
+  }
+
+  "a DESCRIBE of a table with a denied column" should "not be refused" in {
+    val (router, sent) = setup(columns = customerColumns)
+    val out            = run(router, "DESCRIBE customer", maskedUser)
+    withClue(out)(out.isRight shouldBe true)
+    sent().last should include("NOT EXISTS (SELECT 1 FROM")
   }

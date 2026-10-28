@@ -108,39 +108,56 @@ class ComputedLocationsSpec extends AnyFlatSpec with Matchers:
     val copy              = Location(0, 0, "x", list = false)
     def one(v: NodeValue) = NodeRows(List(List(v)))
     ComputedLocations.literal(reader, one(NodeValue.Text("s3://b/it's.csv"))) shouldBe
-      Some("'s3://b/it''s.csv'")
-    ComputedLocations.literal(copy, one(NodeValue.Text("s3://b/o.csv"))) shouldBe Some(
-      "'s3://b/o.csv'"
-    )
+      Right("'s3://b/it''s.csv'")
+    ComputedLocations.literal(copy, one(NodeValue.Text("s3://b/o.csv"))) shouldBe
+      Right("'s3://b/o.csv'")
     ComputedLocations.literal(
       reader,
       one(NodeValue.TextList(List(Some("/a"), Some("/b"))))
     ) shouldBe
-      Some("['/a', '/b']")
+      Right("['/a', '/b']")
+    // Each refusal names its reason: inside a native transaction it is the client's answer.
     List(
-      reader -> one(NodeValue.Null),
-      reader -> one(NodeValue.Text("")),
-      reader -> one(NodeValue.Text("/a" + 0.toChar + "x")),
-      reader -> one(NodeValue.Other("Int(32, true)")),
-      reader -> one(NodeValue.Text("x" * (ComputedLocations.MaxBytes + 1))),
-      reader -> one(NodeValue.TextList(Nil)),
-      reader -> one(NodeValue.TextList(List(Some("/a"), None))),
-      reader -> one(NodeValue.TextList(List(Some("/a"), Some("")))),
-      reader -> one(NodeValue.TextList(List.fill(3)(Some("y" * 1500)))),
-      copy   -> one(NodeValue.TextList(List(Some("/a")))),
-      reader -> NodeRows(Nil),
-      reader -> NodeRows(List(List(NodeValue.Text("/a")), List(NodeValue.Text("/b"))))
-    ).foreach { (location, rows) =>
-      withClue(rows)(ComputedLocations.literal(location, rows) shouldBe None)
+      (reader, one(NodeValue.Null), "the location is NULL"),
+      (reader, one(NodeValue.Text("")), "the location is an empty string"),
+      (reader, one(NodeValue.Text("/a" + 0.toChar + "x")), "the location holds a NUL character"),
+      (
+        reader,
+        one(NodeValue.Other("Int(32, true)")),
+        "the location is a Int(32, true), not a VARCHAR"
+      ),
+      (
+        reader,
+        one(NodeValue.Text("x" * (ComputedLocations.MaxBytes + 1))),
+        s"the location is longer than ${ComputedLocations.MaxBytes} bytes"
+      ),
+      (reader, one(NodeValue.TextList(Nil)), "the location is an empty list"),
+      (reader, one(NodeValue.TextList(List(Some("/a"), None))), "the location list holds a NULL"),
+      (
+        reader,
+        one(NodeValue.TextList(List(Some("/a"), Some("")))),
+        "the location is an empty string"
+      ),
+      (
+        reader,
+        one(NodeValue.TextList(List.fill(3)(Some("y" * 1500)))),
+        s"the location is longer than ${ComputedLocations.MaxBytes} bytes"
+      ),
+      (
+        copy,
+        one(NodeValue.TextList(List(Some("/a")))),
+        "the location is a list, and a COPY takes one file name"
+      ),
+      (reader, NodeRows(Nil), "the location expression returned 0 rows"),
+      (
+        reader,
+        NodeRows(List(List(NodeValue.Text("/a")), List(NodeValue.Text("/b")))),
+        "the location expression returned 2 rows"
+      )
+    ).foreach { (location, rows, why) =>
+      withClue(rows)(ComputedLocations.literal(location, rows) shouldBe Left(why))
     }
-    ComputedLocations.literal(
-      reader,
-      one(NodeValue.Text("é" * (ComputedLocations.MaxBytes / 2)))
-    ) shouldBe
-      Some("'" + "é" * (ComputedLocations.MaxBytes / 2) + "'")
-    ComputedLocations.literal(
-      reader,
-      one(NodeValue.Text("é" * (ComputedLocations.MaxBytes / 2 + 1)))
-    ) shouldBe
-      None
+    val half = "é" * (ComputedLocations.MaxBytes / 2)
+    ComputedLocations.literal(reader, one(NodeValue.Text(half))) shouldBe Right(s"'$half'")
+    ComputedLocations.literal(reader, one(NodeValue.Text(half + "é"))).isLeft shouldBe true
   }

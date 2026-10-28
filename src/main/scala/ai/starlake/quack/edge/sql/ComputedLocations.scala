@@ -79,21 +79,32 @@ private[quack] object ComputedLocations:
   def evaluation(location: Location): String = s"SELECT (${location.expression}) AS location"
 
   /** The SQL literal standing for what `rows` (the [[evaluation]]'s result) holds for `location`,
-    * or None when it is not one non-empty VARCHAR (or, where a list may stand, a non-empty LIST of
-    * them), holds a NUL (which a C string would end the statement at), or is longer than
-    * [[MaxBytes]].
+    * or why none does (Left): it is not one non-empty VARCHAR (or, where a list may stand, a
+    * non-empty LIST of them), holds a NUL (which a C string would end the statement at), or is
+    * longer than [[MaxBytes]].
     */
-  def literal(location: Location, rows: NodeRows): Option[String] =
-    def fits(values: List[String]): Boolean =
-      values.forall(v => v.nonEmpty && v.indexOf(0) < 0) &&
-        values.map(_.getBytes(StandardCharsets.UTF_8).length.toLong).sum <= MaxBytes
+  def literal(location: Location, rows: NodeRows): Either[String, String] =
+    def checked(values: List[String]): Either[String, List[String]] =
+      if values.exists(_.isEmpty) then Left("the location is an empty string")
+      else if values.exists(_.indexOf(0) >= 0) then Left("the location holds a NUL character")
+      else if values.map(_.getBytes(StandardCharsets.UTF_8).length.toLong).sum > MaxBytes then
+        Left(s"the location is longer than $MaxBytes bytes")
+      else Right(values)
     rows.rows match
-      case List(NodeValue.Text(value) :: _) if fits(List(value)) =>
-        Some(SqlLiterals.duckdbLiteral(value))
-      case List(NodeValue.TextList(items) :: _)
-          if location.list && items.nonEmpty && items.forall(_.isDefined) && fits(items.flatten) =>
-        Some(items.flatten.map(SqlLiterals.duckdbLiteral).mkString("[", ", ", "]"))
-      case _ => None
+      case List(value :: _) =>
+        value match
+          case NodeValue.Text(text) => checked(List(text)).map(_ => SqlLiterals.duckdbLiteral(text))
+          case NodeValue.Null       => Left("the location is NULL")
+          case NodeValue.TextList(_) if !location.list =>
+            Left("the location is a list, and a COPY takes one file name")
+          case NodeValue.TextList(Nil) => Left("the location is an empty list")
+          case NodeValue.TextList(items) if items.contains(None) =>
+            Left("the location list holds a NULL")
+          case NodeValue.TextList(items) =>
+            checked(items.flatten).map(_.map(SqlLiterals.duckdbLiteral).mkString("[", ", ", "]"))
+          case NodeValue.Other(tpe) => Left(s"the location is a $tpe, not a VARCHAR")
+      case List(Nil) => Left("the location expression returned no column")
+      case other     => Left(s"the location expression returned ${other.size} rows")
 
   /** `sql` with each location replaced by its literal; `replaced` is in text order. */
   def substitute(sql: String, replaced: List[(Location, String)]): String =

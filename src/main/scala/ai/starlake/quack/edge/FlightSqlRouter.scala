@@ -164,7 +164,11 @@ final class FlightSqlRouter(
       /** Extra denial-audit details merged into the "data-denial" event, e.g. the OPA validator's
         * `authz_source` / `opa_decision_id`. Ignored on every other status.
         */
-      auditMeta: Map[String, String] = Map.empty
+      auditMeta: Map[String, String] = Map.empty,
+      /** What the manager put into the statement that ran, merged into its denial and write events
+        * (the computed file locations it substituted, `locations`). Never a reserved key.
+        */
+      detail: Map[String, String] = Map.empty
   ): Unit =
     // A claim-shaped statement is redacted before it reaches ANY sink below, whether it was
     // ultimately admitted, denied, or (with the dialect off or adminDispatch=false) simply
@@ -228,7 +232,7 @@ final class FlightSqlRouter(
           source,
           // QoD's own audit keys always win: a validator-supplied key of a reserved name is
           // dropped, never allowed to overwrite (or forge) the recorded sql / reason.
-          auditMeta.removedAll(FlightSqlRouter.ReservedAuditKeys) ++
+          (auditMeta ++ detail).removedAll(FlightSqlRouter.ReservedAuditKeys) ++
             Map("sql" -> recordedSql.take(500)) ++
             Option
               .when(deniedRefs.nonEmpty)(
@@ -251,7 +255,8 @@ final class FlightSqlRouter(
           None,
           "ok",
           source,
-          Map("sql" -> recordedSql.take(500), "durationMs" -> durationMs.toString),
+          detail.removedAll(FlightSqlRouter.ReservedAuditKeys) ++
+            Map("sql" -> recordedSql.take(500), "durationMs" -> durationMs.toString),
           patId
         )
       )
@@ -501,15 +506,23 @@ final class FlightSqlRouter(
         * statement unchanged, so the node refuses it as before.
         */
       evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]] = None,
-      /** Whether a computed file location is evaluated inside a client transaction too (Task 19
-        * part D). The native front door says false: there the evaluation would run on the
-        * transaction's own link, where its failure would abort the client's transaction, which the
-        * statement left unchanged would not, so in a transaction such a statement is sent unchanged
-        * and refused as before.
+      /** Set by a front door whose node connection carries the client's transaction (the native
+        * one): inside a client transaction a computed file location fails hard instead of falling
+        * back to the unchanged statement (CONTRACT Addendum 4 items 25-25b). The evaluation runs on
+        * the transaction's own link (`evaluate`); its failure is answered as its own, prefixed
+        * "computing the file location: " (a failure the node answers has aborted the transaction,
+        * as DuckDB does; a refusal by the gateway leaves it open), and a value no literal may stand
+        * for aborts the transaction through this fence. None (FlightSQL, whose statements share no
+        * node connection): a failing evaluation leaves the statement unchanged, as outside a
+        * transaction.
         */
-      computedLocationsInTransaction: Boolean = true
+      failInTransaction: Option[FlightSqlRouter.TransactionFence] = None
   ): IO[Either[RouterFailure, Routed[A]]] =
-    def run(statement: String, pin: Option[String]): IO[Either[RouterFailure, Routed[A]]] =
+    def run(
+        statement: String,
+        pin: Option[String],
+        detail: Map[String, String] = Map.empty
+    ): IO[Either[RouterFailure, Routed[A]]] =
       executeGuarded(
         connectionId,
         user,
@@ -525,8 +538,28 @@ final class FlightSqlRouter(
         patId,
         edge,
         clientDataScans,
-        softPinOverCapacity
+        softPinOverCapacity,
+        detail = detail
       )
+    // The client's statement answered with `failure` before anything ran it: its history row.
+    def refused(failure: RouterFailure): IO[Either[RouterFailure, Routed[A]]] =
+      IO {
+        if recordExecution then
+          record(
+            user,
+            poolKey,
+            nodeId = "-",
+            sql,
+            durationMs = 0,
+            FlightSqlRouter.failureStatus(failure),
+            Some(failure.reason),
+            classifier.classify(sql),
+            realm = "tenant",
+            patId = patId,
+            source = source
+          )
+        Left(failure)
+      }
     // Task 19: a statement the node refuses whose answer an ordinary statement gets, for a tenant
     // principal only (a superuser's statement runs as written). The rewrite is what runs from here
     // on, through every screen, as if the client had written it; history records the client's.
@@ -537,7 +570,13 @@ final class FlightSqlRouter(
           RefusedForms.recognize(
             sql,
             supervisor.get(poolKey).flatMap(FlightSqlRouter.sessionPath),
-            name => ai.starlake.quack.edge.authz.SettingClasses.of(name).isDefined
+            name => ai.starlake.quack.edge.authz.SettingClasses.of(name).isDefined,
+            // The listing rewrites stand on the metadata filter narrowing them; without it the
+            // node's own SHOW TABLES runs as before.
+            listingsNarrowed = effectiveSet.exists(eff =>
+              metadataFilterRewriter.narrows(eff, metadataSchemaContext(poolKey))
+            ),
+            attachedCatalogs = attachedCatalogsOf(poolKey)
           )
         )
     form match
@@ -547,15 +586,28 @@ final class FlightSqlRouter(
         val locations =
           if !FlightSqlRouter.rewritable(effectiveSet) || evaluate.isEmpty then Nil
           else TooDeep.orElse(List.empty[ComputedLocations.Location])(ComputedLocations.find(sql))
-        val inTransaction = sessions.get(connectionId).exists(_.txOpen)
+        val fence = failInTransaction.filter(_ => sessions.get(connectionId).exists(_.txOpen))
         (evaluate, locations) match
-          case (Some(ev), _ :: _) if computedLocationsInTransaction || !inTransaction =>
+          case (Some(ev), _ :: _) =>
             openSession(connectionId, user, poolKey, recordExecution, source)
             literals(connectionId, user, poolKey, locations, effectiveSet, ev, source, edge, patId)
               .flatMap {
-                case Some(values) =>
-                  run(ComputedLocations.substitute(sql, locations.zip(values)), preferredNode)
-                case None => run(sql, preferredNode)
+                case Right(values) =>
+                  run(
+                    ComputedLocations.substitute(sql, locations.zip(values)),
+                    preferredNode,
+                    Map("locations" -> values.mkString(", "))
+                  )
+                case Left(failure) =>
+                  (fence, failure) match
+                    // Outside a native transaction: the node refuses the unchanged statement.
+                    case (None, _) => run(sql, preferredNode)
+                    case (Some(_), FlightSqlRouter.LocationFailure.Evaluation(f)) =>
+                      refused(FlightSqlRouter.computingLocation(f))
+                    case (Some(abort), FlightSqlRouter.LocationFailure.Rejected(why)) =>
+                      val answer = s"transaction aborted: computing the file location: $why; " +
+                        "ROLLBACK to continue"
+                      abort(answer) *> refused(RouterFailure.BadRequest(answer))
               }
           case _ => run(sql, preferredNode)
       case Some(RefusedForms.Form.Rewritten(other))           => run(other, preferredNode)
@@ -568,24 +620,7 @@ final class FlightSqlRouter(
             openSession(connectionId, user, poolKey, recordExecution, source)
             readBack(connectionId, user, poolKey, columns, effectiveSet, ev, source, edge, patId)
               .flatMap {
-                case Left(failure) =>
-                  IO {
-                    if recordExecution then
-                      record(
-                        user,
-                        poolKey,
-                        nodeId = "-",
-                        sql,
-                        durationMs = 0,
-                        FlightSqlRouter.failureStatus(failure),
-                        Some(failure.reason),
-                        StatementKind.Select,
-                        realm = "tenant",
-                        patId = patId,
-                        source = source
-                      )
-                    Left(failure)
-                  }
+                case Left(failure)         => refused(failure)
                 case Right((rows, nodeId)) =>
                   FlightSqlRouter.summarizeColumns(rows) match
                     case Some(cols) => run(RefusedForms.summarizeSql(target, cols), Some(nodeId))
@@ -593,9 +628,8 @@ final class FlightSqlRouter(
               }
 
   /** The literal of each computed location ([[ComputedLocations]]), each evaluated in turn by the
-    * node as the principal ([[readBack]]), or None as soon as one fails: its evaluation refused or
-    * failing, or a value no literal may stand for. What failed is not answered; the statement is
-    * then sent unchanged and the node refuses it as before.
+    * node as the principal ([[readBack]]), or why the first one failed: its evaluation refused or
+    * failing, or a value no literal may stand for ([[executeWith]] decides what that answers).
     */
   private def literals(
       connectionId: String,
@@ -607,11 +641,12 @@ final class FlightSqlRouter(
       source: String,
       edge: String,
       patId: Option[String]
-  ): IO[Option[List[String]]] =
-    locations.foldLeft(IO.pure(Option(List.empty[String]))) { (done, location) =>
+  ): IO[Either[FlightSqlRouter.LocationFailure, List[String]]] =
+    val none: Either[FlightSqlRouter.LocationFailure, List[String]] = Right(Nil)
+    locations.foldLeft(IO.pure(none)) { (done, location) =>
       done.flatMap {
-        case None         => IO.pure(None)
-        case Some(values) =>
+        case Left(failure) => IO.pure(Left(failure))
+        case Right(values) =>
           readBack(
             connectionId,
             user,
@@ -623,16 +658,22 @@ final class FlightSqlRouter(
             edge,
             patId
           ).map {
-            case Right((rows, _)) => ComputedLocations.literal(location, rows).map(values :+ _)
-            case Left(_)          => None
+            case Right((rows, _)) =>
+              ComputedLocations
+                .literal(location, rows)
+                .map(values :+ _)
+                .left
+                .map(FlightSqlRouter.LocationFailure.Rejected(_))
+            case Left(failure) => Left(FlightSqlRouter.LocationFailure.Evaluation(failure))
           }
       }
     }
 
   /** Run `statement` for `effectiveSet`'s principal through the whole pipeline and read its small
     * result back ([[NodeRows]]) instead of handing it to a client, with no history row, no load
-    * booked and no rewrite of its own: SUMMARIZE's column listing, a computed file location's
-    * value. The node that answered comes with the rows.
+    * booked and no rewrite of its own, but in the kill registry while it runs (`internal`):
+    * SUMMARIZE's column listing, a computed file location's value. The node that answered comes
+    * with the rows.
     */
   private def readBack(
       connectionId: String,
@@ -660,7 +701,8 @@ final class FlightSqlRouter(
       patId = patId,
       edge = edge,
       clientDataScans = false,
-      softPinOverCapacity = false
+      softPinOverCapacity = false,
+      internal = true
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
       case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
@@ -681,7 +723,9 @@ final class FlightSqlRouter(
       patId: Option[String],
       edge: String,
       clientDataScans: Boolean,
-      softPinOverCapacity: Boolean
+      softPinOverCapacity: Boolean,
+      internal: Boolean = false,
+      detail: Map[String, String] = Map.empty
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
@@ -704,8 +748,41 @@ final class FlightSqlRouter(
         patId,
         edge,
         clientDataScans,
-        softPinOverCapacity
+        softPinOverCapacity,
+        internal,
+        detail
       )
+    )
+
+  /** The catalog and schema the SQL parser resolves `poolKey`'s unqualified names against: the
+    * per-pool dbName/schemaName overrides, so they resolve to what the node actually sees at
+    * execution time.
+    */
+  private def defaultsOf(poolKey: PoolKey): (Option[String], Option[String]) =
+    val maybeState = supervisor.get(poolKey)
+    val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
+    val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
+    val perKindDb  = kindWire match
+      case "ducklake" | "duckdb-file" =>
+        Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty)
+      case "memory" => Some("memory")
+      case _        => None
+    val perKindSchema = kindWire match
+      case "ducklake" | "duckdb-file" => poolMeta.get("schemaName").filter(_.nonEmpty)
+      case "memory"                   => Some("main")
+      case _                          => None
+    (
+      maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
+      maybeState.flatMap(_.defaultSchema).orElse(perKindSchema)
+    )
+
+  /** The context the metadata filter judges `poolKey`'s statements in. */
+  private def metadataSchemaContext(poolKey: PoolKey): ai.starlake.quack.edge.cls.SchemaContext =
+    val (db, schema) = defaultsOf(poolKey)
+    ai.starlake.quack.edge.cls.SchemaContext(
+      defaultDatabase = db,
+      defaultSchema = schema,
+      attachedCatalogs = attachedCatalogsOf(poolKey)
     )
 
   /** The router session of `connectionId`, opened (and announced, unless `recordExecution` is
@@ -751,6 +828,8 @@ final class FlightSqlRouter(
 
   /** `sql` is the statement that runs, `clientSql` the one the client sent (they differ when a
     * refused form was rewritten): history, audit and the kill registry show the client's.
+    * `internal`: a statement the manager runs for the client ([[readBack]]), which is in the kill
+    * registry while it runs although it records nothing. `detail`: merged into the audit events.
     */
   private def executeUnguarded[A](
       connectionId: String,
@@ -767,7 +846,9 @@ final class FlightSqlRouter(
       patId: Option[String],
       edge: String,
       clientDataScans: Boolean,
-      softPinOverCapacity: Boolean
+      softPinOverCapacity: Boolean,
+      internal: Boolean,
+      detail: Map[String, String]
   ): IO[Either[RouterFailure, Routed[A]]] =
     val resolvedEdge = if edge.isEmpty then source else edge
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
@@ -778,20 +859,10 @@ final class FlightSqlRouter(
     val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet, poolKey)
     // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
     // table refs resolve to what the node actually sees at execution time.
-    val maybeState = supervisor.get(poolKey)
-    val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
-    val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
-
-    def perKindDb: Option[String] = kindWire match
-      case "ducklake" | "duckdb-file" =>
-        Option(TenantDb.catalogAlias(poolMeta)).filter(_.nonEmpty)
-      case "memory" => Some("memory")
-      case _        => None
-
-    def perKindSchema: Option[String] = kindWire match
-      case "ducklake" | "duckdb-file" => poolMeta.get("schemaName").filter(_.nonEmpty)
-      case "memory"                   => Some("main")
-      case _                          => None
+    val maybeState               = supervisor.get(poolKey)
+    val poolMeta                 = maybeState.map(_.metastore).getOrElse(Map.empty)
+    val kindWire                 = maybeState.map(_.kindWire).getOrElse("ducklake")
+    val (defaultDb, defaultSchm) = defaultsOf(poolKey)
 
     // The file locations the principal may name (Task 12), read only when a file screen asks.
     val fileAdmission =
@@ -801,8 +872,8 @@ final class FlightSqlRouter(
       database = poolKey.toString,
       statement = sql,
       peer = connectionId,
-      defaultDatabase = maybeState.flatMap(_.defaultDatabase).orElse(perKindDb),
-      defaultSchema = maybeState.flatMap(_.defaultSchema).orElse(perKindSchema),
+      defaultDatabase = defaultDb,
+      defaultSchema = defaultSchm,
       effectiveSet = effectiveSet,
       attachedCatalogs = attachedCatalogsOf(poolKey),
       poolKey = Some(poolKey),
@@ -841,7 +912,8 @@ final class FlightSqlRouter(
           prepMs,
           patId,
           source,
-          auditMeta
+          auditMeta,
+          detail
         )
 
     // Node lockdown, resolved per pool (tri-state: pool override else global default).
@@ -1235,7 +1307,7 @@ final class FlightSqlRouter(
                       // the first wire byte. Known race: a kill between register and attachCancel
                       // evicts the entry but does not interrupt the stream; accepted best-effort.
                       val stmtId =
-                        if recordExecution then
+                        if recordExecution || internal then
                           Some(
                             registry
                               .register(
@@ -1311,7 +1383,9 @@ final class FlightSqlRouter(
                             stmtId.foreach(registry.deregister)
                             maybeRecord(nodeId, latency, "transient", Some(m))
                             if s.txOpen then
-                              sessions.invalidatePin(connectionId)
+                              // A probe or the manager's own read fails alone: the client's
+                              // transaction keeps its pin, and its own statement answers.
+                              if recordExecution then sessions.invalidatePin(connectionId)
                               IO.pure(
                                 Left(
                                   RouterFailure
@@ -1555,6 +1629,31 @@ object FlightSqlRouter:
     */
   def rewritable(effectiveSet: Option[EffectiveSet]): Boolean =
     effectiveSet.exists(e => e.user.tenant.nonEmpty && !e.system)
+
+  /** Ends the client's transaction on the front door's node connection, answering `answer` to the
+    * statement and every later one until ROLLBACK (QuackFrontDoor's `abortTx`).
+    */
+  type TransactionFence = String => IO[Unit]
+
+  /** Why a computed file location got no literal: its evaluation failed (`Evaluation`, the
+    * gateway's or the node's answer), or the value it yielded is no location (`Rejected`).
+    */
+  enum LocationFailure:
+    case Evaluation(failure: RouterFailure)
+    case Rejected(reason: String)
+
+  /** `failure`, an evaluation's, as the answer to the client's statement (CONTRACT Addendum 4 item
+    * 25): of the same kind, its reason prefixed, since the client did not write the evaluated SQL.
+    */
+  def computingLocation(failure: RouterFailure): RouterFailure =
+    val reason = s"computing the file location: ${failure.reason}"
+    failure match
+      case RouterFailure.AccessDenied(_)  => RouterFailure.AccessDenied(reason)
+      case RouterFailure.NotFound(_)      => RouterFailure.NotFound(reason)
+      case RouterFailure.BadRequest(_)    => RouterFailure.BadRequest(reason)
+      case RouterFailure.Unavailable(_)   => RouterFailure.Unavailable(reason)
+      case RouterFailure.Internal(_)      => RouterFailure.Internal(reason)
+      case RouterFailure.AlreadyExists(_) => RouterFailure.AlreadyExists(reason)
 
   /** The history status of a failure answered before any node ran the statement. */
   def failureStatus(failure: RouterFailure): String = failure match
