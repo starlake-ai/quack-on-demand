@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace qod {
 
@@ -42,6 +43,10 @@ struct Installed {
 	std::string nonce;
 	//! The installing (or last refreshing) handle's ctx: a refresh may change it.
 	std::string ctx;
+	//! That handle, as the manager minted it: the connection's decide calls carry it.
+	std::string handle;
+	//! The replica that minted it, which decides the connection's statements.
+	std::string replica;
 };
 
 //! Why `next` may not install on a connection that holds `current` (null: none yet); empty when it
@@ -79,7 +84,17 @@ public:
 	//! its handle, and once it expired another principal's prelude is admitted here. The session
 	//! decides (qod_session keeps a connection's principal for its life; post_bind refuses a
 	//! statement without a current one); the screen only stops what it can before bind.
-	std::string Screen(const std::string &connection_id, const std::string &sql);
+	//!
+	//! When it admits a statement that is not the prelude, `recorded` (if given) receives the
+	//! connection's record, for the content rules and their decide call (node_hooks).
+	std::string Screen(const std::string &connection_id, const std::string &sql, Installed *recorded = nullptr);
+
+	//! Records, until `exp`, the scopes of the S3 credentials qod_session installed with the handle
+	//! `nonce` (decision 23): the screen judges that connection's s3:// locations against them.
+	void RecordCredentialScopes(const std::string &nonce, std::vector<std::string> scopes, int64_t exp);
+
+	//! The scopes recorded for `nonce`; none when nothing is (any longer).
+	std::vector<std::string> CredentialScopes(const std::string &nonce);
 
 	//! The decide client of this node (its key, its clock), shared by every connection: the parse
 	//! screen's location decisions and the plan verdicts.
@@ -106,6 +121,12 @@ private:
 	NonceLedger ledger_;
 	std::mutex lock_;
 	std::unordered_map<std::string, Installed> connections_;
+	struct RecordedScopes {
+		std::vector<std::string> scopes;
+		int64_t exp = 0;
+	};
+	//! By handle nonce, under lock_; swept with connections_.
+	std::unordered_map<std::string, RecordedScopes> credential_scopes_;
 	int64_t next_sweep_ms_ = 0;
 };
 

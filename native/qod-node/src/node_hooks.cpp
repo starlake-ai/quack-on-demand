@@ -2,10 +2,13 @@
 
 #include "credentials.hpp"
 #include "crypto.hpp"
+#include "locations.hpp"
+#include "screen_rules.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -19,6 +22,7 @@
 #include "duckdb/planner/operator/logical_set.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
+#include <iostream>
 #include <map>
 #include <mutex>
 
@@ -70,7 +74,7 @@ public:
 
 	//! Installs or refreshes `handle` (already verified for this node). Throws PermissionException
 	//! when it may not install here, or was used before.
-	void Install(NodeAuthz &authz, const Handle &handle) {
+	void Install(NodeAuthz &authz, const Handle &handle, const std::string &text) {
 		std::lock_guard<std::mutex> guard(lock_);
 		// The same CALL bound again (DuckDB rebinds a prepared statement when the catalog changed).
 		if (installed_ && current_.nonce == handle.nonce) {
@@ -83,7 +87,8 @@ public:
 		if (!authz.Consume(handle)) {
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
-		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx};
+		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce,
+		                      handle.ctx,       text,                  handle.replica};
 		installed_ = true;
 	}
 
@@ -100,6 +105,18 @@ public:
 	bool CurrentAt(int64_t now_ms) {
 		std::lock_guard<std::mutex> guard(lock_);
 		return installed_ && current_.exp > now_ms && ready_;
+	}
+
+	//! A copy of the installed principal and the handle that last installed or refreshed it, while
+	//! that handle is current at `now_ms` and the last prelude succeeded whole (the plan verdicts'
+	//! decide calls, Task 10).
+	bool Snapshot(int64_t now_ms, Installed &out) {
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!installed_ || current_.exp <= now_ms || !ready_) {
+			return false;
+		}
+		out = current_;
+		return true;
 	}
 
 	//! Makes the connection's user credential secrets the set `handle.creds` names (decision 23): none
@@ -221,16 +238,23 @@ unique_ptr<FunctionData> SessionBind(ClientContext &context, TableFunctionBindIn
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
 		throw PermissionException("qod-node: qod_session takes one session handle");
 	}
+	auto text = input.inputs[0].GetValue<string>();
 	Handle handle;
 	try {
-		handle = authz.Verify(input.inputs[0].GetValue<string>());
+		handle = authz.Verify(text);
 	} catch (std::invalid_argument &error) {
 		throw PermissionException(kHandleRefused + std::string(error.what()));
 	}
-	context.registered_state->GetOrCreate<SessionState>(SessionState::kKey)->Install(authz, handle);
-	// Decision 23: the principal's own S3 credentials, as this connection's secrets.
-	context.registered_state->GetOrCreate<SessionState>(SessionState::kKey)
-	    ->SyncCredentials(context, authz, handle, input.inputs[0].GetValue<string>());
+	auto session = context.registered_state->GetOrCreate<SessionState>(SessionState::kKey);
+	session->Install(authz, handle, text);
+	// Decision 16: no replacement scan for a user session, whatever the spelling (FROM 'x.parquet',
+	// FROM "s3://b/x"); such a user reads a file through a reader function, which the parse screen
+	// judges. No SQL setting reaches this field, and a refresh keeps the same principal.
+	context.config.use_replacement_scans = handle.principal.superuser || handle.principal.system;
+	// Decision 23: the principal's own S3 credentials, as this connection's secrets; the screen judges
+	// the connection's s3:// locations against their scopes.
+	session->SyncCredentials(context, authz, handle, text);
+	authz.RecordCredentialScopes(handle.nonce, session->CredentialScopes(), handle.exp);
 	return_types.push_back(LogicalType::BOOLEAN);
 	names.emplace_back("installed");
 	return make_uniq<TableFunctionData>();
@@ -250,6 +274,67 @@ void SessionScan(ClientContext &context, TableFunctionInput &input, DataChunk &o
 	output.CheckCardinality(1);
 }
 
+//! The scopes of this node's own S3 secrets: outside connection storage, of the types httpfs reads for
+//! an s3:// URL (S3SecretConfig::SecretTypes, httpfs 77392a7). DuckDB signs a URL with one of them
+//! over a user's when it scopes more closely (decision 23, ShadowingScope). Every secret present is
+//! listed, whether or not its type's extension is loaded yet: a temporary secret keeps its type name,
+//! and a persistent one is deserialized here, which autoloads its type or throws (the caller refuses).
+std::vector<std::string> NodeS3SecretScopes(ClientContext &context) {
+	std::vector<std::string> scopes;
+	auto &manager = SecretManager::Get(context);
+	for (auto &entry : manager.AllSecrets(CatalogTransaction::GetSystemCatalogTransaction(context))) {
+		auto type = StringUtil::Lower(entry.secret->GetType().GetIdentifierName());
+		if (entry.storage_mode == SecretManager::CONNECTION_STORAGE_NAME ||
+		    (type != "s3" && type != "r2" && type != "gcs" && type != "aws")) {
+			continue;
+		}
+		for (auto &scope : entry.secret->GetScope()) {
+			scopes.push_back(scope);
+		}
+	}
+	return scopes;
+}
+
+//! The parse screen's content rules for a statement on a connection whose principal is current
+//! (`recorded`): nothing for a superuser or the manager itself; else ScreenStatement, then, when the
+//! statement names locations, a refusal of any s3:// one a node secret would sign over the user's own
+//! (decision 23), then a screen verdict from the replica that minted the connection's handle
+//! (never cached: a new database can claim a folder at any time). Empty to admit, else the refusal.
+std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Installed &recorded, const string &sql) {
+	if (recorded.principal.superuser || recorded.principal.system) {
+		return "";
+	}
+	auto outcome = ScreenStatement(context, sql);
+	if (!outcome.refusal.empty() || outcome.facts.locations.empty()) {
+		return outcome.refusal;
+	}
+	auto user_scopes = authz.CredentialScopes(recorded.nonce);
+	std::vector<std::string> node_scopes;
+	try {
+		node_scopes = NodeS3SecretScopes(context);
+	} catch (std::exception &error) {
+		// The cause can name the node's secret directory: the node's log has it, the client does not.
+		std::cerr << "[qod-node] listing the node's S3 secrets failed: " << ErrorData(error).RawMessage() << std::endl;
+		return "QoD: this node's own S3 secrets cannot be listed, so the statement's locations cannot be checked";
+	}
+	for (auto &location : outcome.facts.locations) {
+		if (!ShadowingScope(location.resolved, user_scopes, node_scopes).empty()) {
+			return "QoD: " + location.given +
+			       " would be signed with this node's own S3 keys, not with an S3 credential of yours";
+		}
+	}
+	DecideCall call;
+	call.replica = recorded.replica;
+	call.handle = recorded.handle;
+	call.kind = "screen";
+	call.description = ScreenDescription(outcome.facts.locations);
+	call.principal = recorded.principal;
+	call.policy_version = recorded.policy_version;
+	call.ctx = recorded.ctx;
+	auto decided = authz.Decider().Decide(call);
+	return decided.status == DecideResult::Status::Allow ? "" : decided.Message();
+}
+
 // ---- qod_screen ----------------------------------------------------------------------------------
 
 void ScreenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -266,7 +351,12 @@ void ScreenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		if (connection_id.IsNull() || sql.IsNull()) {
 			throw PermissionException(kNoPrincipal);
 		}
-		auto refusal = authz.Screen(connection_id.GetValue<string>(), sql.GetValue<string>());
+		Installed recorded;
+		auto text = sql.GetValue<string>();
+		auto refusal = authz.Screen(connection_id.GetValue<string>(), text, &recorded);
+		if (refusal.empty() && !recorded.handle.empty()) {
+			refusal = ScreenContent(state.GetContext(), authz, recorded, text);
+		}
 		if (!refusal.empty()) {
 			throw PermissionException(refusal);
 		}

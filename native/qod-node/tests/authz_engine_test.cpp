@@ -10,9 +10,20 @@
 #include "node_hooks.hpp"
 #include "sql_script.hpp"
 #include "test_handles.hpp"
+#include "crypto.hpp"
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/main/secret/secret.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
+#include "json.hpp"
+#include "test_http_server.hpp"
+#include "test_verdicts.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace {
@@ -20,6 +31,8 @@ namespace {
 using qod_test::kKey;
 using qod_test::kNode;
 using qod_test::Mint;
+using qod_test::MintSpec;
+using qod_test::MintWith;
 using qod_test::Prelude;
 
 int failures = 0;
@@ -160,6 +173,148 @@ int main() {
 	ExpectQuery(internal, ScreenCall("c-1", Prelude(Fresh("u-dave"))), "another principal",
 	            "the screen refuses another principal on the connection");
 	ExpectQuery(erin, ScreenCall("c-3", "SELECT 1"), "authorization callback", "a session cannot call the screen");
+
+	// ---- replacement scans (decision 16): off for a user session, kept for a superuser's
+	auto csv = (std::filesystem::temp_directory_path() /
+	            std::filesystem::u8path("qod-engine-" +
+	                                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+	                                    ".csv"))
+	               .u8string();
+	ExpectQuery(internal, "COPY (SELECT 42 AS v) TO " + qod::QuoteLiteral(csv) + " (HEADER)", "", "the test file");
+	ExpectQuery(internal, "SELECT v FROM " + qod::QuoteLiteral(csv), "", "an internal connection keeps them");
+	duckdb::Connection ivy(db);
+	TagAsQuackSession(ivy);
+	ExpectQuery(ivy, Prelude(Fresh("u-ivy")), "", "ivy installs");
+	ExpectQuery(ivy, "SELECT v FROM " + qod::QuoteLiteral(csv), "does not exist",
+	            "a file in table position is no table for a user");
+	ExpectQuery(ivy, "SELECT v FROM \"" + csv + "\"", "does not exist", "nor as a quoted identifier");
+	ExpectQuery(ivy, "SELECT v FROM query_table(" + qod::QuoteLiteral(csv) + ")", "does not exist",
+	            "nor through query_table");
+	ExpectQuery(ivy, Prelude(Fresh("u-ivy", kNode, 2)), "", "a refresh");
+	ExpectQuery(ivy, "SELECT v FROM " + qod::QuoteLiteral(csv), "does not exist", "still off after a refresh");
+	duckdb::Connection root(db);
+	TagAsQuackSession(root);
+	MintSpec superuser;
+	superuser.principal_id = "u-root";
+	superuser.exp = now_ms + 60000;
+	superuser.superuser = true;
+	ExpectQuery(root, Prelude(MintWith(superuser)), "", "a superuser installs");
+	ExpectQuery(root, "SELECT v FROM " + qod::QuoteLiteral(csv), "", "a superuser keeps replacement scans");
+
+	// ---- the screen's content rules and location decisions, as quack calls them
+	std::atomic<bool> refuse_locations {false};
+	std::mutex seen_lock;
+	std::string seen_description;
+	std::string seen_handle;
+	qod_test::TestHttpServer replica([&](const qod_test::HttpRequest &request) {
+		auto body = qod::ParseJson(request.body);
+		auto description = qod::FromBase64Url(body.Get("description", qod::JsonValue::Kind::STRING).string);
+		{
+			std::lock_guard<std::mutex> guard(seen_lock);
+			seen_description = description;
+			seen_handle = body.Get("handle", qod::JsonValue::Kind::STRING).string;
+		}
+		qod_test::VerdictFields fields;
+		fields.kind = body.Get("kind", qod::JsonValue::Kind::STRING).string;
+		fields.principal = "u-judy";
+		fields.fingerprint = qod::Hex(qod::Sha256(description));
+		// The manager stamps a screen verdict expiresAt = now (Addendum 4 item 5).
+		fields.expires_at = now_ms;
+		if (refuse_locations) {
+			fields.decision = "refuse";
+			fields.reason = "s3://other/x.csv is outside the tenant's authorized locations";
+		}
+		qod_test::HttpAnswer answer;
+		answer.body = qod_test::SignVerdict(qod_test::VerdictJson(fields));
+		return answer;
+	});
+	MintSpec judy;
+	judy.principal_id = "u-judy";
+	judy.exp = now_ms + 60000;
+	judy.replica = replica.Url();
+	auto judy_handle = MintWith(judy);
+	ExpectQuery(internal, ScreenCall("c-judy", Prelude(judy_handle)), "", "judy's prelude");
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT 1"), "", "a statement naming no location");
+	Check("", replica.Requests() != 0, "", "asks no verdict");
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"), "",
+	            "a location the replica allows");
+	{
+		std::lock_guard<std::mutex> guard(seen_lock);
+		Check("", seen_description != "{\"locations\":[{\"access\":\"read\",\"given\":\"s3://acme-etl/in/x.csv\","
+		                              "\"resolved\":\"s3://acme-etl/in/x.csv\",\"via\":\"read_csv\"}],\"v\":1}",
+		      "", "the screen description sent");
+		Check("", seen_handle != judy_handle, "", "with the connection's handle");
+	}
+	Check("", replica.Last().headers["x-qod-signature"].empty(), "", "signed");
+	auto asked = replica.Requests();
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"), "",
+	            "the same location again");
+	Check("", replica.Requests() != asked + 1, "", "is asked again: screen verdicts are never cached");
+	refuse_locations = true;
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('s3://other/x.csv')"),
+	            "QoD: s3://other/x.csv is outside the tenant's authorized locations", "a location the replica refuses");
+	refuse_locations = false;
+	asked = replica.Requests();
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('x.csv')"), "QoD: x.csv ",
+	            "a relative path is refused on the node");
+	ExpectQuery(internal, ScreenCall("c-judy", "DESCRIBE t"), "reserved to superusers", "a content rule");
+	// Decision 23: a user's secret, in any storage, and the settings an S3 request is signed with.
+	ExpectQuery(internal, ScreenCall("c-judy", "CREATE OR REPLACE SECRET qod_uc_0123abcd IN connection (TYPE s3)"),
+	            "QoD: secrets are reserved to superusers", "a user's connection secret");
+	ExpectQuery(internal, ScreenCall("c-judy", "EXPLAIN DROP SECRET s FROM transaction"),
+	            "QoD: secrets are reserved to superusers", "a user's DROP SECRET behind EXPLAIN");
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM query('CREATE SECRET s (TYPE s3)')"),
+	            "QoD: secrets are reserved to superusers", "a user's CREATE SECRET inside query()");
+	ExpectQuery(internal, ScreenCall("c-judy", "EXPLAIN SET s3_endpoint = 'evil.example.com'"),
+	            "QoD: SET and RESET of s3_endpoint are reserved to superusers", "a user's SET of an s3 setting");
+	Check("", replica.Requests() != asked, "", "neither asks the replica");
+	// Decision 23: a location one of the node's own S3 secrets would sign, over judy's (she has none
+	// recorded), is refused on the node. A stand-in s3 type: httpfs registers the real one.
+	duckdb::SecretType s3_type;
+	s3_type.name = "s3";
+	s3_type.deserializer = duckdb::KeyValueSecret::Deserialize<duckdb::KeyValueSecret>;
+	s3_type.default_provider = "config";
+	duckdb::SecretManager::Get(*db.instance).RegisterSecretType(s3_type);
+	internal.context->RunFunctionInTransaction([&] {
+		auto secret = duckdb::make_uniq<duckdb::KeyValueSecret>(duckdb::vector<std::string> {"s3://acme-etl/iceberg/"},
+		                                                        duckdb::Identifier("s3"), duckdb::Identifier("config"),
+		                                                        duckdb::Identifier("qod_ice_test"));
+		auto transaction = duckdb::CatalogTransaction::GetSystemCatalogTransaction(*internal.context);
+		duckdb::SecretManager::Get(*internal.context)
+		    .RegisterSecret(transaction, std::move(secret), duckdb::OnCreateConflict::ERROR_ON_CONFLICT,
+		                    duckdb::SecretPersistType::TEMPORARY, "memory");
+	});
+	asked = replica.Requests();
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_parquet('s3://acme-etl/iceberg/t/x.parquet')"),
+	            "QoD: s3://acme-etl/iceberg/t/x.parquet would be signed with this node's own S3 keys",
+	            "a location under a node secret's scope");
+	Check("", replica.Requests() != asked, "", "is refused on the node");
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"), "",
+	            "a location outside it is still the replica's to judge");
+	// The scopes qod_session records for judy's handle: one as close as the node's wins the tie.
+	authz->RecordCredentialScopes(authz->Verify(judy_handle).nonce, {"s3://acme-etl/iceberg/"}, now_ms + 60000);
+	asked = replica.Requests();
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_parquet('s3://acme-etl/iceberg/t/x.parquet')"), "",
+	            "judy's own credential scoped as closely signs it");
+	Check("", replica.Requests() != asked + 1, "", "and the replica judges it");
+	MintSpec kim = judy;
+	kim.principal_id = "u-kim";
+	kim.replica = "http://127.0.0.1:" + std::to_string(qod_test::UnusedPort());
+	ExpectQuery(internal, ScreenCall("c-kim", Prelude(MintWith(kim))), "",
+	            "kim's prelude names a replica that is down");
+	ExpectQuery(internal, ScreenCall("c-kim", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"),
+	            "QoD: authorization unavailable", "no verdict, no statement");
+	MintSpec root_screen = superuser;
+	root_screen.replica = replica.Url();
+	ExpectQuery(internal, ScreenCall("c-root", Prelude(MintWith(root_screen))), "", "a superuser's prelude");
+	asked = replica.Requests();
+	ExpectQuery(internal, ScreenCall("c-root", "SELECT * FROM read_csv('x.csv')"), "",
+	            "a superuser's statement skips the content rules");
+	ExpectQuery(internal, ScreenCall("c-root", "CREATE SECRET s IN connection (TYPE s3)"), "",
+	            "a superuser's secret is not the screen's to refuse");
+	Check("", replica.Requests() != asked, "", "and asks no verdict");
+	std::error_code ignored;
+	std::filesystem::remove(std::filesystem::u8path(csv), ignored);
 
 	if (failures == 0) {
 		std::cout << "authz_engine_test: all passed" << std::endl;

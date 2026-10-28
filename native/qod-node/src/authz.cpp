@@ -71,10 +71,13 @@ void NodeAuthz::Sweep(int64_t now_ms) {
 	for (auto it = connections_.begin(); it != connections_.end();) {
 		it = it->second.exp <= now_ms ? connections_.erase(it) : std::next(it);
 	}
+	for (auto it = credential_scopes_.begin(); it != credential_scopes_.end();) {
+		it = it->second.exp <= now_ms ? credential_scopes_.erase(it) : std::next(it);
+	}
 	next_sweep_ms_ = now_ms + 10 * 1000;
 }
 
-std::string NodeAuthz::Screen(const std::string &connection_id, const std::string &sql) {
+std::string NodeAuthz::Screen(const std::string &connection_id, const std::string &sql, Installed *recorded) {
 	auto now = Now();
 	auto text = PreludeHandle(sql);
 	Handle handle;
@@ -93,14 +96,36 @@ std::string NodeAuthz::Screen(const std::string &connection_id, const std::strin
 	auto found = connections_.find(connection_id);
 	const Installed *current = found != connections_.end() && found->second.exp > now ? &found->second : nullptr;
 	if (text.empty()) {
-		return current ? "" : kNoPrincipal;
+		if (!current) {
+			return kNoPrincipal;
+		}
+		if (recorded) {
+			*recorded = *current;
+		}
+		return "";
 	}
 	auto refusal = RefreshRefusal(current, handle);
 	if (!refusal.empty()) {
 		return kRefused + refusal;
 	}
-	connections_[connection_id] = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx};
+	connections_[connection_id] =
+	    Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx, text, handle.replica};
 	return "";
+}
+
+void NodeAuthz::RecordCredentialScopes(const std::string &nonce, std::vector<std::string> scopes, int64_t exp) {
+	auto now = Now();
+	std::lock_guard<std::mutex> guard(lock_);
+	Sweep(now);
+	credential_scopes_[nonce] = RecordedScopes {std::move(scopes), exp};
+}
+
+std::vector<std::string> NodeAuthz::CredentialScopes(const std::string &nonce) {
+	auto now = Now();
+	std::lock_guard<std::mutex> guard(lock_);
+	auto found = credential_scopes_.find(nonce);
+	return found != credential_scopes_.end() && found->second.exp > now ? found->second.scopes
+	                                                                    : std::vector<std::string>();
 }
 
 } // namespace qod

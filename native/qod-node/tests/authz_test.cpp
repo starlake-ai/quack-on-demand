@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -77,6 +78,26 @@ int main() {
 	// The screen only peeks at the nonce: qod_session consumes it on the session.
 	Expect(authz.Consume(authz.Verify(first)), "the session consumes the nonce");
 	ExpectMentions(authz.Screen("c-4", Prelude(first)), "already used", "a consumed handle elsewhere");
+
+	// ---- the book keeps the handle that installed: the screen's decide calls carry it
+	auto fifth = Mint("u-5", now_ms + 60000);
+	Expect(authz.Screen("c-5", Prelude(fifth)).empty(), "u-5 installs");
+	qod::Installed recorded;
+	Expect(authz.Screen("c-5", "SELECT 1", &recorded).empty(), "u-5's statement is admitted");
+	Expect(recorded.handle == fifth && recorded.replica == "http://127.0.0.1:20900" && recorded.principal.id == "u-5" &&
+	           recorded.ctx == std::string(64, 'c'),
+	       "with the connection's record: handle, replica, principal, ctx");
+	qod::Installed untouched;
+	Expect(authz.Screen("c-5", Prelude(Mint("u-5", now_ms + 60000)), &untouched).empty() && untouched.handle.empty(),
+	       "a prelude fills no record: it has no content to screen");
+
+	// ---- decision 23: the S3 credential scopes qod_session installed, by the handle's nonce
+	authz.RecordCredentialScopes("n-scopes-1", {"s3://acme-etl/"}, now_ms + 60000);
+	Expect(authz.CredentialScopes("n-scopes-1") == std::vector<std::string> {"s3://acme-etl/"},
+	       "recorded scopes are read back");
+	Expect(authz.CredentialScopes("n-scopes-2").empty(), "an unknown nonce has none");
+	authz.RecordCredentialScopes("n-scopes-3", {"s3://b/"}, now_ms);
+	Expect(authz.CredentialScopes("n-scopes-3").empty(), "expired scopes are none");
 	now_ms += 61000;
 	Expect(authz.Screen("c-1", "SELECT 1") == qod::kNoPrincipal, "an expired record");
 	// The book is advisory: once a record expired it admits another principal's prelude; the

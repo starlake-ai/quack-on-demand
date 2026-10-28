@@ -150,9 +150,11 @@ set(QOD_NODE_CORE_SOURCES
   src/json.cpp
   src/json_writer.cpp
   src/lifetime.cpp
+  src/locations.cpp
   src/node_config.cpp
   src/node_hooks.cpp
   src/options.cpp
+  src/screen_rules.cpp
   src/secrets.cpp
   src/settings_list.cpp
   src/socket_compat.cpp
@@ -236,6 +238,12 @@ if(QOD_NODE_TESTS)
   qod_node_test(decide_client_test)
   target_link_libraries(decide_client_test PRIVATE qod_node_test_http)
   add_test(NAME decide_client COMMAND decide_client_test)
+  qod_node_test(locations_test)
+  add_test(NAME locations COMMAND locations_test)
+  qod_node_test(screen_rules_test)
+  add_test(NAME screen_rules COMMAND screen_rules_test)
+  # The screen's location decisions ask a real replica.
+  target_link_libraries(authz_engine_test PRIVATE qod_node_test_http)
   qod_node_test(credentials_test)
   target_link_libraries(credentials_test PRIVATE qod_node_test_http)
   add_test(NAME credentials COMMAND credentials_test)

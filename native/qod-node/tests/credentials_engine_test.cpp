@@ -15,6 +15,7 @@
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "node_hooks.hpp"
+#include "sql_script.hpp"
 #include "test_credentials.hpp"
 #include "test_http_server.hpp"
 
@@ -435,6 +436,48 @@ int main() {
 	TagAsQuackSession(root);
 	Expect(Run(root, MintFrom(url, "u-root", Digest('8'), exp, true)).empty() && UserSecrets(root).size() == 1,
 	       "a superuser's own credentials are installed");
+
+	// ---- the scopes qod_session installs reach the parse screen, which refuses an s3:// location a
+	// node secret would sign over the user's own (decision 23). The screen asks the replica only after:
+	// this one answers with credentials, never a verdict, so a location that passes is refused there.
+	duckdb::Connection internal(db);
+	internal.context->RunFunctionInTransaction([&] {
+		auto secret = duckdb::make_uniq<duckdb::KeyValueSecret>(duckdb::vector<std::string> {"s3://lake/ice/"},
+		                                                        duckdb::Identifier("s3"), duckdb::Identifier("config"),
+		                                                        duckdb::Identifier("qod_ice_e2e"));
+		auto transaction = duckdb::CatalogTransaction::GetSystemCatalogTransaction(*internal.context);
+		duckdb::SecretManager::Get(*internal.context)
+		    .RegisterSecret(transaction, std::move(secret), duckdb::OnCreateConflict::ERROR_ON_CONFLICT,
+		                    duckdb::SecretPersistType::TEMPORARY, "memory");
+	});
+	auto screen = [&](const std::string &connection_id, const std::string &sql) {
+		auto result = internal.Query(std::string("SELECT ") + qod::kScreenFunction + "(" +
+		                             qod::QuoteLiteral(connection_id) + ", " + qod::QuoteLiteral(sql) + ")");
+		return result->HasError() ? result->GetError() : std::string();
+	};
+	auto read_ice = std::string("SELECT * FROM read_parquet('s3://lake/ice/t/x.parquet')");
+	struct Case {
+		const char *user;
+		char digit;
+		const char *scope;
+		bool shadowed;
+		const char *what;
+	};
+	for (auto &c : {Case {"u-gwen", '9', "s3://lake/ice/", false, "a credential scoped as closely as the node's"},
+	                Case {"u-hugo", '6', "s3://lake/", true, "a credential scoped more widely than the node's"}}) {
+		auto digest = Digest(c.digit);
+		Serve(digest, {Entry(c.digit, c.scope, "AKIAUSER", "user-secret")});
+		auto handle = MintFrom(url, c.user, digest, exp);
+		duckdb::Connection user(db);
+		TagAsQuackSession(user);
+		auto connection_id = std::string("c-") + c.user;
+		Expect(screen(connection_id, qod_test::Prelude(handle)).empty() && Run(user, handle).empty(),
+		       std::string(c.what) + ": the prelude installs");
+		auto refusal = screen(connection_id, read_ice);
+		auto shadowed = refusal.find("would be signed with this node's own S3 keys") != std::string::npos;
+		Expect(shadowed == c.shadowed && (c.shadowed || refusal.find("verdict does not verify") != std::string::npos),
+		       std::string(c.what) + ": " + refusal);
+	}
 
 	if (failures == 0) {
 		std::cout << "credentials_engine_test: all passed" << std::endl;
