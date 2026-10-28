@@ -245,11 +245,14 @@ class GatewayLocationAdmissionSpec extends AnyFlatSpec with Matchers:
     val viaLink = FlightSqlRouter.fileAdmissionFor(
       Some(alice),
       rulesFor,
-      p => p.replace("/tmp-link/", "/srv/qod/")
+      p => if p.contains("dangling") then None else Some(p.replace("/tmp-link/", "/srv/qod/"))
     )
     viaLink.admits("/tmp-link/acme/in/x.csv") shouldBe true
     viaLink.admits("/tmp-link/acme/in/../in/x.csv") shouldBe false
     viaLink.admits("/tmp-link/acme//in/x.csv") shouldBe false
+    // a path the node cannot resolve (a link that leads nowhere) is refused, never judged as given
+    viaLink.admits("/srv/qod/acme/in/dangling") shouldBe false
+    forAlice.admits("/srv/qod/acme/in/dangling") shouldBe true
     forAlice.admits("/tmp-link/acme/in/x.csv") shouldBe false
     val root = alice.copy(user = RbacUser("u-0", None, "root", "admin"))
     FlightSqlRouter
@@ -279,4 +282,101 @@ class GatewayLocationAdmissionSpec extends AnyFlatSpec with Matchers:
       "SELECT * FROM read_parquet('s3://acme-etl/in/x.parquet')",
       admission
     ) shouldBe defined
+  }
+
+  // Task 12 review, implementer concern 2: the stand-in reprints a COPY's table name verbatim, and
+  // JSqlParser keeps a doubled quote doubled where DuckDB reads one. DottedIdentifierScreen refuses
+  // such a name on the COPY text itself, before the stand-in is parsed, in every consumer.
+  private val quotedNameCopies = List(
+    "COPY \"a\"\"b\" TO 's3://acme-etl/out/x.csv'",
+    "COPY \"secret@x\" FROM 's3://acme-etl/in/x.csv'"
+  )
+
+  "a COPY of a doubled-quote or odd quoted name" should "be refused before its stand-in is parsed" in {
+    quotedNameCopies.foreach { sql =>
+      withClue(sql) {
+        FileLocations.copy(sql) shouldBe defined
+        DottedIdentifierScreen.find(sql) shouldBe defined
+        validate(sql, admission) shouldBe a[Denied]
+        LockdownScreen.screen(sql, Set.empty, admission) shouldBe defined
+      }
+    }
+    val guard = new ProtectedWriteGuard(
+      new ColumnCatalog.MapCatalog(Map(("lake", "main", "customer") -> List("c_id"))),
+      clsEnabled = true,
+      rlsEnabled = true
+    )
+    val withRows = alice.copy(rowPolicies =
+      List(RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_id = 1"))
+    )
+    quotedNameCopies.foreach { sql =>
+      withClue(sql)(
+        guard.check(
+          sql,
+          StatementKind.Dml,
+          withRows,
+          SchemaContext(Some("lake"), Some("main"), Set.empty),
+          admission = admission
+        ) shouldBe a[GuardOutcome.Deny]
+      )
+    }
+  }
+
+  // Task 12 review I1: the access check authorizes a COPY on its stand-in, and admits a metadata
+  // read there only because the edge filter narrows it; the filter must leave the stand-in alone.
+  private val metadataFilter =
+    new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true)
+  private val schemaCtx                   = SchemaContext(Some("lake"), Some("main"), Set("lake"))
+  private def listingRefusal(sql: String) =
+    FlightSqlRouter.copyListingRefusal(sql, s => metadataFilter.rewrite(s, alice, schemaCtx))
+
+  "a COPY of filtered metadata" should "be refused, whatever form names the listing" in {
+    List(
+      "COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SHOW TABLES FROM tpch1) TO 's3://acme-etl/out/t.csv'"
+    ).foreach { sql =>
+      withClue(sql) {
+        FileLocations.copy(sql) shouldBe None
+        FileAccessScreen.find(sql, admission) shouldBe defined
+        validate(sql, admission) shouldBe a[Denied]
+      }
+    }
+    List(
+      "COPY (SELECT table_name, column_name FROM information_schema./**/columns) TO " +
+        "'s3://acme-etl/out/c.csv'",
+      "COPY (SELECT table_name FROM information_schema.tables) TO 's3://acme-etl/out/t.csv'",
+      "COPY information_schema./**/tables TO 's3://acme-etl/out/t.csv'",
+      "COPY lake.information_schema.columns TO 's3://acme-etl/out/c.csv'"
+    ).foreach { sql =>
+      withClue(sql) {
+        // the access check admits it (the filtered-metadata implicit admit, on the stand-in), so
+        // the filter step is what refuses it
+        validate(sql, admission) shouldBe Allowed
+        listingRefusal(sql) shouldBe defined
+      }
+    }
+  }
+
+  it should "leave an ordinary COPY alone" in {
+    List(
+      "COPY (SELECT * FROM main.orders) TO 's3://acme-etl/out/o.csv'",
+      "COPY lake.main.orders TO 's3://acme-etl/out/o.csv'",
+      "COPY lake.main.events FROM 's3://acme-etl/in/e.csv'",
+      "SELECT * FROM read_parquet('s3://acme-etl/in/x.parquet')"
+    ).foreach(sql => withClue(sql)(listingRefusal(sql) shouldBe None))
+    validate("COPY (SELECT * FROM main.orders) TO 's3://acme-etl/out/o.csv'", admission) shouldBe
+      Allowed
+  }
+
+  // Task 12 review M3: a rewrite of a statement holding an admitted reader is still compared.
+  "rewriteReachesBeyond" should "compare a rewrite of an admitted file read under the admission" in {
+    val original =
+      "SELECT o.id FROM lake.main.orders o, read_parquet('s3://acme-etl/in/x.parquet') r"
+    val rewritten = original + ", lake.main.secret s"
+    AccessGate.rewriteReachesBeyond(original, rewritten, cfg, "lake", false, admission) match
+      case Some(reason) => reason should include("lake.main.secret")
+      case None         => fail("the extra table went unnoticed")
+    AccessGate.rewriteReachesBeyond(original, original, cfg, "lake", false, admission) shouldBe None
+    // without the admission the original is refused, so nothing is compared (the old behavior)
+    AccessGate.rewriteReachesBeyond(original, rewritten, cfg, "lake", false) shouldBe None
   }

@@ -3,9 +3,8 @@ package ai.starlake.quack.edge.authz.location
 import ai.starlake.quack.ondemand.runtime.NodePaths
 
 import java.io.File
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, LinkOption, Paths}
 import java.util.Locale
-import scala.annotation.tailrec
 
 /** A database data path as [[LocationChecker]] deny-set entries. */
 object DataFolders:
@@ -124,29 +123,113 @@ object DataFolders:
     p.length >= 3 && p.charAt(0).isLetter && p.charAt(1) == ':' &&
       (p.charAt(2) == '\\' || p.charAt(2) == '/')
 
-/** The real path a node gives a local path: the deepest existing ancestor through `toRealPath`
-  * (symlinks resolved), the rest appended as written, a trailing separator kept. qod-node's
-  * `ResolveLocalPath` does the same before its parse screen asks; the manager applies it to data
-  * paths, the files root and tenant folders on the local runtime, where it sees the nodes'
-  * filesystem.
+/** The real path a node gives a local path, by qod-node's own algorithm (`ResolveLocalPath`,
+  * native/qod-node/src/locations.cpp): the path split by the node's lexical rules (absolute, no
+  * NUL, no empty, `.` or `..` segment; on Windows a drive letter, no `:` in a segment, no segment
+  * ending in `.` or a space, no device name), then the deepest ancestor that exists AS ITSELF (a
+  * link that leads nowhere included, so it is not joined past) through `toRealPath`, the rest
+  * appended as written, a trailing separator kept. A link that leads nowhere, or a folder this host
+  * cannot read, refuses the path rather than leaving it unresolved. The manager applies it on the
+  * local runtime, where it sees the nodes' filesystem.
   */
 object LocalRealPath:
 
-  def of(path: String): String =
-    val dir = path.endsWith("/") || path.endsWith("\\")
-    try
-      val p = Paths.get(path)
-      if !p.isAbsolute then path
-      else
-        existing(p, Nil) match
-          case None               => path
-          case Some((base, rest)) =>
-            val real = rest.foldLeft(base.toRealPath())((acc, seg) => acc.resolve(seg)).toString
-            if dir && !real.endsWith(File.separator) then real + File.separator else real
-    catch case _: Exception => path
+  /** The node's resolution of `path`, or why the node refuses it. */
+  def resolve(path: String): Either[String, String] =
+    split(path).flatMap { (root, segments, trailing) =>
+      try
+        var existing = Paths.get(root)
+        var kept     = 0
+        var walking  = true
+        while walking && kept < segments.length do
+          val next = existing.resolve(segments(kept))
+          if Files.exists(next, LinkOption.NOFOLLOW_LINKS) then
+            existing = next
+            kept += 1
+          else walking = false
+        val real     = existing.toRealPath().toString
+        val resolved = new StringBuilder(
+          if Windows && real.startsWith("\\\\?\\") then real.drop(4) else real
+        )
+        if Windows && (resolved.length < 3 || resolved.charAt(1) != ':') then
+          Left("resolves outside a drive")
+        else
+          segments.drop(kept).foreach { seg =>
+            if resolved.isEmpty || resolved.last != Separator then resolved.append(Separator)
+            resolved.append(seg)
+          }
+          if trailing && (resolved.isEmpty || resolved.last != Separator) then
+            resolved.append(Separator)
+          Right(resolved.toString)
+      catch
+        case _: Exception =>
+          Left(
+            "cannot be resolved: it passes through a symbolic link that leads nowhere or a " +
+              "folder this node cannot read"
+          )
+    }
 
-  @tailrec
-  private def existing(p: Path, rest: List[String]): Option[(Path, List[String])] =
-    if p == null then None
-    else if Files.exists(p) then Some((p, rest))
-    else existing(p.getParent, Option(p.getFileName).map(_.toString).toList ++ rest)
+  /** [[resolve]], or `path` as written when the node would refuse it: for the deny set and the
+    * tenant folders, which keep their written form beside the real one. A statement's location is
+    * judged through [[resolve]], so a path the node refuses is refused there too.
+    */
+  def of(path: String): String = resolve(path).getOrElse(path)
+
+  private val Windows   = File.separatorChar == '\\'
+  private val Separator = File.separatorChar
+
+  private def isSeparator(c: Char): Boolean = c == '/' || (Windows && c == '\\')
+
+  /** The node's `Split`: the root, the segments, whether a separator ends the path. */
+  private def split(path: String): Either[String, (String, Vector[String], Boolean)] =
+    if path.contains('\u0000') then Left("holds a NUL character")
+    else
+      val rooted =
+        if Windows then
+          Option
+            .when(
+              path.length >= 3 && isAsciiLetter(path.charAt(0)) && path.charAt(1) == ':' &&
+                isSeparator(path.charAt(2))
+            ) {
+              (s"${path.charAt(0).toUpper}:\\", 3)
+            }
+            .toRight("is not an absolute path with a drive letter")
+        else if path.isEmpty || path.charAt(0) != '/' then Left("is a relative path")
+        else Right(("/", 1))
+      rooted.flatMap { (root, start) =>
+        val trailing = path.length > start && isSeparator(path.last)
+        val end      = if trailing then path.length - 1 else path.length
+        if end <= start then Right((root, Vector.empty, trailing))
+        else
+          val segments = splitOn(path.substring(start, end))
+          segments.collectFirst(Function.unlift(segmentError)).toLeft((root, segments, trailing))
+      }
+
+  private def splitOn(s: String): Vector[String] =
+    val out  = Vector.newBuilder[String]
+    var from = 0
+    var i    = 0
+    while i <= s.length do
+      if i == s.length || isSeparator(s.charAt(i)) then
+        out += s.substring(from, i)
+        from = i + 1
+      i += 1
+    out.result()
+
+  private def segmentError(segment: String): Option[String] =
+    if segment.isEmpty || segment == "." || segment == ".." then
+      Some("has an empty, '.' or '..' segment")
+    else if !Windows then None
+    else if segment.contains(':') then Some("names an alternate data stream")
+    else if segment.endsWith(".") || segment.endsWith(" ") then
+      Some("has a segment ending in '.' or ' ', which Windows strips")
+    else if isDeviceName(segment) then Some("names a Windows device")
+    else None
+
+  private def isDeviceName(segment: String): Boolean =
+    val stem = segment.takeWhile(_ != '.').toLowerCase(Locale.ROOT)
+    Set("con", "prn", "aux", "nul")(stem) ||
+    (stem.length == 4 && (stem.startsWith("com") || stem.startsWith("lpt")) &&
+      stem.charAt(3) >= '1' && stem.charAt(3) <= '9')
+
+  private def isAsciiLetter(c: Char): Boolean = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')

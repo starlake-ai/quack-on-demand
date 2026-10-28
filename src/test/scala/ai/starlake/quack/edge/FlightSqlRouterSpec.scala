@@ -996,7 +996,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
         ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
       lockdownFor: PoolKey => Boolean = _ => false,
-      attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty
+      attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty,
+      locationRulesFor: (String, String) => Option[
+        ai.starlake.quack.edge.authz.location.LocationRules
+      ] = (_, _) => None
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -1058,7 +1061,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard = protectedWriteGuard,
       lockdownFor = lockdownFor,
-      attachedCatalogsOf = attachedCatalogsOf
+      attachedCatalogsOf = attachedCatalogsOf,
+      locationRulesFor = locationRulesFor
     )
     (router, () => capturedSql, node)
 
@@ -3695,6 +3699,58 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
+
+  // Task 12 review I1: a COPY to an authorized location must not carry a listing the edge filter
+  // would have narrowed (the access check authorizes the COPY on its stand-in, and the filter
+  // cannot read a COPY).
+  private val acmeEtlRules: (String, String) => Option[
+    ai.starlake.quack.edge.authz.location.LocationRules
+  ] = (tenant, user) =>
+    Option.when(tenant == "acme" && user == "u-1")(
+      ai.starlake.quack.edge.authz.location.LocationRules(List("s3://acme-etl/"), Nil, Nil, None)
+    )
+  private val tableGrants = Some(
+    effWithGrants(
+      List(grant("memory", "main", "t", "RO"), grant("memory", "tpch1", "customer", "RO"))
+    )
+  )
+
+  it should "refuse a COPY writing a filtered listing to an authorized location" in:
+    val (router, capturedSql, _) = setupWithRewriter(
+      metadataFilter = metaFilterOn,
+      validator = filteredMetaValidator,
+      locationRulesFor = acmeEtlRules
+    )
+    List(
+      "COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SHOW TABLES FROM tpch1) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SELECT table_name, column_name FROM information_schema./**/columns) TO " +
+        "'s3://acme-etl/out/c.csv'",
+      "COPY information_schema./**/tables TO 's3://acme-etl/out/t.csv'"
+    ).zipWithIndex.foreach { (sql, i) =>
+      withClue(sql) {
+        val out = router
+          .execute(s"copy-meta-$i", "alice", poolKey, sql, effectiveSet = tableGrants)
+          .unsafeRunSync()
+        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "send an ordinary COPY to an authorized location" in:
+    val (router, capturedSql, _) = setupWithRewriter(
+      metadataFilter = metaFilterOn,
+      validator = filteredMetaValidator,
+      locationRulesFor = acmeEtlRules
+    )
+    val sql = "COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'"
+    val out = router
+      .execute("copy-ok", "alice", poolKey, sql, effectiveSet = tableGrants)
+      .unsafeRunSync()
+    out match
+      case Right(r) => r.close()
+      case Left(f)  => fail(s"refused: $f")
+    capturedSql() should include("COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'")
 
   it should "filter a metadata read hiding behind the first statement of a read batch" in:
     // A single parse reads only the first statement, so the second used to reach the node

@@ -126,11 +126,11 @@ final class FlightSqlRouter(
     val locationRulesFor: (String, String) => Option[
       ai.starlake.quack.edge.authz.location.LocationRules
     ] = (_, _) => None,
-    /** How a node resolves a local path before its location is judged: Task 5's `LocalRealPath.of`
-      * when nodes run on this host (local runtime), else identity (the manager cannot see the
-      * nodes' filesystem). TAIL param.
+    /** How a node resolves a local path before its location is judged: `LocalRealPath.resolve` when
+      * nodes run on this host (local runtime; None, a path the node refuses, is refused), else the
+      * path as given (the manager cannot see the nodes' filesystem). TAIL param.
       */
-    val resolveLocalPath: String => String = identity
+    val resolveLocalPath: String => Option[String] = Some(_)
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -840,22 +840,38 @@ final class FlightSqlRouter(
         // so nothing filterable survives to here.
         case None      => Right(rewrittenSql)
         case Some(eff) =>
-          val m0        = System.nanoTime()
-          val outcome   = metadataFilterRewriter.rewrite(rewrittenSql, eff, schemaCtx)
-          val elapsedMs = (System.nanoTime() - m0) / 1_000_000L
-          stmtInstruments.recordMetadataFilterDuration(poolKey.tenant, poolKey.pool, elapsedMs)
-          outcome match
-            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough =>
-              stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "passthrough")
-              Right(rewrittenSql)
-            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Rewritten(s) =>
-              stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "rewritten")
-              Right(s)
-            case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Denied(reason) =>
+          // An admitted COPY is authorized on its stand-in, which the filter never sees in the
+          // COPY text: refused unless the filter would leave that stand-in as it is.
+          FlightSqlRouter.copyListingRefusal(
+            sql,
+            standIn => metadataFilterRewriter.rewrite(standIn, eff, schemaCtx)
+          ) match
+            case Some(reason) =>
               stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "denied")
-              val f = RouterFailure.AccessDenied(s"access denied: $reason")
               maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-              Left(f)
+              Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+            case None => metadataFilteredStatement(rewrittenSql, eff)
+
+    def metadataFilteredStatement(
+        rewrittenSql: String,
+        eff: EffectiveSet
+    ): Either[RouterFailure, String] =
+      val m0        = System.nanoTime()
+      val outcome   = metadataFilterRewriter.rewrite(rewrittenSql, eff, schemaCtx)
+      val elapsedMs = (System.nanoTime() - m0) / 1_000_000L
+      stmtInstruments.recordMetadataFilterDuration(poolKey.tenant, poolKey.pool, elapsedMs)
+      outcome match
+        case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough =>
+          stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "passthrough")
+          Right(rewrittenSql)
+        case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Rewritten(s) =>
+          stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "rewritten")
+          Right(s)
+        case ai.starlake.quack.edge.meta.MetadataFilterOutcome.Denied(reason) =>
+          stmtInstruments.recordMetadataFilter(poolKey.tenant, poolKey.pool, "denied")
+          val f = RouterFailure.AccessDenied(s"access denied: $reason")
+          maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+          Left(f)
 
     // Defense in depth behind the three rewriters: each prints a NEW statement, and the node runs
     // that one, not the one the ACL gate authorized. A rewrite that reaches a table the original
@@ -879,7 +895,8 @@ final class FlightSqlRouter(
           rewrittenSql,
           parserCfg,
           ctx.defaultDatabase.getOrElse(""),
-          clientDataScans
+          clientDataScans,
+          ctx.fileAdmission
         ) match
           case Some(reason) => denied(s"policy rewrite: $reason")
           case None         =>
@@ -1301,7 +1318,7 @@ object FlightSqlRouter:
   def fileAdmissionFor(
       effectiveSet: Option[EffectiveSet],
       rulesFor: (String, String) => Option[ai.starlake.quack.edge.authz.location.LocationRules],
-      resolveLocal: String => String = identity
+      resolveLocal: String => Option[String] = Some(_)
   ): FileAdmission =
     effectiveSet
       .filterNot(_.system)
@@ -1315,6 +1332,30 @@ object FlightSqlRouter:
             .flatten
             .fold(FileAdmission.Closed)(rules => FileAdmission.of(rules, resolveLocal))
         FileAdmission(location => admission.admits(location))
+
+  /** Why `sql`, a lone COPY, may not run (Task 12 review I1): the access check authorizes an
+    * admitted COPY on its stand-in ([[ai.starlake.quack.edge.sql.FileLocations.CopyUse]]'s
+    * `tableSide`), and admits a session-catalog `information_schema` read or a SHOW TABLES only on
+    * the strength of the edge metadata filter narrowing it. The filter cannot read a COPY and would
+    * pass it through, so the stand-in is put to it (`filter`, the principal's) and the COPY refused
+    * unless the filter would leave the stand-in as it is: a narrowed listing cannot be narrowed
+    * inside a COPY, and qod-node narrows nothing in Phase C. Any lone COPY, its location admitted
+    * or not, so the rule does not depend on the ACL mode. None for any other statement.
+    */
+  def copyListingRefusal(
+      sql: String,
+      filter: String => ai.starlake.quack.edge.meta.MetadataFilterOutcome
+  ): Option[String] =
+    ai.starlake.quack.edge.sql.FileLocations
+      .copy(sql)
+      .flatMap { c =>
+        val untouched =
+          filter(c.tableSide) == ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough
+        Option.unless(untouched)(
+          "a COPY may not write catalog metadata the edge filters (information_schema, SHOW) to " +
+            "a file: query the listing directly"
+        )
+      }
 
   /** One node call for [[FlightSqlRouter.executeWith]]: `(node, wrappedSql, stampPrelude,
     * recordLoad, principal) => outcome`. `principal` is who the statement runs for: the call sends

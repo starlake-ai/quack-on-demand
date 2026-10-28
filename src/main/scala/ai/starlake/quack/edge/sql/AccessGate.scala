@@ -118,20 +118,32 @@ object AccessGate:
     * `rewritten` (it is the rewriter that introduces them, for SHOW TABLES). An original that is
     * itself refused (admitted by a wildcard grant) cannot be compared here; the router re-validates
     * every rewrite anyway.
+    *
+    * `admission` is the statement's ([[ValidationContext.fileAdmission]]), applied to both sides: a
+    * file reader it admits is set aside on both, so the table sets still compare.
     */
   def rewriteReachesBeyond(
       original: String,
       rewritten: String,
       config: Config,
       sessionCatalog: String,
-      clientDataScans: Boolean
+      clientDataScans: Boolean,
+      admission: FileAdmission = FileAdmission.Closed
   ): Option[String] =
     def gatedOf(o: GateOutcome): Option[Set[TableAccess]] = o match
       case GateOutcome.Refuse(_, _, _)    => None
       case GateOutcome.NothingGated(_, _) => Some(Set.empty)
       case GateOutcome.Gated(gated, _)    => Some(gated)
     def eval(sql: String, rewriteOf: Option[String]) =
-      evaluate(sql, config, sessionCatalog, filteredMetadata = true, clientDataScans, rewriteOf)
+      evaluate(
+        sql,
+        config,
+        sessionCatalog,
+        filteredMetadata = true,
+        clientDataScans,
+        rewriteOf,
+        admission
+      )
     gatedOf(eval(original, None)).flatMap { authorized =>
       eval(rewritten, Some(original)) match
         case GateOutcome.Refuse(message, _, _) =>

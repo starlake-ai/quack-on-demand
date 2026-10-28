@@ -1432,8 +1432,8 @@ object Main extends IOApp with LazyLogging:
         // same only when nodes run on its host (BootFactories.locationRules' sameHost).
         resolveLocalPath =
           if mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local" then
-            ai.starlake.quack.edge.authz.location.LocalRealPath.of
-          else identity
+            path => ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
+          else Some(_)
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a

@@ -202,6 +202,57 @@ class FileLocationsSpec extends AnyFlatSpec with Matchers:
       true
   }
 
+  it should "refuse a bare special value word, which an expression reads as a call" in {
+    List("current_schema", "CURRENT_DATE", "user", "session_user", "current_catalog").foreach { w =>
+      withClue(w)(admitsOptions(s"COPY t TO 's3://b/o.xlsx' (SHEET $w)") shouldBe false)
+    }
+    admitsOptions("COPY t TO 's3://b/o.xlsx' (SHEET data)") shouldBe true
+  }
+
+  // The rule per option class, as screen_rules.cpp CopyOptions / CopyFormat / LiteralOption apply
+  // it; a change to either side's rule must change these cases. Two cases are stricter than the
+  // node on purpose (the gateway's token reader does not take them as literals): a parenthesized
+  // file name and a `row(...)` spelled as a call.
+  it should "apply each option class's rule, as qod-node does" in {
+    val cases = List(
+      // file name options: one VARCHAR literal holding no path, under every format
+      "COPY t TO 's3://b/out/' (FORMAT xlsx, FILENAME_PATTERN 'x_{i}')"  -> true,
+      "COPY t TO 's3://b/out/' (FORMAT csv, FILENAME_PATTERN ('x_{i}'))" -> false,
+      "COPY t TO 's3://b/out/' (FORMAT csv, FILE_EXTENSION n'csv')"      -> true,
+      "COPY t TO 's3://b/out/' (FORMAT csv, FILE_EXTENSION 'c/v')"       -> false,
+      // a non-path option under a core format: any value
+      "COPY t TO 's3://b/o.parquet' (COMPRESSION lower('ZSTD'))" -> true,
+      "COPY t TO 's3://b/o.ndjson' (DATE_FORMAT '%Y/%m/%d')"     -> true,
+      "COPY t TO 's3://b/o.csv.zst' (DELIMITER '/')"             -> true,
+      "COPY t TO 's3://b/o.xlsx' (FORMAT csv, QUOTE '/')"        -> true,
+      // the same option under any other format: a literal holding no path
+      "COPY t TO 's3://b/o.parquet' (FORMAT xlsx, COMPRESSION lower('ZSTD'))" -> false,
+      "COPY t TO 's3://b/o.tsv' (DATE_FORMAT '%Y/%m/%d')"                     -> false,
+      "COPY t TO 's3://b/o.tsv' (DATE_FORMAT '%Y-%m-%d')"                     -> true,
+      "COPY t TO 's3://b/o.csv' (FORMAT 'xlsx.gz', QUOTE '/')"                -> false,
+      // any other option, under any format: a literal holding no path
+      "COPY t FROM 's3://b/i.csv' (HIVE_PARTITIONING true, UNION_BY_NAME 1)" -> true,
+      "COPY t FROM 's3://b/i.csv' (FILENAME 'f/n')"                          -> false,
+      "COPY t FROM 's3://b/i.csv' (TYPES row('a', 'b'))"                     -> false,
+      "COPY t FROM 's3://b/i.csv' (TYPES ('a', 'b'))"                        -> true
+    )
+    cases.foreach { (sql, admitted) =>
+      withClue(sql)(admitsOptions(sql) shouldBe admitted)
+    }
+  }
+
+  it should "not read a COPY of a listing or a description" in
+    List(
+      "COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SHOW TABLES FROM tpch1) TO 's3://acme-etl/out/t.csv'",
+      "COPY (show all tables) TO 's3://acme-etl/out/t.csv'",
+      "COPY (DESCRIBE orders) TO 's3://acme-etl/out/t.csv'",
+      "COPY (DESC orders) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SUMMARIZE orders) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SELECT * FROM (SHOW TABLES)) TO 's3://acme-etl/out/t.csv'",
+      "COPY (WITH s AS (DESCRIBE orders) SELECT * FROM s) TO 's3://acme-etl/out/t.csv'"
+    ).foreach(sql => withClue(sql)(FileLocations.copy(sql) shouldBe None))
+
   "the COPY option lists" should "be qod-node's, name for name" in {
     val source = Files.readString(Paths.get("native/qod-node/src/screen_rules.cpp"))
     def names(array: String): Set[String] =

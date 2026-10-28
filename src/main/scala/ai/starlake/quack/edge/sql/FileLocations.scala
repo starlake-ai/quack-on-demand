@@ -19,16 +19,20 @@ object FileAdmission:
   val Closed: FileAdmission = FileAdmission(_ => false)
 
   /** `rules` judged by the decider's checker. `resolveLocal` is the node's resolution of a local
-    * path (`LocalRealPath.of` on the local runtime, where the rules hold real paths; identity
-    * elsewhere), applied only to an absolute path with clean segments: resolving a relative one, or
-    * one with an empty, `.` or `..` segment, would hide what the node refuses. A failure while
-    * judging admits nothing.
+    * path (`LocalRealPath.resolve` on the local runtime, where the rules hold real paths; the path
+    * as given elsewhere), applied only to an absolute path with clean segments: resolving a
+    * relative one, or one with an empty, `.` or `..` segment, would hide what the node refuses. A
+    * path it cannot resolve (None: a link that leads nowhere, an unreadable folder) is refused, as
+    * the node refuses it, and so is any failure while judging.
     */
-  def of(rules: LocationRules, resolveLocal: String => String = identity): FileAdmission =
+  def of(
+      rules: LocationRules,
+      resolveLocal: String => Option[String] = Some(_)
+  ): FileAdmission =
     FileAdmission { location =>
       try
-        val judged = if resolvable(location) then resolveLocal(location) else location
-        LocationChecker.check(judged, rules).isRight
+        val judged = if resolvable(location) then resolveLocal(location) else Some(location)
+        judged.exists(LocationChecker.check(_, rules).isRight)
       catch case NonFatal(_) => false
     }
 
@@ -226,7 +230,8 @@ private[quack] object FileLocations:
       if close < 0 || !head.word(close + 1).contains("to") then None
       else
         val query = view.substring(toks(1).end, toks(close).start).trim
-        located(view, toks, close + 2).map(CopyUse(_, write = true, query))
+        if listingSource(view, toks, 1, close) then None
+        else located(view, toks, close + 2).map(CopyUse(_, write = true, query))
     else
       tableName(view, toks, 1).flatMap { (name, next) =>
         val afterColumns = if punct(next, '(') then closingParen(view, toks, next) + 1 else next
@@ -241,6 +246,28 @@ private[quack] object FileLocations:
                 .map(CopyUse(_, write = true, s"SELECT * FROM $name"))
             case _ => None
       }
+
+  /** Statements DuckDB takes as a query source that list the catalog or describe a table. */
+  private val ListingWords = Set("show", "describe", "desc", "summarize")
+
+  /** True when the query between the parens at `open` and `close` is, or holds as a parenthesized
+    * source (`FROM (SHOW TABLES)`, a CTE body), a SHOW, DESCRIBE or SUMMARIZE. Without COPY the
+    * edge metadata filter rewrites or refuses a listing (SHOW TABLES reads as control flow to the
+    * access check, answered downstream by that filter); inside a COPY nothing would narrow its rows
+    * on the way to the file, and qod-node admits the listing forms, so such a COPY is not read here
+    * (Task 12 review I1).
+    */
+  private def listingSource(
+      view: String,
+      toks: Vector[SqlLexer.Token],
+      open: Int,
+      close: Int
+  ): Boolean =
+    (open until close).exists { i =>
+      toks(i).kind == SqlLexer.Kind.Punct && view.charAt(toks(i).start) == '(' &&
+      i + 1 < close && toks(i + 1).kind == SqlLexer.Kind.Word &&
+      ListingWords(view.substring(toks(i + 1).start, toks(i + 1).end).toLowerCase(Locale.ROOT))
+    }
 
   /** The location literal at `k` when the statement ends after it, or after one option list
     * (`(...)` or `WITH (...)`) that [[optionsAdmitted]] admits.
@@ -374,7 +401,32 @@ private[quack] object FileLocations:
   /** No text of a COPY option may look like a path of its own (screen_rules.cpp `CopyOptionText`).
     */
   private def namesNoPath(text: String): Boolean =
-    !text.contains('/') && !text.contains('\\') && !text.contains("..")
+    !text.contains('/') && !text.contains('\\') && !text.contains("..") &&
+      !(WindowsHost && text.contains(':'))
+
+  /** On Windows the node also refuses `:` (a drive, `C:x`, or an alternate stream). The local
+    * runtime's nodes share the manager's OS, so the gateway applies it on a Windows manager.
+    */
+  private val WindowsHost = java.io.File.separatorChar == '\\'
+
+  /** The SQL-standard special values (`current_date`, `user`, ...): a bare one stands for a call,
+    * not a name, in an ordinary expression. Refused as an option value although DuckDB v2.0.0 takes
+    * a bare word in a COPY option as its own text (and qod-node's `LiteralOption` admits it as a
+    * name): the gateway does not judge which reading a value gets (Task 12 review M4).
+    */
+  private val SpecialValueWords = Set(
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "localtime",
+    "localtimestamp",
+    "session_user",
+    "user"
+  )
 
   private val MaxValueDepth = 16
 
@@ -451,8 +503,9 @@ private[quack] object FileLocations:
   private def atom(view: String, t: SqlLexer.Token): Option[List[String]] =
     val spelled = view.substring(t.start, t.end)
     t.kind match
-      case SqlLexer.Kind.Number  => Some(List(spelled))
-      case SqlLexer.Kind.Word    => Some(List(spelled))
+      case SqlLexer.Kind.Number => Some(List(spelled))
+      case SqlLexer.Kind.Word   =>
+        Option.unless(SpecialValueWords(spelled.toLowerCase(Locale.ROOT)))(List(spelled))
       case SqlLexer.Kind.Literal =>
         FunctionCalls
           .varcharValue(view, t)
