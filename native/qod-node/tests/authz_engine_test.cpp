@@ -341,7 +341,8 @@ int main() {
 	// Task 9 review C1: superuser-class functions and bind-time slots are a superuser's own.
 	for (auto own : {"SELECT current_setting('memory_limit')", "SELECT * FROM range(setval('seq1', 5))",
 	                 "ALTER TABLE x ALTER v TYPE VARCHAR USING setval('seq1', 99)::VARCHAR",
-	                 "EXPLAIN EXECUTE p(setval('seq1', 88))", "SELECT 1 LIMIT nextval('seq1')"}) {
+	                 "EXPLAIN EXECUTE p(setval('seq1', 88))", "SELECT 1 LIMIT nextval('seq1')",
+	                 "PRAGMA table_info(CASE WHEN nextval('seq1') > 0 THEN 't' END)"}) {
 		ExpectQuery(internal, ScreenCall("c-root", own), "", std::string("a superuser's: ") + own);
 	}
 	Check("", replica.Requests() != asked, "", "and asks no verdict");
@@ -351,7 +352,8 @@ int main() {
 	std::vector<std::string> kills {"ALTER TABLE x ALTER v TYPE VARCHAR USING setval('seq1', 99)::VARCHAR",
 	                                "EXPLAIN EXECUTE p(setval('seq1', 88))",
 	                                "ALTER TABLE x ALTER v TYPE BIGINT USING nextval('seq1')",
-	                                "EXPLAIN EXECUTE p(nextval('seq1'))"};
+	                                "EXPLAIN EXECUTE p(nextval('seq1'))",
+	                                "PRAGMA table_info(CASE WHEN nextval('seq1') > 0 THEN 't' END)"};
 	asked = replica.Requests();
 	for (auto &kill : kills) {
 		ExpectQuery(internal, ScreenCall("c-judy", kill), "QoD: ", "a node-kill form for a user: " + kill);

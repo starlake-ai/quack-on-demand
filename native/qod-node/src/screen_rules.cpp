@@ -3,10 +3,15 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/expression/list.hpp"
+#include "duckdb/parser/parsed_data/alter_schema_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
+#include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_trigger_info.hpp"
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -369,18 +374,23 @@ public:
 		auto outer = nesting_;
 		nesting_ = nesting;
 		judged_.emplace_back();
+		named_.emplace_back();
 		for (auto &statement : parser.statements) {
 			Statement(*statement);
 		}
+		// A call-shaped token the walk did not see as a call (which it judged or refused) nor as a name
+		// before a parenthesis (a table with its column list, a CTE or an alias with its column names) is a
+		// call where the walk does not go: refused (Addendum 4 item 15).
 		for (auto &call : calls) {
-			if (IsSuperuserFunction(call.first)) {
-				// Wherever the walk does not go (a column default, a CHECK, a trigger body) as well.
+			auto seen = judged_.back()[call.first] + named_.back()[call.first];
+			if (IsSuperuserFunction(call.first) && seen < call.second) {
 				Refuse(call.first + " is reserved to superusers");
 			}
-			if (IsJudgedCall(call.first) && judged_.back()[call.first] < call.second) {
+			if (IsJudgedCall(call.first) && seen < call.second) {
 				Refuse(call.first + " is called where QoD cannot check its arguments");
 			}
 		}
+		named_.pop_back();
 		judged_.pop_back();
 		nesting_ = outer;
 	}
@@ -474,6 +484,13 @@ private:
 	//! TYPE ... USING), as bind-time slots. The others (SET DEFAULT, constraints) run in later plans; a
 	//! judged call in one fails the token count, and a superuser-class one is refused by it.
 	void Alter(AlterInfo &info) {
+		if (info.type == AlterType::ALTER_SCHEMA) {
+			auto &schema = info.Cast<AlterSchemaInfo>();
+			if (schema.alter_schema_type == AlterSchemaType::SET_SCHEMA_OPTIONS) {
+				Options(schema.Cast<SetSchemaOptionsInfo>().options);
+			}
+			return;
+		}
 		if (info.type != AlterType::ALTER_TABLE) {
 			return;
 		}
@@ -492,6 +509,50 @@ private:
 			Walk(change.expression);
 			break;
 		}
+		case AlterTableType::SET_DEFAULT:
+			// Stored, and run in later INSERT plans: walked like any expression (Addendum 4 item 15).
+			Walk(table.Cast<SetDefaultInfo>().expression);
+			break;
+		case AlterTableType::ADD_CONSTRAINT:
+			Constraint(*table.Cast<AddConstraintInfo>().constraint);
+			break;
+		case AlterTableType::SET_PARTITIONED_BY:
+			for (auto &key : table.Cast<SetPartitionedByInfo>().partition_keys) {
+				Walk(key);
+			}
+			break;
+		case AlterTableType::SET_SORTED_BY:
+			for (auto &order : table.Cast<SetSortedByInfo>().orders) {
+				Walk(order.expression);
+			}
+			break;
+		case AlterTableType::SET_TABLE_OPTIONS:
+			Options(table.Cast<SetTableOptionsInfo>().table_options);
+			break;
+		default:
+			break;
+		}
+	}
+
+	//! WITH (...) / SET (...) options of a table or schema: no plan holds them, the catalog (DuckLake,
+	//! Iceberg) takes their values when the CREATE or ALTER binds or runs, so they are a bind-time slot.
+	void Options(const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options) {
+		InSlot slot(*this, "table or schema options");
+		for (auto &option : options) {
+			Walk(option.second);
+		}
+	}
+
+	//! A table constraint: a CHECK's expression is walked; a foreign key names its referenced table before
+	//! a parenthesis (REFERENCES t (a)).
+	void Constraint(const duckdb::Constraint &constraint) {
+		switch (constraint.type) {
+		case ConstraintType::CHECK:
+			Walk(constraint.Cast<CheckConstraint>().expression);
+			break;
+		case ConstraintType::FOREIGN_KEY:
+			Named(constraint.Cast<ForeignKeyConstraint>().info.table);
+			break;
 		default:
 			break;
 		}
@@ -665,6 +726,8 @@ private:
 			if (insert.select_statement) {
 				Node(*insert.select_statement->node);
 			}
+			// INSERT INTO t (a) / INSERT INTO t (SELECT ...): the target before a parenthesis.
+			Named(insert.qualified_name.Name());
 			if (insert.table_ref) {
 				Ref(*insert.table_ref);
 			}
@@ -785,6 +848,9 @@ private:
 			}
 		}
 		for (auto &entry : node.cte_map.map) {
+			if (!entry.second->aliases.empty()) {
+				Named(entry.first);
+			}
 			if (entry.second->query_node) {
 				Node(*entry.second->query_node);
 			}
@@ -793,6 +859,9 @@ private:
 
 	void Ref(TableRef &ref) {
 		Deeper deeper(depth_);
+		if (!ref.alias.empty() && !ref.column_name_alias.empty()) {
+			Named(ref.alias);
+		}
 		switch (ref.type) {
 		case TableReferenceType::BASE_TABLE: {
 			auto &base = ref.Cast<BaseTableRef>();
@@ -1162,6 +1231,9 @@ private:
 			Node(*info.select_statement);
 		}
 		CopyOptions(info);
+		if (!info.select_list.empty()) {
+			Named(info.GetQualifiedName().Name());
+		}
 		if (info.file_path_expression) {
 			Refuse("COPY needs a literal file name");
 		}
@@ -1172,21 +1244,69 @@ private:
 		switch (info.type) {
 		case CatalogType::TABLE_ENTRY: {
 			auto &table = info.Cast<CreateTableInfo>();
+			Named(table.GetQualifiedName().Name());
 			if (table.query) {
 				Node(*table.query->node);
 			}
 			// The column types are bound at creation (Binder::BindLogicalType, bind_create.cpp:615-636).
+			// The defaults, generated columns, constraints and keys run in later plans: walked like any
+			// expression (Addendum 4 item 15), so a superuser-class call in one is refused here.
 			for (auto &column : table.columns.Logical()) {
 				TypeSlot(column.Type());
+				if (column.HasDefaultValue()) {
+					Expression(column.DefaultValue());
+				}
+				if (column.Generated()) {
+					Expression(column.GeneratedExpression());
+				}
 			}
+			for (auto &constraint : table.constraints) {
+				Constraint(*constraint);
+			}
+			for (auto &key : table.partition_keys) {
+				Walk(key);
+			}
+			for (auto &key : table.sort_keys) {
+				Walk(key);
+			}
+			Options(table.options);
+			break;
+		}
+		case CatalogType::SCHEMA_ENTRY: {
+			Options(info.Cast<CreateSchemaInfo>().options);
 			break;
 		}
 		case CatalogType::VIEW_ENTRY: {
 			auto &view = info.Cast<CreateViewInfo>();
+			if (!view.aliases.empty()) {
+				Named(view.GetQualifiedName().Name());
+			}
 			if (view.query) {
 				// Bound at creation, which evaluates its bind-time slots: walked like a SELECT, so those slots
 				// get the slot rule and its readers the location checks (CONTRACT Addendum 4 item 13).
 				Node(*view.query->node);
+			}
+			break;
+		}
+		case CatalogType::INDEX_ENTRY: {
+			auto &index = info.Cast<CreateIndexInfo>();
+			Named(index.table);
+			for (auto &expression : index.parsed_expressions) {
+				Walk(expression);
+			}
+			for (auto &expression : index.expressions) {
+				Walk(expression);
+			}
+			break;
+		}
+		case CatalogType::TRIGGER_ENTRY: {
+			// The trigger body runs in the plans of the statements that fire it.
+			auto &trigger = info.Cast<CreateTriggerInfo>();
+			if (trigger.base_table) {
+				Ref(*trigger.base_table);
+			}
+			if (trigger.trigger_action) {
+				Node(*trigger.trigger_action);
 			}
 			break;
 		}
@@ -1216,6 +1336,9 @@ private:
 		if (!Contains(kReadOnlyPragmas, name)) {
 			Refuse("PRAGMA " + name + " is reserved to superusers");
 		}
+		// Binder::BindPragma folds every argument through PlaceArguments (bind_pragma.cpp,
+		// function_binder.cpp:668-673), with no foldability check (Addendum 4 item 15).
+		InSlot slot(*this, "PRAGMA arguments");
 		for (auto &parameter : info.parameters) {
 			Walk(parameter);
 		}
@@ -1251,6 +1374,15 @@ private:
 	idx_t depth_ = 0;
 	//! The judged calls of each Text level, innermost last.
 	std::vector<std::map<std::string, idx_t>> judged_;
+	//! The names of each Text level the walk saw right before a parenthesis that opens no call: a table
+	//! with its column list (INSERT INTO t (a), CREATE TABLE t (a INT), CREATE INDEX ... ON t (a),
+	//! REFERENCES t (a), COPY t (a)), a CTE or a table alias with its column names, a view with its column
+	//! names. The token count does not take them for calls.
+	std::vector<std::map<std::string, idx_t>> named_;
+
+	void Named(const Identifier &name) {
+		named_.back()[StringUtil::Lower(name.GetIdentifierName())]++;
+	}
 };
 
 } // namespace

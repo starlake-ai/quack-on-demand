@@ -39,13 +39,16 @@ constexpr int kMaxQueryNesting = 8;
 //! a call to a function function-classes.tsv classes superuser, anywhere (function_classes.hpp), and in
 //! the slots DuckDB evaluates while binding (SET values, table-function arguments, EXECUTE parameters,
 //! AT clauses, LIMIT and OFFSET, PIVOT IN lists, COLUMNS(), type expressions, unnest's parameters,
-//! ALTER TABLE ADD COLUMN, ALTER COLUMN TYPE USING, COPY options; a CREATE VIEW body is walked like a
-//! SELECT, its own slots included) any function not classed allowed and nextval, currval and setval
-//! (CONTRACT Addendum 4 items 9 and 13);
+//! ALTER TABLE ADD COLUMN, ALTER COLUMN TYPE USING, COPY options, PRAGMA arguments, table and schema
+//! options; a CREATE VIEW body is walked like a SELECT, its own slots included) any function not classed
+//! allowed and nextval, currval and setval (CONTRACT Addendum 4 items 9, 13 and 15). Column defaults,
+//! generated columns, CHECK constraints, SET DEFAULT, index expressions and trigger bodies are walked
+//! too;
 //! screens a literal query() string like the outer SQL; collects every reader and COPY location
-//! (MakeLocation refusals are refusals here). A reader or query() call the tokens show but the walk did
-//! not judge is refused, and so is a superuser-class call the tokens show anywhere, so a statement form
-//! the walk does not follow fails closed. Never throws.
+//! (MakeLocation refusals are refusals here). A call-shaped token of a reader, query() or superuser-class
+//! name that the walk saw neither as a call nor as a name before a parenthesis (a table with its column
+//! list, a CTE or an alias with column names) is refused, so a statement form the walk does not follow
+//! fails closed. Never throws.
 ScreenOutcome ScreenStatement(duckdb::ClientContext &context, const std::string &sql);
 
 } // namespace qod

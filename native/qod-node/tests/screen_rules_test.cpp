@@ -145,15 +145,22 @@ int main() {
 	Refused("CALL read_text('x.csv')", "QoD: x.csv ", "CALL");
 	Refused("SELECT * FROM \"read_csv\" ('x.csv')", "QoD: x.csv ", "a quoted name and a blank before the parenthesis");
 
-	// ---- the token count: a reader where the walk does not go is refused, never admitted unseen
-	Refused("ALTER TABLE t ALTER COLUMN a SET DEFAULT (SELECT count(*) FROM read_csv('s3://acme-etl/x.csv'))",
-	        "QoD: read_csv is called where QoD cannot check its arguments", "a reader in an ALTER default");
+	// ---- defaults, CHECK constraints and SET DEFAULT are walked (Addendum 4 item 15): a reader there is
+	// judged like anywhere; the token count still backs the walk up
+	ExpectLocation(Admitted("ALTER TABLE t ALTER COLUMN a SET DEFAULT (SELECT count(*) FROM "
+	                        "read_csv('s3://acme-etl/x.csv'))",
+	                        1, "a reader in an ALTER default"),
+	               "s3://acme-etl/x.csv", "read", "read_csv", "is located");
+	Refused("ALTER TABLE t ALTER COLUMN a SET DEFAULT (SELECT count(*) FROM read_csv('x.csv'))", "QoD: x.csv ",
+	        "a relative reader in an ALTER default");
 	Refused("CREATE TABLE t3 (a INT CHECK ((SELECT count(*) FROM read_csv('s3://acme-etl/x.csv')) > 0))",
 	        "QoD: the statement does not parse: subqueries prohibited in CHECK constraints",
 	        "a reader in a CHECK constraint (DuckDB 2.0's parser refuses the subquery)");
-	Refused("ALTER TABLE t ALTER COLUMN a SET DEFAULT (SELECT count(*) FROM read_csv/* x */('s3://acme-etl/x.csv'))",
-	        "read_csv is called where QoD cannot check its arguments", "a comment between name and parenthesis");
+	Admitted("ALTER TABLE t ALTER COLUMN a SET DEFAULT (SELECT count(*) FROM read_csv/* x */('s3://acme-etl/x.csv'))",
+	         1, "a comment between name and parenthesis");
 	Admitted("SELECT read_csv FROM t", 0, "a column named like a reader is no call");
+	Admitted("SELECT * FROM t AS read_csv(a)", 0, "an alias with a column list spelled like a reader is no call");
+	Admitted("WITH read_csv(a) AS (SELECT 1) SELECT * FROM read_csv", 0, "nor a CTE with column names");
 	Refused("CREATE MACRO m() AS TABLE SELECT * FROM read_csv('s3://acme-etl/x.csv')",
 	        "QoD: CREATE MACRO is reserved to superusers", "a table macro");
 	Refused("CREATE MACRO twice(x) AS x * 2", "CREATE MACRO is reserved to superusers", "a scalar macro");
@@ -582,6 +589,55 @@ int main() {
 	Admitted("COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE 100 * 1000)", 1, "a computed allowed COPY option");
 	Admitted("SELECT * FROM read_csv('s3://acme-etl/x.csv', header = true, sample_size = 10 * 10)", 1,
 	         "a reader's literal and computed allowed arguments");
+
+	// ---- Task 9 re-review R1 (Addendum 4 item 15): PRAGMA arguments are a bind-time slot
+	Refused("PRAGMA table_info(CASE WHEN nextval('s') > 0 THEN 't' END)",
+	        "QoD: nextval is not allowed in PRAGMA arguments", "a sequence write in a PRAGMA argument");
+	Refused("PRAGMA table_info(current_setting('memory_limit'))", "current_setting is reserved to superusers",
+	        "a superuser-class function in a PRAGMA argument");
+	Refused("PRAGMA table_info(my_macro())", "my_macro is not allowed in PRAGMA arguments",
+	        "an unclassified name in a PRAGMA argument");
+	Admitted("PRAGMA table_info('t')", 0, "PRAGMA table_info of a name");
+	Admitted("PRAGMA table_info(lower('T'))", 0, "an allowed function in a PRAGMA argument");
+
+	// ---- R2: a table, CTE or alias spelled like a superuser-class function is no call; a call where the
+	// walk now goes is refused by the walk
+	// SHOW is a reserved word in DuckDB 2.0: a name spelled so is quoted, and the token count unquotes it.
+	Refused("SELECT * FROM t AS show(a)", "QoD: the statement does not parse: syntax error at or near \"show\"",
+	        "unquoted, DuckDB's own parser refuses it, not the token count");
+	for (std::string name : {"platform", "checkpoint", "\"show\"", "collations", "user_agent", "write_log"}) {
+		for (auto form : {"INSERT INTO " + name + " (id) VALUES (1)", "INSERT INTO main." + name + " (id) VALUES (1)",
+		                  "CREATE TABLE " + name + " (id INT)", "CREATE TABLE IF NOT EXISTS " + name + "(id INT)",
+		                  "WITH " + name + "(a) AS (SELECT 1) SELECT * FROM " + name,
+		                  "SELECT * FROM t AS " + name + "(a)", "SELECT * FROM range(3) AS " + name + "(a)",
+		                  "CREATE VIEW " + name + "(a) AS SELECT 1", "CREATE INDEX i ON " + name + " (id)",
+		                  "CREATE TABLE c (id INT REFERENCES " + name + "(id))",
+		                  "COPY " + name + " (id) FROM 's3://acme-etl/in.csv'", "SELECT * FROM " + name,
+		                  "UPDATE " + name + " SET id = 2", "SELECT " + name + " FROM t"}) {
+			auto locations = form.rfind("COPY", 0) == 0 ? 1 : 0;
+			Admitted(form, locations, form);
+		}
+	}
+	for (auto refused : {"CREATE TABLE x (v VARCHAR DEFAULT current_setting('memory_limit'))",
+	                     "CREATE TABLE x (v VARCHAR, CHECK (current_setting('memory_limit') IS NOT NULL))",
+	                     "CREATE TABLE x (v INT CHECK (current_setting('threads') IS NOT NULL))",
+	                     "CREATE TABLE x (v VARCHAR GENERATED ALWAYS AS (current_setting('threads')))",
+	                     "ALTER TABLE x ALTER COLUMN v SET DEFAULT current_setting('memory_limit')",
+	                     "ALTER TABLE x ADD CONSTRAINT c CHECK (current_setting('threads') IS NOT NULL)",
+	                     "CREATE TRIGGER tr AFTER INSERT ON x FOR EACH ROW INSERT INTO y VALUES (write_log('x'))",
+	                     "CREATE TRIGGER tr AFTER INSERT ON x FOR EACH ROW INSERT INTO y SELECT current_setting('x')",
+	                     "CREATE INDEX i ON x (current_setting('threads'))"}) {
+		Refused(refused, "is reserved to superusers", refused);
+	}
+	// The walk refuses them, not the token count: also behind a name that would hide one from the count.
+	Refused("WITH current_setting(a) AS (SELECT 1) SELECT * FROM t WHERE current_setting('threads') IS NULL",
+	        "QoD: current_setting is reserved to superusers", "a call beside a CTE of the same name");
+	// table and schema options: what the catalog takes when the CREATE or ALTER runs
+	Refused("CREATE TABLE x (v INT) WITH (o = nextval('s'))", "QoD: nextval is not allowed in table or schema options",
+	        "a sequence in a table's options");
+	Refused("ALTER TABLE x SET (o = currval('s'))", "currval is not allowed in table or schema options",
+	        "a sequence in ALTER TABLE SET options");
+	Admitted("CREATE TABLE x (v INT) WITH (o = upper('a'))", 0, "an allowed function in a table's options");
 
 	// ---- what the parser cannot read is refused
 	Refused("SELEC 1", "QoD: the statement does not parse", "a syntax error");
