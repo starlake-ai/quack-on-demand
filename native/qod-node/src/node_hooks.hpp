@@ -25,4 +25,10 @@ constexpr const char *kScreenFunction = "system.main.qod_screen";
 //!    and none changes quack_authorization_function or quack_authentication_function.
 void RegisterNodeAuthz(duckdb::DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz);
 
+//! The principal installed on the connection of `context` and the handle that last installed or
+//! refreshed it (with its replica), into `out`, while that handle is current at `now_ms` and the
+//! connection's last prelude succeeded whole; false otherwise (no prelude yet, expired, or the last
+//! prelude refused). For the plan verdicts' decide calls (Task 10).
+bool SessionSnapshot(duckdb::ClientContext &context, int64_t now_ms, Installed &out);
+
 } // namespace qod

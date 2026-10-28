@@ -267,6 +267,13 @@ int main() {
 	            "QoD: secrets are reserved to superusers", "a user's CREATE SECRET inside query()");
 	ExpectQuery(internal, ScreenCall("c-judy", "EXPLAIN SET s3_endpoint = 'evil.example.com'"),
 	            "QoD: SET and RESET of s3_endpoint are reserved to superusers", "a user's SET of an s3 setting");
+	ExpectQuery(internal, ScreenCall("c-judy", "SET SESSION enable_server_cert_verification = false"),
+	            "QoD: SET and RESET of enable_server_cert_verification are reserved to superusers",
+	            "a user's session SET of certificate verification");
+	ExpectQuery(internal,
+	            ScreenCall("c-judy", "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), "
+	                                 "FILENAME_PATTERN concat('..', '/', '..', '/pwn_{i}'))"),
+	            "QoD: COPY option filename_pattern is computed", "a computed file name pattern");
 	Check("", replica.Requests() != asked, "", "neither asks the replica");
 	// Decision 23: a location one of the node's own S3 secrets would sign, over judy's (she has none
 	// recorded), is refused on the node. A stand-in s3 type: httpfs registers the real one.
@@ -303,7 +310,22 @@ int main() {
 	ExpectQuery(internal, ScreenCall("c-kim", Prelude(MintWith(kim))), "",
 	            "kim's prelude names a replica that is down");
 	ExpectQuery(internal, ScreenCall("c-kim", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"),
-	            "QoD: authorization unavailable", "no verdict, no statement");
+	            "QoD: authorization unavailable, retry", "no verdict, no statement, and the client may retry");
+	{
+		// A replica that answers 503: retryable too, with what it said.
+		qod_test::TestHttpServer busy([](const qod_test::HttpRequest &) {
+			qod_test::HttpAnswer answer;
+			answer.status = 503;
+			answer.body = "authorization context expired; retry";
+			return answer;
+		});
+		MintSpec lou = judy;
+		lou.principal_id = "u-lou";
+		lou.replica = busy.Url();
+		ExpectQuery(internal, ScreenCall("c-lou", Prelude(MintWith(lou))), "", "lou's prelude");
+		ExpectQuery(internal, ScreenCall("c-lou", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')"),
+		            "QoD: authorization unavailable, retry: ", "a 503 is retryable");
+	}
 	MintSpec root_screen = superuser;
 	root_screen.replica = replica.Url();
 	ExpectQuery(internal, ScreenCall("c-root", Prelude(MintWith(root_screen))), "", "a superuser's prelude");
@@ -315,6 +337,32 @@ int main() {
 	Check("", replica.Requests() != asked, "", "and asks no verdict");
 	std::error_code ignored;
 	std::filesystem::remove(std::filesystem::u8path(csv), ignored);
+
+	// ---- the session's snapshot (the plan verdicts' decide calls): only while its last prelude
+	// succeeded whole and its handle is current
+	duckdb::Connection max(db);
+	TagAsQuackSession(max);
+	qod::Installed snapshot;
+	Check("", qod::SessionSnapshot(*max.context, now_ms, snapshot), "", "no snapshot before a prelude");
+	MintSpec max_spec;
+	max_spec.principal_id = "u-max";
+	max_spec.exp = now_ms + 60000;
+	max_spec.replica = "http://127.0.0.1:20901";
+	auto max_handle = MintWith(max_spec);
+	ExpectQuery(max, Prelude(max_handle), "", "max installs");
+	Check("",
+	      !qod::SessionSnapshot(*max.context, now_ms, snapshot) || snapshot.handle != max_handle ||
+	          snapshot.replica != "http://127.0.0.1:20901" || snapshot.principal.id != "u-max" ||
+	          snapshot.ctx != std::string(64, 'c') || snapshot.exp != max_spec.exp,
+	      "", "the snapshot carries the installing handle, its replica, principal, ctx and expiry");
+	ExpectQuery(max, Prelude(Fresh("u-mallory")), "another principal", "a refused prelude on max's connection");
+	Check("", qod::SessionSnapshot(*max.context, now_ms, snapshot), "", "no snapshot after a refused prelude");
+	auto refreshed = Fresh("u-max", kNode, 2);
+	ExpectQuery(max, Prelude(refreshed), "", "max's next prelude");
+	Check("", !qod::SessionSnapshot(*max.context, now_ms, snapshot) || snapshot.handle != refreshed,
+	      "", "the snapshot follows the refreshing handle");
+	Check("", qod::SessionSnapshot(*max.context, now_ms + 61000, snapshot), "", "no snapshot once it expired");
+	Check("", qod::SessionSnapshot(*internal.context, now_ms, snapshot), "", "no snapshot on an internal connection");
 
 	if (failures == 0) {
 		std::cout << "authz_engine_test: all passed" << std::endl;

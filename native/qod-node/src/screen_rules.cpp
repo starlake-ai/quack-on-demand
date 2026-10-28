@@ -47,27 +47,136 @@ const char *const kRefusedCalls[] = {"json_execute_serialized_sql", "register_ex
 const char *const kReadOnlyPragmas[] = {"table_info",     "show_tables", "show_tables_expanded", "show_databases",
                                         "database_list", "functions",   "version"};
 
-//! COPY options that hold text, never a path, whatever it spells ('%d/%m/%Y').
-const char *const kCopyTextOptions[] = {"dateformat", "date_format", "timestampformat", "timestamp_format",
-                                        "delim",      "delimiter",   "sep",             "quote",
-                                        "escape",     "null",        "nullstr",         "new_line",
-                                        "comment"};
+//! COPY options whose value DuckDB v2.0.0 never reads as a location, so the screen admits any value,
+//! computed or not (its calls are still walked): the column and ordering lists bound against the
+//! COPY's columns (partition_by, force_quote, force_not_null, force_null, order_by, and the json
+//! writer's geometry_column / id_column); partition_path, an expression over the partition columns
+//! that DuckDB itself refuses when it evaluates to an absolute or remote path or holds '..'
+//! (PartitionFileRequestBuilder::BuildDirectory); booleans; numbers and sizes; text the writer or
+//! reader formats with ('%d/%m/%Y', a delimiter, a codec name, a prefix written into the file); and
+//! file metadata (parquet's kv_metadata, field_ids, shredding, encryption_config, which names keys
+//! added by PRAGMA add_parquet_key). The names come from bind_copy.cpp (GetFullCopyOptionsList,
+//! BindCopyTo), copy_csv.cpp (CSVListCopyOptions), csv_reader_options.cpp (SetReadOption,
+//! SetBaseOption), copy_json.cpp (CopyToJSONPlanInternal) and parquet_extension.cpp
+//! (ParquetListCopyOptions). Every other option (filename_pattern, file_extension, rejects_table,
+//! rejects_scan, format, the multi-file and JSON reader options of COPY FROM, any option an extension
+//! adds) must be literal, and each text it holds must not look like a path (CopyOptionText). Sorted.
+const char *const kCopyNonPathOptions[] = {"allow_quoted_nulls",
+                                           "append",
+                                           "array",
+                                           "auto_detect",
+                                           "batch_size",
+                                           "batch_size_bytes",
+                                           "batches_per_file",
+                                           "bbox",
+                                           "binary_as_string",
+                                           "bloom_filter_false_positive_ratio",
+                                           "buffer_size",
+                                           "can_have_nan",
+                                           "chunk_size",
+                                           "codec",
+                                           "comment",
+                                           "compression",
+                                           "compression_level",
+                                           "data_page_size_limit",
+                                           "date_format",
+                                           "dateformat",
+                                           "debug_use_openssl",
+                                           "decimal_separator",
+                                           "delim",
+                                           "delimiter",
+                                           "dictionary_compression_ratio_threshold",
+                                           "dictionary_size_limit",
+                                           "encoding",
+                                           "encryption_config",
+                                           "escape",
+                                           "field_ids",
+                                           "file_row_number",
+                                           "file_size_bytes",
+                                           "force_not_null",
+                                           "force_null",
+                                           "force_quote",
+                                           "geometry_column",
+                                           "geoparquet_version",
+                                           "header",
+                                           "hive_file_pattern",
+                                           "id_column",
+                                           "ignore_errors",
+                                           "int96_as",
+                                           "kv_metadata",
+                                           "max_line_size",
+                                           "maximum_line_size",
+                                           "new_line",
+                                           "null",
+                                           "null_padding",
+                                           "nullstr",
+                                           "order_by",
+                                           "overwrite",
+                                           "overwrite_or_ignore",
+                                           "parallel",
+                                           "parquet_version",
+                                           "partition_by",
+                                           "partition_path",
+                                           "per_thread_output",
+                                           "prefix",
+                                           "preserve_order",
+                                           "quote",
+                                           "rejects_limit",
+                                           "rejects_line_size_limit",
+                                           "return_files",
+                                           "return_stats",
+                                           "row_group_size",
+                                           "row_group_size_bytes",
+                                           "row_groups_per_file",
+                                           "sample_size",
+                                           "sep",
+                                           "separator",
+                                           "shredding",
+                                           "skip",
+                                           "store_rejects",
+                                           "strict_mode",
+                                           "string_dictionary_page_size_limit",
+                                           "suffix",
+                                           "thousands",
+                                           "timestamp_format",
+                                           "timestamp_is_adjusted_to_utc",
+                                           "timestampformat",
+                                           "use_tmp_file",
+                                           "write_bloom_filter",
+                                           "write_empty_file",
+                                           "write_partition_columns",
+                                           "write_timestamp_as_int96"};
 
 //! Settings a session may not change (decision 23), besides every s3_* and external_file_cache_*
-//! one: what makes httpfs sign with the node's environment or the AWS chain, the proxies a signed
-//! request passes, the secret defaults, and the caches that would hand one user what another read.
-const char *const kReservedSettings[] = {"aws_default_credentials",
+//! one: what makes httpfs sign with the node's environment or the AWS chain, refresh credentials,
+//! add headers to a signed request or log it unredacted; how the server's certificate is verified;
+//! which HTTP client sends a request, the proxies it passes and the connections it reuses; the
+//! secret defaults; and the caches that would hand one user what another read. From httpfs's
+//! registered settings at DuckDB 2.0.0 (duckdb_settings() with httpfs loaded) and the core secret
+//! and cache settings.
+const char *const kReservedSettings[] = {"allow_persistent_secrets",
+                                         "allow_unredacted_secrets",
+                                         "aws_default_credentials",
+                                         "ca_cert_file",
                                          "cache_local_files",
                                          "default_secret_storage",
                                          "enable_external_file_cache",
                                          "enable_global_s3_configuration",
                                          "enable_http_metadata_cache",
                                          "enable_object_cache",
+                                         "enable_server_cert_verification",
+                                         "extra_http_headers",
+                                         "http_keep_alive",
                                          "http_proxy",
                                          "http_proxy_password",
                                          "http_proxy_username",
+                                         "httpfs_client_implementation",
+                                         "httpfs_connection_caching",
+                                         "httpfs_enable_credential_refresh",
                                          "merge_http_secret_into_s3_request",
                                          "parquet_metadata_cache",
+                                         "redact_http_logs",
+                                         "secret_directory",
                                          "validate_external_file_cache"};
 
 //! How deep the walk may nest (nodes, references and expressions together).
@@ -652,14 +761,95 @@ private:
 		Expression(*function);
 	}
 
-	//! A COPY option's string value that could name a path of its own (FILENAME_PATTERN '../x_{i}').
-	static void CopyOption(const std::string &name, const std::string &text) {
-		if (Contains(kCopyTextOptions, name)) {
-			return;
-		}
-		if (text.find('/') != std::string::npos || text.find('\\') != std::string::npos ||
-		    text.find("..") != std::string::npos) {
+	//! A text a COPY option holds that could name a path of its own (FILENAME_PATTERN '../x_{i}').
+	static void CopyOptionText(const std::string &name, const std::string &text) {
+		auto path = text.find('/') != std::string::npos || text.find('\\') != std::string::npos ||
+		            text.find("..") != std::string::npos;
+#ifdef _WIN32
+		// A drive (C:x) or an alternate stream.
+		path = path || text.find(':') != std::string::npos;
+#endif
+		if (path) {
 			Refuse("COPY option " + name + " names a path");
+		}
+	}
+
+	//! The texts of a COPY option value the binder evaluates without computing anything, into `texts`:
+	//! no value (a flag), a constant, an unqualified name (the binder takes it as its own text, so
+	//! FILENAME_PATTERN "../x" is the text ../x), or a list, struct or row of those. False for anything
+	//! computed: a call (concat, ||), a cast ('x'::VARCHAR), a parameter, a qualified name.
+	static bool LiteralOption(const ParsedExpression *expression, std::vector<std::string> &texts, idx_t depth = 0) {
+		if (!expression) {
+			return true;
+		}
+		if (depth > kMaxDepth) {
+			Refuse("the statement nests too deeply to be screened");
+		}
+		switch (expression->GetExpressionClass()) {
+		case ExpressionClass::CONSTANT:
+			texts.push_back(expression->Cast<ConstantExpression>().GetLiteral().text);
+			return true;
+		case ExpressionClass::COLUMN_REF: {
+			auto &name = expression->Cast<ColumnRefExpression>();
+			if (name.IsQualified()) {
+				return false;
+			}
+			texts.push_back(name.GetColumnName().GetIdentifierName());
+			return true;
+		}
+		case ExpressionClass::FUNCTION: {
+			auto &call = expression->Cast<FunctionExpression>();
+			auto &qualified = call.GetQualifiedName();
+			auto function = StringUtil::Lower(call.FunctionName().GetIdentifierName());
+			auto system = (qualified.Catalog().empty() || qualified.Catalog() == "system") &&
+			              (qualified.Schema().empty() || qualified.Schema() == "main");
+			if (!system || (function != "list_value" && function != "struct_pack" && function != "row")) {
+				return false;
+			}
+			for (auto &argument : call.GetArguments()) {
+				if (argument.HasName()) {
+					texts.push_back(argument.GetName().GetIdentifierName());
+				}
+				if (!LiteralOption(&argument.GetExpression(), texts, depth + 1)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		default:
+			return false;
+		}
+	}
+
+	//! COPY options, both directions (C1): an option DuckDB never reads as a location may hold any
+	//! value (kCopyNonPathOptions); any other one must be literal, and no text it holds may look like a
+	//! path. Its value is computed at bind (BindCopyOption evaluates it), so a computed one could spell
+	//! any path: FILENAME_PATTERN concat('..', '/x_{i}') writes beside the checked target.
+	void CopyOptions(CopyInfo &info) {
+		for (auto &option : info.parsed_options) {
+			Walk(option.second);
+			auto name = StringUtil::Lower(option.first.GetIdentifierName());
+			if (Contains(kCopyNonPathOptions, name)) {
+				continue;
+			}
+			std::vector<std::string> texts;
+			if (!LiteralOption(option.second.get(), texts)) {
+				Refuse("COPY option " + name + " is computed, so QoD cannot check that it names no path");
+			}
+			for (auto &text : texts) {
+				CopyOptionText(name, text);
+			}
+		}
+		for (auto &option : info.options) {
+			auto name = StringUtil::Lower(option.first.GetIdentifierName());
+			if (Contains(kCopyNonPathOptions, name)) {
+				continue;
+			}
+			for (auto &value : option.second) {
+				if (!value.IsNull()) {
+					CopyOptionText(name, value.ToString());
+				}
+			}
 		}
 	}
 
@@ -667,20 +857,7 @@ private:
 		if (info.select_statement) {
 			Node(*info.select_statement);
 		}
-		for (auto &option : info.parsed_options) {
-			if (option.second && IsStringLiteral(*option.second)) {
-				CopyOption(StringUtil::Lower(option.first.GetIdentifierName()),
-				           option.second->Cast<ConstantExpression>().GetLiteral().text);
-			}
-			Walk(option.second);
-		}
-		for (auto &option : info.options) {
-			for (auto &value : option.second) {
-				if (!value.IsNull() && value.type().id() == LogicalTypeId::VARCHAR) {
-					CopyOption(StringUtil::Lower(option.first.GetIdentifierName()), value.ToString());
-				}
-			}
-		}
+		CopyOptions(info);
 		if (info.file_path_expression) {
 			Refuse("COPY needs a literal file name");
 		}

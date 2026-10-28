@@ -101,6 +101,26 @@ int main() {
 	// ---- every place a reader can hide in a query
 	Refused("SELECT 1 WHERE EXISTS (SELECT * FROM read_csv('x.csv'))", "QoD: x.csv ", "a subquery in WHERE");
 	Admitted("WITH c AS (SELECT * FROM read_json('s3://acme-etl/j.json')) SELECT * FROM c", 1, "a CTE");
+	Refused("SELECT 1 AS a UNION ALL SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "the right side of a UNION");
+	Refused("SELECT * FROM read_csv('x.csv') UNION SELECT 1", "QoD: x.csv ", "the left side of a UNION");
+	Refused("SELECT 1 EXCEPT SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "EXCEPT");
+	Refused("SELECT 1 INTERSECT SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "INTERSECT");
+	ExpectLocation(Admitted("SELECT 1 AS a UNION ALL BY NAME SELECT * FROM read_parquet('s3://acme-etl/u.parquet')", 1,
+	                        "a UNION BY NAME reading an s3 file"),
+	               "s3://acme-etl/u.parquet", "read", "read_parquet", "the UNION's location");
+	Refused("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r, read_csv('x.csv') WHERE n < 3) "
+	        "SELECT * FROM r",
+	        "QoD: x.csv ", "the recursive side of a recursive CTE");
+	Refused("WITH RECURSIVE r(n) AS (SELECT count(*) FROM read_csv('x.csv') UNION ALL SELECT n + 1 FROM r WHERE n < 3) "
+	        "SELECT * FROM r",
+	        "QoD: x.csv ", "the anchor of a recursive CTE");
+	Refused("WITH RECURSIVE r(n) USING KEY (n) AS (SELECT 1 UNION SELECT n + 1 FROM r JOIN read_csv('x.csv') ON true) "
+	        "SELECT * FROM r",
+	        "QoD: x.csv ", "a recursive CTE with USING KEY");
+	ExpectLocation(Admitted("WITH RECURSIVE r(n) AS (SELECT count(*) FROM read_json('s3://acme-etl/r.json') UNION ALL "
+	                        "SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r",
+	                        1, "a recursive CTE reading an s3 file"),
+	               "s3://acme-etl/r.json", "read", "read_json", "the recursive CTE's location");
 	Admitted("WITH c AS MATERIALIZED (SELECT 1 AS a) SELECT * FROM c", 0, "a materialized CTE");
 	Refused("SELECT * FROM range(3) r JOIN read_csv('x.csv') ON true", "QoD: x.csv ", "a join");
 	Refused("SELECT list_transform([1], lambda x: (SELECT count(*) FROM read_csv('x.csv')))", "QoD: x.csv ",
@@ -170,6 +190,64 @@ int main() {
 	         "a plain file name pattern");
 	Admitted("COPY t FROM 's3://acme-etl/in.csv' (DATEFORMAT '%d/%m/%Y')", 1, "a date format is text, not a path");
 	Admitted("COPY t TO 's3://acme-etl/o.csv' (HEADER true, DELIMITER '|')", 1, "plain options");
+
+	// ---- C1: a COPY option DuckDB may read as a path is literal, both directions; a computed one could
+	// spell any path, as the binder evaluates it
+	const std::string to_out = "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), ";
+	for (auto computed : {"FILENAME_PATTERN concat('..', '/', '..', '/pwn_{i}'))",
+	                      "FILENAME_PATTERN ('..' || '/x_{i}'))", "FILENAME_PATTERN '../../x_{i}'::VARCHAR)", "FILENAME_PATTERN CAST('x_{i}' AS VARCHAR))",
+	                      "FILENAME_PATTERN lower('X_{I}'))", "FILENAME_PATTERN getvariable('p'))",
+	                      "FILENAME_PATTERN $1)",
+	                      "FILE_EXTENSION concat('csv', '/../x'))", "FILE_EXTENSION ('pa' || 'rquet'))",
+	                      "FILE_EXTENSION 'csv'::VARCHAR)", "FILENAME_PATTERN [concat('..', '/x')])",
+	                      "FILENAME_PATTERN system.main.concat('x_', '{i}'))"}) {
+		Refused(to_out + computed, "is computed, so QoD cannot check", std::string("a computed option: ") + computed);
+	}
+	Refused(to_out + "FILENAME_PATTERN (SELECT 'x_{i}'))", "QoD: the statement does not parse",
+	        "a subquery as an option value (DuckDB 2.0's parser refuses it)");
+	Refused(to_out + "FILENAME_PATTERN concat('..', '/', 'x_{i}'))",
+	        "QoD: COPY option filename_pattern is computed, so QoD cannot check that it names no path",
+	        "the refusal names the option");
+	Refused("COPY t TO 's3://acme-etl/o.csv' (FORMAT concat('cs', 'v'))", "COPY option format is computed",
+	        "a computed FORMAT");
+	Refused("COPY t FROM 's3://acme-etl/in.csv' (REJECTS_TABLE concat('a', 'b'))",
+	        "COPY option rejects_table is computed", "COPY FROM: a computed option off the list");
+	Refused("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, COLUMNS {'a': concat('INT', 'EGER')})",
+	        "COPY option columns is computed", "COPY FROM: a computed leaf in a struct option");
+	Refused("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, NO_SUCH_OPTION concat('..', '/x'))",
+	        "COPY option no_such_option is computed", "an option nobody listed (an extension's)");
+	for (auto escape : {"FILENAME_PATTERN '../x_{i}')", "FILENAME_PATTERN 'sub/x_{i}')",
+	                    "FILENAME_PATTERN '..\\x_{i}')", "FILENAME_PATTERN \"../x_{i}\")", "FILENAME_PATTERN ('a', '../x'))",
+	                    "FILE_EXTENSION 'csv/../../x')", "FILE_EXTENSION '../x')", "FILE_EXTENSION \"a/b\")",
+	                    // The parser keeps a qualified name's last part, as text.
+	                    "FILENAME_PATTERN \"x\".\"../y_{i}\")"}) {
+		Refused(to_out + escape, "names a path", std::string("a literal escape: ") + escape);
+	}
+	Refused("COPY t FROM 's3://acme-etl/in.csv' (REJECTS_TABLE 'x/../y')", "COPY option rejects_table names a path",
+	        "COPY FROM: a literal path in an option off the list");
+	Refused("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, NO_SUCH_OPTION '../x')",
+	        "COPY option no_such_option names a path", "an unlisted option's literal path");
+	for (auto admitted : {"FILENAME_PATTERN 'part_{i}')", "FILENAME_PATTERN \"part_{uuid}\")",
+	                      "FILENAME_PATTERN 'part_{i}', FILE_EXTENSION 'pq')", "FILE_EXTENSION pq)",
+	                      "PER_THREAD_OUTPUT, OVERWRITE_OR_IGNORE)", "WRITE_PARTITION_COLUMNS true)",
+	                      "PARTITION_PATH concat('a=', a))", "ORDER_BY (a DESC))", "ROW_GROUP_SIZE 100000)",
+	                      "ROW_GROUP_SIZE 100 * 1000)", "FILE_SIZE_BYTES '10MB')", "COMPRESSION zstd)",
+	                      "COMPRESSION_LEVEL 3)", "KV_METADATA {'mime': 'application/json'})",
+	                      "FIELD_IDS {'a': 1})", "CODEC 'snappy')"}) {
+		Admitted(to_out + admitted, 1, std::string("a legitimate option: ") + admitted);
+	}
+	Admitted("COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a, b))", 1, "partitioned by two columns");
+	Admitted("COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY a)", 1, "partitioned by one column");
+	Admitted("COPY t TO 's3://acme-etl/o.csv' (FORMAT csv, FORCE_QUOTE *, NULL 'n/a', PREFIX '//', DATEFORMAT '%d/%m')",
+	         1, "text options holding slashes");
+	Admitted("COPY t TO 's3://acme-etl/o.csv' (FORMAT csv, FORCE_QUOTE (a, b), QUOTE '\"', ESCAPE '\\')", 1,
+	         "column lists and a backslash escape");
+	Admitted("COPY t TO 's3://acme-etl/o.json' (FORMAT json, ARRAY true)", 1, "a json writer option");
+	Admitted("COPY t FROM 's3://acme-etl/in.csv' (FORMAT csv, AUTO_DETECT false, SKIP 1, FORCE_NOT_NULL (a))", 1,
+	         "COPY FROM options");
+	Admitted("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, COLUMNS {'a': 'INTEGER'})", 1,
+	         "COPY FROM: a literal struct option");
+	Admitted("COPY t FROM 's3://acme-etl/in.csv' (REJECTS_TABLE 'rejects')", 1, "a literal rejects table");
 
 	// ---- statements reserved to superusers, and their nearest admitted neighbors
 	Refused("EXPORT DATABASE 's3://acme-etl/dump'", "EXPORT DATABASE is reserved to superusers", "EXPORT");
@@ -293,6 +371,25 @@ int main() {
 	}
 	Refused("SET S3_Region = 'eu-west-1'", "QoD: SET and RESET of s3_region are reserved to superusers",
 	        "the refusal names the setting in lower case");
+	// I1: how a request is signed, verified, routed or cached, in every form a session can spell it
+	for (std::string name :
+	     {"enable_server_cert_verification", "ca_cert_file", "extra_http_headers", "httpfs_enable_credential_refresh",
+	      "httpfs_client_implementation", "httpfs_connection_caching", "http_keep_alive", "redact_http_logs",
+	      "secret_directory", "allow_persistent_secrets", "allow_unredacted_secrets"}) {
+		auto refusal = "QoD: SET and RESET of " + name + " are reserved to superusers";
+		for (auto form : {"SET " + name + " = 'x'", "SET SESSION " + name + " = 'x'", "SET GLOBAL " + name + " = 'x'",
+		                  "SET " + name + " TO 'x'", "RESET " + name, "RESET SESSION " + name, "RESET GLOBAL " + name,
+		                  "EXPLAIN SET SESSION " + name + " = 'x'", "EXPLAIN ANALYZE SET " + name + " = 'x'",
+		                  "EXPLAIN RESET " + name, "SELECT 1; SET SESSION " + name + " = 'x'",
+		                  "SELECT * FROM query('SET " + name + " = ''x''')", "PRAGMA " + name + " = 'x'"}) {
+			Refused(form, refusal, form);
+		}
+		// DuckDB 2.0 has no SET LOCAL: it refuses it before the screen could reserve anything.
+		for (auto form : {"SET LOCAL " + name + " = 'x'", "RESET LOCAL " + name}) {
+			Refused(form, "QoD: the statement does not parse", form);
+		}
+	}
+	Admitted("SET SESSION http_timeout = 30", 0, "an HTTP setting that changes no signing, verification or routing");
 	Refused("PRAGMA s3_region = 'eu-west-1'", "reserved to superusers", "the PRAGMA spelling of SET");
 	Refused("PREPARE p AS SET s3_region = 'eu-west-1'", "QoD: the statement does not parse",
 	        "DuckDB 2.0 cannot PREPARE a SET");

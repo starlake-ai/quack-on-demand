@@ -276,11 +276,15 @@ void SessionScan(ClientContext &context, TableFunctionInput &input, DataChunk &o
 
 //! The scopes of this node's own S3 secrets: outside connection storage, of the types httpfs reads for
 //! an s3:// URL (S3SecretConfig::SecretTypes, httpfs 77392a7). DuckDB signs a URL with one of them
-//! over a user's when it scopes more closely (decision 23, ShadowingScope). Every secret present is
-//! listed, whether or not its type's extension is loaded yet: a temporary secret keeps its type name,
-//! and a persistent one is deserialized here, which autoloads its type or throws (the caller refuses).
-std::vector<std::string> NodeS3SecretScopes(ClientContext &context) {
-	std::vector<std::string> scopes;
+//! over a user's when it scores higher (decision 23, ShadowingScope), so each scope comes with its
+//! storage's tie-break offset; a secret with no scope matches every path, as an empty one. Every secret
+//! present is listed, whether or not its type's extension is loaded yet: a temporary secret keeps its
+//! type name, and a persistent one is deserialized here, which autoloads its type or throws (the caller
+//! refuses). Connection storage is the screen connection's own, never a user's, and so is the
+//! transaction storage this reads; a user's are only its qod_uc_* secrets (users may not create any,
+//! and DuckDB creates no transaction secret from SQL).
+std::vector<NodeSecretScope> NodeS3SecretScopes(ClientContext &context) {
+	std::vector<NodeSecretScope> scopes;
 	auto &manager = SecretManager::Get(context);
 	for (auto &entry : manager.AllSecrets(CatalogTransaction::GetSystemCatalogTransaction(context))) {
 		auto type = StringUtil::Lower(entry.secret->GetType().GetIdentifierName());
@@ -288,8 +292,12 @@ std::vector<std::string> NodeS3SecretScopes(ClientContext &context) {
 		    (type != "s3" && type != "r2" && type != "gcs" && type != "aws")) {
 			continue;
 		}
+		auto offset = SecretStorageOffset(entry.storage_mode);
+		if (entry.secret->GetScope().empty()) {
+			scopes.push_back(NodeSecretScope {"", offset});
+		}
 		for (auto &scope : entry.secret->GetScope()) {
-			scopes.push_back(scope);
+			scopes.push_back(NodeSecretScope {scope, offset});
 		}
 	}
 	return scopes;
@@ -309,7 +317,7 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 		return outcome.refusal;
 	}
 	auto user_scopes = authz.CredentialScopes(recorded.nonce);
-	std::vector<std::string> node_scopes;
+	std::vector<NodeSecretScope> node_scopes;
 	try {
 		node_scopes = NodeS3SecretScopes(context);
 	} catch (std::exception &error) {
@@ -318,7 +326,7 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 		return "QoD: this node's own S3 secrets cannot be listed, so the statement's locations cannot be checked";
 	}
 	for (auto &location : outcome.facts.locations) {
-		if (!ShadowingScope(location.resolved, user_scopes, node_scopes).empty()) {
+		if (ShadowingScope(location.resolved, user_scopes, node_scopes)) {
 			return "QoD: " + location.given +
 			       " would be signed with this node's own S3 keys, not with an S3 credential of yours";
 		}
@@ -332,7 +340,19 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 	call.policy_version = recorded.policy_version;
 	call.ctx = recorded.ctx;
 	auto decided = authz.Decider().Decide(call);
-	return decided.status == DecideResult::Status::Allow ? "" : decided.Message();
+	if (decided.status == DecideResult::Status::Allow) {
+		return "";
+	}
+	if (decided.status == DecideResult::Status::Unavailable) {
+		// Every unavailable decision is retryable (a 503, a timeout, a transport failure): say so, like
+		// the credential fetch does.
+		std::string unavailable = "authorization unavailable";
+		auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0
+		                ? decided.reason.substr(unavailable.size())
+		                : ": " + decided.reason;
+		return "QoD: " + unavailable + ", retry" + rest;
+	}
+	return decided.Message();
 }
 
 // ---- qod_screen ----------------------------------------------------------------------------------
@@ -399,6 +419,11 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 }
 
 } // namespace
+
+bool SessionSnapshot(ClientContext &context, int64_t now_ms, Installed &out) {
+	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+	return session && session->Snapshot(now_ms, out);
+}
 
 void RegisterNodeAuthz(DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz) {
 	ExtensionLoader loader(db, "qod_node");

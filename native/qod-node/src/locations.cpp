@@ -233,20 +233,47 @@ std::string ScreenDescription(const std::vector<Location> &locations) {
 	return CanonicalJson(JsonObject({{"locations", JsonArray(std::move(sorted))}, {"v", JsonInt(1)}}));
 }
 
-std::string ShadowingScope(const std::string &url, const std::vector<std::string> &user_scopes,
-                           const std::vector<std::string> &node_scopes) {
-	size_t own = 0;
+int64_t SecretStorageOffset(const std::string &storage) {
+	auto name = Lower(storage);
+	if (name == "connection") {
+		return 5;
+	}
+	if (name == "memory") {
+		return 10;
+	}
+	if (name == "local_file") {
+		return 20;
+	}
+	return 0;
+}
+
+std::optional<std::string> ShadowingScope(const std::string &url, const std::vector<std::string> &user_scopes,
+                                          const std::vector<NodeSecretScope> &node_scopes) {
+	// httpfs signs only S3 URLs with these secrets (decision 23 screens no other scheme).
+	if (Lower(url.substr(0, 5)) != "s3://") {
+		return std::nullopt;
+	}
+	// BaseSecret::MatchScore: the longest scope the URL starts with, an empty one matching at 0.
+	auto score = [&url](const std::string &scope, int64_t offset) -> std::optional<int64_t> {
+		if (!scope.empty() && url.compare(0, scope.size(), scope) != 0) {
+			return std::nullopt;
+		}
+		return 100 * static_cast<int64_t>(scope.size()) - offset;
+	};
+	std::optional<int64_t> own;
 	for (auto &scope : user_scopes) {
-		if (!scope.empty() && url.compare(0, scope.size(), scope) == 0) {
-			own = std::max(own, scope.size());
+		auto matched = score(scope, kUserSecretStorageOffset);
+		if (matched && (!own || *matched > *own)) {
+			own = matched;
 		}
 	}
-	for (auto &scope : node_scopes) {
-		if (scope.size() > own && url.compare(0, scope.size(), scope) == 0) {
-			return scope;
+	for (auto &node : node_scopes) {
+		auto matched = score(node.scope, node.storage_offset);
+		if (matched && (!own || *matched >= *own)) {
+			return node.scope;
 		}
 	}
-	return "";
+	return std::nullopt;
 }
 
 } // namespace qod

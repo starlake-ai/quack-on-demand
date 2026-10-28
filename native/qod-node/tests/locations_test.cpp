@@ -153,19 +153,39 @@ int main() {
 	       "a local path resolved");
 
 	// ---- decision 23: a node secret signs a URL over the user's own when it scopes more closely
-	std::vector<std::string> node_scopes {"s3://acme-etl/iceberg/", "s3://acme-etl/lake/", ""};
-	Expect(qod::ShadowingScope("s3://acme-etl/iceberg/t/x.parquet", {"s3://acme-etl/"}, node_scopes) ==
-	           "s3://acme-etl/iceberg/",
+	auto memory = qod::SecretStorageOffset("memory");
+	Expect(qod::SecretStorageOffset("transaction") == 0 && qod::SecretStorageOffset("connection") == 5 &&
+	           memory == 10 && qod::SecretStorageOffset("local_file") == 20 &&
+	           qod::SecretStorageOffset("some_extension_storage") == 0,
+	       "DuckDB's storage offsets, an unknown storage the strongest");
+	std::vector<qod::NodeSecretScope> node_scopes {{"s3://acme-etl/iceberg/", memory},
+	                                               {"s3://acme-etl/lake/", qod::SecretStorageOffset("local_file")}};
+	auto shadow = [](const std::string &url, const std::vector<std::string> &user,
+	                 const std::vector<qod::NodeSecretScope> &node) {
+		return qod::ShadowingScope(url, user, node).value_or("<none>");
+	};
+	Expect(shadow("s3://acme-etl/iceberg/t/x.parquet", {"s3://acme-etl/"}, node_scopes) == "s3://acme-etl/iceberg/",
 	       "a node secret inside the user's scope signs that subtree");
-	Expect(qod::ShadowingScope("s3://acme-etl/in/x.csv", {"s3://acme-etl/"}, node_scopes).empty(),
-	       "outside it, the user's own");
-	Expect(qod::ShadowingScope("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/"}, node_scopes).empty(),
-	       "a tie goes to the connection secret");
-	Expect(qod::ShadowingScope("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/t/"}, node_scopes) ==
+	Expect(shadow("s3://acme-etl/in/x.csv", {"s3://acme-etl/"}, node_scopes) == "<none>", "outside it, the user's own");
+	Expect(shadow("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/"}, node_scopes) == "<none>",
+	       "an equal length goes to the connection secret over memory storage");
+	Expect(shadow("s3://acme-etl/lake/x", {"s3://acme-etl/lake/"}, node_scopes) == "<none>",
+	       "and over local_file storage");
+	Expect(shadow("s3://acme-etl/iceberg/x", {"s3://acme-etl/ice"}, node_scopes) == "s3://acme-etl/iceberg/",
+	       "a node scope one character longer wins over every storage offset");
+	Expect(shadow("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/"}, {{"s3://acme-etl/iceberg/", 0}}) ==
 	           "s3://acme-etl/iceberg/",
+	       "an equal length in transaction storage (offset 0) beats the connection secret");
+	Expect(shadow("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/"}, {{"s3://acme-etl/iceberg/", 5}}) ==
+	           "s3://acme-etl/iceberg/",
+	       "an equal score is broken on names the screen does not compare: refused");
+	Expect(shadow("s3://acme-etl/iceberg/x", {"s3://acme-etl/iceberg/t/"}, node_scopes) == "s3://acme-etl/iceberg/",
 	       "a user scope that does not cover the URL does not count");
-	Expect(qod::ShadowingScope("s3://other/x", {}, node_scopes).empty(), "an empty node scope never wins");
-	Expect(qod::ShadowingScope("/srv/qod-files/x.csv", {}, node_scopes).empty(), "a local path");
+	std::vector<qod::NodeSecretScope> catch_all {{"", memory}};
+	Expect(shadow("s3://other/x", {}, catch_all) == "", "a node secret matching every path signs what no user's does");
+	Expect(shadow("s3://other/x", {"s3://other/"}, catch_all) == "<none>", "but never over a user's that matches");
+	Expect(shadow("s3://other/x", {}, {}) == "<none>", "no node secret, nothing shadowed");
+	Expect(shadow("/srv/qod-files/x.csv", {}, catch_all) == "<none>", "a local path is never signed");
 
 	// ---- the screen description: canonical, sorted, without duplicates
 	qod::Location read {"s3://b/a", "s3://b/a", "read", "read_csv"};
