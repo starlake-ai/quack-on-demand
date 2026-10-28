@@ -75,7 +75,16 @@ cat >> "$work/macros.sql" <<'SQL'
 COPY (
   SELECT schema_name AS schema, function_name AS name, function_type AS type,
          json_serialize_sql(CASE WHEN function_type = 'macro' THEN 'SELECT ' || macro_definition
-                                 ELSE macro_definition END) AS tree
+                                 ELSE macro_definition END) AS tree,
+         -- The binder's list of every overload with its default parameter values: a call with one
+         -- argument too many is refused with it (duckdb_functions() carries no default).
+         json_serialize_plan(
+           CASE WHEN function_type = 'macro' THEN 'SELECT ' ELSE 'SELECT * FROM ' END ||
+           '"' || replace(database_name, '"', '""') || '"."' || replace(schema_name, '"', '""') ||
+           '"."' || replace(function_name, '"', '""') || '"(' ||
+           repeat('NULL, ', max(len(parameters)) OVER (PARTITION BY schema_name, function_name,
+                                                      function_type)) || 'NULL)'
+         ) ->> 'error_message' AS signatures
   FROM duckdb_functions()
   WHERE database_name = 'system' AND internal AND function_type IN ('macro', 'table_macro')
   ORDER BY schema, name, type, tree::VARCHAR

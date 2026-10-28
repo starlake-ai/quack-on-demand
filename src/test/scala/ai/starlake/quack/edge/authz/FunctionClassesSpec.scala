@@ -230,29 +230,33 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     FunctionClasses.all.get(FunctionClasses.Key("main", "histogram", "table_macro")) shouldBe None
   }
 
-  it should "class a fixture dump's macros as the generator's rules say" in {
-    val python = scala.util
-      .Try(
-        scala.sys.process
-          .Process(Seq("python3", "--version"))
-          .!(scala.sys.process.ProcessLogger(_ => ()))
-      )
-      .toOption
-      .contains(0)
+  private lazy val python: Boolean = scala.util
+    .Try(
+      scala.sys.process
+        .Process(Seq("python3", "--version"))
+        .!(scala.sys.process.ProcessLogger(_ => ()))
+    )
+    .toOption
+    .contains(0)
+
+  /** The classifier's macro classes for `file` (a dump, or macros.json), one TSV-shaped line each.
+    */
+  private def macroClasses(file: String): List[String] =
     assume(python, "python3 not on PATH")
-    // src/test/resources/authz/macro-dump-fixture.json: the release CLI's duckdb_functions() rows,
-    // with parse trees, of macros made for it (each body is in the expectations below).
-    val out = scala.sys.process
-      .Process(
-        Seq(
-          "python3",
-          "scripts/dev/classify-qod-node.py",
-          "--macro-classes",
-          "src/test/resources/authz/macro-dump-fixture.json"
-        )
-      )
+    scala.sys.process
+      .Process(Seq("python3", "scripts/dev/classify-qod-node.py", "--macro-classes", file))
       .!!
-    out.linesIterator.toList shouldBe List(
+      .linesIterator
+      .toList
+
+  it should "class a fixture dump's macros as the generator's rules say" in {
+    // src/test/resources/authz/macro-dump-fixture.json: the release CLI's duckdb_functions() rows,
+    // with parse trees and the binder's signatures, of macros made for it (each body is in the
+    // expectations below), plus two rows written by hand, since DuckDB refuses to create such
+    // macros: fx_nonconstant (a default calling current_setting) and fx_unknown_defaults (no
+    // signatures, so its defaults are unknown).
+    macroClasses("src/test/resources/authz/macro-dump-fixture.json") shouldBe List(
+      "fx_default\tmain\tmacro\tallowed",          // a || b, b := 'x': a constant default
       "fx_nested\tmain\tmacro\tallowed",           // fx_pure(a) || lower(a): through another macro
       "fx_overload\tmain\tmacro\tsuperuser",       // one overload calls current_setting
       "fx_pure\tmain\tmacro\tallowed",             // upper(a) || 'x'
@@ -264,7 +268,18 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       "fx_window\tmain\tmacro\tallowed"            // row_number() OVER ()
     )
     // Not classified: fx_seq (nextval), fx_reads (a table), fx_listing (duckdb_tables()), fx_query
-    // (query()), fx_other (memory.main.fx_pure, another catalog's).
+    // (query()), fx_other (memory.main.fx_pure, another catalog's), fx_nonconstant and
+    // fx_unknown_defaults (a default parameter not a constant, or unknown).
+  }
+
+  it should "hold exactly the macro classes the classifier gives macros.json" in {
+    val tsv = FunctionClasses.all.collect {
+      case (k, c) if isMacro(k) =>
+        s"${k.name}\t${k.schema}\t${k.tpe}\t${c.toString.toLowerCase(Locale.ROOT)}"
+    }.toSet
+    withClue("run scripts/dev/gen-qod-node-classification.sh: ")(
+      macroClasses("native/qod-node/macros.json").toSet shouldBe tsv
+    )
   }
 
   it should "restrict exactly the reviewed scalar, aggregate and window functions, to superusers" in {

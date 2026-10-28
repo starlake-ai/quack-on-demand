@@ -327,8 +327,56 @@ def body_uses(tree):
     return {"calls": [list(c) for c in sorted(calls)], "readsTables": reads}
 
 
+# A default parameter value a macro body may use and still be allowed: a constant. DuckDB 2.0 folds a
+# CREATE MACRO default to a constant (and refuses one it cannot fold), but macros.json must not rest on
+# that for a built-in one, whose default the dump does not otherwise carry.
+CONSTANT_DEFAULT = re.compile(r"^(-?[0-9]+(\.[0-9]+)?|'([^']|'')*'|NULL|TRUE|FALSE)$", re.IGNORECASE)
+
+
+def split_arguments(text):
+    """The top-level comma-separated parts of a signature's argument list, strings respected."""
+    parts, depth, quoted, current = [], 0, False, ""
+    for c in text:
+        if c == "'":
+            quoted = not quoted
+        elif not quoted and c in "([":
+            depth += 1
+        elif not quoted and c in ")]":
+            depth -= 1
+        if c == "," and depth == 0 and not quoted:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += c
+    if current.strip():
+        parts.append(current.strip())
+    return parts
+
+
+def macro_defaults(signatures):
+    """The default values (as DuckDB renders them) of every overload of a macro, from the binder's
+    "Candidate macros:" list in `signatures`, or None when the list is missing (defaults unknown)."""
+    if not isinstance(signatures, str) or "Candidate macros:" not in signatures:
+        return None
+    defaults = []
+    for line in signatures.split("Candidate macros:", 1)[1].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "(" not in line or not line.endswith(")"):
+            return None
+        for argument in split_arguments(line[line.index("(") + 1:-1]):
+            if ":=" in argument:
+                defaults.append(argument.split(":=", 1)[1].strip())
+    return sorted(defaults)
+
+
 def extract_macros(dump):
-    """macros.json rows from a dump: one per macro or table macro overload, sorted."""
+    """macros.json rows from a dump: one per macro or table macro overload, sorted. A dump row is
+    already a macros.json row when it carries `calls` (FunctionClassesSpec classifies the committed
+    file this way)."""
+    if all(isinstance(row, dict) and "calls" in row for row in dump):
+        return dump
     rows = []
     for row in dump:
         if not isinstance(row, dict) or not {"name", "schema", "type", "tree"} <= set(row):
@@ -340,7 +388,9 @@ def extract_macros(dump):
         if isinstance(tree, str):
             tree = json.loads(tree)
         uses = body_uses(tree)
-        rows.append({"calls": uses["calls"] if uses else None, "name": row["name"].lower(),
+        rows.append({"calls": uses["calls"] if uses else None,
+                     "defaults": macro_defaults(row.get("signatures")),
+                     "name": row["name"].lower(),
                      "readsTables": uses["readsTables"] if uses else None,
                      "schema": row["schema"].lower(), "type": tpe})
     return sorted(rows, key=lambda r: (r["name"], r["schema"], r["type"], json.dumps(r, sort_keys=True)))
@@ -377,7 +427,10 @@ def classify_macros(macros, functions, review):
                 continue
             calls = [c for r in rows for c in (r["calls"] or [])]
             found = [candidates(c) for c in calls]
-            parsed = all(r["calls"] is not None and not r["readsTables"] for r in rows)
+            # Every body parsed and reads no table; every default parameter known and constant.
+            parsed = all(r["calls"] is not None and not r["readsTables"] and
+                         r.get("defaults") is not None and
+                         all(CONSTANT_DEFAULT.match(d) for d in r["defaults"]) for r in rows)
             if any("superuser" in f for f in found):
                 classes[key] = "superuser"
                 changed = True
@@ -388,7 +441,8 @@ def classify_macros(macros, functions, review):
     for key, cls in sorted(classes.items()):
         if cls is None:
             review.append(f"{key[2]} {key[0]}.{key[1]}: not classified (its body calls a function not "
-                          f"classed allowed, reads a table, or could not be parsed)")
+                          f"classed allowed, reads a table, or could not be parsed, or a default "
+                          f"parameter is unknown or not a constant)")
     return {key: cls for key, cls in classes.items() if cls is not None}
 
 
