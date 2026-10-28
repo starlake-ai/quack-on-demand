@@ -100,7 +100,9 @@ object PolicyPipelineFixture:
       /** What the node answers to the statement it received; by default one row of `SELECT 1`. */
       respond: String => QuackResponse = _ => TestArrow.okResponse(),
       /** The control plane under the supervisor; a spec seeds principals into it. */
-      store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore()
+      store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore(),
+      /** Mounts the production protected-write guard over `columnCatalog` (CLS and RLS on). */
+      guarded: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -164,7 +166,10 @@ object PolicyPipelineFixture:
       new QuackHttpAdapter(client, tracker),
       validator = validator,
       columnPolicyRewriter = new ColumnPolicyRewriter(columnCatalog, enabled = true),
-      metadataFilterRewriter = metadataFilter
+      metadataFilterRewriter = metadataFilter,
+      protectedWriteGuard =
+        if guarded then new ProtectedWriteGuard(columnCatalog, clsEnabled = true, rlsEnabled = true)
+        else ProtectedWriteGuard.disabled
     )
     new Harness(router, key, () => last, sup)
 

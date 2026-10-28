@@ -7,6 +7,7 @@ import ai.starlake.quack.edge.adapter.{NodeLoadTracker, TestArrow}
 import ai.starlake.quack.model.{
   PoolKey,
   RoleDistribution,
+  SqlLiterals,
   StatementKind,
   Tenant,
   TenantDb,
@@ -171,6 +172,17 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val name = NameRe.findFirstMatchIn(sql).map(_.group(3))
     if sql.contains("information_schema.schemata") then
       result("SELECT * FROM (VALUES ('main'), ('sales')) t(schema_name)", closes)
+    else if sql.startsWith("SELECT table_type FROM information_schema.tables") then
+      // The table detail's type lookup, matched on the name.
+      val kind =
+        if sql.contains("lower('v_customer')") then "'VIEW'"
+        else if sql.contains("lower('customer')") then "'BASE TABLE'"
+        else ""
+      result(
+        if kind.isEmpty then "SELECT 'x' AS table_type WHERE false"
+        else s"SELECT $kind AS table_type",
+        closes
+      )
     else if sql.contains("information_schema.tables") then
       if sql.contains("'empty'") then
         result("SELECT 'x' AS table_name, 'BASE TABLE' AS table_type WHERE false", closes)
@@ -556,11 +568,11 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
 
   // ---- path segments ----------------------------------------------------------------------------
 
-  "a path segment outside the identifier rule" should "404 before the executor sees anything" in {
-    val fx     = fixture()
-    val bad    = List("..", "a/b", "a\"b", "x" * 64, "", "a b", "ümlaut")
-    val system = List("information_schema", "pg_catalog", "PG_CATALOG")
-    (bad ++ system).foreach { seg =>
+  "a schema or table segment that names nothing" should "404 before the executor sees anything" in {
+    val fx      = fixture()
+    val nothing = List("", "a\u0000b", "a\nb", "x" * 1025)
+    val system  = List("information_schema", "pg_catalog", "PG_CATALOG")
+    (nothing ++ system).foreach { seg =>
       withClue(seg) {
         errOf(
           fx.handlers.rows("acme", "acme_lake", seg, "customer", req()).unsafeRunSync()
@@ -571,17 +583,30 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
       }
     }
     // The system names are never valid SCHEMA segments; as a table name they are ordinary.
-    bad.foreach { seg =>
+    nothing.foreach { seg =>
       withClue(seg) {
         errOf(fx.handlers.rows("acme", "acme_lake", "main", seg, req()).unsafeRunSync())._1 shouldBe
           StatusCode.NotFound
       }
     }
-    List("..", "INFORMATION_SCHEMA").foreach(db =>
+    // The database segment keeps QoD's own name rule.
+    List("..", "INFORMATION_SCHEMA", "order-items").foreach(db =>
       errOf(fx.handlers.schemas("acme", db, req()).unsafeRunSync())._1 shouldBe StatusCode.NotFound
     )
     fx.calls shouldBe empty
   }
+
+  "a schema or table name outside QoD's own name rule" should "reach the executor quoted, so every listed object is readable" in
+    List("order-items", "2024_sales", "a\"b", "a b", "ümlaut", "x" * 64).foreach { name =>
+      withClue(name) {
+        val fx = fixture()
+        fx.handlers.rows("acme", "acme_lake", "main", name, req()).unsafeRunSync(): Unit
+        fx.handlers.tables("acme", "acme_lake", name, req()).unsafeRunSync(): Unit
+        val quoted = SqlLiterals.duckdbIdent(name)
+        fx.calls.map(_.sql).count(_.contains(quoted)) shouldBe 1
+        fx.calls.map(_.sql).count(_.contains(SqlLiterals.duckdbLiteral(name))) shouldBe 1
+      }
+    }
 
   // ---- limits -----------------------------------------------------------------------------------
 
@@ -825,6 +850,16 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     header(d.headers, "X-QoD-Snapshot") shouldBe None
   }
 
+  it should "be typed a view by the table detail, from a lookup on its name, not a capped listing" in {
+    val fx = fixture(TokenRestriction.Unrestricted.copy(maxRows = Some(1)))
+    val d  =
+      okOf(fx.handlers.table("acme", "acme_lake", "main", "v_customer", req()).unsafeRunSync())
+    json(d.body).hcursor.get[String]("type") shouldBe Right("view")
+    fx.calls.map(_.sql).filter(_.contains("information_schema.tables")) shouldBe List(
+      RestSql.tableType("acme_lake", "main", "v_customer")
+    )
+  }
+
   it should "answer asOf, asOfTag and asOfTs with invalid_selector after the probe" in {
     for q <- List("asOf=3", "asOfTag=v1", "asOfTs=2026-01-01T00:00:00Z") do
       withClue(q) {
@@ -941,4 +976,19 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val e = errOf(rows(fixture(respond = Some(deny)), "customer"))
     (e._1, e._3.error) shouldBe (StatusCode.Forbidden, "acl_denied")
     e._3.message should not include "salary"
+  }
+
+  // ---- node refusals of the data statement -----------------------------------------------------
+
+  "a data statement the node refuses as invalid" should "be a 400 invalid_filter when it carries filters, which the probe could not type" in {
+    // A UUID column arrives as VARCHAR: a malformed value fails only at the node's cast.
+    val invalid: AtomicInteger => Responder = closes =>
+      sql =>
+        if sql.endsWith("LIMIT 0") then defaultResponder(closes, 1)(sql)
+        else IO.pure(Left(RouterFailure.BadRequest("Conversion Error: Could not convert string")))
+    val e = errOf(rows(fixture(respond = Some(invalid)), "customer", "c_email=eq.not-a-uuid"))
+    (e._1, e._3.error) shouldBe (StatusCode.BadRequest, "invalid_filter")
+    e._3.message should not include "not-a-uuid"
+    // With no filter, the node's refusal is not the client's doing.
+    errOf(rows(fixture(respond = Some(invalid)), "customer"))._1 shouldBe StatusCode.BadGateway
   }

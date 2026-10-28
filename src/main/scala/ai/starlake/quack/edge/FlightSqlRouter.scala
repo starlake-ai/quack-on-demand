@@ -8,12 +8,19 @@ import ai.starlake.quack.model.{PoolKey, SessionCatalog, SqlLiterals, StatementK
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditEvent, EventJournal, StatementEvent}
-import ai.starlake.quack.route.{PoolSnapshot, Router, RoutingDecision, StatementClassifier}
+import ai.starlake.quack.route.{
+  PoolSnapshot,
+  RoleMatcher,
+  Router,
+  RoutingDecision,
+  StatementClassifier
+}
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
 import ai.starlake.sql.{SqlCommentStripper, SqlTrivia, TooDeep}
 
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import cats.effect.IO
+import cats.syntax.parallel.*
 
 import scala.concurrent.duration.*
 
@@ -1311,7 +1318,7 @@ final class FlightSqlRouter(
         .flatMap(rewriteRevalidated) match
         case Left(f)         => IO.pure(Left(f))
         case Right(finalSql) =>
-          resolveSnapshot(poolKey, wake = purpose == DecidePurpose.Live).flatMap {
+          resolveSnapshot(poolKey, kind, wake = purpose == DecidePurpose.Live).flatMap {
             case Left(f: RouterFailure.NotFound) =>
               if s.txOpen then sessions.invalidatePin(connectionId)
               maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
@@ -1624,13 +1631,16 @@ final class FlightSqlRouter(
       case _ => sql
 
   /** Resolve the routing snapshot, waking a suspended (never a disabled) pool first: fire
-    * resumePool then poll for a routable node that answers a statement
+    * resumePool then poll for a routable node eligible for `kind` that answers a statement
     * ([[ai.starlake.quack.edge.adapter.QuackHttpAdapter.answers]]: a respawned node is routable by
     * default before its process listens, so routability alone sent the waking statement to a closed
-    * port), bounded by resumeHoldTimeout; expiry yields the retryable "pool is resuming"
-    * UNAVAILABLE. resumePool errors are swallowed (.attempt): reconcile retries the spawn and the
-    * poll either sees a node or times out. All but one: a pool no node of its database could serve
-    * (local files off, a local data path) stays suspended and nothing retries, so it is answered
+    * port), until resumeHoldTimeout has passed on the monotonic clock (the probes' own time counts
+    * against it); expiry yields the retryable "pool is resuming" UNAVAILABLE. The eligible nodes
+    * are probed at once, and the snapshot handed to the router holds only those that answered: a
+    * node still starting would otherwise be picked and fail its connect. resumePool errors are
+    * swallowed (.attempt): reconcile retries the spawn and the poll either sees a node or times
+    * out. All but one: a pool no node of its database could serve (local files off, a local data
+    * path) stays suspended and nothing retries, so it is answered
     * [[FlightSqlRouter.CannotWakeLocalFilesOff]] at once. With `wake` false (the OPA dry run) a
     * suspended pool is answered [[FlightSqlRouter.PoolNotWoken]] instead.
     */
@@ -1639,6 +1649,7 @@ final class FlightSqlRouter(
 
   private def resolveSnapshot(
       poolKey: PoolKey,
+      kind: StatementKind,
       wake: Boolean
   ): IO[Either[RouterFailure, PoolSnapshot]] =
     supervisor.get(poolKey) match
@@ -1649,26 +1660,27 @@ final class FlightSqlRouter(
         // IO.defer is load-bearing: without it the snapshot check (and the recursive
         // poll construction) would run eagerly, BEFORE resumePool executes, and the
         // whole chain would pre-resolve to the timeout against the still-empty pool.
-        def answering(snap: PoolSnapshot): IO[Boolean] =
-          snap.nodes
-            .filter(n => snap.loadOf(n.nodeId).routable)
-            .foldLeft(IO.pure(false))((acc, n) =>
-              acc.flatMap(ok => if ok then IO.pure(true) else answers(n))
-            )
         def poll(deadline: FiniteDuration): IO[Either[RouterFailure, PoolSnapshot]] =
           IO.defer {
-            val ready = supervisor.snapshot(poolKey) match
-              case Some(snap) => answering(snap).map(ok => Option.when(ok)(snap))
-              case None       => IO.pure(None)
-            ready.flatMap {
-              case Some(snap) => IO.pure(Right(snap))
-              case None       =>
-                IO.monotonic.flatMap { now =>
-                  if now >= deadline then
-                    IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
-                  else IO.sleep(resumePollInterval) *> poll(deadline)
-                }
-            }
+            supervisor.snapshot(poolKey) match
+              case Some(snap) =>
+                val routable = snap.nodes.filter(n => snap.loadOf(n.nodeId).routable)
+                val roles    = RoleMatcher.fallback(kind, routable.map(_.role).toSet)
+                routable
+                  .filter(n => roles.contains(n.role))
+                  .parTraverse(n => answers(n).map(n -> _))
+                  .flatMap { probed =>
+                    val answering = probed.collect { case (n, true) => n }
+                    if answering.nonEmpty then IO.pure(Right(snap.copy(nodes = answering)))
+                    else retry(deadline)
+                  }
+              case None => retry(deadline)
+          }
+        def retry(deadline: FiniteDuration): IO[Either[RouterFailure, PoolSnapshot]] =
+          IO.monotonic.flatMap { now =>
+            if now >= deadline then
+              IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
+            else IO.sleep(resumePollInterval.min(deadline - now)) *> poll(deadline)
           }
         supervisor.resumePool(poolKey, "query").attempt.flatMap {
           case Right(Left(SupervisorError.LocalFilesOff(_))) =>

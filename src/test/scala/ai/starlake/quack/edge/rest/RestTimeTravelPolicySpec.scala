@@ -31,8 +31,10 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
   private val regionX =
     RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_region = 'X'")
 
+  // `customer` has always been that table with those columns (ColumnCatalog.historyStable).
   private val columnCatalog = new ColumnCatalog.MapCatalog(
-    Map((kc.catalog, "main", "customer") -> List("c_id", "c_email", "c_region"))
+    Map((kc.catalog, "main", "customer") -> List("c_id", "c_email", "c_region")),
+    stable = Set((kc.catalog, "main", "customer"))
   )
 
   /** The edge's schema probe and data statement, with or without the snapshot clause. */
@@ -43,7 +45,8 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
   private val WithAt                             = s" $At"
   private val statements: List[String => String] = List(probe, data)
 
-  private def pipeline = harness(kc, columnCatalog)
+  // With the production guard, which refuses a snapshot read of a name whose history moved.
+  private def pipeline = harness(kc, columnCatalog, guarded = true)
 
   "a snapshot read" should "reach the node with the AT clause and the three-part name intact when no policy applies" in
     statements.foreach { st =>
@@ -132,12 +135,40 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
 
   it should "still be refused fail-closed when the clause does not follow a table reference" in {
     val derived = s"SELECT * FROM (SELECT * FROM $Ref) d $At"
-    pipeline.run(derived, effWith(columnPolicies = List(maskEmail))) match
-      case Left(RouterFailure.AccessDenied(reason)) =>
-        reason should include("column policy rewrite could not parse statement")
-      case other => fail(s"expected a fail-closed CLS refusal, got $other")
-    pipeline.run(derived, effWith(rowPolicies = List(regionX))) match
-      case Left(RouterFailure.AccessDenied(reason)) =>
-        reason should include("row policy rewrite could not parse statement")
-      case other => fail(s"expected a fail-closed RLS refusal, got $other")
+    // The guard refuses first; without it, each rewriter refuses on its own.
+    val unguarded = harness(kc, columnCatalog)
+    List(
+      (pipeline, maskEmail, regionX, "could not be tied to its table", "could not be tied"),
+      (
+        unguarded,
+        maskEmail,
+        regionX,
+        "column policy rewrite could not parse statement",
+        "row policy rewrite could not parse statement"
+      )
+    ).foreach { (h, cp, rp, clsWhy, rlsWhy) =>
+      h.run(derived, effWith(columnPolicies = List(cp))) match
+        case Left(RouterFailure.AccessDenied(reason)) => reason should include(clsWhy)
+        case other => fail(s"expected a fail-closed refusal, got $other")
+      h.run(derived, effWith(rowPolicies = List(rp))) match
+        case Left(RouterFailure.AccessDenied(reason)) => reason should include(rlsWhy)
+        case other => fail(s"expected a fail-closed refusal, got $other")
+    }
+  }
+
+  it should "be refused when the name read at the snapshot has not always been that table" in {
+    // A table renamed since (or a name dropped and reused) escapes policies keyed on today's names.
+    val renamed = harness(
+      kc,
+      new ColumnCatalog.MapCatalog(
+        Map((kc.catalog, "main", "customer") -> List("c_id", "c_email", "c_region"))
+      ),
+      guarded = true
+    )
+    statements.foreach { st =>
+      renamed.run(st(WithAt), effWith(columnPolicies = List(maskEmail))) match
+        case Left(RouterFailure.AccessDenied(reason)) =>
+          reason should include("cannot be read with time travel")
+        case other => fail(s"expected a refusal, got $other")
+    }
   }

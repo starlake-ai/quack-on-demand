@@ -153,3 +153,13 @@ class RestResolverSpec extends AnyFlatSpec with Matchers:
     e.message should not include "secret"
     e.message should include("Id")
   }
+
+  "checkValue" should "admit zero, however written, in a DECIMAL(p,p) column" in {
+    val rate = ColumnKind.Decimal(4, 4)
+    List("0", "0.00", "-0", "0.0000", "0.1234", "-0.5").foreach { v =>
+      withClue(v)(RestResolver.checkValue("rate", rate, v) shouldBe Right(()))
+    }
+    List("1", "0.12345", "10").foreach { v =>
+      withClue(v)(RestResolver.checkValue("rate", rate, v).isLeft shouldBe true)
+    }
+  }

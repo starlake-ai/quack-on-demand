@@ -53,6 +53,15 @@ object RestSql:
       s" WHERE table_catalog = ${lit(catalog)} AND table_schema = ${lit(schema)}" +
       s" ORDER BY table_name LIMIT ${limit.toLong + 1}"
 
+  /** The `table_type` of one object, `BASE TABLE` or `VIEW`, for the table detail: matched on its
+    * name rather than looked up in a capped listing, so any object of a large schema is found.
+    * Schema and name compare case-insensitively, as DuckDB binds the probe's quoted name.
+    */
+  def tableType(catalog: String, schema: String, name: String): String =
+    "SELECT table_type FROM information_schema.tables" +
+      s" WHERE table_catalog = ${lit(catalog)} AND lower(table_schema) = lower(${lit(schema)})" +
+      s" AND lower(table_name) = lower(${lit(name)}) LIMIT 1"
+
   /** The one data statement of `/rows`. `effectiveLimit` is `ExecCaller.effectiveMaxRows` over the
     * server cap, the token cap and the request's `limit`; one extra row is fetched so the encoder
     * can tell a full page from a truncated one.

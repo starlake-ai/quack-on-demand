@@ -15,14 +15,14 @@ import ai.starlake.quack.ondemand.api.{
 import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import cats.data.EitherT
-import cats.effect.IO
+import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import org.apache.arrow.vector.ipc.ArrowReader
 import sttp.model.{Header, StatusCode}
 
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.concurrent.duration.*
 object RestEdgeHandlers:
 
@@ -30,6 +30,9 @@ object RestEdgeHandlers:
   type Out     = IO[Either[Failure, RestOk]]
 
   private val SystemSchemas = Set("information_schema", "pg_catalog")
+
+  /** The longest schema or object name a path segment may carry. */
+  private val MaxObjectName = 1024
 
   /** The four routes: their template (for access logs, never the concrete path) and the parameters
     * each admits. `None` admits the whole `/rows` vocabulary; the listings and the detail refuse
@@ -126,8 +129,9 @@ final class RestEdgeHandlers(
         fmt <- lift(RestFormat.negotiate(q.format, req.accept))
         t   <- resolveTarget(p, tenant, tenantDb, q.pool)
         cap = listingCap(t)
-        qr    <- execute(t, RestSql.listSchemas(t.catalog, cap), hiddenFailure(req.requestId), req)
-        found <- io(consume(qr)(r => readStrings(r.rows, cap)))
+        found <- execute(t, RestSql.listSchemas(t.catalog, cap), hiddenFailure(req.requestId), req)(
+          reading(r => readStrings(r.rows, cap))
+        )
       yield listing(fmt, List("name"), found._1.map(r => List(Json.fromString(r(0)))), found._2)
     }
 
@@ -142,8 +146,9 @@ final class RestEdgeHandlers(
         t   <- resolveTarget(p, tenant, tenantDb, q.pool)
         cap = listingCap(t)
         sql = RestSql.listTables(t.catalog, sch, cap)
-        qr    <- execute(t, sql, hiddenFailure(req.requestId), req)
-        found <- io(consume(qr)(r => readStrings(r.rows, cap)))
+        found <- execute(t, sql, hiddenFailure(req.requestId), req)(
+          reading(r => readStrings(r.rows, cap))
+        )
         // Nothing visible in the schema is indistinguishable from no schema.
         _ <- if found._1.isEmpty then fail(RestError.NotFound) else lift(Right(()))
       yield listing(
@@ -160,7 +165,7 @@ final class RestEdgeHandlers(
         p    <- authenticate(tenant, req)
         _    <- lift(segment(tenantDb))
         sch  <- lift(schemaSegment(schema))
-        tbl  <- lift(segment(name))
+        tbl  <- lift(objectSegment(name))
         q    <- lift(parseQuery(Route.Table, req.rawQuery))
         fmt  <- lift(RestFormat.negotiate(q.format, req.accept))
         t    <- resolveTarget(p, tenant, tenantDb, q.pool)
@@ -196,7 +201,7 @@ final class RestEdgeHandlers(
         p    <- authenticate(tenant, req)
         _    <- lift(segment(tenantDb))
         sch  <- lift(schemaSegment(schema))
-        tbl  <- lift(segment(name))
+        tbl  <- lift(objectSegment(name))
         q    <- lift(parseQuery(Route.Rows, req.rawQuery))
         f    <- lift(RestFormat.negotiate(q.format, req.accept))
         t    <- resolveTarget(p, tenant, tenantDb, q.pool)
@@ -211,10 +216,12 @@ final class RestEdgeHandlers(
         // Same node as the probe: a soft pin, a vanished node falls back as usual.
         pinnedCaller = t.caller.copy(preferredNode = Some(pr._2))
         sql          = RestSql.render(at, rq, limit)
-        qr  <- execute(t.copy(caller = pinnedCaller), sql, dataFailure(req.requestId), req)
-        enc <- io(
-          consume(qr)(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))
-        )
+        enc <- execute(
+          t.copy(caller = pinnedCaller),
+          sql,
+          dataFailure(req.requestId, filtered = rq.filters.nonEmpty),
+          req
+        )(reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes)))
       yield
         val range =
           if enc.rows == 0 then "*/*" else s"${q.offset}-${q.offset.toLong + enc.rows - 1}/*"
@@ -240,12 +247,23 @@ final class RestEdgeHandlers(
 
   // ---- path segments and parameters ----------------------------------------------------------
 
-  /** QoD's identifier rule: a segment that breaks it names no object, so it is a 404. */
+  /** QoD's identifier rule, for the tenant-db: a segment that breaks it names no database, so it is
+    * a 404.
+    */
   private def segment(s: String): Either[RestError, String] =
     if Names.isValid(s) then Right(s) else Left(RestError.NotFound)
 
+  /** A schema or object name: anything DuckDB can name (`"order-items"`, `"2024_sales"`), so every
+    * object the tables listing names is reachable. Only an empty or over-long segment, or one
+    * holding a control character, names nothing (404). The name reaches SQL only quoted
+    * ([[RestSql]]) or as a bound parameter.
+    */
+  private def objectSegment(s: String): Either[RestError, String] =
+    if s.nonEmpty && s.length <= MaxObjectName && !s.exists(Character.isISOControl) then Right(s)
+    else Left(RestError.NotFound)
+
   private def schemaSegment(s: String): Either[RestError, String] =
-    segment(s).filterOrElse(
+    objectSegment(s).filterOrElse(
       x => !SystemSchemas.contains(RestResolver.asciiLower(x)),
       RestError.NotFound
     )
@@ -299,18 +317,18 @@ final class RestEdgeHandlers(
   private def routable(key: PoolKey): Boolean =
     sup.snapshot(key).exists(snap => snap.nodes.exists(n => snap.loadOf(n.nodeId).routable))
 
+  /** MCP `run_sql`'s own resolution ([[PoolPicks.forDatabase]]); a pool not serving the database is
+    * as absent as one that does not exist.
+    */
   private def poolKeyFor(
       tenant: String,
       db: String,
       pool: Option[String]
   ): Either[RestError, PoolKey] =
-    pool match
-      case None       => PoolPicks.readPoolKey(sup, tenant, db).toRight(RestError.PoolUnavailable)
-      case Some(name) =>
-        sup
-          .findPoolKeyByTenantAndPoolName(tenant, name)
-          .filter(_.tenantDb == db)
-          .toRight(RestError.NotFound)
+    PoolPicks.forDatabase(sup, tenant, db, pool).left.map {
+      case PoolPicks.Miss.NoPool => RestError.PoolUnavailable
+      case _                     => RestError.NotFound
+    }
 
   private def listingCap(t: Target): Int = t.caller.effectiveMaxRows(cfg.maxRows, cfg.maxRows)
 
@@ -395,24 +413,18 @@ final class RestEdgeHandlers(
       at: RestSql.Target,
       req: RestRequest
   ): Step[(Vector[ProbedColumn], String)] =
-    execute(t, RestSql.probe(at), hiddenFailure(req.requestId), req, probeExecutor).flatMap { qr =>
-      io(consume(qr)(r => (ProbedColumn.fromArrow(r.rows.getVectorSchemaRoot.getSchema), r.nodeId)))
-    }
+    execute(t, RestSql.probe(at), hiddenFailure(req.requestId), req, probeExecutor)(
+      reading(r => (ProbedColumn.fromArrow(r.rows.getVectorSchemaRoot.getSchema), r.nodeId))
+    )
 
-  /** The table-or-view answer of the detail endpoint, from the tables listing. The probe cannot
-    * tell the two apart; when the listing is denied (filtered metadata off, no grant on
-    * `information_schema`) or cut by the cap, the type is unknown rather than guessed.
+  /** The table-or-view answer of the detail endpoint, from `information_schema.tables`. The probe
+    * cannot tell the two apart; when that lookup is denied (filtered metadata off, no grant on
+    * `information_schema`), the type is unknown rather than guessed.
     */
   private def objectTypeOf(t: Target, schema: String, name: String, req: RestRequest) =
-    val cap = listingCap(t)
-    execute(t, RestSql.listTables(t.catalog, schema, cap), hiddenFailure(req.requestId), req).value
-      .flatMap {
-        case Left(_)   => IO.pure(None)
-        case Right(qr) =>
-          consume(qr)(r =>
-            readStrings(r.rows, cap)._1.find(_(0) == name).map(r => objectType(r(1)))
-          )
-      }
+    execute(t, RestSql.tableType(t.catalog, schema, name), hiddenFailure(req.requestId), req)(
+      reading(r => readStrings(r.rows, 1)._1.headOption.map(r => objectType(r(0))))
+    ).value.map(_.toOption.flatten)
 
   private def objectType(tableType: String): String =
     if tableType == "VIEW" then "view" else "table"
@@ -422,35 +434,73 @@ final class RestEdgeHandlers(
     * 504, unless the pool was cold when the request arrived: the wait then went to the resume, so
     * it is the retryable 503 `pool_resuming` the router's own hold would have given. A raised error
     * is an upstream failure whose text is logged at DEBUG only, never returned.
+    *
+    * A result delivered in time is handed to `use`, which owns it from then on and must close it.
+    * The hand-off has no cancellation point: a request cancelled after the result arrived but
+    * before `use` ran (at the boundary of the wait), or while `use` runs, or a `use` that raises,
+    * has the result closed here. Its close is idempotent, so a `use` that already closed it is not
+    * harmed.
     */
-  private def execute(
+  private def execute[A](
       t: Target,
       sql: String,
       onFailure: RouterFailure => RestError,
       req: RestRequest,
       via: CatalogPreviewHandlers.PreviewExecutor = executor
-  ): Step[QueryResult] =
+  )(use: QueryResult => IO[Either[RestError, A]]): Step[A] =
     val run: IO[Either[RestError, QueryResult]] =
       IO.defer(via(t.caller, t.poolKey, sql))
-        .map(_.left.map(onFailure))
+        .map {
+          case Right(qr) => Right(closingOnce(qr))
+          case Left(f)   => Left(onFailure(f))
+        }
         .handleError { e =>
           logger.warn(s"rest [${req.requestId}] executor raised ${e.getClass.getName}")
           logger.debug(s"rest [${req.requestId}] executor raised: ${e.getMessage}")
           Left(RestError.UpstreamError)
         }
     val onTimeout = if t.cold then RestError.PoolResuming else RestError.StatementTimeout
-    EitherT(BoundedWait.closingLate(run, timeoutFor(t.caller), onTimeout, _.close()))
+    // The result as soon as it is delivered, before any cancellation point can lose it.
+    val delivered = new AtomicReference[Option[QueryResult]](None)
+    val waited    = BoundedWait.closingLate(
+      run,
+      timeoutFor(t.caller),
+      onTimeout,
+      _.close(),
+      qr => IO(delivered.set(Some(qr)))
+    )
+    EitherT(IO.uncancelable { poll =>
+      poll(waited)
+        .onCancel(IO.defer(delivered.get.fold(IO.unit)(qr => IO.blocking(qr.close()))))
+        .flatMap {
+          case Left(e)   => IO.pure(Left(e))
+          case Right(qr) =>
+            poll(use(qr)).guaranteeCase {
+              case Outcome.Succeeded(_) => IO.unit
+              case _                    => IO.blocking(qr.close())
+            }
+        }
+    })
+
+  /** A `use` for [[execute]] that reads the result with `f` and closes it ([[consume]]). */
+  private def reading[A](f: QueryResult => A): QueryResult => IO[Either[RestError, A]] =
+    qr => consume(qr)(f).map(Right(_))
+
+  /** `qr`, whose close runs at most once. */
+  private def closingOnce(qr: QueryResult): QueryResult =
+    val closed = new AtomicBoolean(false)
+    qr.copy(close = () => if closed.compareAndSet(false, true) then qr.close())
 
   private def timeoutFor(caller: ExecCaller): FiniteDuration =
     val base = stmtTimeout.getOrElse(cfg.stmtTimeoutSec.seconds)
     caller.restriction.stmtTimeoutMs.filter(_ > 0).map(_.toLong.millis).fold(base)(_ min base)
 
-  /** Reads a result under ONE idempotent finalizer that closes it (which also deregisters the
-    * statement from the kill registry), on success, error and cancellation alike.
+  /** Reads a result under ONE finalizer that closes it (which also deregisters the statement from
+    * the kill registry), on success, error and cancellation alike; the close is idempotent
+    * ([[closingOnce]]).
     */
   private def consume[A](qr: QueryResult)(f: QueryResult => A): IO[A] =
-    val closed = new AtomicBoolean(false)
-    IO.blocking(f(qr)).guarantee(IO.blocking(if closed.compareAndSet(false, true) then qr.close()))
+    IO.blocking(f(qr)).guarantee(IO.blocking(qr.close()))
 
   // ---- failure mapping -----------------------------------------------------------------------
 
@@ -463,15 +513,22 @@ final class RestEdgeHandlers(
     case other => common(rid, other)
 
   /** The data statement, after a probe that saw the object: a denial is an `acl_denied` whose
-    * reason (it may name columns or tables) is logged, not returned.
+    * reason (it may name columns or tables) is logged, not returned. A statement the node refuses
+    * as invalid (`BadRequest`: a conversion error) while it carries filters is a filter value the
+    * column's real type rejects, which the probe's Arrow type could not show (a UUID or JSON column
+    * arrives as VARCHAR): a 400, not an upstream failure.
     */
-  private def dataFailure(rid: String)(f: RouterFailure): RestError = f match
+  private def dataFailure(rid: String, filtered: Boolean)(f: RouterFailure): RestError = f match
     case RouterFailure.AccessDenied(reason) =>
       logger.info(s"rest [$rid] data statement denied")
       logger.debug(s"rest [$rid] data statement denied: $reason")
       RestError.AclDenied("access denied")
-    case RouterFailure.NotFound(_) => RestError.NotFound
-    case other                     => common(rid, other)
+    case RouterFailure.NotFound(_)               => RestError.NotFound
+    case RouterFailure.BadRequest(r) if filtered =>
+      logger.info(s"rest [$rid] data statement refused by the node as invalid")
+      logger.debug(s"rest [$rid] data statement refused by the node: $r")
+      RestError.InvalidFilter("a filter value does not convert to its column's type")
+    case other => common(rid, other)
 
   private def common(rid: String, f: RouterFailure): RestError = f match
     // The router's hibernation hold expired, the same test MCP applies.

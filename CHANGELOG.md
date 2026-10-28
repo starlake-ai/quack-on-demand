@@ -1391,6 +1391,13 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `QOD_REST_STMT_TIMEOUT_SEC` that does not exceed the resume hold. Every `503` carries
   `Retry-After`. CSV values are written as stored, with no spreadsheet formula escaping, and
   `X-QoD-Snapshot` shows any reader of a DuckLake database when it was last written to.
+  Schema and table segments take any name DuckDB can hold (`order-items`, `2024_sales`), so every
+  listed object is readable, and a filter value the column's real type rejects (a malformed UUID,
+  whose column the probe sees as text) answers `400 invalid_filter` rather than `502`. A principal
+  under a column or row policy reads a table at a snapshot only when the table, under that name,
+  has always been the same table with the same column names: those policies match today's names,
+  so a table or column renamed, dropped or recreated since is refused, in every statement kind and
+  on every door.
   Responses are `Cache-Control: private` with `Vary:
   Authorization, Accept`, and cacheable for five minutes only when pinned to a snapshot. The
   endpoints are in the OpenAPI document under the `rest-edge` tag. The Helm chart gains `rest.enabled` (off by default), `rest.tls.enabled`, a
