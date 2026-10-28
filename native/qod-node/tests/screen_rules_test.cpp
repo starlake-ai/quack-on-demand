@@ -192,21 +192,22 @@ int main() {
 	Admitted("COPY t TO 's3://acme-etl/o.csv' (HEADER true, DELIMITER '|')", 1, "plain options");
 
 	// ---- C1: a COPY option DuckDB may read as a path is literal, both directions; a computed one could
-	// spell any path, as the binder evaluates it
+	// spell any path, as the binder evaluates it. FILENAME_PATTERN and FILE_EXTENSION take one string
+	// (I2), so every computed form of them is refused as not one.
 	const std::string to_out = "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), ";
 	for (auto computed : {"FILENAME_PATTERN concat('..', '/', '..', '/pwn_{i}'))",
-	                      "FILENAME_PATTERN ('..' || '/x_{i}'))", "FILENAME_PATTERN '../../x_{i}'::VARCHAR)", "FILENAME_PATTERN CAST('x_{i}' AS VARCHAR))",
-	                      "FILENAME_PATTERN lower('X_{I}'))", "FILENAME_PATTERN getvariable('p'))",
-	                      "FILENAME_PATTERN $1)",
+	                      "FILENAME_PATTERN ('..' || '/x_{i}'))", "FILENAME_PATTERN '../../x_{i}'::VARCHAR)",
+	                      "FILENAME_PATTERN CAST('x_{i}' AS VARCHAR))", "FILENAME_PATTERN lower('X_{I}'))",
+	                      "FILENAME_PATTERN getvariable('p'))", "FILENAME_PATTERN $1)",
 	                      "FILE_EXTENSION concat('csv', '/../x'))", "FILE_EXTENSION ('pa' || 'rquet'))",
 	                      "FILE_EXTENSION 'csv'::VARCHAR)", "FILENAME_PATTERN [concat('..', '/x')])",
 	                      "FILENAME_PATTERN system.main.concat('x_', '{i}'))"}) {
-		Refused(to_out + computed, "is computed, so QoD cannot check", std::string("a computed option: ") + computed);
+		Refused(to_out + computed, "needs one literal string", std::string("a computed option: ") + computed);
 	}
 	Refused(to_out + "FILENAME_PATTERN (SELECT 'x_{i}'))", "QoD: the statement does not parse",
 	        "a subquery as an option value (DuckDB 2.0's parser refuses it)");
-	Refused(to_out + "FILENAME_PATTERN concat('..', '/', 'x_{i}'))",
-	        "QoD: COPY option filename_pattern is computed, so QoD cannot check that it names no path",
+	Refused("COPY t TO 's3://acme-etl/o.csv' (FORMAT csv, NO_SUCH_OPTION concat('..', '/', 'x_{i}'))",
+	        "QoD: COPY option no_such_option is computed, so QoD cannot check that it names no path",
 	        "the refusal names the option");
 	Refused("COPY t TO 's3://acme-etl/o.csv' (FORMAT concat('cs', 'v'))", "COPY option format is computed",
 	        "a computed FORMAT");
@@ -217,7 +218,7 @@ int main() {
 	Refused("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, NO_SUCH_OPTION concat('..', '/x'))",
 	        "COPY option no_such_option is computed", "an option nobody listed (an extension's)");
 	for (auto escape : {"FILENAME_PATTERN '../x_{i}')", "FILENAME_PATTERN 'sub/x_{i}')",
-	                    "FILENAME_PATTERN '..\\x_{i}')", "FILENAME_PATTERN \"../x_{i}\")", "FILENAME_PATTERN ('a', '../x'))",
+	                    "FILENAME_PATTERN '..\\x_{i}')", "FILENAME_PATTERN \"../x_{i}\")",
 	                    "FILE_EXTENSION 'csv/../../x')", "FILE_EXTENSION '../x')", "FILE_EXTENSION \"a/b\")",
 	                    // The parser keeps a qualified name's last part, as text.
 	                    "FILENAME_PATTERN \"x\".\"../y_{i}\")"}) {
@@ -248,6 +249,53 @@ int main() {
 	Admitted("COPY t FROM 's3://acme-etl/in.json' (FORMAT json, COLUMNS {'a': 'INTEGER'})", 1,
 	         "COPY FROM: a literal struct option");
 	Admitted("COPY t FROM 's3://acme-etl/in.csv' (REJECTS_TABLE 'rejects')", 1, "a literal rejects table");
+
+	// ---- I2: FILENAME_PATTERN and FILE_EXTENSION take one string; any other literal is judged by the
+	// value the binder takes, so a hex or bit literal by its bytes, not its digits
+	for (auto shaped : {"FILENAME_PATTERN [X'2F2E2E2F2E2E2F78'])", "FILENAME_PATTERN X'2F2E2E2F78')",
+	                    "FILENAME_PATTERN ['x', X'2F2E2E2F2E2E2F78'])", "FILENAME_PATTERN [B'00101111'])",
+	                    "FILENAME_PATTERN B'00101111')", "FILENAME_PATTERN {'k': X'2F2E2E2F78'})",
+	                    "FILENAME_PATTERN ('x_{i}', 'y'))", "FILENAME_PATTERN ['x_{i}'])", "FILENAME_PATTERN 1)",
+	                    "FILENAME_PATTERN)", "FILE_EXTENSION [X'2F2E2E2F78'])", "FILE_EXTENSION X'2F2E2E2F78')",
+	                    "FILE_EXTENSION ['csv', X'2F2E2E2F78'])", "FILE_EXTENSION {'e': 'csv'})"}) {
+		Refused(to_out + shaped, "needs one literal string", std::string("not one string: ") + shaped);
+	}
+	Refused(to_out + "FILENAME_PATTERN [X'2F2E2E2F2E2E2F78'])",
+	        "QoD: COPY option filename_pattern needs one literal string", "the refusal names the option");
+	Refused("COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, FILENAME_PATTERN [X'2F2E2E2F78'])",
+	        "COPY option filename_pattern needs one literal string", "under any format");
+	for (auto decoded : {"REJECTS_TABLE [X'2F2E2E2F78'])", "REJECTS_TABLE ['r', X'2E2E'])",
+	                     "NO_SUCH_OPTION {'k': X'2F2E2E2F78'})", "NO_SUCH_OPTION ('a', X'5C78'))"}) {
+		Refused("COPY t FROM 's3://acme-etl/in.csv' (" + std::string(decoded), "names a path",
+		        std::string("a nested hex literal, by its bytes: ") + decoded);
+	}
+	Admitted("COPY t FROM 's3://acme-etl/in.csv' (NO_SUCH_OPTION [X'6162', B'0101'])", 1,
+	         "hex and bit literals spelling no path");
+
+	// ---- M5: the allowlist holds for the core formats only; under any other, every option is literal
+	for (auto strict : {"COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, COMPRESSION concat('zs', 'td'))",
+	                    "COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, PARTITION_PATH concat('a=', a))",
+	                    "COPY t TO 's3://acme-lake/ns/t' (FORMAT 'ICEBERG', ROW_GROUP_SIZE 100 * 1000)",
+	                    "COPY t TO 's3://acme-etl/o.xlsx' (ROW_GROUP_SIZE 100 * 1000)",
+	                    "COPY t FROM 's3://acme-etl/in.xlsx' (HEADER concat('tr', 'ue'))"}) {
+		Refused(strict, "is computed, so QoD cannot check", strict);
+	}
+	for (auto strict : {"COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, PREFIX '../x')",
+	                    "COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, DATEFORMAT '%d/%m/%Y')",
+	                    "COPY t TO 's3://acme-etl/o.xlsx' (COMPRESSION 'a/b')"}) {
+		Refused(strict, "names a path", strict);
+	}
+	for (auto core : {"COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE 100 * 1000)",
+	                  "COPY t TO 's3://acme-etl/o.csv.gz' (DATEFORMAT '%d/%m/%Y', HEADER)",
+	                  "COPY t TO 's3://acme-etl/o.json' (DATEFORMAT '%d/%m/%Y')",
+	                  "COPY t TO 's3://acme-etl/o.ndjson' (DATEFORMAT '%d/%m/%Y')",
+	                  "COPY t TO 's3://acme-etl/out/' (PARTITION_BY (a), PARTITION_PATH concat('a=', a))",
+	                  "COPY t TO 's3://acme-etl/o.bin' (FORMAT blob, COMPRESSION 'gzip')",
+	                  "COPY t TO 's3://acme-etl/o' (FORMAT 'PARQUET', ROW_GROUP_SIZE 100 * 1000)"}) {
+		Admitted(core, 1, core);
+	}
+	Admitted("COPY t TO 's3://acme-lake/ns/t' (FORMAT iceberg, COMPRESSION 'zstd', PARTITION_BY (a))", 1,
+	         "literal options under another format");
 
 	// ---- statements reserved to superusers, and their nearest admitted neighbors
 	Refused("EXPORT DATABASE 's3://acme-etl/dump'", "EXPORT DATABASE is reserved to superusers", "EXPORT");
@@ -333,11 +381,14 @@ int main() {
 		Refused(secret, "QoD: secrets are reserved to superusers", secret);
 	}
 	// Every storage, DuckDB 2.0's transaction-scoped one included, and every wrapper the walk follows.
-	for (auto secret : {"CREATE SECRET s IN connection (TYPE s3)", "CREATE TEMPORARY SECRET s IN connection (TYPE s3)",
-	                    "CREATE SECRET s IN transaction (TYPE s3)", "CREATE TEMPORARY SECRET s IN transaction (TYPE s3)",
-	                    "CREATE SECRET s IN memory (TYPE s3)", "CREATE PERSISTENT SECRET s IN local_file (TYPE s3)",
-	                    "CREATE SECRET s IN some_other_storage (TYPE s3)", "CREATE SECRET s IN \"Connection\" (TYPE s3)",
-	                    "CREATE OR REPLACE PERSISTENT SECRET s (TYPE s3)", "CREATE OR REPLACE TEMPORARY SECRET s (TYPE s3)",
+	for (auto secret : {"CREATE SECRET s IN connection (TYPE s3)",
+	                    "CREATE TEMPORARY SECRET s IN connection (TYPE s3)", "CREATE SECRET s IN transaction (TYPE s3)",
+	                    "CREATE TEMPORARY SECRET s IN transaction (TYPE s3)", "CREATE SECRET s IN memory (TYPE s3)",
+	                    "CREATE PERSISTENT SECRET s IN local_file (TYPE s3)",
+	                    "CREATE SECRET s IN some_other_storage (TYPE s3)",
+	                    "CREATE SECRET s IN \"Connection\" (TYPE s3)",
+	                    "CREATE OR REPLACE PERSISTENT SECRET s (TYPE s3)",
+	                    "CREATE OR REPLACE TEMPORARY SECRET s (TYPE s3)",
 	                    "CREATE PERSISTENT SECRET IF NOT EXISTS s (TYPE s3)", "CREATE SECRET (TYPE s3)",
 	                    "CREATE SECRET IF NOT EXISTS s IN transaction (TYPE s3)", "DROP PERSISTENT SECRET s",
 	                    "DROP SECRET IF EXISTS s", "DROP SECRET s FROM transaction", "DROP SECRET s FROM memory",
@@ -349,15 +400,16 @@ int main() {
 	                    "SELECT * FROM query('CREATE SECRET s IN connection (TYPE s3)')",
 	                    "SELECT * FROM query('DROP SECRET s')",
 	                    "SELECT * FROM query('SELECT * FROM query(''CREATE SECRET s (TYPE s3)'')')",
-	                    "SELECT * FROM range(1) WHERE EXISTS (SELECT * FROM query('DROP SECRET s FROM transaction'))"}) {
+	                    "SELECT * FROM range(1) WHERE EXISTS "
+	                    "(SELECT * FROM query('DROP SECRET s FROM transaction'))"}) {
 		Refused(secret, "QoD: secrets are reserved to superusers", secret);
 	}
 	Refused("PREPARE p AS CREATE SECRET s (TYPE s3)", "QoD: the statement does not parse",
 	        "DuckDB 2.0 cannot PREPARE a CREATE SECRET");
 	Refused("SELECT 1; SET s3_region = 'eu-west-1'", "SET and RESET of s3_region are reserved",
 	        "a SET in a multi-statement request");
-	Refused("SELECT * FROM query('SET s3_endpoint = ''evil.example.com''')", "SET and RESET of s3_endpoint are reserved",
-	        "a SET inside query()");
+	Refused("SELECT * FROM query('SET s3_endpoint = ''evil.example.com''')",
+	        "SET and RESET of s3_endpoint are reserved", "a SET inside query()");
 	Refused("SET s3_region TO 'eu-west-1'", "SET and RESET of s3_region are reserved", "SET ... TO");
 	Refused("RESET SESSION s3_endpoint", "SET and RESET of s3_endpoint are reserved", "RESET SESSION");
 	for (auto setting : {"SET s3_access_key_id = 'AKIA'", "SET SESSION s3_secret_access_key = 'x'",
@@ -375,7 +427,9 @@ int main() {
 	for (std::string name :
 	     {"enable_server_cert_verification", "ca_cert_file", "extra_http_headers", "httpfs_enable_credential_refresh",
 	      "httpfs_client_implementation", "httpfs_connection_caching", "http_keep_alive", "redact_http_logs",
-	      "secret_directory", "allow_persistent_secrets", "allow_unredacted_secrets"}) {
+	      "secret_directory", "allow_persistent_secrets", "allow_unredacted_secrets",
+	      // I3, M6
+	      "enable_curl_server_cert_verification", "gcs_user_project", "unsafe_disable_etag_checks"}) {
 		auto refusal = "QoD: SET and RESET of " + name + " are reserved to superusers";
 		for (auto form : {"SET " + name + " = 'x'", "SET SESSION " + name + " = 'x'", "SET GLOBAL " + name + " = 'x'",
 		                  "SET " + name + " TO 'x'", "RESET " + name, "RESET SESSION " + name, "RESET GLOBAL " + name,

@@ -273,7 +273,11 @@ int main() {
 	ExpectQuery(internal,
 	            ScreenCall("c-judy", "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), "
 	                                 "FILENAME_PATTERN concat('..', '/', '..', '/pwn_{i}'))"),
-	            "QoD: COPY option filename_pattern is computed", "a computed file name pattern");
+	            "QoD: COPY option filename_pattern needs one literal string", "a computed file name pattern");
+	ExpectQuery(internal,
+	            ScreenCall("c-judy", "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), "
+	                                 "FILENAME_PATTERN [X'2F2E2E2F2E2E2F78'])"),
+	            "QoD: COPY option filename_pattern needs one literal string", "a file name pattern of hex bytes");
 	Check("", replica.Requests() != asked, "", "neither asks the replica");
 	// Decision 23: a location one of the node's own S3 secrets would sign, over judy's (she has none
 	// recorded), is refused on the node. A stand-in s3 type: httpfs registers the real one.

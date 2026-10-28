@@ -147,25 +147,39 @@ const char *const kCopyNonPathOptions[] = {"allow_quoted_nulls",
                                            "write_partition_columns",
                                            "write_timestamp_as_int96"};
 
+//! The COPY functions kCopyNonPathOptions was read from (copy_csv.cpp, copy_blob.cpp,
+//! parquet_extension.cpp, json_extension.cpp at v2.0.0). Under any other format (an extension's, or
+//! a file extension no core function claims) every option must be literal and hold no path.
+const char *const kCoreCopyFormats[] = {"blob",    "csv",   "geojson", "geojsonl",
+                                        "json",    "jsonl", "ndjson",  "parquet"};
+
+//! The COPY options that spell the names of the files written (bind_copy.cpp, CreateFilename): one
+//! string, under every format.
+const char *const kCopyFileNameOptions[] = {"file_extension", "filename_pattern"};
+
 //! Settings a session may not change (decision 23), besides every s3_* and external_file_cache_*
 //! one: what makes httpfs sign with the node's environment or the AWS chain, refresh credentials,
 //! add headers to a signed request or log it unredacted; how the server's certificate is verified;
 //! which HTTP client sends a request, the proxies it passes and the connections it reuses; the
-//! secret defaults; and the caches that would hand one user what another read. From httpfs's
-//! registered settings at DuckDB 2.0.0 (duckdb_settings() with httpfs loaded) and the core secret
-//! and cache settings.
+//! project a GCS request is billed to; the consistency check between reads of one file; the secret
+//! defaults; and the caches that would hand one user what another read. From httpfs's settings at
+//! DuckDB 2.0.0 (duckdb_settings() with httpfs loaded, and DuckDbSettingScopes, generated from the
+//! httpfs sources, for the ones registered only later, such as the curl client's) and the core
+//! secret and cache settings.
 const char *const kReservedSettings[] = {"allow_persistent_secrets",
                                          "allow_unredacted_secrets",
                                          "aws_default_credentials",
                                          "ca_cert_file",
                                          "cache_local_files",
                                          "default_secret_storage",
+                                         "enable_curl_server_cert_verification",
                                          "enable_external_file_cache",
                                          "enable_global_s3_configuration",
                                          "enable_http_metadata_cache",
                                          "enable_object_cache",
                                          "enable_server_cert_verification",
                                          "extra_http_headers",
+                                         "gcs_user_project",
                                          "http_keep_alive",
                                          "http_proxy",
                                          "http_proxy_password",
@@ -177,6 +191,7 @@ const char *const kReservedSettings[] = {"allow_persistent_secrets",
                                          "parquet_metadata_cache",
                                          "redact_http_logs",
                                          "secret_directory",
+                                         "unsafe_disable_etag_checks",
                                          "validate_external_file_cache"};
 
 //! How deep the walk may nest (nodes, references and expressions together).
@@ -786,9 +801,22 @@ private:
 			Refuse("the statement nests too deeply to be screened");
 		}
 		switch (expression->GetExpressionClass()) {
-		case ExpressionClass::CONSTANT:
-			texts.push_back(expression->Cast<ConstantExpression>().GetLiteral().text);
+		case ExpressionClass::CONSTANT: {
+			// As spelled and as the binder takes it: a hex or bit literal's text is its digits, its value
+			// the bytes they spell (X'2F2E2E' is /..).
+			auto &literal = expression->Cast<ConstantExpression>().GetLiteral();
+			texts.push_back(literal.text);
+			try {
+				auto value = literal.ToValue();
+				if (!value.IsNull()) {
+					texts.push_back(value.ToString());
+				}
+			} catch (std::exception &) {
+				// A literal the screen cannot decode is no literal it can check.
+				return false;
+			}
 			return true;
+		}
 		case ExpressionClass::COLUMN_REF: {
 			auto &name = expression->Cast<ColumnRefExpression>();
 			if (name.IsQualified()) {
@@ -821,15 +849,44 @@ private:
 		}
 	}
 
+	//! The COPY format DuckDB will look up (Binder::BindCopyFormat at v2.0.0): FORMAT as given, else the
+	//! file name's extension past a .gz or .zst suffix (ExtractFormat), lower case. A file name with no
+	//! extension is csv, as DuckDB finds no function and no extension for an empty format and falls back
+	//! to csv. A FORMAT value that is computed stays in parsed_options and is refused there.
+	static std::string CopyFormat(const CopyInfo &info) {
+		if (!info.format.empty()) {
+			return StringUtil::Lower(info.format);
+		}
+		auto format = StringUtil::Lower(info.file_path);
+		if (StringUtil::EndsWith(format, ".gz")) {
+			format = format.substr(0, format.size() - 3);
+		} else if (StringUtil::EndsWith(format, ".zst")) {
+			format = format.substr(0, format.size() - 4);
+		}
+		auto dot = format.rfind('.');
+		return dot == std::string::npos || dot + 1 == format.size() ? "csv" : format.substr(dot + 1);
+	}
+
 	//! COPY options, both directions (C1): an option DuckDB never reads as a location may hold any
-	//! value (kCopyNonPathOptions); any other one must be literal, and no text it holds may look like a
-	//! path. Its value is computed at bind (BindCopyOption evaluates it), so a computed one could spell
-	//! any path: FILENAME_PATTERN concat('..', '/x_{i}') writes beside the checked target.
+	//! value (kCopyNonPathOptions), for the core formats only (M5: an extension's COPY function may read
+	//! any name as a path); any other one must be literal, and no text it holds may look like a path.
+	//! Its value is computed at bind (BindCopyOption evaluates it), so a computed one could spell any
+	//! path: FILENAME_PATTERN concat('..', '/x_{i}') writes beside the checked target. FILENAME_PATTERN
+	//! and FILE_EXTENSION, which spell the files written, take one string and nothing else (I2).
 	void CopyOptions(CopyInfo &info) {
+		auto core = Contains(kCoreCopyFormats, CopyFormat(info));
+		auto free_value = [core](const std::string &name) {
+			return core && Contains(kCopyNonPathOptions, name);
+		};
 		for (auto &option : info.parsed_options) {
 			Walk(option.second);
 			auto name = StringUtil::Lower(option.first.GetIdentifierName());
-			if (Contains(kCopyNonPathOptions, name)) {
+			if (Contains(kCopyFileNameOptions, name)) {
+				// The parser keeps a single string (or name) in CopyInfo.options; anything here is a list,
+				// a struct, a row, a cast or a call.
+				Refuse("COPY option " + name + " needs one literal string");
+			}
+			if (free_value(name)) {
 				continue;
 			}
 			std::vector<std::string> texts;
@@ -842,7 +899,12 @@ private:
 		}
 		for (auto &option : info.options) {
 			auto name = StringUtil::Lower(option.first.GetIdentifierName());
-			if (Contains(kCopyNonPathOptions, name)) {
+			if (Contains(kCopyFileNameOptions, name) &&
+			    (option.second.size() != 1 || option.second[0].type().id() != LogicalTypeId::VARCHAR)) {
+				// A BLOB or BIT literal (X'2F2E2E'), several values, or none.
+				Refuse("COPY option " + name + " needs one literal string");
+			}
+			if (free_value(name)) {
 				continue;
 			}
 			for (auto &value : option.second) {
