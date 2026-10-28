@@ -5,11 +5,15 @@ decision 11) from what qod-node resolves:
   native/qod-node/functions.json -> src/main/resources/authz/function-classes.tsv
                                     native/qod-node/file-functions.txt
                                     native/qod-node/admitted-table-functions.txt
+  native/qod-node/macros.json    -> the macro and table macro rows of function-classes.tsv
   native/qod-node/settings.json  -> src/main/resources/authz/setting-classes.tsv
 
-Run by scripts/dev/gen-qod-node-classification.sh, which writes the two JSON files first. The rule
-tables below ARE the classification: review a change to them like code. FunctionClassesSpec and
-SettingClassesSpec fail until the generated tables match the JSON.
+Run by scripts/dev/gen-qod-node-classification.sh, which writes the JSON files first; macros.json
+comes from `--macros-dump <file>`, the release CLI's duckdb_functions() rows of every internal macro
+and table macro with each definition's parse tree (json_serialize_sql), reduced here to the calls
+and table reads of each body. The rule tables below ARE the classification: review a change to them
+like code. FunctionClassesSpec and SettingClassesSpec fail until the generated tables match the
+JSON.
 
 Fail closed by construction:
   - a table function or a pragma no rule names is superuser;
@@ -17,10 +21,18 @@ Fail closed by construction:
     starts with a SCALAR_SUPERUSER_PREFIXES family or holds a SUSPICIOUS_SUBSTRINGS entry and is not in
     REVIEWED_ALLOWED: that is superuser (quack_ has no exception);
   - an alias is at least as strict as the function it stands for;
-  - a setting is superuser unless SESSION names it; an alias takes its target's class.
+  - a setting is superuser unless SESSION names it; an alias takes its target's class;
+  - a built-in macro or table macro (Task 19) is classified from its body: allowed only when every
+    call in it, through other macros, is to a function classed allowed (no sequence function, no
+    query() or query_table(), no table read), superuser when any call is to one classed superuser,
+    and otherwise not classified, so the node refuses it in a bind-time slot.
 Every default applied is printed under "review:": copy those lines into the commit message.
+
+`--macro-classes <dump>` prints the class it computes for each macro of a dump, against the
+function classes functions.json gives, and writes nothing (FunctionClassesSpec runs it on a fixture).
 """
 
+import argparse
 import json
 import re
 import sys
@@ -29,6 +41,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 FUNCTIONS_JSON = REPO / "native/qod-node/functions.json"
 SETTINGS_JSON = REPO / "native/qod-node/settings.json"
+MACROS_JSON = REPO / "native/qod-node/macros.json"
 FUNCTION_TSV = REPO / "src/main/resources/authz/function-classes.tsv"
 SETTING_TSV = REPO / "src/main/resources/authz/setting-classes.tsv"
 FILE_FUNCTIONS = REPO / "native/qod-node/file-functions.txt"
@@ -174,8 +187,23 @@ SESSION = {
 
 # ---- generation -------------------------------------------------------------------------------------------
 
+# ---- built-in macros and table macros (Task 19) ----------------------------------------------------
+
+# Allowed functions a macro body may still not call to be allowed: a sequence function reads or
+# writes a sequence while the slot is bound, and query() / query_table() take the SQL or the table
+# they read as a value, which no screen reads inside a macro.
+MACRO_REFUSED_CALLS = {"currval", "nextval", "setval", "query", "query_table"}
+
+# The function types a call can resolve to, by where the body calls it.
+CALL_TYPES = {"scalar": ("scalar", "aggregate", "macro"), "window": ("window", "aggregate"),
+              "table": ("table", "table_macro")}
+
+# Where an unqualified name resolves: DuckDB's default search path for functions.
+CALL_SCHEMAS = ("main", "pg_catalog")
+
 RANK = {"allowed": 0, "listing": 1, "file": 2, "superuser": 3}
 TYPES = {"scalar", "aggregate", "window", "table", "pragma"}
+MACRO_TYPES = {"macro", "table_macro"}
 NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
@@ -270,6 +298,114 @@ def classify_functions(rows, review):
     return classes
 
 
+def body_uses(tree):
+    """The calls and table reads in one serialized definition (json_serialize_sql), walking every
+    node: a FUNCTION is a scalar call (a table one when it is a TABLE_FUNCTION reference's
+    function), a WINDOW a window call, a BASE_TABLE a read. None when DuckDB could not parse it."""
+    if not isinstance(tree, dict) or tree.get("error") is not False:
+        return None
+    calls, reads = set(), False
+
+    def walk(node, position="scalar"):
+        nonlocal reads
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        cls, tpe = node.get("class"), node.get("type")
+        if cls in ("FUNCTION", "WINDOW") and isinstance(node.get("function_name"), str):
+            calls.add(("window" if cls == "WINDOW" else position, (node.get("catalog") or "").lower(),
+                       (node.get("schema") or "").lower(), node["function_name"].lower()))
+        if tpe == "BASE_TABLE":
+            reads = True
+        for key, child in node.items():
+            walk(child, "table" if tpe == "TABLE_FUNCTION" and key == "function" else "scalar")
+
+    walk(tree.get("statements"))
+    return {"calls": [list(c) for c in sorted(calls)], "readsTables": reads}
+
+
+def extract_macros(dump):
+    """macros.json rows from a dump: one per macro or table macro overload, sorted."""
+    rows = []
+    for row in dump:
+        if not isinstance(row, dict) or not {"name", "schema", "type", "tree"} <= set(row):
+            fail(f"macro dump: unexpected element {row!r}")
+        tpe = row["type"].lower()
+        if tpe not in MACRO_TYPES:
+            fail(f"macro dump: {row['name']} has the type {tpe}, not a macro")
+        tree = row["tree"]
+        if isinstance(tree, str):
+            tree = json.loads(tree)
+        uses = body_uses(tree)
+        rows.append({"calls": uses["calls"] if uses else None, "name": row["name"].lower(),
+                     "readsTables": uses["readsTables"] if uses else None,
+                     "schema": row["schema"].lower(), "type": tpe})
+    return sorted(rows, key=lambda r: (r["name"], r["schema"], r["type"], json.dumps(r, sort_keys=True)))
+
+
+def classify_macros(macros, functions, review):
+    """The class of each macro (schema, name, type) over every overload, or nothing (unclassified),
+    by a least fixpoint: superuser as soon as one call can resolve to a superuser function, allowed
+    once every call of every overload resolves only to allowed ones (macros included)."""
+    overloads = {}
+    for row in macros:
+        overloads.setdefault((row["schema"], row["name"], row["type"]), []).append(row)
+    classes = {key: None for key in overloads}
+
+    def candidates(call):
+        position, catalog, schema, name = call
+        if catalog not in ("", "system"):
+            return []
+        found = []
+        for sch in ((schema,) if schema else CALL_SCHEMAS):
+            for tpe in CALL_TYPES[position]:
+                key = (sch, name, tpe)
+                if key in functions:
+                    found.append(functions[key])
+                elif key in classes:
+                    found.append(classes[key] or "pending")
+        return found
+
+    changed = True
+    while changed:
+        changed = False
+        for key, rows in overloads.items():
+            if classes[key] is not None:
+                continue
+            calls = [c for r in rows for c in (r["calls"] or [])]
+            found = [candidates(c) for c in calls]
+            parsed = all(r["calls"] is not None and not r["readsTables"] for r in rows)
+            if any("superuser" in f for f in found):
+                classes[key] = "superuser"
+                changed = True
+            elif parsed and not any(c[3] in MACRO_REFUSED_CALLS for c in calls) and \
+                    all(f and set(f) == {"allowed"} for f in found):
+                classes[key] = "allowed"
+                changed = True
+    for key, cls in sorted(classes.items()):
+        if cls is None:
+            review.append(f"{key[2]} {key[0]}.{key[1]}: not classified (its body calls a function not "
+                          f"classed allowed, reads a table, or could not be parsed)")
+    return {key: cls for key, cls in classes.items() if cls is not None}
+
+
+def check_macro_names(macro_classes, functions):
+    """The node keys a class by name and type alone (function_classes.cpp) and treats a name classed
+    superuser under any type as superuser everywhere, so neither may disagree across a schema or a
+    type."""
+    by_name_type, by_name = {}, {}
+    for (schema, name, tpe), cls in list(functions.items()) + list(macro_classes.items()):
+        if by_name_type.setdefault((name, tpe), cls) != cls:
+            fail(f"{tpe} {name} has two classes in two schemas")
+        by_name.setdefault(name, set()).add(cls)
+    mixed = sorted(n for n, cs in by_name.items() if "superuser" in cs and len(cs) > 1)
+    if mixed:
+        fail(f"names classed superuser under one type and not under another: {mixed}")
+
+
 def session_capable(row):
     if row["kind"] == "core":
         return row["scope"] in ("local_only", "local_default", "global_default") or (
@@ -328,15 +464,34 @@ def table_names(classes, wanted):
 
 
 def main():
+    args = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    args.add_argument("--macros-dump", type=Path,
+                      help="the release CLI's dump of the built-in macros; rewrites macros.json from it")
+    args.add_argument("--macro-classes", type=Path,
+                      help="print the class of each macro of this dump and write nothing")
+    opts = args.parse_args()
     check_rules()
     review = []
     functions = classify_functions(load_json(FUNCTIONS_JSON), review)
+    if opts.macro_classes:
+        classes = classify_macros(extract_macros(load_json(opts.macro_classes)), functions, [])
+        for (schema, name, tpe), cls in sorted(classes.items()):
+            print(f"{name}\t{schema}\t{tpe}\t{cls}")
+        return
+    if opts.macros_dump:
+        macros = extract_macros(load_json(opts.macros_dump))
+        MACROS_JSON.write_text("[\n" + ",\n".join(json.dumps(m, sort_keys=True, separators=(",", ":"))
+                                                   for m in macros) + "\n]\n", encoding="utf-8")
+    macro_classes = classify_macros(load_json(MACROS_JSON), functions, review)
+    check_macro_names(macro_classes, functions)
     settings = classify_settings(load_json(SETTINGS_JSON), review)
     previous = previous_function_keys()
+    classified = {**functions, **macro_classes}
 
-    rows = sorted(functions.items(), key=lambda kv: (kv[0][1], kv[0][0], kv[0][2]))
+    rows = sorted(classified.items(), key=lambda kv: (kv[0][1], kv[0][0], kv[0][2]))
     write_lines(FUNCTION_TSV, [
-        "# GENERATED by scripts/dev/classify-qod-node.py from native/qod-node/functions.json; do not edit.",
+        "# GENERATED by scripts/dev/classify-qod-node.py from native/qod-node/functions.json and "
+        "native/qod-node/macros.json; do not edit.",
         "# name\tschema\ttype\tclass",
     ] + [f"{name}\t{schema}\t{tpe}\t{cls}" for (schema, name, tpe), cls in rows])
     write_lines(SETTING_TSV, [
@@ -350,11 +505,12 @@ def main():
         return ", ".join(f"{c} {sum(1 for v in classes.values() if v == c)}"
                          for c in sorted(set(classes.values()), key=lambda c: RANK.get(c, 0)))
     print(f"functions: {len(functions)} classified ({counts(functions)})")
+    print(f"macros: {len(macro_classes)} classified ({counts(macro_classes)})")
     print(f"settings: {len(settings)} classified ({counts(settings)})")
     if previous is not None:
-        for key in sorted(functions.keys() - previous):
-            review.append(f"new: {key[2]} {key[1]} ({functions[key]})")
-        for key in sorted(previous - functions.keys()):
+        for key in sorted(classified.keys() - previous):
+            review.append(f"new: {key[2]} {key[1]} ({classified[key]})")
+        for key in sorted(previous - classified.keys()):
             review.append(f"gone: {key[2]} {key[1]}")
     if review:
         print("review:")

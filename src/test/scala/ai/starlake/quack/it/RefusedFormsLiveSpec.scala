@@ -415,6 +415,22 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     rc should not be 0
   }
 
+  "a built-in macro in a bind-time slot" should "run when its body calls only allowed functions" in {
+    flight(open, "alice", "SELECT count(*) FROM range(fdiv(100, 7)::BIGINT)") shouldBe Right(
+      List("14")
+    )
+    flight(open, "alice", "SELECT id FROM t ORDER BY id LIMIT if(true, 2, 3)") shouldBe
+      Right(List("1", "2"))
+    val (rc, out, err) =
+      native(openPort, "alice", "SELECT count(*) FROM range(fdiv(100, 7)::BIGINT)")
+    withClue(err)(rc shouldBe 0)
+    out shouldBe "14"
+    // ... and is refused, like the function it calls, when that one is superuser-class.
+    flight(open, "alice", "SELECT 1 LIMIT get_block_size('acme_db')") match
+      case Left(m) => m should include("QoD: get_block_size is reserved to superusers")
+      case other   => fail(s"expected the screen's refusal, got $other")
+  }
+
   "a superuser's DESCRIBE" should "run as written" in {
     flight(gated, "root", "DESCRIBE acme_db.tpch1.t").map(_.map(_.takeWhile(_ != ','))) shouldBe
       Right(List("id", "v", "d", "ts"))

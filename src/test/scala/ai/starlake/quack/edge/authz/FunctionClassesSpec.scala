@@ -132,8 +132,26 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     "unnest"
   )
 
+  private def isMacro(k: FunctionClasses.Key): Boolean = FunctionClasses.MacroTypes(k.tpe)
+
+  /** Every built-in macro and table macro overload native/qod-node/macros.json lists (from
+    * scripts/dev/gen-qod-node-classification.sh), keyed as the table keys it.
+    */
+  private lazy val macros: Set[FunctionClasses.Key] =
+    val json = parser
+      .parse(Files.readString(Paths.get("native/qod-node/macros.json")))
+      .fold(e => fail(s"macros.json: ${e.getMessage}"), identity)
+    json.asArray
+      .getOrElse(fail("macros.json is not an array"))
+      .map { m =>
+        val c                = m.hcursor
+        def field(k: String) = c.get[String](k).fold(e => fail(s"macros.json $k: $e"), lower)
+        FunctionClasses.Key(field("schema"), field("name"), field("type"))
+      }
+      .toSet
+
   "the function classification" should "classify exactly the functions qod-node resolves" in {
-    val classified = FunctionClasses.all.keySet
+    val classified = FunctionClasses.all.keySet.filterNot(isMacro)
     withClue(
       "in functions.json, not classified (run scripts/dev/gen-qod-node-classification.sh): "
     )(
@@ -175,9 +193,84 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     }
   }
 
+  it should "class only macros macros.json lists, each allowed or superuser, from its body" in {
+    val classified = FunctionClasses.all.filter((k, _) => isMacro(k))
+    withClue("classified, not in macros.json: ")(
+      (classified.keySet -- macros).toList.map(_.toString).sorted shouldBe Nil
+    )
+    classified.values.toSet shouldBe Set(Allowed, Superuser)
+    def macroClass(schema: String, name: String): Option[FunctionClass] =
+      FunctionClasses.all.get(FunctionClasses.Key(schema, name, "macro"))
+    // pure: they pass in bind-time slots now
+    List(
+      "date_add",
+      "ago",
+      "if",
+      "nullif",
+      "split_part",
+      "fdiv",
+      "fmod",
+      "list_sum",
+      "array_append"
+    )
+      .foreach(n => withClue(n)(macroClass("main", n) shouldBe Some(Allowed)))
+    List("pg_typeof", "has_table_privilege", "current_database")
+      .foreach(n => withClue(n)(macroClass("pg_catalog", n) shouldBe Some(Allowed)))
+    // their bodies call a superuser-class function
+    macroClass("main", "get_block_size") shouldBe Some(Superuser)    // pragma_database_size
+    macroClass("pg_catalog", "format_type") shouldBe Some(Superuser) // duckdb_types()
+    macroClass("pg_catalog", "pg_get_constraintdef") shouldBe Some(Superuser)
+    FunctionClasses.all.get(
+      FunctionClasses.Key("main", "duckdb_logs_parsed", "table_macro")
+    ) shouldBe
+      Some(Superuser)
+    // a listing, unnest, or a table read in the body: not classified, refused in a slot
+    macroClass("pg_catalog", "pg_get_viewdef") shouldBe None
+    macroClass("main", "generate_subscripts") shouldBe None
+    FunctionClasses.all.get(FunctionClasses.Key("main", "histogram", "table_macro")) shouldBe None
+  }
+
+  it should "class a fixture dump's macros as the generator's rules say" in {
+    val python = scala.util
+      .Try(
+        scala.sys.process
+          .Process(Seq("python3", "--version"))
+          .!(scala.sys.process.ProcessLogger(_ => ()))
+      )
+      .toOption
+      .contains(0)
+    assume(python, "python3 not on PATH")
+    // src/test/resources/authz/macro-dump-fixture.json: the release CLI's duckdb_functions() rows,
+    // with parse trees, of macros made for it (each body is in the expectations below).
+    val out = scala.sys.process
+      .Process(
+        Seq(
+          "python3",
+          "scripts/dev/classify-qod-node.py",
+          "--macro-classes",
+          "src/test/resources/authz/macro-dump-fixture.json"
+        )
+      )
+      .!!
+    out.linesIterator.toList shouldBe List(
+      "fx_nested\tmain\tmacro\tallowed",           // fx_pure(a) || lower(a): through another macro
+      "fx_overload\tmain\tmacro\tsuperuser",       // one overload calls current_setting
+      "fx_pure\tmain\tmacro\tallowed",             // upper(a) || 'x'
+      "fx_qualified\tmain\tmacro\tallowed",        // system.main.lower(a)
+      "fx_range\tmain\ttable_macro\tallowed",      // TABLE SELECT * FROM range(n)
+      "fx_setting\tmain\tmacro\tsuperuser",        // current_setting(a)
+      "fx_settings\tmain\ttable_macro\tsuperuser", // TABLE SELECT * FROM duckdb_settings()
+      "fx_via\tmain\tmacro\tsuperuser",            // fx_setting(a) || 'y': through another macro
+      "fx_window\tmain\tmacro\tallowed"            // row_number() OVER ()
+    )
+    // Not classified: fx_seq (nextval), fx_reads (a table), fx_listing (duckdb_tables()), fx_query
+    // (query()), fx_other (memory.main.fx_pure, another catalog's).
+  }
+
   it should "restrict exactly the reviewed scalar, aggregate and window functions, to superusers" in {
     val restricted = FunctionClasses.all.collect {
-      case (k, c) if k.tpe != "table" && k.tpe != "pragma" && c != Allowed => (k.name, k.tpe) -> c
+      case (k, c) if k.tpe != "table" && k.tpe != "pragma" && !isMacro(k) && c != Allowed =>
+        (k.name, k.tpe) -> c
     }
     restricted.keySet shouldBe ExpectedRestrictedScalar
     restricted.values.toSet shouldBe Set(Superuser)
@@ -274,7 +367,8 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     List(
       "lower\tmain\tscalar"                                          -> "line 1",
       "lower\tmain\tscalar\tmaybe"                                   -> "unknown class",
-      "lower\tmain\tmacro\tallowed"                                  -> "unknown function type",
+      "lower\tmain\tview\tallowed"                                   -> "unknown function type",
+      "lower\tmain\tmacro\tfile"                                     -> "only a table function",
       "lower\tmain\tscalar\tfile"                                    -> "only a table function",
       "Lower\tmain\tscalar\tallowed"                                 -> "lowercase",
       "lower\tmain\tscalar\tallowed\nlower\tmain\tscalar\tsuperuser" -> "line 2"

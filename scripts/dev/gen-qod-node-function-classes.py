@@ -4,7 +4,9 @@ one QOD_FUNCTION_CLASS(name, schema, type, class) line per classified function, 
 and type (byte order), so the node's parse screen judges a call by the same classes the manager's
 decision pipeline does (spec Section 6, CONTRACT Addendum 4 item 9). The parse screen refuses a
 superuser-class function anywhere in a non-superuser's statement, and anything not classed allowed in
-the slots DuckDB evaluates while binding.
+the slots DuckDB evaluates while binding. Built-in macros and table macros are listed too (types
+`macro` and `table_macro`, classed from their bodies, Task 19): DuckDB expands them before any plan
+exists, so only the screen judges them by class.
 
 Run it after every regeneration of the TSV (scripts/dev/gen-qod-node-classification.sh runs it last),
 then rebuild qod-node and run `sbt "testOnly *FunctionClassesHeaderSpec"`, which fails while the header
@@ -18,7 +20,7 @@ REPO = Path(__file__).resolve().parents[2]
 TSV = REPO / "src/main/resources/authz/function-classes.tsv"
 OUT = REPO / "native/qod-node/src/function_classes.inc"
 
-TYPES = {"scalar", "aggregate", "window", "table", "pragma"}
+TYPES = {"scalar", "aggregate", "window", "table", "pragma", "macro", "table_macro"}
 CLASSES = {"allowed", "listing", "file", "superuser"}
 
 

@@ -40,6 +40,12 @@ object FunctionClasses:
   /** The function types descriptions carry. */
   val Types: Set[String] = Set("scalar", "aggregate", "window", "table", "pragma")
 
+  /** DuckDB's built-in macros and table macros, classed from their bodies (Task 19) for qod-node's
+    * parse screen, which judges them in bind-time slots: DuckDB expands a macro before any plan
+    * exists, so no description ever carries one.
+    */
+  val MacroTypes: Set[String] = Set("macro", "table_macro")
+
   /** A function as the table keys it, lowercased: DuckDB resolves names case-insensitively. */
   final case class Key(schema: String, name: String, tpe: String)
 
@@ -74,7 +80,7 @@ object FunctionClasses:
         FunctionClass.parse(cells(3)) match
           case None =>
             throw new IllegalArgumentException(s"line $line: unknown class ${cells(3)}")
-          case Some(_) if !Types(key.tpe) =>
+          case Some(_) if !Types(key.tpe) && !MacroTypes(key.tpe) =>
             throw new IllegalArgumentException(s"line $line: unknown function type ${key.tpe}")
           case Some(FunctionClass.File) if key.tpe != "table" =>
             throw new IllegalArgumentException(s"line $line: only a table function can be file")

@@ -458,8 +458,10 @@ private:
 
 	//! A call in a bind-time slot: refused unless it is a built-in function classed allowed under one of
 	//! `types`, and is no sequence function (nextval, currval and setval run, or read, a sequence while
-	//! binding: what the plan, and so the manager, never sees). A name the screen cannot resolve to a
-	//! class (a macro, a function of another catalog or schema, one loaded at runtime) is not allowed.
+	//! binding: what the plan, and so the manager, never sees). A built-in macro is classed by its body
+	//! (Task 19): allowed only when everything it calls is. A name the screen cannot resolve to a class
+	//! (a macro of another catalog, a built-in one its body does not class allowed, a function of another
+	//! catalog or schema, one loaded at runtime) is not allowed.
 	void SlotCall(const QualifiedName &qualified, const std::string &name, std::initializer_list<const char *> types) {
 		if (slot_.empty()) {
 			return;
@@ -1062,7 +1064,7 @@ private:
 		if (table_position) {
 			SlotCall(call.GetQualifiedName(), name, {"table"});
 		} else {
-			SlotCall(call.GetQualifiedName(), name, {"scalar", "aggregate"});
+			SlotCall(call.GetQualifiedName(), name, {"scalar", "aggregate", "macro"});
 		}
 		if (!IsJudgedCall(name)) {
 			return;

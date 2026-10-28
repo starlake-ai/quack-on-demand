@@ -561,7 +561,7 @@ int main() {
 	         // a name the screen cannot resolve to a class: a macro, another catalog's function
 	         {"SELECT 1 LIMIT my_macro()", "QoD: my_macro is not allowed in LIMIT and OFFSET"},
 	         {"SELECT * FROM range(memory.main.upper('a'))", "upper is not allowed in a table function's arguments"},
-	         {"SET threads = date_add(1, 2)", "date_add is not allowed in a SET value"},
+	         {"SET threads = pg_get_viewdef(1)", "pg_get_viewdef is not allowed in a SET value"},
 	         // nor is nesting a way around it
 	         {"SELECT * FROM range((SELECT nextval('seq1')))",
 	          "nextval is not allowed in a table function's arguments"},
@@ -587,6 +587,31 @@ int main() {
 		Admitted(allowed, 0, allowed);
 	}
 	Admitted("COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE 100 * 1000)", 1, "a computed allowed COPY option");
+
+	// ---- Task 19 part B: DuckDB's built-in macros are classed by their bodies
+	for (auto pure : {"SELECT * FROM range(fdiv(100, 7))",
+	                  "SELECT * FROM generate_series(DATE '2026-01-01', date_add(DATE '2026-01-01', INTERVAL 30 DAY), "
+	                  "INTERVAL 1 DAY)",
+	                  "SELECT * FROM t AT (TIMESTAMP => ago(INTERVAL 1 DAY))", "SELECT 1 LIMIT if(true, 10, 20)",
+	                  "SELECT 1 LIMIT nullif(5, 0)", "SELECT * FROM range(length(split_part('a,b', ',', 1)))",
+	                  "SET default_order = if(fmod(4, 2) = 0, 'ASC', 'DESC')",
+	                  "SELECT * FROM range(list_sum([1, 2]))", "PRAGMA table_info(pg_typeof(1))"}) {
+		Admitted(pure, 0, pure);
+	}
+	// a body calling a superuser-class function: refused anywhere, like the function
+	Refused("SELECT 1 LIMIT get_block_size('memory')", "QoD: get_block_size is reserved to superusers",
+	        "a macro over pragma_database_size in a slot");
+	Refused("SELECT format_type(23, 0)", "QoD: format_type is reserved to superusers",
+	        "a macro over duckdb_types() outside the slots");
+	// one whose body reads a listing or a table, or calls what no class admits, stays unclassified
+	Refused("SELECT 1 LIMIT length(pg_get_viewdef(1))", "pg_get_viewdef is not allowed in LIMIT and OFFSET",
+	        "a macro over duckdb_views()");
+	Refused("SELECT * FROM range(len(generate_subscripts([1, 2], 1)))",
+	        "generate_subscripts is not allowed in a table function's arguments", "a macro over unnest");
+	// only the system's own macros: a qualified one elsewhere, or a user's, is not classed
+	Refused("SELECT 1 LIMIT memory.main.nullif(5, 0)", "nullif is not allowed in LIMIT and OFFSET",
+	        "a macro of another catalog");
+	Admitted("SELECT get_block_size", 0, "a column spelled like a superuser-class macro is no call");
 	Admitted("SELECT * FROM read_csv('s3://acme-etl/x.csv', header = true, sample_size = 10 * 10)", 1,
 	         "a reader's literal and computed allowed arguments");
 

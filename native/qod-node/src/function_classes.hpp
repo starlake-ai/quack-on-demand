@@ -9,10 +9,12 @@ namespace qod {
 enum class FunctionClass { Allowed, Listing, File, Superuser };
 
 //! The class of the built-in or extension function `name` (lower case) of type `type` ("scalar",
-//! "aggregate", "window", "table" or "pragma"), from function_classes.inc (generated from
+//! "aggregate", "window", "table", "pragma", or "macro" / "table_macro" for a built-in macro, which
+//! its body classes), from function_classes.inc (generated from
 //! src/main/resources/authz/function-classes.tsv by scripts/dev/gen-qod-node-function-classes.py;
-//! every classified function lives in the system catalog's main schema); nullopt when nobody
-//! classified it (a macro, a function loaded at runtime).
+//! every classified function lives in the system catalog, its main schema but for the pg_catalog
+//! macros); nullopt when nobody classified it (a macro whose body calls a function not classed allowed
+//! or reads a table, a function loaded at runtime).
 std::optional<FunctionClass> FunctionClassOf(const std::string &name, const std::string &type);
 
 //! Whether a classification of `name` (lower case), of any type, is superuser: no name the table

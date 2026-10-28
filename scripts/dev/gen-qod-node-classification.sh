@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Regenerates the in-engine authorization classification from what qod-node resolves:
 #   native/qod-node/functions.json, native/qod-node/settings.json   (qod-node --list-functions /
-#     --list-settings, every extension a node may load installed and loaded first), then through
+#     --list-settings, every extension a node may load installed and loaded first);
+#   native/qod-node/macros.json   (the built-in macros and table macros, from duckdb_functions() of
+#     the release DuckDB CLI ($DUCKDB_CLI, the node's own DuckDB release) with the same extensions
+#     loaded: each definition parsed by json_serialize_sql, reduced to its calls); then through
 #     scripts/dev/classify-qod-node.py:
 #   src/main/resources/authz/function-classes.tsv, src/main/resources/authz/setting-classes.tsv,
 #   native/qod-node/file-functions.txt, native/qod-node/admitted-table-functions.txt;
 #   and through scripts/dev/gen-qod-node-function-classes.py, native/qod-node/src/function_classes.inc.
 #
-# Run it at every DuckDB pin bump and whenever qod-node registers a function; then rebuild qod-node
+# Run it at every DuckDB pin bump and whenever qod-node registers a function (DUCKDB_CLI set to the
+# release CLI of the node's DuckDB); then rebuild qod-node
 # (CMake embeds the two .txt lists, the parse screen includes the .inc) and run FunctionClassesSpec,
 # FunctionClassesHeaderSpec and SettingClassesSpec. Local: it runs
 # the host's qod-node build ($QOD_NODE_BIN, else native/qod-node/build/qod-node), which downloads the
@@ -51,5 +55,36 @@ list() {
 }
 list list-functions "$root/native/qod-node/functions.json"
 list list-settings "$root/native/qod-node/settings.json"
-python3 "$root/scripts/dev/classify-qod-node.py"
+
+# The macros: duckdb_functions() lists them, with their definitions, only through SQL; qod-node has
+# no listing of them, so the release CLI of the node's DuckDB reads them (Task 19).
+cli="${DUCKDB_CLI:-}"
+if [[ -z "$cli" || ! -x "$cli" ]]; then
+  echo "ERROR: set DUCKDB_CLI to the release duckdb CLI of the node's DuckDB" >&2
+  exit 1
+fi
+node_duckdb="$("$node" --build-info | sed -n 's/.*;duckdb=\([^;]*\);duckdb_source=\([^;]*\).*/\1 \2/p')"
+cli_duckdb="$("$cli" -no-agent -version | awk '{print $1, $NF}')"
+if [[ -z "$node_duckdb" || "$node_duckdb" != "$cli_duckdb" ]]; then
+  echo "ERROR: DUCKDB_CLI is DuckDB '$cli_duckdb', qod-node runs '$node_duckdb'" >&2
+  exit 1
+fi
+# The extensions first, one statement per line (a failing line skips the rest of it), then the dump.
+cp "$work/init.sql" "$work/macros.sql"
+cat >> "$work/macros.sql" <<'SQL'
+COPY (
+  SELECT schema_name AS schema, function_name AS name, function_type AS type,
+         json_serialize_sql(CASE WHEN function_type = 'macro' THEN 'SELECT ' || macro_definition
+                                 ELSE macro_definition END) AS tree
+  FROM duckdb_functions()
+  WHERE database_name = 'system' AND internal AND function_type IN ('macro', 'table_macro')
+  ORDER BY schema, name, type, tree::VARCHAR
+) TO '/dev/stdout' (FORMAT json, ARRAY true);
+SQL
+if ! "$cli" -no-agent -batch -bail -f "$work/macros.sql" > "$work/macros-dump.json" \
+    2> "$work/macros.err"; then
+  cat "$work/macros.err" >&2
+  exit 1
+fi
+python3 "$root/scripts/dev/classify-qod-node.py" --macros-dump "$work/macros-dump.json"
 python3 "$root/scripts/dev/gen-qod-node-function-classes.py"
