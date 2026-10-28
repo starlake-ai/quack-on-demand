@@ -484,9 +484,11 @@ void Definition::Query(const QueryNode &node, std::set<std::string> scope) {
 		}
 		break;
 	case QueryNodeType::RECURSIVE_CTE_NODE: {
+		// The anchor binds before the CTE exists: its own name there is a table (UNION, UNION ALL and
+		// USING KEY alike, re-review 5 R7). Only the recursive term reads the CTE.
 		auto &recursive = node.Cast<RecursiveCTENode>();
-		scope.insert(StringUtil::Lower(Text(recursive.ctename)));
 		Query(*recursive.left, scope);
+		scope.insert(StringUtil::Lower(Text(recursive.ctename)));
 		Query(*recursive.right, scope);
 		for (auto &expr : recursive.key_targets) {
 			Expr(*expr, scope);
