@@ -545,12 +545,10 @@ int main() {
 	         {"CREATE VIEW v AS SELECT * FROM t LIMIT currval('seq1')", "currval is not allowed in LIMIT and OFFSET"},
 	         {"CREATE VIEW v AS SELECT current_setting('memory_limit') AS m",
 	          "QoD: current_setting is reserved to superusers"},
-	         {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT nextval('seq1')",
-	          "QoD: nextval is not allowed in ALTER TABLE ADD COLUMN"},
 	         // IF NOT EXISTS keeps the plain ALTER, which runs the default itself (transform_alter.cpp:52-60)
 	         {"ALTER TABLE x ADD COLUMN IF NOT EXISTS w BIGINT DEFAULT nextval('seq1')",
 	          "nextval is not allowed in ALTER TABLE ADD COLUMN"},
-	         {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT (SELECT count(*) FROM duckdb_tables())",
+	         {"ALTER TABLE x ADD COLUMN IF NOT EXISTS w BIGINT DEFAULT (SELECT count(*) FROM duckdb_tables())",
 	          "duckdb_tables is not allowed in ALTER TABLE ADD COLUMN"},
 	         {"ALTER TABLE x ALTER v TYPE BIGINT USING nextval('seq1')",
 	          "QoD: nextval is not allowed in ALTER COLUMN TYPE USING"},
@@ -587,6 +585,24 @@ int main() {
 		Admitted(allowed, 0, allowed);
 	}
 	Admitted("COPY t TO 's3://acme-etl/o.parquet' (ROW_GROUP_SIZE 100 * 1000)", 1, "a computed allowed COPY option");
+
+	// ---- Task 19 part C: DuckDB's three-part ADD COLUMN ... DEFAULT rewrite is judged part by part: the
+	// UPDATE's nextval is in its plan, SET DEFAULT is stored
+	for (auto split : {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT nextval('seq1')",
+	                   "ALTER TABLE x ADD COLUMN w BIGINT NOT NULL DEFAULT nextval('seq1')",
+	                   "ALTER TABLE x ADD COLUMN w BIGINT UNIQUE DEFAULT nextval('seq1') + 1",
+	                   "ALTER TABLE x ADD COLUMN w TIMESTAMP DEFAULT now()",
+	                   "ALTER TABLE x ADD COLUMN w BIGINT DEFAULT (SELECT count(*) FROM duckdb_tables())"}) {
+		Admitted(split, 0, split);
+	}
+	Refused("ALTER TABLE x ADD COLUMN w VARCHAR DEFAULT 'a' || current_setting('memory_limit')",
+	        "current_setting is reserved to superusers", "a superuser-class call in the default, in every part");
+	Refused("ALTER TABLE x ADD COLUMN w BIGINT DEFAULT setval('seq1', 5)", "setval is reserved to superusers",
+	        "setval in the default");
+	Refused("ALTER TABLE x ADD COLUMN w BIGINT DEFAULT nextval('seq1') + length(read_text('x.txt'))", "QoD: x.txt ",
+	        "a reader in the default gets the location rules");
+	Refused("ALTER TABLE x ADD COLUMN w DECIMAL(nextval('seq1'), 2) DEFAULT 1", "QoD:",
+	        "the added column's type is still a bind-time slot");
 
 	// ---- Task 19 part B: DuckDB's built-in macros are classed by their bodies
 	for (auto pure : {"SELECT * FROM range(fdiv(100, 7))",

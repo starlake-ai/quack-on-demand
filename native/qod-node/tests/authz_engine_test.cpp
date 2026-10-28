@@ -65,6 +65,16 @@ void ExpectQuery(duckdb::Connection &con, const std::string &sql, const std::str
 	Check(result->HasError() ? result->GetError() : "", result->HasError(), needle, what);
 }
 
+//! The first value `sql` answers on `con` as DuckDB renders it, or its error.
+std::string FirstValue(duckdb::Connection &con, const std::string &sql) {
+	auto result = con.Query(sql);
+	if (result->HasError()) {
+		return "error: " + result->GetError();
+	}
+	auto chunk = result->FetchRaw();
+	return chunk && chunk->size() > 0 ? chunk->GetValue(0, 0).ToString() : "no row";
+}
+
 struct FakeQuackSession : public duckdb::ClientContextState {};
 
 void TagAsQuackSession(duckdb::Connection &con) {
@@ -672,6 +682,29 @@ int main() {
 	ExpectQuery(frank, "COPY (SELECT 1 AS x) TO " + qod::QuoteLiteral(out + "/x.csv") + " (FORMAT csv)", "",
 	            "a COPY TO csv");
 	std::filesystem::remove_all(out_dir, ignored);
+
+	// ---- Task 19 part C: DuckDB binds each part of its three-part ADD COLUMN ... DEFAULT rewrite as a
+	// statement of its own, so each is decided, the UPDATE with the sequence update its nextval makes
+	ExpectQuery(internal, "CREATE TABLE memory.main.t19 AS SELECT range AS id FROM range(3)", "", "a table");
+	ExpectQuery(internal, "CREATE SEQUENCE memory.main.s19", "", "a sequence");
+	ExpectQuery(internal, "CREATE SEQUENCE memory.main.forbidden", "", "a sequence the decider refuses");
+	duckdb::Connection lena(db);
+	TagAsQuackSession(lena);
+	ExpectQuery(lena, Prelude(Fresh("u-lena")), "", "lena installs");
+	auto before_add = decide_calls.size();
+	ExpectQuery(lena, "ALTER TABLE memory.main.t19 ADD COLUMN n BIGINT DEFAULT nextval('memory.main.s19')", "",
+	            "an ADD COLUMN whose default draws from a sequence");
+	auto sequence_update = std::string("{\"access\":\"update\",\"catalog\":\"memory\",\"catalogType\":\"duckdb\","
+	                                   "\"columns\":[],\"kind\":\"sequence\",\"name\":\"s19\"");
+	Check("", !AskedFor(before_add, "\"statement\":\"UPDATE\"") || !AskedFor(before_add, sequence_update), "",
+	      "its UPDATE was decided with the sequence update");
+	Check("", !AskedFor(before_add, "\"statement\":\"ALTER\""), "", "and its ALTERs were decided");
+	Check("", FirstValue(internal, "SELECT count(DISTINCT n) FROM memory.main.t19 WHERE n IS NOT NULL") != "3", "",
+	      "the existing rows got values from the sequence");
+	ExpectQuery(lena, "ALTER TABLE memory.main.t19 ADD COLUMN m BIGINT DEFAULT nextval('memory.main.forbidden')",
+	            "denied by test", "refused when its sequence update is refused");
+	auto columns_m = "SELECT count(*) FROM duckdb_columns() WHERE table_name = 't19' AND column_name = 'm'";
+	Check("", FirstValue(internal, columns_m) != "0", "", "and no part of it stays: the parts run in one transaction");
 
 	if (failures == 0) {
 		std::cout << "authz_engine_test: all passed" << std::endl;

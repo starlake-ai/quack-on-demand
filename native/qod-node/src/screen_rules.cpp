@@ -516,11 +516,6 @@ private:
 		}
 	}
 
-	static bool IsAddColumn(const AlterInfo &info) {
-		return info.type == AlterType::ALTER_TABLE &&
-		       info.Cast<AlterTableInfo>().alter_table_type == AlterTableType::ADD_COLUMN;
-	}
-
 	//! ALTER TABLE: the expressions an ALTER runs at execution (ADD COLUMN ... DEFAULT, ALTER COLUMN ...
 	//! TYPE ... USING), as bind-time slots. The others (SET DEFAULT, constraints) run in later plans; a
 	//! judged call in one fails the token count, and a superuser-class one is refused by it.
@@ -668,21 +663,22 @@ private:
 			}
 			break;
 		}
-		case StatementType::MULTI_STATEMENT: {
+		case StatementType::MULTI_STATEMENT:
 			// Only the parser writes one (a request's statements arrive one by one). DuckDB 2.0 rewrites ALTER
-			// TABLE ... ADD COLUMN ... DEFAULT <expression> into one: the column added with DEFAULT NULL, an
-			// UPDATE that sets it to the expression for the existing rows, then SET DEFAULT
-			// (transform_alter.cpp:32-90, 236-266). The whole rewrite is the ADD COLUMN's slot.
-			auto &multi = statement.Cast<MultiStatement>();
-			auto adds_column = !multi.statements.empty() &&
-			                   multi.statements[0]->type == StatementType::ALTER_STATEMENT &&
-			                   IsAddColumn(*multi.statements[0]->Cast<AlterStatement>().info);
-			InSlot slot(*this, adds_column ? "ALTER TABLE ADD COLUMN" : "");
-			for (auto &child : multi.statements) {
+			// TABLE ... ADD COLUMN ... DEFAULT <expression> into the column added with DEFAULT NULL, an UPDATE
+			// that sets it to the expression for the existing rows, then SET DEFAULT, with SET NOT NULL or ADD
+			// UNIQUE after them (peg/transformer/transform_alter.cpp, TransformAlterStatement and
+			// TransformAndMaterializeAlter), and a PIVOT whose IN list comes from the data into its CREATE
+			// TYPE statements and the PIVOT (peg_transformer.cpp, CreatePivotStatement). DuckDB binds and runs
+			// each part as a statement of its own (statement_preprocessor.cpp, ExpandStatement), so each part
+			// gets a plan and a verdict of its own, and is judged here on its own (Task 19 part C): the ADD
+			// COLUMN by the ADD COLUMN slot rule (its default is NULL now), the UPDATE like any UPDATE (its
+			// nextval is a sequence its plan names, which the manager checks against grants), SET DEFAULT as a
+			// stored expression, which the walk refuses superuser-class calls in.
+			for (auto &child : statement.Cast<MultiStatement>().statements) {
 				Statement(*child);
 			}
 			break;
-		}
 		case StatementType::SET_STATEMENT: {
 			auto &set = statement.Cast<SetStatement>();
 			auto name = StringUtil::Lower(set.name.GetIdentifierName());

@@ -59,20 +59,30 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
 
   private val poolKey = PoolKey("acme", "acme_db", "bi")
 
-  private def user(id: String, name: String, grants: (String, String)*): EffectiveSet =
+  /** A tenant user of acme holding `grants`, each `(schema, table)` RO or `(schema, table, verb)`.
+    */
+  private def user(id: String, name: String, grants: Product*): EffectiveSet =
     EffectiveSet(
       RbacUser(id, Some("acme"), name, "user"),
       Nil,
       Nil,
-      grants.toList.zipWithIndex.map { case ((schema, table), i) =>
-        RolePermission(s"p-$id-$i", s"r-$id", "acme_db", schema, table, "RO")
+      grants.toList.zipWithIndex.map {
+        case ((schema: String, table: String), i) =>
+          RolePermission(s"p-$id-$i", s"r-$id", "acme_db", schema, table, "RO")
+        case ((schema: String, table: String, verb: String), i) =>
+          RolePermission(s"p-$id-$i", s"r-$id", "acme_db", schema, table, verb)
+        case (other, _) => fail(s"not a grant: $other")
       },
       Nil
     )
   private val alice = user("u-alice", "alice", "tpch1" -> "t", "tpch1" -> "sv")
   private val bob   = user("u-bob", "bob", "tpch1" -> "other")
+  // ADD COLUMN ... DEFAULT nextval(...): carol may alter t2 and update s2, dave only alter t2.
+  private val carol = user("u-carol", "carol", ("tpch1", "t2", "ALL"), ("tpch1", "s2", "RW"))
+  private val dave  = user("u-dave", "dave", ("tpch1", "t2", "ALL"))
   private val root  = EffectiveSet(RbacUser("u-root", None, "root", "admin"), Nil, Nil, Nil, Nil)
-  private val users = Map("alice" -> alice, "bob" -> bob, "root" -> root)
+  private val users =
+    Map("alice" -> alice, "bob" -> bob, "carol" -> carol, "dave" -> dave, "root" -> root)
 
   private val secret                 = NodeKeys.randomSecret()
   private val minted                 = new MintedHandles()
@@ -107,6 +117,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
            |CREATE TABLE acme_db.tpch1.secret AS SELECT 7 AS x, 'hidden' AS y;
            |CREATE TABLE acme_db.tpch1.other AS SELECT 1 AS o;
            |CREATE SECURE VIEW acme_db.tpch1.sv AS SELECT x FROM acme_db.tpch1.secret;
+           |CREATE TABLE acme_db.tpch1.t2 AS SELECT range AS id FROM range(3);
+           |CREATE SEQUENCE acme_db.tpch1.s2;
            |""".stripMargin
       val nodePort = freePort()
       val backend  = new QuackBackend:
@@ -429,6 +441,39 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     flight(open, "alice", "SELECT 1 LIMIT get_block_size('acme_db')") match
       case Left(m) => m should include("QoD: get_block_size is reserved to superusers")
       case other   => fail(s"expected the screen's refusal, got $other")
+  }
+
+  "ADD COLUMN ... DEFAULT nextval(...)" should "run for a principal that may alter the table and draw from the sequence" in {
+    flight(open, "carol", "ALTER TABLE t2 ADD COLUMN n BIGINT DEFAULT nextval('s2')") shouldBe
+      Right(Nil)
+    flight(open, "carol", "SELECT count(DISTINCT n) FROM t2") shouldBe Right(List("3"))
+    val (rc, _, err) =
+      native(openPort, "carol", "ALTER TABLE t2 ADD COLUMN n2 BIGINT DEFAULT nextval('s2')")
+    withClue(err)(rc shouldBe 0)
+  }
+
+  it should "be refused without a write grant on the sequence" in {
+    flight(open, "dave", "ALTER TABLE t2 ADD COLUMN m BIGINT DEFAULT nextval('s2')") match
+      case Left(m) => m should include("lacks grants on acme_db.tpch1.s2")
+      case other   => fail(s"expected the node's refusal, got $other")
+    flight(
+      open,
+      "carol",
+      "SELECT count(*) FROM duckdb_columns() WHERE table_name = 't2' AND column_name = 'm'"
+    ) shouldBe
+      Right(List("0"))
+  }
+
+  it should "still refuse a superuser-class call in the default" in {
+    // The gateway's own node-state screen refuses it first; the node's screen refuses it too
+    // (screen_rules_test).
+    flight(
+      open,
+      "carol",
+      "ALTER TABLE t2 ADD COLUMN w VARCHAR DEFAULT current_setting('threads')"
+    ) match
+      case Left(m) => m should include("current_setting")
+      case other   => fail(s"expected a refusal, got $other")
   }
 
   "a superuser's DESCRIBE" should "run as written" in {
