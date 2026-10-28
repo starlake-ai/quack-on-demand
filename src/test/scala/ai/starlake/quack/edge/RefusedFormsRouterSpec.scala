@@ -198,3 +198,84 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     router.supervisor.get(poolKey).flatMap(FlightSqlRouter.sessionPath) shouldBe Some(Path)
     router.supervisor.get(poolKey).flatMap(FlightSqlRouter.usePath) shouldBe Some("memory.main")
   }
+
+  // ---- Task 19 part D: computed file locations
+
+  private val Computed  = "SELECT * FROM read_csv('s3://acme-etl/in/' || 'x.csv', header = true)"
+  private val Evaluated = "SELECT ('s3://acme-etl/in/' || 'x.csv') AS location"
+
+  /** The node evaluating `value` for every evaluation, answering anything else with one row. */
+  private def evaluatesTo(value: String): String => QuackResponse = sql =>
+    if sql.endsWith(" AS location") then
+      QuackResponse.Ok(TestArrow.readerFor(s"SELECT $value AS location"), 1L, () => ())
+    else TestArrow.okResponse()
+
+  "a tenant's computed file location" should "be evaluated by the node, then sent as a literal" in {
+    val (router, sent) = setup(evaluatesTo("'s3://acme-etl/in/x.csv'"))
+    run(router, Computed, tenantUser).isRight shouldBe true
+    val List(evaluation, statement) = sent(): @unchecked
+    evaluation should endWith(Evaluated)
+    statement should endWith("SELECT * FROM read_csv('s3://acme-etl/in/x.csv', header = true)")
+    router.history.snapshot(5).map(r => (r.sql, r.status)) shouldBe List((Computed, "ok"))
+  }
+
+  it should "be sent unchanged when the evaluation fails or yields no location" in
+    List[String => QuackResponse](
+      _ =>
+        QuackResponse.Failed(
+          QuackError.Permanent("QoD: current_setting is reserved to superusers")
+        ),
+      evaluatesTo("NULL::VARCHAR"),
+      evaluatesTo("''"),
+      evaluatesTo("42")
+    ).foreach { answer =>
+      val (router, sent) = setup(answer)
+      run(router, Computed, tenantUser)
+      sent().last should endWith(Computed)
+    }
+
+  it should "not be evaluated for a superuser" in {
+    val (router, sent) = setup(evaluatesTo("'s3://acme-etl/in/x.csv'"))
+    run(router, Computed, superuser).isRight shouldBe true
+    sent().size shouldBe 1
+    sent().last should endWith(Computed)
+  }
+
+  it should "stay unchanged inside a transaction on a transport that asks so" in {
+    val (router, sent) = setup(evaluatesTo("'s3://acme-etl/in/x.csv'"))
+    val evaluate: FlightSqlRouter.NodeSend[NodeRows] = (node, wrappedSql, _, _, principal) =>
+      router.adapter.send(node, wrappedSql, principal, None).map {
+        case QuackResponse.Ok(rows, ms, close) =>
+          try
+            NodeRows.read(rows).fold(NodeOutcome.Permanent(_, ms), NodeOutcome.Ok(_, ms, () => ()))
+          finally close()
+        case QuackResponse.Failed(err, ms) => NodeOutcome.Permanent(err.toString, ms)
+      }
+    val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
+      router.adapter.send(node, wrappedSql, principal, None).map {
+        case QuackResponse.Ok(_, ms, close) => NodeOutcome.Ok((), ms, close)
+        case QuackResponse.Failed(err, ms)  => NodeOutcome.Permanent(err.toString, ms)
+      }
+    def statement(sql: String, inTransaction: Boolean) =
+      router
+        .executeWith(
+          "c-tx",
+          "alice",
+          poolKey,
+          sql,
+          Some(tenantUser),
+          relay,
+          evaluate = Some(evaluate),
+          computedLocationsInTransaction = inTransaction
+        )
+        .unsafeRunSync()
+        .foreach(_.close())
+    statement("BEGIN", inTransaction = false)
+    router.sessions.get("c-tx").exists(_.txOpen) shouldBe true
+    statement(Computed, inTransaction = false)
+    sent().last should endWith(Computed)
+    sent().exists(_.endsWith(Evaluated)) shouldBe false
+    // The Arrow path evaluates it in a transaction too: its statements share no node connection.
+    statement(Computed, inTransaction = true)
+    sent().last should endWith("read_csv('s3://acme-etl/in/x.csv', header = true)")
+  }

@@ -9,6 +9,7 @@ import ai.starlake.quack.edge.sql.{
   CatalogInternalsScreen,
   CatalogWriteScreen,
   CheckpointScreen,
+  ComputedLocations,
   Denied,
   FileAdmission,
   LockdownScreen,
@@ -499,7 +500,14 @@ final class FlightSqlRouter(
         * SUMMARIZE learns its columns this way ([[RefusedForms]]). None (the default) leaves such a
         * statement unchanged, so the node refuses it as before.
         */
-      evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]] = None
+      evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]] = None,
+      /** Whether a computed file location is evaluated inside a client transaction too (Task 19
+        * part D). The native front door says false: there the evaluation would run on the
+        * transaction's own link, where its failure would abort the client's transaction, which the
+        * statement left unchanged would not, so in a transaction such a statement is sent unchanged
+        * and refused as before.
+        */
+      computedLocationsInTransaction: Boolean = true
   ): IO[Either[RouterFailure, Routed[A]]] =
     def run(statement: String, pin: Option[String]): IO[Either[RouterFailure, Routed[A]]] =
       executeGuarded(
@@ -533,7 +541,23 @@ final class FlightSqlRouter(
           )
         )
     form match
-      case None                                               => run(sql, preferredNode)
+      case None =>
+        // Task 19 part D: a file location the statement computes, evaluated by the node as the
+        // principal and put in its place as a literal, which every screen then judges.
+        val locations =
+          if !FlightSqlRouter.rewritable(effectiveSet) || evaluate.isEmpty then Nil
+          else TooDeep.orElse(List.empty[ComputedLocations.Location])(ComputedLocations.find(sql))
+        val inTransaction = sessions.get(connectionId).exists(_.txOpen)
+        (evaluate, locations) match
+          case (Some(ev), _ :: _) if computedLocationsInTransaction || !inTransaction =>
+            openSession(connectionId, user, poolKey, recordExecution, source)
+            literals(connectionId, user, poolKey, locations, effectiveSet, ev, source, edge, patId)
+              .flatMap {
+                case Some(values) =>
+                  run(ComputedLocations.substitute(sql, locations.zip(values)), preferredNode)
+                case None => run(sql, preferredNode)
+              }
+          case _ => run(sql, preferredNode)
       case Some(RefusedForms.Form.Rewritten(other))           => run(other, preferredNode)
       case Some(RefusedForms.Form.Summarize(columns, target)) =>
         evaluate match
@@ -568,10 +592,47 @@ final class FlightSqlRouter(
                     case None       => run(sql, preferredNode)
               }
 
+  /** The literal of each computed location ([[ComputedLocations]]), each evaluated in turn by the
+    * node as the principal ([[readBack]]), or None as soon as one fails: its evaluation refused or
+    * failing, or a value no literal may stand for. What failed is not answered; the statement is
+    * then sent unchanged and the node refuses it as before.
+    */
+  private def literals(
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      locations: List[ComputedLocations.Location],
+      effectiveSet: Option[EffectiveSet],
+      evaluate: FlightSqlRouter.NodeSend[NodeRows],
+      source: String,
+      edge: String,
+      patId: Option[String]
+  ): IO[Option[List[String]]] =
+    locations.foldLeft(IO.pure(Option(List.empty[String]))) { (done, location) =>
+      done.flatMap {
+        case None         => IO.pure(None)
+        case Some(values) =>
+          readBack(
+            connectionId,
+            user,
+            poolKey,
+            ComputedLocations.evaluation(location),
+            effectiveSet,
+            evaluate,
+            source,
+            edge,
+            patId
+          ).map {
+            case Right((rows, _)) => ComputedLocations.literal(location, rows).map(values :+ _)
+            case Left(_)          => None
+          }
+      }
+    }
+
   /** Run `statement` for `effectiveSet`'s principal through the whole pipeline and read its small
     * result back ([[NodeRows]]) instead of handing it to a client, with no history row, no load
-    * booked and no rewrite of its own: SUMMARIZE's column listing. The node that answered comes
-    * with the rows.
+    * booked and no rewrite of its own: SUMMARIZE's column listing, a computed file location's
+    * value. The node that answered comes with the rows.
     */
   private def readBack(
       connectionId: String,

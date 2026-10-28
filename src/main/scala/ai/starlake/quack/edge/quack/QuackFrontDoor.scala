@@ -254,7 +254,9 @@ final class QuackFrontDoor(
         // The one edge that relays SEND_DATA on the statement's own node connection, so the
         // one edge where a 2.0 client's scan_data_from_quack_client can ever be fed.
         clientDataScans = true,
-        evaluate = Some(evaluateSend(s, cq))
+        evaluate = Some(evaluateSend(s, cq)),
+        // An evaluation on the transaction's link that failed would abort the client's transaction.
+        computedLocationsInTransaction = false
       )
       .flatMap {
         case Left(fail) =>

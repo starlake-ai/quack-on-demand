@@ -27,7 +27,7 @@ import org.scalatest.matchers.should.Matchers
 import org.typelevel.ci.CIString
 
 import java.net.InetSocketAddress
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.time.Instant
 import scala.collection.concurrent.TrieMap
 import scala.jdk.CollectionConverters.*
@@ -96,11 +96,31 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   private var gatedPort = 0
   private var openPort  = 0
 
+  /** The tenant's file folder (`files/`, with a database data folder `files/data/` inside it) and a
+    * folder outside it, real paths: what the decider and the gateway admit by location.
+    */
+  private var files: String        = null
+  private var elsewhere: String    = null
+  private var rules: LocationRules = LocationRules.Empty
+
   private def freePort(): Int = LiveQodNode.freePort()
 
   override def beforeAll(): Unit =
     if nodeReady then
       dir = Files.createTempDirectory("qod-refused-forms")
+      val real = dir.toRealPath()
+      files = real.resolve("files").toString
+      elsewhere = real.resolve("elsewhere").toString
+      List("files/in", "files/out", "files/data", "elsewhere").foreach(d =>
+        Files.createDirectories(real.resolve(d))
+      )
+      val today =
+        java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE)
+      Files.writeString(real.resolve("files/in/20260115.csv"), "a,b\n1,2\n")
+      Files.writeString(real.resolve(s"files/in/$today.csv"), "a,b\n3,4\n")
+      Files.writeString(real.resolve("files/data/x.csv"), "a,b\n5,6\n")
+      Files.writeString(real.resolve("elsewhere/x.csv"), "a,b\n7,8\n")
+      rules = LocationRules(Nil, List(s"$files/"), List(s"$files/data/"), Some(s"$real/"))
       decide = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0)
       val keys = new NodeKeys(
         secret,
@@ -164,7 +184,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         parentPoolsOf = _ => Nil,
         locations = new LocationRulesSource {
           def rulesFor(tenantId: String, userId: String): Either[String, LocationRules] =
-            Right(LocationRules.Empty)
+            Right(rules)
         },
         opa = new OpaAuthorizer(
           OpaConfig.default,
@@ -202,7 +222,10 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         tracker,
         new QuackHttpAdapter(client, tracker, keys),
         validator = validator,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter)
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter),
+        locationRulesFor = (_, _) => Some(rules),
+        resolveLocalPath = path =>
+          ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
       )
       gated = router(
         new PostgresAclValidator(
@@ -474,6 +497,118 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     ) match
       case Left(m) => m should include("current_setting")
       case other   => fail(s"expected a refusal, got $other")
+  }
+
+  "a computed file location" should "read the authorized file it computes" in {
+    val dated =
+      s"SELECT * FROM read_csv('$files/in/' || strftime(DATE '2026-01-15', '%Y%m%d') || '.csv')"
+    flight(gated, "alice", dated) shouldBe Right(List("1,2"))
+    flight(open, "alice", dated) shouldBe Right(List("1,2"))
+    flight(
+      open,
+      "alice",
+      s"FROM read_csv('$files/in/' || strftime(today(), '%Y%m%d') || '.csv')"
+    ) shouldBe
+      Right(List("3,4"))
+    flight(
+      open,
+      "alice",
+      s"FROM read_csv(['$files/in/20260115.csv', '$files/in/' || '20260115.csv'])"
+    ) shouldBe
+      Right(List("1,2", "1,2"))
+    for port <- List(gatedPort, openPort) do
+      val (rc, out, err) = native(port, "alice", dated)
+      withClue(err)(rc shouldBe 0)
+      out shouldBe "1,2"
+    // History keeps the client's text.
+    gated.history.snapshot(50).exists(r => r.sql == dated && r.status == "ok") shouldBe true
+  }
+
+  it should "be refused as the literal location is" in {
+    List(
+      s"'$elsewhere/' || 'x.csv'"                -> s"'$elsewhere/x.csv'",
+      s"'$files/data/' || 'x.csv'"               -> s"'$files/data/x.csv'",
+      "'x' || '.csv'"                            -> "'x.csv'",
+      s"'$files/in/../../' || 'elsewhere/x.csv'" -> s"'$files/in/../../elsewhere/x.csv'"
+    ).foreach { (computed, literal) =>
+      for router <- List(open, gated) do
+        val asComputed = flight(router, "alice", s"SELECT * FROM read_csv($computed)")
+        val asLiteral  = flight(router, "alice", s"SELECT * FROM read_csv($literal)")
+        withClue(computed) {
+          asLiteral.isLeft shouldBe true
+          asComputed shouldBe asLiteral
+        }
+    }
+    flight(open, "alice", s"SELECT * FROM read_csv('$elsewhere/' || 'x.csv')") match
+      case Left(m) =>
+        m should include(s"$elsewhere/x.csv is outside the tenant's authorized locations")
+      case other => fail(s"expected the node's refusal, got $other")
+    flight(open, "alice", s"SELECT * FROM read_csv('$files/data/' || 'x.csv')") match
+      case Left(m) => m should include("is a database data folder")
+      case other   => fail(s"expected the node's refusal, got $other")
+  }
+
+  it should "be refused unchanged when it names a column, a subquery, a superuser function or a parameter" in {
+    List(
+      "SELECT * FROM t, read_csv(t.v || '.csv')",
+      s"SELECT * FROM read_csv((SELECT '$files/in/20260115.csv'))",
+      "SELECT * FROM read_csv(? || '.csv')"
+    ).foreach { sql =>
+      flight(open, "alice", sql) match
+        case Left(m) => withClue(sql)(m should include("read_csv needs a literal file name"))
+        case other   => fail(s"expected the node's refusal of $sql, got $other")
+    }
+    flight(
+      open,
+      "alice",
+      s"SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')"
+    ) match
+      case Left(m) => m should include("current_setting")
+      case other   => fail(s"expected a refusal, got $other")
+  }
+
+  it should "write a COPY to the location it computes" in {
+    val out = s"$files/out/20260115.csv"
+    flight(
+      gated,
+      "alice",
+      s"COPY (SELECT 5 AS a) TO ('$files/out/' || strftime(DATE '2026-01-15', '%Y%m%d') || '.csv')"
+    ).isRight shouldBe true
+    Files.readString(Paths.get(out)).trim shouldBe "a\n5"
+    val (rc, _, err) =
+      native(openPort, "alice", s"COPY (SELECT 6 AS a) TO ('$files/out/' || 'n.csv')")
+    withClue(err)(rc shouldBe 0)
+    Files.readString(Paths.get(s"$files/out/n.csv")).trim shouldBe "a\n6"
+    flight(open, "alice", s"COPY (SELECT 7 AS a) TO ('$elsewhere/' || 'o.csv')") match
+      case Left(m) => m should include("is outside the tenant's authorized locations")
+      case other   => fail(s"expected the node's refusal, got $other")
+    Files.exists(Paths.get(s"$elsewhere/o.csv")) shouldBe false
+  }
+
+  it should "stay refused inside a native front door transaction" in {
+    assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    assume(duckdbPresent, "no DuckDB 2.0 CLI on PATH")
+    val token  = "tenant=acme&pool=bi&user=alice&password=x"
+    val inner  = s"SELECT * FROM read_csv(''$files/in/'' || ''20260115.csv'')"
+    val script =
+      s"""ATTACH 'quack:127.0.0.1:$openPort' AS q (TYPE quack, TOKEN '$token');
+         |BEGIN;
+         |SELECT count(*) FROM q.tpch1.t;
+         |SELECT * FROM quack_query_by_name('q', '$inner');
+         |ROLLBACK;
+         |""".stripMargin
+    val out = new StringBuilder
+    val err = new StringBuilder
+    (Process(Seq("duckdb", "-no-agent", "-csv", "-noheader")) #<
+      new java.io.ByteArrayInputStream(script.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+      .!(ProcessLogger(l => out.append(l).append('\n'), l => err.append(l).append('\n')))
+    err.toString should include("read_csv needs a literal file name")
+  }
+
+  it should "run as written for a superuser" in {
+    val dated =
+      s"SELECT * FROM read_csv('$files/in/' || strftime(DATE '2026-01-15', '%Y%m%d') || '.csv')"
+    flight(gated, "root", dated) shouldBe Right(List("1,2"))
   }
 
   "a superuser's DESCRIBE" should "run as written" in {
