@@ -49,10 +49,14 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
   private enum Expected:
     case Allow
 
-    /** Refused, for a reason that holds `why`. */
+    /** Refused, for exactly this reason. */
     case Refuse(why: String)
 
   import Expected.*
+
+  /** LocationChecker's refusal of a path LocationPath cannot parse as absolute. */
+  private val NotAbsolute =
+    "is outside the tenant's authorized locations (not an s3:// URL or an absolute local path)"
 
   private def lacks(on: String)         = Refuse(s"user:alice lacks grants on $on")
   private def superuserOnly(op: String) = Refuse(
@@ -144,10 +148,8 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     "settings_use"            -> Allow, // USE is the schema setting
     "settings_variable"       -> Allow, // SET VARIABLE: session data
     // a relative path is never authorized for a non-superuser
-    "superuser_copy_to_relative" -> Refuse(
-      "rel/out.csv is outside the tenant's authorized locations"
-    ),
-    "superuser_relative_path" -> Refuse("rel/x.csv is outside the tenant's authorized locations"),
+    "superuser_copy_to_relative" -> Refuse(s"rel/out.csv $NotAbsolute"),
+    "superuser_relative_path"    -> Refuse(s"rel/x.csv $NotAbsolute"),
     // secure views: what lies behind the boundary is covered by the RO grant on the outermost view
     "macro_table_over_secure"                       -> Allow,
     "read_correlated_secure"                        -> Allow,
@@ -206,9 +208,13 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     "sv_tm"
   )
 
-  private val AlicePerms: List[RolePermission] =
-    List("t", "c", "chk", "kv", "dflt").map(perm(_, "RW")) ++
-      SecureViews.map(perm(_, "RO")) ++
+  /** alice's grants on base tables. */
+  private val TablePerms: List[RolePermission] =
+    List("t", "c", "chk", "kv", "dflt").map(perm(_, "RW"))
+
+  /** alice's grants on secure views. */
+  private val ViewPerms: List[RolePermission] =
+    SecureViews.map(perm(_, "RO")) ++
       List(
         perm("sv_up", "RO", schema = "rpt"),
         perm("sv_seq", "RO", schema = "rpt"),
@@ -217,12 +223,17 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
         perm("sv_m1q", "RO", catalog = "m1")
       )
 
-  private def alice(pool: PoolKey = Pool): DecidePrincipal =
+  private val AlicePerms: List[RolePermission] = TablePerms ++ ViewPerms
+
+  private def alice(
+      pool: PoolKey = Pool,
+      perms: List[RolePermission] = AlicePerms
+  ): DecidePrincipal =
     val effective = EffectiveSet(
       RbacUser("u-alice", Some("acme"), "alice", "user"),
       List(RbacRole("r-1", "acme", "analyst")),
       Nil,
-      AlicePerms,
+      perms,
       Nil
     )
     DecidePrincipal(
@@ -280,10 +291,26 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
       opaCfg = opaCfg
     )
 
-  private def decide(json: String, p: DecidePrincipal, dir: String = Folder): Decision =
+  private def decoded(json: String, dir: String = Folder): Description =
     Description.decode(json.replace("@DIR@", dir).getBytes(UTF_8)) match
-      case Right(d)    => decider.decidePlan(p, d)
+      case Right(d)    => d
       case Left(error) => fail(s"does not decode: $error")
+
+  private def decide(json: String, p: DecidePrincipal, dir: String = Folder): Decision =
+    decider.decidePlan(p, decoded(json, dir))
+
+  /** The goldens `names` whose decision for `p` is not `want`'s, each with what it got. */
+  private def mismatches(
+      p: DecidePrincipal,
+      names: List[String],
+      want: String => Expected
+  ): List[String] =
+    names.sorted.flatMap { name =>
+      (decide(goldens(name), p), want(name)) match
+        case (Decision.Allow, Allow)                                 => None
+        case (Decision.Refuse(reason), Refuse(why)) if reason == why => None
+        case (decision, expectation) => Some(s"$name: expected $expectation, got $decision")
+    }
 
   "the golden corpus" should "be the one qod-node's describer_test pins" in {
     assume(Files.isDirectory(Dir), s"no $Dir")
@@ -298,20 +325,28 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
       }
     }
 
+  it should "name only functions and settings the committed classification knows" in {
+    val names = goldens.toList.sortBy(_._1).flatMap { (name, text) =>
+      val d = decoded(text)
+      d.functions.map(f =>
+        s"$name: function ${f.catalog}.${f.schema}.${f.name} (${f.tpe})" ->
+          FunctionClasses.of(f.catalog, f.schema, f.name, f.tpe).isDefined
+      ) ++ d.settings
+        .filter(_.scope != "variable")
+        .map(s => s"$name: setting ${s.name}" -> SettingClasses.of(s.name).isDefined)
+    }
+    names.size should be > 0
+    names.filterNot(_._2).map(_._1) shouldBe empty
+  }
+
   it should "have a decision for every golden, and no decision without one" in {
     withClue("goldens without a decision:")(goldens.keySet -- expected.keySet shouldBe empty)
     withClue("decisions without a golden:")(expected.keySet -- goldens.keySet shouldBe empty)
   }
 
   "every golden" should "decide for alice as the table says" in {
-    val mismatches = goldens.toList.sortBy(_._1).flatMap { (name, text) =>
-      (decide(text, alice()), expected.get(name)) match
-        case (Decision.Allow, Some(Allow))                                        => None
-        case (Decision.Refuse(reason), Some(Refuse(why))) if reason.contains(why) => None
-        case (_, None)                     => None // the key-set case names it
-        case (decision, Some(expectation)) => Some(s"$name: expected $expectation, got $decision")
-    }
-    mismatches shouldBe empty
+    // A golden without a decision is named by the key-set case.
+    mismatches(alice(), goldens.keySet.intersect(expected.keySet).toList, expected) shouldBe empty
     opaCalls.get shouldBe 0
   }
 
@@ -322,6 +357,46 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
         decide(text, DecidePrincipal(NodePrincipal.System, None)) shouldBe Decision.Allow
       }
     }
+
+  "a golden read through a secure view" should "decide on the view's grant alone" in {
+    val viaGoldens = goldens.keySet.toList.filter { name =>
+      val d = decoded(goldens(name))
+      d.objects.exists(_.via.isDefined) || d.functions.exists(_.via.isDefined)
+    }
+    // The goldens whose view body reads t, on which alice holds RW directly.
+    viaGoldens should contain allOf (
+      "view_secure_builtin_function",
+      "view_secure_macro_qualified",
+      "view_secure_table_macro_qualified",
+      "view_secure_user_macro_qualified"
+    )
+    // read_correlated_secure also reads t outside the view.
+    val want = expected ++ Map("read_correlated_secure" -> lacks("memory.main.t:read"))
+    mismatches(alice(perms = ViewPerms), viaGoldens, want) shouldBe empty
+  }
+
+  "a nested secure view" should "be judged on the outermost view's grant" in {
+    mismatches(
+      alice(perms = List(perm("sv_outer", "RO"))),
+      List("view_secure_nested"),
+      _ => Allow
+    ) shouldBe empty
+    // The inner view's grant covers nothing read through the outer one.
+    mismatches(
+      alice(perms = List(perm("sv", "RO"))),
+      List("view_secure_nested"),
+      _ => lacks("memory.main.sv:read, memory.main.sv_outer:read, memory.main.u:read")
+    ) shouldBe empty
+  }
+
+  "a secure view of another catalog" should "be covered only by a grant naming that catalog" in {
+    val starOnly = AlicePerms.filterNot(_.catalogName == "m1") :+ perm("sv_m1q", "RO")
+    mismatches(
+      alice(perms = starOnly),
+      List("view_secure_cross_catalog_named"),
+      _ => lacks("m1.main.sv_m1q:read, memory.main.u:read")
+    ) shouldBe empty
+  }
 
   "a wildcard catalog grant" should "cover memory only on a pool that attaches it" in {
     decide(goldens("read_where"), alice(LakePool)) shouldBe
