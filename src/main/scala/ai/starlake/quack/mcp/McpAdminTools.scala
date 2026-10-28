@@ -99,6 +99,12 @@ final class McpAdminTools(
 
   private def keyOf(principal: McpPrincipal): Option[String] = principal.rawToken
 
+  /** An init_sql property's help: who may write what (Task 20), the same rule as the REST call. */
+  private def initSqlHelp(what: String): String =
+    s"$what A tenant admin's runs only SET/RESET of allowlisted settings to literals, read-only " +
+      "PRAGMAs and INSTALL/LOAD of allowlisted extensions (else 400 init_sql_refused); a " +
+      "superuser's is not restricted."
+
   // ---------- pools ----------
 
   private val listPoolsTool = McpToolDef(
@@ -601,7 +607,7 @@ final class McpAdminTools(
       "max_concurrent_per_node" -> intProp("Per-node statement cap (0 = unlimited)."),
       "disabled"                -> boolProp("Create disabled."),
       "start_suspended"         -> boolProp("Create suspended at zero nodes."),
-      "init_sql"                -> strProp("SQL run on each node at boot."),
+      "init_sql"                -> strProp(initSqlHelp("SQL run on each node at boot.")),
       "cpu"                     -> strProp("K8s CPU quantity, e.g. '500m'."),
       "memory"                  -> strProp("K8s memory quantity, e.g. '2Gi'."),
       "lockdown"                -> strProp("inherit | on | off (default inherit)."),
@@ -876,7 +882,7 @@ final class McpAdminTools(
       "object_store"     -> objProp("Object-store credentials config."),
       "default_database" -> strProp("Default catalog name presented to clients."),
       "default_schema"   -> strProp("Default schema presented to clients."),
-      "init_sql"         -> strProp("SQL run on each node at attach."),
+      "init_sql"         -> strProp(initSqlHelp("SQL run on each node at attach.")),
       "managed_storage"  -> boolProp("Let the manager provision metastore + storage."),
       "encrypted"        -> boolProp(
         "Encrypt this database's data at rest. Create-time only: it cannot be changed later."
@@ -942,7 +948,7 @@ final class McpAdminTools(
       "object_store"     -> objProp("Replacement object-store config (omit = unchanged)."),
       "default_database" -> strProp("New default catalog (omit = unchanged)."),
       "default_schema"   -> strProp("New default schema (omit = unchanged)."),
-      "init_sql"         -> strProp("New init SQL (omit = unchanged)."),
+      "init_sql"         -> strProp(initSqlHelp("New init SQL (omit = unchanged).")),
       tenantProp
     ),
     adminOnly = true,

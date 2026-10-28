@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
 import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.initsql.InitSqlTrust
+import ai.starlake.quack.ondemand.initsql.{InitSqlChecker, InitSqlTrust}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
@@ -27,7 +27,9 @@ final class PoolHandlers(
     // silent attach failure visible, so degrading a broken lookup into "no failures" would
     // reproduce exactly the bug the feature exists to catch. A lookup that can throw belongs
     // guarded (and logged) at the wiring site, where the failure can still be said out loud.
-    attachFailuresOf: (String, java.time.Instant) => List[CatalogAttachFailureDto] = (_, _) => Nil
+    attachFailuresOf: (String, java.time.Instant) => List[CatalogAttachFailureDto] = (_, _) => Nil,
+    /** The write-time check of a tenant admin's initSql (see TenantDbHandlers). */
+    initSqlChecker: InitSqlChecker = InitSqlChecker.unavailable
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -137,6 +139,29 @@ final class PoolHandlers(
     * and its audit rows.
     */
   def createPoolAs(
+      req: CreatePoolRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[PoolResponse] =
+    // A tenant admin's initSql is judged by the tenant initSql allowlist first (a caller outside the
+    // tenant gets its 403 from the scope gate, unjudged).
+    if TenantScopeCheck.forScope(scope, req.tenant).isDefined then createChecked(req, scope, actor)
+    else
+      InitSqlChecker
+        .writeCheck(
+          initSqlChecker,
+          SuperuserCheck.forScope(scope).isEmpty,
+          req.initSql.getOrElse(""),
+          None
+        )
+        .flatMap {
+          case Left(message) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message))))
+          case Right(warning) =>
+            createChecked(req, scope, actor).map(_.map(_.copy(initSqlWarning = warning)))
+        }
+
+  private def createChecked(
       req: CreatePoolRequest,
       scope: SessionScope,
       actor: AuditActor

@@ -170,7 +170,9 @@ final case class PoolResponse(
     pendingDetail: Option[String] = None,
     // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
     // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
-    initSqlTrusted: Boolean = false
+    initSqlTrusted: Boolean = false,
+    // Set on a create whose tenant-admin initSql this manager could not check (see TenantDbResponse).
+    initSqlWarning: Option[String] = None
 )
 
 final case class SetPoolResourcesRequest(
@@ -668,7 +670,10 @@ final case class TenantDbResponse(
     encrypted: Boolean = false,
     // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
     // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
-    initSqlTrusted: Boolean = false
+    initSqlTrusted: Boolean = false,
+    // Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    // the nodes still run only its allowlisted statements.
+    initSqlWarning: Option[String] = None
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 

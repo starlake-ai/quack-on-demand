@@ -619,11 +619,21 @@ object Main extends IOApp with LazyLogging:
     // A clientSecretRef stored before changeset 0048 is parked and unused until a write stores a
     // secret source again: report it at ERROR, with the restore step, once per tenant per boot.
     ai.starlake.quack.ondemand.auth.ParkedSecretRefs.report(store.listTenants())
+    // The write-time check of a tenant admin's initSql: the local qod-node's --check-init when this
+    // manager runs nodes on its host, else none (the node stays the gate).
+    val initSqlChecker =
+      qodNodeBin.fold(ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable)(
+        ai.starlake.quack.ondemand.initsql.InitSqlChecker.nodeBinary(_)
+      )
     // An initSql a tenant admin wrote (Liquibase 0053 left every earlier one untrusted) runs only
-    // under the tenant initSql allowlist: report each, with how a superuser vouches for it.
+    // under the tenant initSql allowlist: report each that loses statements (or that this manager
+    // cannot check), with how a superuser vouches for it. In the background: one check per row.
     locally {
       val snap = store.snapshot()
-      ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.report(snap.tenantDbs, snap.pools)
+      ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
+        .report(snap.tenantDbs, snap.pools, initSqlChecker)
+        .handleError(e => logger.warn(s"initSql boot report: ${e.getClass.getSimpleName}"))
+        .unsafeRunAndForget()(cats.effect.unsafe.implicits.global)
     }
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
@@ -776,6 +786,7 @@ object Main extends IOApp with LazyLogging:
       mgrCfg.k8s.podTemplateEnabled,
       autoscaleHardCap = mgrCfg.autoscale.hardCap,
       audit = auditRecorder,
+      initSqlChecker = initSqlChecker,
       attachFailuresOf = (nodeId, startedAt) =>
         attachRegistry
           .failuresFor(nodeId, startedAt.toEpochMilli)
@@ -837,7 +848,8 @@ object Main extends IOApp with LazyLogging:
       catalog = catalogHandlers,
       audit = auditRecorder,
       managedEnabled = mgrCfg.managedObjectStore.enabled,
-      requireEncryption = mgrCfg.requireEncryption
+      requireEncryption = mgrCfg.requireEncryption,
+      initSqlChecker = initSqlChecker
     )
 
     // REST surface only; the scheduler + drain-loop fibers start later with the duty fibers.

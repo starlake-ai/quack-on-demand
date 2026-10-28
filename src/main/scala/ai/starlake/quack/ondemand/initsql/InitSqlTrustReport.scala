@@ -47,6 +47,24 @@ object InitSqlTrustReport extends LazyLogging:
     s"tenant '${row.tenant}' ${row.label}: its initSql was not written by a superuser and $what. " +
       s"If its author is to be trusted, ${row.fix}."
 
-  /** Logs [[line]] for every untrusted row, without a check. */
-  def report(tenantDbs: List[TenantDb], pools: List[Pool]): Unit =
-    untrusted(tenantDbs, pools).foreach(r => logger.warn(line(r, None)))
+  /** The WARN line of `row` after `verdict`, None when the check admits every statement (nothing is
+    * lost: the row runs as before, under the allowlist).
+    */
+  def lineAfter(row: Row, verdict: InitSqlVerdict): Option[String] = verdict match
+    case InitSqlVerdict.Checked(_, Nil)     => None
+    case InitSqlVerdict.Checked(n, refused) =>
+      Some(line(row, Some(refused.map(r => s"statement ${r.statement} of $n: ${r.reason}"))))
+    case InitSqlVerdict.Unchecked(_) => Some(line(row, None))
+
+  /** Logs [[lineAfter]] for every untrusted row, each checked with `checker` (one qod-node run per
+    * row on a manager that has one), one row after the other.
+    */
+  def report(
+      tenantDbs: List[TenantDb],
+      pools: List[Pool],
+      checker: InitSqlChecker
+  ): cats.effect.IO[Unit] =
+    import cats.syntax.foldable.*
+    untrusted(tenantDbs, pools).traverse_ { r =>
+      checker.check(r.sql).map(v => lineAfter(r, v).foreach(l => logger.warn(l)))
+    }

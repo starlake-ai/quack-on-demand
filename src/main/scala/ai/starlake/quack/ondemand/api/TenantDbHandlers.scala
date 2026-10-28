@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.api
 import ai.starlake.quack.model.{TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError, TenantDbPatch}
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.initsql.InitSqlTrust
+import ai.starlake.quack.ondemand.initsql.{InitSqlChecker, InitSqlTrust}
 import ai.starlake.quack.ondemand.state.FederatedSourceStore
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditActor, AuditRecorder}
 import cats.effect.IO
@@ -29,7 +29,11 @@ final class TenantDbHandlers(
       * can guarantee no plaintext database exists in the deployment. Gates creates only; existing
       * databases are untouched, so enabling it never bricks a running deployment.
       */
-    requireEncryption: Boolean
+    requireEncryption: Boolean,
+    /** The write-time check of a tenant admin's initSql (qod-node --check-init when this manager
+      * runs nodes on its host); the node stays the gate.
+      */
+    initSqlChecker: InitSqlChecker = InitSqlChecker.unavailable
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -149,6 +153,23 @@ final class TenantDbHandlers(
     * superuser's), and its audit rows.
     */
   def createTenantDbAs(
+      req: TenantDbRequest,
+      scope: SessionScope,
+      actor: AuditActor
+  ): Out[TenantDbResponse] =
+    // A tenant admin's initSql is judged by the tenant initSql allowlist first (a caller outside the
+    // tenant gets its 403 from the scope gate, unjudged).
+    if TenantScopeCheck.forScope(scope, req.tenant).isDefined then createChecked(req, scope, actor)
+    else
+      InitSqlChecker
+        .writeCheck(initSqlChecker, SuperuserCheck.forScope(scope).isEmpty, req.initSql, None)
+        .flatMap {
+          case Left(message)  => IO.pure(Left(initSqlRefused(message)))
+          case Right(warning) =>
+            createChecked(req, scope, actor).map(_.map(_.copy(initSqlWarning = warning)))
+        }
+
+  private def createChecked(
       req: TenantDbRequest,
       scope: SessionScope,
       actor: AuditActor
@@ -328,6 +349,28 @@ final class TenantDbHandlers(
         }
 
   def update(req: UpdateTenantDbRequest, apiKey: Option[String])(
+      scopeOf: SessionScope.Resolver
+  ): Out[UpdateTenantDbResponse] =
+    // A tenant admin's changed initSql is judged first (see createTenantDbAs).
+    (req.initSql, TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf)) match
+      case (Some(sql), None) =>
+        InitSqlChecker
+          .writeCheck(
+            initSqlChecker,
+            SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty,
+            sql,
+            sup.findTenantDb(req.tenant, req.name).map(_.initSql)
+          )
+          .flatMap {
+            case Left(message)  => IO.pure(Left(initSqlRefused(message)))
+            case Right(warning) =>
+              updateChecked(req, apiKey)(scopeOf).map(
+                _.map(r => r.copy(db = r.db.copy(initSqlWarning = warning)))
+              )
+          }
+      case _ => updateChecked(req, apiKey)(scopeOf)
+
+  private def updateChecked(req: UpdateTenantDbRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
   ): Out[UpdateTenantDbResponse] =
     TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match

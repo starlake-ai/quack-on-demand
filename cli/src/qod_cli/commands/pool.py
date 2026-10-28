@@ -3,7 +3,13 @@ from typing import Optional
 import typer
 
 from ..registry import covers
-from ._run import call
+from ._run import call, warn_init_sql
+
+
+# Who may write what in an initSql (the manager refuses the rest with init_sql_refused).
+_INIT_SQL_HELP = ("SQL each node runs at start. A tenant admin's may hold only SET/RESET of allowlisted "
+                  "settings to literals, read-only PRAGMAs and INSTALL/LOAD of allowlisted extensions; "
+                  "a superuser's is not restricted.")
 
 app = typer.Typer(help="Pool lifecycle and pool-level access grants.")
 permission_app = typer.Typer(help="Pool access grants for users and groups.")
@@ -60,7 +66,7 @@ def create(
     idle_timeout_sec: int = typer.Option(-1, "--idle-timeout-sec"),
     max_concurrent_per_node: int = typer.Option(0, "--max-concurrent-per-node"),
     disabled: bool = typer.Option(False, "--disabled"),
-    init_sql: str = typer.Option(None, "--init-sql"),
+    init_sql: str = typer.Option(None, "--init-sql", help=_INIT_SQL_HELP),
     cpu: str = typer.Option("", "--cpu"),
     memory: str = typer.Option("", "--memory"),
     pod_template_file: typer.FileText = typer.Option(None, "--pod-template-file"),
@@ -116,7 +122,7 @@ def create(
         body["minNodes"] = min_nodes
     if max_nodes is not None:
         body["maxNodes"] = max_nodes
-    call(ctx, "POST", "/api/pool/create", body=body)
+    warn_init_sql(call(ctx, "POST", "/api/pool/create", body=body))
 
 
 @app.command()

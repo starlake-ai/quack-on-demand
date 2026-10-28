@@ -1,9 +1,14 @@
 import typer
 
 from ..registry import covers
-from ._run import call, kv_pairs
+from ._run import call, kv_pairs, warn_init_sql
 
 app = typer.Typer(help="Tenant databases (DuckLake catalogs).")
+
+# Who may write what in an initSql (the manager refuses the rest with init_sql_refused).
+_INIT_SQL_HELP = ("SQL each node runs at start. A tenant admin's may hold only SET/RESET of allowlisted "
+                  "settings to literals, read-only PRAGMAs and INSTALL/LOAD of allowlisted extensions; "
+                  "a superuser's is not restricted.")
 
 
 @app.command("list")
@@ -41,7 +46,7 @@ def create(
     object_store: list[str] = typer.Option(None, "--object-store", help="KEY=VALUE, repeatable."),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),
-    init_sql: str = typer.Option("", "--init-sql"),
+    init_sql: str = typer.Option("", "--init-sql", help=_INIT_SQL_HELP),
     managed_storage: bool = typer.Option(
         False,
         "--managed-storage",
@@ -92,7 +97,7 @@ def create(
         body["encrypted"] = True
     if encryption_key:
         body["encryptionKey"] = encryption_key
-    call(ctx, "POST", "/api/database/create", body=body)
+    warn_init_sql(call(ctx, "POST", "/api/database/create", body=body))
 
 
 @app.command()
@@ -117,7 +122,7 @@ def update(
     object_store: list[str] = typer.Option(None, "--object-store"),
     default_database: str = typer.Option(None, "--default-database"),
     default_schema: str = typer.Option(None, "--default-schema"),
-    init_sql: str = typer.Option(None, "--init-sql"),
+    init_sql: str = typer.Option(None, "--init-sql", help=_INIT_SQL_HELP),
 ):
     body: dict = {"tenant": tenant, "name": name}
     if metastore is not None:
@@ -130,7 +135,7 @@ def update(
         body["defaultSchema"] = default_schema
     if init_sql is not None:
         body["initSql"] = init_sql
-    call(ctx, "POST", "/api/database/update", body=body)
+    warn_init_sql(call(ctx, "POST", "/api/database/update", body=body))
 
 
 @app.command()

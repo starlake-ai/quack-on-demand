@@ -51,7 +51,11 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       patToken
     )
 
-  private final class Fixture(auditRecorder: AuditRecorder = AuditRecorder.noop):
+  private final class Fixture(
+      auditRecorder: AuditRecorder = AuditRecorder.noop,
+      initSqlChecker: ai.starlake.quack.ondemand.initsql.InitSqlChecker =
+        ai.starlake.quack.ondemand.initsql.InitSqlChecker.unavailable
+  ):
     val store    = new InMemoryControlPlaneStore()
     val backend  = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
     val tracker  = new ai.starlake.quack.edge.adapter.NodeLoadTracker
@@ -99,7 +103,8 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       snapshotsExist = (_, _, ids) => ids
     )
     val audit     = new AuditHandlers(NoopTelemetryStore)
-    val tenantDbs = new TenantDbHandlers(sup, requireEncryption = false)
+    val tenantDbs =
+      new TenantDbHandlers(sup, requireEncryption = false, initSqlChecker = initSqlChecker)
 
     val tools =
       new McpAdminTools(pools, nodes, statements, maintenance, tags, audit, tenantDbs, scopeOf)
@@ -425,6 +430,36 @@ class McpAdminToolsSpec extends AnyFlatSpec with Matchers:
       "tenant" -> Json.fromString(Tenant0),
       "name"   -> Json.fromString(fullName)
     ).isRight shouldBe true
+  }
+
+  // Task 20 Part D: the tool goes through the REST handler, so a tenant admin's initSql gets the
+  // same write-time check and the same refusal.
+  "create_database" should "refuse a tenant admin's initSql the allowlist refuses" in {
+    val bin = ai.starlake.quack.ondemand.runtime.QodNodeTestBinary.path
+    assume(bin.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
+    val f = new Fixture(initSqlChecker =
+      ai.starlake.quack.ondemand.initsql.InitSqlChecker.nodeBinary(bin.get)
+    )
+    val out = f.call(
+      "create_database",
+      adminPat(),
+      "tenant"   -> Json.fromString(Tenant0),
+      "name"     -> Json.fromString("tinit"),
+      "kind"     -> Json.fromString("memory"),
+      "init_sql" -> Json.fromString("SET threads = 2;\nCOPY (SELECT 1) TO '/tmp/x.csv';")
+    )
+    out.left.toOption.getOrElse(fail(s"admitted: $out")) should include(
+      "statement 2 of 2: COPY is not allowed"
+    )
+    val ok = f.call(
+      "create_database",
+      adminPat(),
+      "tenant"   -> Json.fromString(Tenant0),
+      "name"     -> Json.fromString("tinit"),
+      "kind"     -> Json.fromString("memory"),
+      "init_sql" -> Json.fromString("SET threads = 2;")
+    )
+    ok.toOption.get.hcursor.get[Boolean]("initSqlTrusted").toOption shouldBe Some(false)
   }
 
   "create_database" should "accept encrypted and encryption_key for kind=duckdb-file" in {

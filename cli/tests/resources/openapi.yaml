@@ -9870,6 +9870,8 @@ components:
           type: string
         initSqlTrusted:
           type: boolean
+        initSqlWarning:
+          type: string
     PreviewColumn:
       title: PreviewColumn
       type: object
@@ -10870,6 +10872,8 @@ components:
           type: boolean
         initSqlTrusted:
           type: boolean
+        initSqlWarning:
+          type: string
     TenantListResponse:
       title: TenantListResponse
       type: object
