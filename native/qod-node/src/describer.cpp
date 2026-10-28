@@ -200,8 +200,8 @@ SQLStatement *Unwrapped(SQLStatement *statement) {
 //! unqualified table name in the view's own schema first, so a user with create there could shadow it.
 //! Refuses a base table reference without a schema (a CTE name in scope excepted, in the scope that
 //! defines it), and a table read through a SQL string (query, query_table), whose names the walk
-//! cannot see. Collects the catalogs the definition qualifies a table with, and those of every plain
-//! view it reads, whose definition is held to the same rule (they expand in the body, unseen).
+//! cannot see. Item 18: it reads base tables, secure views and DuckDB's own views only, never a plain
+//! view, and casts to built-in types only. Collects the catalogs the definition qualifies a table with.
 //!
 //! Item 17: an unqualified function, macro, table macro, type or sequence name (a nextval, currval or
 //! setval string included) is refused when it resolves outside the system catalog, so a user's entry in
@@ -222,9 +222,6 @@ public:
 	std::set<std::string> catalogs;
 
 private:
-	//! How deep plain views may nest inside a secure view's definition.
-	static constexpr int kMaxViewDepth = 8;
-
 	unique_ptr<CatalogEntryRetriever> ViewRetriever(const std::string &catalog, const std::string &schema);
 	void Ref(const TableRef &ref, const std::set<std::string> &scope);
 	void Expr(const ParsedExpression &expr, const std::set<std::string> &scope);
@@ -239,7 +236,6 @@ private:
 	ClientContext &context_;
 	std::string view_catalog_;
 	unique_ptr<CatalogEntryRetriever> retriever_;
-	int depth_ = 0;
 };
 
 unique_ptr<CatalogEntryRetriever> Definition::ViewRetriever(const std::string &catalog, const std::string &schema) {
@@ -275,8 +271,14 @@ optional_ptr<CatalogEntry> Definition::Lookup(CatalogType type, const QualifiedN
 //! DuckDB's own: the system catalog's entries, and the built-ins every DuckDB catalog generates on
 //! demand (DefaultTypeGenerator: an unqualified BIGINT resolves to temp.main.bigint, internal), which
 //! no session can create or replace.
+//! `internal` is trusted only in those two catalogs: CreateInfo serializes it, so a database file written
+//! elsewhere could carry it on an entry of its own (review M-f).
 bool BuiltIn(CatalogEntry &entry) {
-	return entry.internal || Text(entry.ParentCatalog().GetName()) == Text(Identifier::SystemCatalog());
+	auto catalog = Text(entry.ParentCatalog().GetName());
+	if (catalog == Text(Identifier::SystemCatalog())) {
+		return true;
+	}
+	return entry.internal && catalog == Text(Identifier::TempCatalog());
 }
 
 //! An unqualified name of `type` the body would resolve outside the system catalog.
@@ -337,16 +339,25 @@ void Definition::Sequence(const FunctionExpression &call) {
 
 //! A type as ExpressionBinder::BindExpression(TypeExpression&) finds it: the resolved name, then the
 //! name in the resolved catalog with any schema, then the name anywhere on the path, then system.main.
+//! Item 18: the type must be built in, whether the definition qualifies it or not. A user type (an ENUM)
+//! is replaced by whoever holds DDL on it, and the body then casts with the owner's rights to what that
+//! user chose.
 void Definition::Type(const TypeExpression &type) {
 	auto &name = type.GetQualifiedName();
-	if (name.Path().size() > 1) {
-		Resolved(name, "type");
-		return;
-	}
 	auto valid = [](optional_ptr<CatalogEntry> entry) {
 		return entry && entry->type == CatalogType::TYPE_ENTRY &&
 		       entry->Cast<TypeCatalogEntry>().user_type.id() != LogicalTypeId::INVALID;
 	};
+	auto refuse = [&]() {
+		Unsupported("a secure view whose definition uses the user type " + name.ToString());
+	};
+	if (name.Path().size() > 1) {
+		auto entry = Lookup(CatalogType::TYPE_ENTRY, Resolved(name, "type"));
+		if (valid(entry) && !BuiltIn(*entry)) {
+			refuse();
+		}
+		return;
+	}
 	auto bound = Binder::BindTableName(*retriever_, name);
 	auto entry = Lookup(CatalogType::TYPE_ENTRY, bound);
 	if (!valid(entry)) {
@@ -358,7 +369,7 @@ void Definition::Type(const TypeExpression &type) {
 		               QualifiedName(Identifier::InvalidCatalog(), Identifier::InvalidSchema(), name.Name()));
 	}
 	if (valid(entry) && !BuiltIn(*entry)) {
-		Unsupported("a secure view whose definition names the type " + Text(name.Name()) + " without its schema");
+		refuse();
 	}
 }
 
@@ -442,6 +453,12 @@ void Definition::Ref(const TableRef &ref, const std::set<std::string> &scope) {
 		if (join.condition) {
 			Expr(*join.condition, scope);
 		}
+		for (auto &expr : join.duplicate_eliminated_columns) {
+			Expr(*expr, scope);
+		}
+		if (join.ranking_expression) {
+			Expr(*join.ranking_expression, scope);
+		}
 		break;
 	}
 	case TableReferenceType::SUBQUERY:
@@ -478,6 +495,12 @@ void Definition::Ref(const TableRef &ref, const std::set<std::string> &scope) {
 		for (auto &column : pivot.pivots) {
 			for (auto &expr : column.pivot_expressions) {
 				Expr(*expr, scope);
+			}
+			// The IN list: a typed literal ('a'::lvl) names a type.
+			for (auto &entry : column.entries) {
+				if (entry.expr) {
+					Expr(*entry.expr, scope);
+				}
 			}
 		}
 		break;
@@ -546,28 +569,19 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 	if (!bound.Catalog().empty()) {
 		catalogs.insert(StringUtil::Lower(Text(bound.Catalog())));
 	}
-	// A plain view it reads expands in the body, unseen: its definition follows the same rule, and the
-	// catalogs it qualifies are the body's too (review M-d). Looked up as the body binds it (tables and
-	// views share a catalog set).
+	// Looked up as the body binds it (tables and views share a catalog set). Item 18: a definition reads
+	// base tables and secure views (creating or replacing those is superuser-only; a nested one's own
+	// boundary checks its definition), never a plain view, which whoever holds DDL on it can redefine to
+	// read anything with the owner's rights. DuckDB's own views (information_schema, pg_catalog: the
+	// system catalog's) are built in, admitted without a walk (review M-h).
 	auto entry = Lookup(CatalogType::TABLE_ENTRY, bound);
 	if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
 		return;
 	}
-	auto &view = entry->Cast<ViewCatalogEntry>();
-	if (view.security_type == ViewSecurityType::SECURE_VIEW) {
-		// Its own boundary checks its definition when the walk reaches it.
+	if (entry->Cast<ViewCatalogEntry>().security_type == ViewSecurityType::SECURE_VIEW || BuiltIn(*entry)) {
 		return;
 	}
-	if (++depth_ > kMaxViewDepth) {
-		Unsupported("a secure view whose definition nests plain views too deep");
-	}
-	catalogs.insert(StringUtil::Lower(Text(view.ParentCatalog().GetName())));
-	// Its body binds with its own search path (its catalog and schema first).
-	auto outer = std::move(retriever_);
-	retriever_ = ViewRetriever(Text(view.ParentCatalog().GetName()), Text(view.ParentSchema().name));
-	Query(*view.GetQuery().node, {});
-	retriever_ = std::move(outer);
-	depth_--;
+	Unsupported("a secure view whose definition reads the plain view " + bound.ToString());
 }
 
 class Walker {

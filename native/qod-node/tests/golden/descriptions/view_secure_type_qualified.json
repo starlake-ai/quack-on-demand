@@ -1,1 +1,0 @@
-{"control":[],"functions":[],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["body","level"],"kind":"table","name":"docs","schema":"main","via":"memory.rpt.sv_lvl"},{"access":"read","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv_lvl","schema":"rpt","via":null}],"settings":[],"statement":"PROJECTION","v":1}

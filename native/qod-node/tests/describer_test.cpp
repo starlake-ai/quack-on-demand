@@ -157,7 +157,7 @@ void RunGoldens(const fs::path &dir) {
 		names.push_back(file.substr(0, file.size() - suffix.size()));
 	}
 	std::sort(names.begin(), names.end());
-	if (names.size() < 129) {
+	if (names.size() < 133) {
 		Fail("expected the full golden corpus, found " + std::to_string(names.size()) + " cases in " + dir.string());
 	}
 	for (auto &name : names) {
