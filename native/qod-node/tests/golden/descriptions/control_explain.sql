@@ -1,0 +1,1 @@
+EXPLAIN SELECT id FROM t

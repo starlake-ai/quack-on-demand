@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"alter","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"t","schema":"main","via":null},{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"trigger","name":"tr2","schema":"main","via":null}],"settings":[],"statement":"CREATE_TRIGGER","v":1}

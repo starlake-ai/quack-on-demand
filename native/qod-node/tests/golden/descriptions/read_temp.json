@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"read","catalog":"temp","catalogType":"duckdb","columns":["x"],"kind":"table","name":"scratch","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

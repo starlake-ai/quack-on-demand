@@ -1,0 +1,3 @@
+"statement":"MERGE_INTO"
+{"access":"insert","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"t","schema":"main","via":null}
+{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id","tags","v"],"kind":"table","name":"u","schema":"main","via":null}

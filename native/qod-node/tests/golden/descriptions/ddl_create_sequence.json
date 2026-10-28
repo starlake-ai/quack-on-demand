@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"sequence","name":"seq2","schema":"main","via":null}],"settings":[],"statement":"CREATE_SEQUENCE","v":1}

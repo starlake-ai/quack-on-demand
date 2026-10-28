@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"delete","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"table","name":"t","schema":"main","via":null},{"access":"read","catalog":"memory","catalogType":"duckdb","columns":["id"],"kind":"table","name":"t","schema":"main","via":null}],"settings":[],"statement":"DELETE","v":1}

@@ -1,0 +1,4 @@
+"statement":"PRAGMA"
+{"op":"pragma","target":"disable_profiling","type":null}
+"name":"disable_profiling"
+"type":"pragma"

@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":["rel/x.csv"],"catalog":"system","name":"glob","schema":"main","type":"table","via":"memory.main.sv_rel"}],"objects":[{"access":"read","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"secure_view","name":"sv_rel","schema":"main","via":null}],"settings":[],"statement":"PROJECTION","v":1}

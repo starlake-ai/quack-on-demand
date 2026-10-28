@@ -1,0 +1,1 @@
+ALTER VIEW pv RENAME TO pv2

@@ -143,6 +143,7 @@ set(QOD_NODE_CORE_SOURCES
   src/credentials.cpp
   src/crypto.cpp
   src/decide_client.cpp
+  src/describer.cpp
   src/functions_list.cpp
   src/handle.cpp
   src/http_post.cpp
@@ -225,6 +226,11 @@ if(QOD_NODE_TESTS)
   add_test(NAME authz COMMAND authz_test)
   qod_node_test(authz_engine_test)
   add_test(NAME authz_engine COMMAND authz_engine_test)
+  qod_node_test(describer_test)
+  add_test(NAME describer COMMAND describer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/descriptions)
+  qod_node_test(describer_extension_test)
+  add_test(NAME describer_extensions COMMAND describer_extension_test)
+  set_tests_properties(describer_extensions PROPERTIES SKIP_RETURN_CODE 77)
   find_package(Threads REQUIRED)
   # A real HTTP server on 127.0.0.1 for the decide client's tests, on every platform.
   add_library(qod_node_test_http STATIC tests/test_http_server.cpp)

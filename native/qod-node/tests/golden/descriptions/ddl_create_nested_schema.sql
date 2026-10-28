@@ -1,0 +1,1 @@
+CREATE SCHEMA memory.s1.s2

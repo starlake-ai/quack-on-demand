@@ -1,0 +1,1 @@
+{"control":[],"functions":[{"args":["@DIR@/in.csv"],"catalog":"system","name":"read_csv","schema":"main","type":"table","via":null}],"objects":[],"settings":[],"statement":"PROJECTION","v":1}

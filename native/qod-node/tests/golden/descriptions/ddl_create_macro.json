@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"macro","name":"m2","schema":"main","via":null}],"settings":[],"statement":"CREATE_MACRO","v":1}

@@ -1,0 +1,1 @@
+{"control":[{"op":"detach","target":null,"type":"duckdb"}],"functions":[],"objects":[],"settings":[],"statement":"DETACH","v":1}

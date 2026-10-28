@@ -1,0 +1,1 @@
+CREATE VIEW pv_sv AS SELECT id FROM sv;

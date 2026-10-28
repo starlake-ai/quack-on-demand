@@ -1,0 +1,1 @@
+{"control":[],"functions":[],"objects":[{"access":"create","catalog":"memory","catalogType":"duckdb","columns":[],"kind":"type","name":"mood","schema":"main","via":null}],"settings":[],"statement":"CREATE_TYPE","v":1}
