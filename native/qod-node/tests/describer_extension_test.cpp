@@ -94,8 +94,8 @@ int main() {
 	} catch (std::exception &error) {
 		Fail(std::string("DuckLake setup: ") + error.what());
 	}
-	// DuckLake runs its metadata queries on the same context while the flush executes, so they are
-	// described after it: judge the description that names the operator.
+	// DuckLake runs its metadata queries while the flush executes, so they are described after it:
+	// judge the description that names the operator.
 	auto from = capture.all.size();
 	capture.on = true;
 	con.Query("CALL ducklake_flush_inlined_data('lake')");
@@ -103,6 +103,19 @@ int main() {
 	const std::string flush_op =
 	    "{\"op\":\"extension_operator\",\"target\":\"DUCKLAKE_FLUSH_DATA\",\"type\":\"ducklake\"}";
 	auto flush = DescriptionWith(from, flush_op);
+	// Which ClientContext DuckLake's own metadata queries bind on (CONTRACT Addendum 4 item 7, for Task
+	// 10): reported, not asserted.
+	size_t nested = 0;
+	size_t nested_on_client = 0;
+	for (auto i = from; i < capture.all.size(); i++) {
+		if (capture.all[i].find("__ducklake_metadata_lake") != std::string::npos) {
+			nested++;
+			nested_on_client += capture.contexts[i] == con.context.get() ? 1 : 0;
+		}
+	}
+	std::cout << "describer_extension_test: the flush bound " << (capture.all.size() - from)
+	          << " plans; " << nested << " read __ducklake_metadata_lake, " << nested_on_client
+	          << " of them on the client's own ClientContext" << std::endl;
 	Expect("DuckLake flush", flush, flush_op);
 	Expect("DuckLake flush", flush, "{\"op\":\"copy_to\",\"target\":\"" + dir + "/lake_data/");
 	Expect("DuckLake flush", flush, "\"catalog\":\"lake\",\"catalogType\":\"ducklake\"");

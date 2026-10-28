@@ -221,7 +221,6 @@ private:
 	void AddFunction(const std::string &type, const QualifiedName &qualified, const std::vector<std::string> &args,
 	                 const std::string &via);
 	std::vector<std::string> TableArgs(LogicalGet &get, const std::string &name, const std::string &via);
-	std::vector<std::string> Args(const vector<Value> &positional, const named_argument_map_t &named);
 	std::vector<std::string> LocationStrings(const Value &value, const std::string &via);
 	std::string Location(const std::string &given, const std::string &via);
 	SQLStatement *Statement();
@@ -815,7 +814,8 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 	case LogicalOperatorType::LOGICAL_PRAGMA: {
 		auto &info = *op.Cast<LogicalPragma>().info;
 		AddControl("pragma", Text(info.function.name), "");
-		AddFunction("pragma", info.function.GetQualifiedName(), Args(info.parameters, info.named_parameters), via);
+		// No arguments (CONTRACT Addendum 4 item 6): only a File function's locations leave the node.
+		AddFunction("pragma", info.function.GetQualifiedName(), {}, via);
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_TRANSACTION:
@@ -1042,9 +1042,11 @@ void Walker::AddFunction(const std::string &type, const QualifiedName &qualified
 	                            {"via", StringOrNull(via)}}));
 }
 
+//! A File function's resolved locations; every other table function carries none (CONTRACT Addendum 4
+//! item 6), so a credential a statement names (a postgres_scan connection string) never leaves the node.
 std::vector<std::string> Walker::TableArgs(LogicalGet &get, const std::string &name, const std::string &via) {
 	if (!IsFileFunction(name)) {
-		return Args(get.parameters, get.named_parameters);
+		return {};
 	}
 	if (get.parameters.empty()) {
 		return CopyFromLocations(via);
@@ -1053,22 +1055,6 @@ std::vector<std::string> Walker::TableArgs(LogicalGet &get, const std::string &n
 	std::vector<std::string> args;
 	for (auto &given : LocationStrings(get.parameters[0], via)) {
 		args.push_back(Location(given, via));
-	}
-	return args;
-}
-
-std::vector<std::string> Walker::Args(const vector<Value> &positional, const named_argument_map_t &named) {
-	std::vector<std::string> args;
-	for (auto &value : positional) {
-		args.push_back(value.ToString());
-	}
-	std::vector<std::pair<std::string, std::string>> by_name;
-	for (auto &entry : named) {
-		by_name.emplace_back(Text(entry.first), entry.second.ToString());
-	}
-	std::sort(by_name.begin(), by_name.end());
-	for (auto &entry : by_name) {
-		args.push_back(entry.first + "=" + entry.second);
 	}
 	return args;
 }

@@ -22,9 +22,11 @@ struct Capture {
 	//! Set by the last described plan; cleared by a refusal.
 	std::string canonical;
 	std::string fingerprint;
-	//! Every description, in bind order: a statement an extension runs on the same context (DuckLake's
-	//! metadata queries) is bound, and described, after the statement that ran it.
+	//! Every description, in bind order: a statement an extension runs while the client's executes
+	//! (DuckLake's metadata queries, on DuckLake's own ClientContext) is bound, and described, after it.
 	std::vector<std::string> all;
+	//! The ClientContext each of `all` was bound on.
+	std::vector<const duckdb::ClientContext *> contexts;
 	//! Set by the last refusal; cleared by a described plan.
 	std::string refused;
 	int described = 0;
@@ -47,6 +49,7 @@ inline void CapturePostBind(duckdb::PlannerExtensionInput &input, duckdb::BoundS
 		capture.canonical = described.canonical;
 		capture.fingerprint = described.fingerprint;
 		capture.all.push_back(described.canonical);
+		capture.contexts.push_back(&input.context);
 		capture.refused.clear();
 		capture.described++;
 	} catch (duckdb::PermissionException &error) {

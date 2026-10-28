@@ -109,6 +109,13 @@ void RunCase(const fs::path &dir, const std::string &name, const std::string &sc
 		     (result->HasError() ? result->GetError() : std::string("none")) + ")");
 		return;
 	}
+	// Only a File function's locations leave the node (CONTRACT Addendum 4 item 6): no other argument a
+	// statement names, such as a connection string's password or a key, reaches a description.
+	for (auto secret : {"qod-not-a-real-password", "0123456789112345"}) {
+		if (capture.canonical.find(secret) != std::string::npos) {
+			Fail(name + ": an argument reached the description: " + capture.canonical);
+		}
+	}
 	if (capture.fingerprint != qod::Hex(qod::Sha256(capture.canonical))) {
 		Fail(name + ": the fingerprint is not the SHA-256 of the canonical bytes");
 	}
@@ -147,7 +154,7 @@ void RunGoldens(const fs::path &dir) {
 		names.push_back(file.substr(0, file.size() - suffix.size()));
 	}
 	std::sort(names.begin(), names.end());
-	if (names.size() < 90) {
+	if (names.size() < 94) {
 		Fail("expected the full golden corpus, found " + std::to_string(names.size()) + " cases in " + dir.string());
 	}
 	for (auto &name : names) {
