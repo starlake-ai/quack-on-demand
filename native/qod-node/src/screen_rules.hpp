@@ -2,6 +2,8 @@
 
 #include "locations.hpp"
 
+#include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,19 @@ struct ScreenOutcome {
 	std::string refusal;
 	ScreenFacts facts;
 };
+
+//! The call-shaped tokens of one text, the screen's backstop to its walk: per judged (reader, query()),
+//! refused or superuser-class name, how many times an identifier (quoted or not) or a keyword spelled so
+//! stands right before '(' (`calls`), comments skipped; and how many of those stand, past any `<name> .`
+//! qualifiers, right after INTO, TABLE, EXISTS, ON or REFERENCES (`after_target`): where an INSERT target,
+//! a CREATE TABLE name, a CREATE INDEX table or a referenced table is written with its column list.
+struct CallShapes {
+	std::map<std::string, uint64_t> calls;
+	std::map<std::string, uint64_t> after_target;
+};
+
+//! The CallShapes of `sql` (normalized as the screen normalizes it).
+CallShapes CallShapesOf(const std::string &sql);
 
 //! How deep query('...') may nest query('...').
 constexpr int kMaxQueryNesting = 8;

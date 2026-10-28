@@ -639,6 +639,41 @@ int main() {
 	        "a sequence in ALTER TABLE SET options");
 	Admitted("CREATE TABLE x (v INT) WITH (o = upper('a'))", 0, "an allowed function in a table's options");
 
+	// ---- Task 9 re-review 3 M-i: an INSERT target, CREATE TABLE name, index table or referenced table
+	// offsets a call-shaped token only where the tokens show a parenthesis right after its keyword
+	struct Shape {
+		const char *sql;
+		uint64_t calls;
+		uint64_t after_target;
+	};
+	for (auto &shape : std::vector<Shape> {{"INSERT INTO current_setting SELECT 1", 0, 0},
+	                                       {"INSERT INTO current_setting (a) SELECT 1", 1, 1},
+	                                       {"INSERT INTO main.current_setting (a) VALUES (1)", 1, 1},
+	                                       {"INSERT INTO memory.main.current_setting(a) VALUES (1)", 1, 1},
+	                                       {"INSERT INTO current_setting /* c */ (a) VALUES (1)", 1, 1},
+	                                       {"CREATE TABLE IF NOT EXISTS current_setting(a INT)", 1, 1},
+	                                       {"CREATE TABLE current_setting AS SELECT 1", 0, 0},
+	                                       {"CREATE INDEX i ON current_setting (a)", 1, 1},
+	                                       {"CREATE TABLE c (a INT REFERENCES current_setting (a))", 1, 1},
+	                                       {"CREATE TABLE c (a INT REFERENCES current_setting)", 0, 0},
+	                                       {"INSERT INTO current_setting SELECT current_setting('x')", 1, 0},
+	                                       {"SELECT * FROM t JOIN u ON current_setting('x') = 'y'", 1, 1}}) {
+		auto found = qod::CallShapesOf(shape.sql);
+		Expect(found.calls["current_setting"] == shape.calls &&
+		           found.after_target["current_setting"] == shape.after_target,
+		       std::string("the call shapes of ") + shape.sql);
+	}
+	Admitted("INSERT INTO current_setting SELECT 1", 0, "a target with no parenthesis adds no slack");
+	for (auto refused : {"INSERT INTO current_setting SELECT current_setting('x')",
+	                     "INSERT INTO current_setting (a) SELECT current_setting('x')",
+	                     "CREATE TABLE current_setting AS SELECT current_setting('x')",
+	                     "CREATE TABLE current_setting (a VARCHAR DEFAULT current_setting('x'))",
+	                     "CREATE TABLE c (a VARCHAR REFERENCES current_setting, "
+	                     "b VARCHAR DEFAULT current_setting('x'))",
+	                     "SELECT * FROM t JOIN u ON current_setting('x') = 'y'"}) {
+		Refused(refused, "QoD: current_setting is reserved to superusers", refused);
+	}
+
 	// ---- what the parser cannot read is refused
 	Refused("SELEC 1", "QoD: the statement does not parse", "a syntax error");
 

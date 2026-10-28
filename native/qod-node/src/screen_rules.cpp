@@ -251,11 +251,39 @@ std::string CallName(const std::string &text) {
 	return StringUtil::Lower(unquoted);
 }
 
-//! How many times `sql`'s tokens call each judged, refused or superuser-class name: an identifier
-//! (quoted or not) or a keyword right before '(', comments skipped.
-std::map<std::string, idx_t> CallsInTokens(const std::string &sql) {
+
+//! The keyword or identifier token before `i`, past comments and `<name> .` qualifier pairs, lower case;
+//! empty at the start.
+std::string WordBefore(const std::string &sql, const vector<SimplifiedToken> &tokens, idx_t i) {
+	auto previous = [&](idx_t at) -> idx_t {
+		while (at > 0) {
+			at--;
+			if (tokens[at].type != SimplifiedTokenType::SIMPLIFIED_TOKEN_COMMENT) {
+				return at;
+			}
+		}
+		return tokens.size();
+	};
+	auto at = previous(i);
+	// DuckDB's tokenizer reports the '.' of a qualified name as a numeric constant, not an operator.
+	while (at < tokens.size() && TokenText(sql, tokens, at) == ".") {
+		auto qualifier = previous(at);
+		if (qualifier >= tokens.size()) {
+			return "";
+		}
+		at = previous(qualifier);
+	}
+	if (at >= tokens.size() || (tokens[at].type != SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD &&
+	                            tokens[at].type != SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER)) {
+		return "";
+	}
+	return StringUtil::Lower(TokenText(sql, tokens, at));
+}
+
+CallShapes CallsInTokens(const std::string &sql) {
 	auto tokens = Parser::Tokenize(sql);
-	std::map<std::string, idx_t> calls;
+	CallShapes result;
+	auto &calls = result.calls;
 	for (idx_t i = 0; i < tokens.size(); i++) {
 		if (tokens[i].type != SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
 		    tokens[i].type != SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD) {
@@ -272,9 +300,14 @@ std::map<std::string, idx_t> CallsInTokens(const std::string &sql) {
 		if (next < tokens.size() && tokens[next].type == SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR &&
 		    TokenText(sql, tokens, next).compare(0, 1, "(") == 0) {
 			calls[name]++;
+			auto before = WordBefore(sql, tokens, i);
+			if (before == "into" || before == "table" || before == "exists" || before == "on" ||
+			    before == "references") {
+				result.after_target[name]++;
+			}
 		}
 	}
-	return calls;
+	return result;
 }
 
 bool IsStringLiteral(const ParsedExpression &expression) {
@@ -359,7 +392,8 @@ public:
 			Refuse("query() nests deeper than " + std::to_string(kMaxQueryNesting) + " levels");
 		}
 		auto normalized = Parser::NormalizeSQLString(sql);
-		auto calls = CallsInTokens(normalized);
+		auto tokens = CallsInTokens(normalized);
+		auto &calls = tokens.calls;
 		for (auto &call : calls) {
 			if (IsRefusedCall(call.first)) {
 				Refuse(call.first + " is reserved to superusers: it runs SQL no screen sees");
@@ -375,14 +409,18 @@ public:
 		nesting_ = nesting;
 		judged_.emplace_back();
 		named_.emplace_back();
+		targets_.emplace_back();
 		for (auto &statement : parser.statements) {
 			Statement(*statement);
 		}
 		// A call-shaped token the walk did not see as a call (which it judged or refused) nor as a name
 		// before a parenthesis (a table with its column list, a CTE or an alias with its column names) is a
 		// call where the walk does not go: refused (Addendum 4 item 15).
+		// A target the walk saw counts only as often as the tokens show it before a parenthesis right after
+		// its keyword, so INSERT INTO current_setting SELECT 1 hides no current_setting(...) call.
 		for (auto &call : calls) {
-			auto seen = judged_.back()[call.first] + named_.back()[call.first];
+			auto targets = std::min(targets_.back()[call.first], tokens.after_target[call.first]);
+			auto seen = judged_.back()[call.first] + named_.back()[call.first] + targets;
 			if (IsSuperuserFunction(call.first) && seen < call.second) {
 				Refuse(call.first + " is reserved to superusers");
 			}
@@ -390,6 +428,7 @@ public:
 				Refuse(call.first + " is called where QoD cannot check its arguments");
 			}
 		}
+		targets_.pop_back();
 		named_.pop_back();
 		judged_.pop_back();
 		nesting_ = outer;
@@ -551,7 +590,7 @@ private:
 			Walk(constraint.Cast<CheckConstraint>().expression);
 			break;
 		case ConstraintType::FOREIGN_KEY:
-			Named(constraint.Cast<ForeignKeyConstraint>().info.table);
+			Target(constraint.Cast<ForeignKeyConstraint>().info.table);
 			break;
 		default:
 			break;
@@ -727,7 +766,7 @@ private:
 				Node(*insert.select_statement->node);
 			}
 			// INSERT INTO t (a) / INSERT INTO t (SELECT ...): the target before a parenthesis.
-			Named(insert.qualified_name.Name());
+			Target(insert.qualified_name.Name());
 			if (insert.table_ref) {
 				Ref(*insert.table_ref);
 			}
@@ -1244,7 +1283,7 @@ private:
 		switch (info.type) {
 		case CatalogType::TABLE_ENTRY: {
 			auto &table = info.Cast<CreateTableInfo>();
-			Named(table.GetQualifiedName().Name());
+			Target(table.GetQualifiedName().Name());
 			if (table.query) {
 				Node(*table.query->node);
 			}
@@ -1290,7 +1329,7 @@ private:
 		}
 		case CatalogType::INDEX_ENTRY: {
 			auto &index = info.Cast<CreateIndexInfo>();
-			Named(index.table);
+			Target(index.table);
 			for (auto &expression : index.parsed_expressions) {
 				Walk(expression);
 			}
@@ -1374,18 +1413,30 @@ private:
 	idx_t depth_ = 0;
 	//! The judged calls of each Text level, innermost last.
 	std::vector<std::map<std::string, idx_t>> judged_;
-	//! The names of each Text level the walk saw right before a parenthesis that opens no call: a table
-	//! with its column list (INSERT INTO t (a), CREATE TABLE t (a INT), CREATE INDEX ... ON t (a),
-	//! REFERENCES t (a), COPY t (a)), a CTE or a table alias with its column names, a view with its column
-	//! names. The token count does not take them for calls.
+	//! The names of each Text level the walk saw right before a parenthesis that opens no call, where the
+	//! statement's shape puts one: a COPY table with its column list (COPY t (a)), a CTE or a table alias
+	//! with its column names, a view with its column names. The token count does not take them for calls.
 	std::vector<std::map<std::string, idx_t>> named_;
 
 	void Named(const Identifier &name) {
 		named_.back()[StringUtil::Lower(name.GetIdentifierName())]++;
 	}
+
+	//! The tables of each Text level that a parenthesis may or may not follow (an INSERT target, a CREATE
+	//! TABLE name, a CREATE INDEX table, a referenced table): counted only against the tokens that show
+	//! one right after their keyword (CallShapes::after_target).
+	std::vector<std::map<std::string, idx_t>> targets_;
+
+	void Target(const Identifier &name) {
+		targets_.back()[StringUtil::Lower(name.GetIdentifierName())]++;
+	}
 };
 
 } // namespace
+
+CallShapes CallShapesOf(const std::string &sql) {
+	return CallsInTokens(Parser::NormalizeSQLString(sql));
+}
 
 ScreenOutcome ScreenStatement(ClientContext &context, const std::string &sql) {
 	ScreenOutcome outcome;
