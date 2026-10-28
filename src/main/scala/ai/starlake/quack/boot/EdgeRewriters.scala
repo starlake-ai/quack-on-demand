@@ -9,7 +9,7 @@ import ai.starlake.quack.edge.cls.{
   PolicyColumnSources,
   UnresolvedMode
 }
-import ai.starlake.quack.model.{PoolKey, TenantDbKind}
+import ai.starlake.quack.model.{PoolKey, TenantDb, TenantDbKind}
 import ai.starlake.quack.edge.rls.RowPolicyRewriter
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -103,7 +103,40 @@ object EdgeRewriters extends LazyLogging:
       node = nodeQuery,
       nodeTimeout = nodeTimeout
     )
-    new CachedColumnCatalog(fetch = sources.fetch, instruments = Some(stmtInstruments))
+    new CachedColumnCatalog(
+      fetch = sources.fetch,
+      instruments = Some(stmtInstruments),
+      history = (tenant, pool, cat, sch, tab) =>
+        IO.blocking(
+          duckLakeHistoryRow(sup, tenant, pool, cat)
+            .flatMap(td => sup.getTenantById(td.tenantId).map(t => catalogReaders.get(t.id, td.name)))
+            .exists(_.nameHistoryStable(sch, tab))
+        )
+    )
+
+  /** The DuckLake row whose catalog `cat` names for a statement on `pool`: the pool's own row when
+    * it attaches under `cat` (a branch attaches under its parent's alias, so its history is its
+    * own), else the tenant's DuckLake row of that name or alias. None for anything else (a
+    * federated or built-in catalog): no history, which the guard reads as unstable.
+    */
+  private def duckLakeHistoryRow(
+      sup: PoolSupervisor,
+      tenant: String,
+      pool: Option[PoolKey],
+      cat: String
+  ): Option[TenantDb] =
+    val own = pool
+      .filter(_.tenant == tenant)
+      .flatMap(k => sup.findTenantDb(k.tenant, k.tenantDb).map(td => (k, td)))
+      .collect {
+        case (k, td)
+            if td.kind == TenantDbKind.DuckLake &&
+              TenantDb
+                .catalogAlias(sup.effectiveMetastoreFor(k.tenant, k.tenantDb))
+                .equalsIgnoreCase(cat) =>
+          td
+      }
+    own.orElse(sup.findTenantDbByCatalogName(tenant, cat).filter(_.kind == TenantDbKind.DuckLake))
 
   /** Write-path protected-read guard. Reads the same CLS / RLS enable flags the SELECT-path
     * rewriters consult, and takes the [[columnCatalog]] (NOT a pre-built rewriter): the guard owns

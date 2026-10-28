@@ -22,6 +22,29 @@ object PoolPicks:
       .find(key => sup.snapshot(key).exists(_.nodes.exists(n => eligible(n.role))))
       .orElse(candidates.headOption)
 
+  /** Why [[forDatabase]] found no pool. */
+  enum Miss:
+    case PoolNotFound(pool: String)
+    case OtherDatabase(pool: String, servedDb: String)
+    case NoPool
+
+  /** The pool a data call on `tenantDb` targets (MCP `run_sql`, the REST data edge): a named pool
+    * must exist in the tenant and serve that database; none means [[readPoolKey]].
+    */
+  def forDatabase(
+      sup: PoolSupervisor,
+      tenant: String,
+      tenantDb: String,
+      pool: Option[String]
+  ): Either[Miss, PoolKey] =
+    pool match
+      case Some(name) =>
+        sup.findPoolKeyByTenantAndPoolName(tenant, name) match
+          case Some(key) if key.tenantDb == tenantDb => Right(key)
+          case Some(key)                             => Left(Miss.OtherDatabase(name, key.tenantDb))
+          case None                                  => Left(Miss.PoolNotFound(name))
+      case None => readPoolKey(sup, tenant, tenantDb).toRight(Miss.NoPool)
+
   /** Read-preferring pick (ReadOnly/Dual): preview, diff, restore dry-run. */
   def readPoolKey(sup: PoolSupervisor, tenant: String, tenantDb: String): Option[PoolKey] =
     pick(sup, tenant, tenantDb)(r => r == Role.ReadOnly || r == Role.Dual)

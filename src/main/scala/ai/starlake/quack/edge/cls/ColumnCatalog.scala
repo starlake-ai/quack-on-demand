@@ -21,12 +21,30 @@ trait ColumnCatalog:
       tableName: String
   ): IO[List[String]]
 
+  /** Whether the name has meant one and the same table, with the same column names, in every
+    * snapshot the catalog holds (`DuckLakeCatalogReader.nameHistoryStable`): what a time-travel
+    * read under a column or row policy needs, since policies match today's names. False when it
+    * cannot tell (fail closed). `pool` is the statement's: a branch pool attaches its own catalog
+    * under the parent's alias, so the history read is the branch's, not the parent's.
+    */
+  def historyStable(
+      tenant: String,
+      pool: Option[PoolKey],
+      catalog: String,
+      schemaName: String,
+      tableName: String
+  ): IO[Boolean] =
+    IO.pure(false)
+
 object ColumnCatalog:
 
   /** Test-only static catalog. Construct with the (catalog, schema, table) -> column-list map you
     * want. Not cached; tests run synchronously.
     */
-  final class MapCatalog(rows: Map[(String, String, String), List[String]]) extends ColumnCatalog:
+  final class MapCatalog(
+      rows: Map[(String, String, String), List[String]],
+      stable: Set[(String, String, String)] = Set.empty
+  ) extends ColumnCatalog:
     def columnsOf(
         tenant: String,
         pool: Option[PoolKey],
@@ -35,3 +53,11 @@ object ColumnCatalog:
         t: String
     ): IO[List[String]] =
       IO.pure(rows.getOrElse((c, s, t), Nil))
+    override def historyStable(
+        tenant: String,
+        pool: Option[PoolKey],
+        c: String,
+        s: String,
+        t: String
+    ): IO[Boolean] =
+      IO.pure(stable.contains((c, s, t)))

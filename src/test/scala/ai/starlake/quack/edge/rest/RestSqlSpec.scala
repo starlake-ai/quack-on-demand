@@ -142,6 +142,12 @@ class RestSqlSpec extends AnyFlatSpec with Matchers:
       " WHERE table_catalog = 'db' AND table_schema = 's''x' ORDER BY table_name LIMIT 51"
   }
 
+  "tableType" should "match one object by name, case-insensitively, with values only as literals" in {
+    RestSql.tableType("db", "s'x", "Order-Items") shouldBe
+      "SELECT table_type FROM information_schema.tables WHERE table_catalog = 'db'" +
+      " AND lower(table_schema) = lower('s''x') AND lower(table_name) = lower('Order-Items') LIMIT 1"
+  }
+
   "the rendered statements" should "mean what the grammar says in DuckDB" in {
     Class.forName("org.duckdb.DuckDBDriver")
     Using.resource(DriverManager.getConnection("jdbc:duckdb:")) { conn =>

@@ -20,7 +20,12 @@ import java.time.Duration
   */
 final class CachedColumnCatalog(
     fetch: (String, Option[PoolKey], String, String, String) => IO[List[String]],
-    instruments: Option[StatementInstruments] = None
+    instruments: Option[StatementInstruments] = None,
+    /** [[ColumnCatalog.historyStable]]'s answer, DuckLake metadata only (never a node DESCRIBE);
+      * false (fail closed) when not wired.
+      */
+    history: (String, Option[PoolKey], String, String, String) => IO[Boolean] =
+      (_, _, _, _, _) => IO.pure(false)
 ) extends ColumnCatalog:
 
   private val cache: Cache[(String, Option[PoolKey], String, String, String), List[String]] =
@@ -29,6 +34,32 @@ final class CachedColumnCatalog(
       .expireAfterWrite(Duration.ofSeconds(5))
       .maximumSize(4096)
       .build()
+
+  private val stableCache
+      : Cache[(String, Option[PoolKey], String, String, String), java.lang.Boolean] =
+    Caffeine
+      .newBuilder()
+      .expireAfterWrite(Duration.ofSeconds(5))
+      .maximumSize(4096)
+      .build()
+
+  /** Cached like [[columnsOf]]; a failed lookup answers false, cached for a tick. */
+  override def historyStable(
+      tenant: String,
+      pool: Option[PoolKey],
+      catalog: String,
+      schemaName: String,
+      tableName: String
+  ): IO[Boolean] =
+    val key = (tenant, pool, catalog, schemaName, tableName)
+    Option(stableCache.getIfPresent(key)) match
+      case Some(cached) => IO.pure(cached.booleanValue)
+      case None         =>
+        history(tenant, pool, catalog, schemaName, tableName).attempt.map { r =>
+          val stable = r.getOrElse(false)
+          stableCache.put(key, stable)
+          stable
+        }
 
   def columnsOf(
       tenant: String,

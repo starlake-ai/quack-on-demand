@@ -109,9 +109,10 @@ object RestResolver:
       case ColumnKind.Decimal(p, s) =>
         if !DecimalRe.matches(raw) then fail("expected a decimal without exponent")
         else
-          val bd       = BigDecimal(raw).bigDecimal.stripTrailingZeros
-          val scale    = bd.scale.max(0)
-          val intDigit = (bd.precision - bd.scale).max(0)
+          val bd    = BigDecimal(raw).bigDecimal.stripTrailingZeros
+          val scale = bd.scale.max(0)
+          // Zero has no integer digit, though its precision is 1 (DECIMAL(p,p) holds it).
+          val intDigit = if bd.signum == 0 then 0 else (bd.precision - bd.scale).max(0)
           if scale <= s && intDigit <= p - s then Right(())
           else fail(s"expected a value that fits DECIMAL($p,$s)")
       case ColumnKind.Floating(_) =>

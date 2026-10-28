@@ -26,12 +26,17 @@ object BoundedWait:
     * `Right` that arrives afterwards is handed to `close`. The same applies when the waiting caller
     * is itself cancelled (an outer timeout, a disconnect). A late `Left` or a late error is
     * dropped: it holds nothing to release.
+    *
+    * `onDelivered` sees a `Right` delivered in time before it is returned, with no cancellation
+    * point in between: a caller that registers it there can close it when it is cancelled at the
+    * boundary of the `poll` it waits in, where the returned value itself would be lost.
     */
   def closingLate[E, A](
       run: IO[Either[E, A]],
       limit: FiniteDuration,
       onTimeout: => E,
-      close: A => Unit
+      close: A => Unit,
+      onDelivered: A => IO[Unit] = (_: A) => IO.unit
   ): IO[Either[E, A]] =
     IO.uncancelable { poll =>
       for
@@ -61,6 +66,7 @@ object BoundedWait:
           }.flatten
         )
         value <- IO.fromEither(result)
+        _     <- value.fold(_ => IO.unit, onDelivered)
       yield value
     }
 

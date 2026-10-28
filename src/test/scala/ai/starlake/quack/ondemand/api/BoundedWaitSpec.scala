@@ -127,3 +127,25 @@ class BoundedWaitSpec extends AnyFlatSpec with Matchers:
     withClue(s"seed=$seed: ") {
       all.map(_.closes.get()).distinct shouldBe List(1)
     }
+
+  it should "show a result delivered in time to onDelivered before returning it, and a late one never" in:
+    val seen = new java.util.concurrent.atomic.AtomicReference[Option[Res]](None)
+    val res  = new Res(7)
+    BoundedWait
+      .closingLate(IO.pure(Right(res)), 1.second, "timeout", closeRes, r => IO(seen.set(Some(r))))
+      .unsafeRunSync() shouldBe Right(res)
+    seen.get shouldBe Some(res)
+    val late = new Res(8)
+    seen.set(None)
+    BoundedWait
+      .closingLate(
+        IO.sleep(300.millis).as(Right(late)),
+        50.millis,
+        "timeout",
+        closeRes,
+        r => IO(seen.set(Some(r)))
+      )
+      .unsafeRunSync() shouldBe Left("timeout")
+    awaitCloses(late, 1)
+    late.closes.get() shouldBe 1
+    seen.get shouldBe None

@@ -93,3 +93,41 @@ class DuckLakeCatalogReaderTimeTravelSpec extends AnyFlatSpec with Matchers with
       // the column identity and that from != to only if the engine records it
       diff.typeChanged.map(_._1) should (contain("r_name") or be(empty))
     }
+
+  "nameHistoryStable" should "hold for a name that has always been one table with the same columns" in
+    withCatalog("tt", extraSql = extra) { (reader, _) =>
+      reader.nameHistoryStable("tpch1", "nation") shouldBe true
+      // DuckDB binds names case-insensitively, and so does the check.
+      reader.nameHistoryStable("TPCH1", "Nation") shouldBe true
+      reader.nameHistoryStable("tpch1", "no_such_table") shouldBe false
+    }
+
+  it should "fail for both names of a renamed table, and for a name reused by another table" in
+    withCatalog(
+      "tt",
+      extraSql = extra +
+        """ALTER TABLE lake.tpch1.nation RENAME TO nations;
+          |CREATE TABLE lake.tpch1.nation (n_key INTEGER);
+          |""".stripMargin
+    ) { (reader, _) =>
+      reader.nameHistoryStable("tpch1", "nations") shouldBe false
+      reader.nameHistoryStable("tpch1", "nation") shouldBe false
+    }
+
+  it should "fail for a table one of whose columns was renamed" in
+    withCatalog(
+      "tt",
+      extraSql = extra + "ALTER TABLE lake.tpch1.nation RENAME COLUMN n_name TO n_label;\n"
+    ) { (reader, _) =>
+      reader.nameHistoryStable("tpch1", "nation") shouldBe false
+    }
+
+  "viewEverNamed" should "find a view whatever the case it is asked in, as DuckDB binds it" in
+    withCatalog(
+      "tt",
+      extraSql = extra + "CREATE VIEW lake.tpch1.myview AS SELECT * FROM lake.tpch1.nation;\n"
+    ) { (reader, _) =>
+      reader.viewEverNamed("tpch1", "myview") shouldBe true
+      reader.viewEverNamed("TPCH1", "MyView") shouldBe true
+      reader.viewEverNamed("tpch1", "nation") shouldBe false
+    }

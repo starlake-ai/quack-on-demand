@@ -57,12 +57,46 @@ object TimeTravelCarrier:
   private val PlaceholderIndex = (Marker + """(\d+)__""").r
 
   def carry(sql: String): Carry =
+    pin(sql) match
+      case Pinned.Absent                   => Carry.Absent
+      case Pinned.Unplaceable              => Carry.Unplaceable
+      case Pinned.Tables(stmt, _, clauses) => Carry.Carried(stmt.toString, clauses)
+
+  /** The table references a time-travel clause pins (`[catalog.][schema.]table`, each part None
+    * when absent, unquoted): `Some(Nil)` with no clause, None when a clause cannot be pinned (the
+    * caller fails closed).
+    */
+  def pinnedTables(sql: String): Option[List[(Option[String], Option[String], String)]] =
+    pin(sql) match
+      case Pinned.Absent               => Some(Nil)
+      case Pinned.Unplaceable          => None
+      case Pinned.Tables(_, tables, _) =>
+        Some(tables.map { t =>
+          (
+            Option(t.getDatabaseName).map(unquote),
+            Option(t.getSchemaName).map(unquote),
+            unquote(t.getName)
+          )
+        })
+
+  /** A name as DuckDB reads it: a double-quoted identifier without its quotes, `""` as `"`. */
+  private def unquote(s: String): String =
+    if s.length >= 2 && s.startsWith("\"") && s.endsWith("\"") then
+      s.substring(1, s.length - 1).replace("\"\"", "\"")
+    else s
+
+  private enum Pinned:
+    case Absent, Unplaceable
+    case Tables(stmt: Statement, tables: List[Table], clauses: Vector[String])
+
+  /** Parses the stripped `sql` and puts placeholder k on the table clause k followed. */
+  private def pin(sql: String): Pinned =
     val (stripped, clauses) = SqlParser.timeTravelClauses(sql)
-    if clauses.isEmpty then Carry.Absent
+    if clauses.isEmpty then Pinned.Absent
     // The marker is reserved: a caller who writes it could otherwise forge a placeholder.
-    else if sql.contains(Marker) then Carry.Unplaceable
+    else if sql.contains(Marker) then Pinned.Unplaceable
     else
-      Try(CCJSqlParserUtil.parse(stripped)).toOption.fold(Carry.Unplaceable) { stmt =>
+      Try(CCJSqlParserUtil.parse(stripped)).toOption.fold(Pinned.Unplaceable) { stmt =>
         val offsets = lineOffsets(stripped)
         val ends    = tablesOf(stmt).flatMap(t => endOffset(t, offsets).map(t -> _))
         val pinned  = clauses.zipWithIndex.map { (clause, k) =>
@@ -71,11 +105,12 @@ object TimeTravelCarrier:
           } match
             case List((t, _)) if t.getTimeTravel == null && t.getTimeTravelStrAfterAlias == null =>
               t.setTimeTravel(placeholder(k)): Unit
-              true
-            case _ => false
+              Some(t)
+            case _ => None
         }
-        if pinned.forall(identity) then Carry.Carried(stmt.toString, clauses.map(_.text).toVector)
-        else Carry.Unplaceable
+        if pinned.forall(_.isDefined) then
+          Pinned.Tables(stmt, pinned.flatten, clauses.map(_.text).toVector)
+        else Pinned.Unplaceable
       }
 
   /** Puts every clause back on the table carrying its placeholder, in the rewritten `stmt`. False
