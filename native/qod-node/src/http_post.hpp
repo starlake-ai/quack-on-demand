@@ -19,7 +19,8 @@ struct HttpUrl {
 	std::string path;
 };
 
-//! Splits `url`, which must be http://host[:port][/path] with no user information, query or fragment.
+//! Splits `url`, which must be http://host[:port][/path] with no user information, query or fragment,
+//! and no space or control character in the path.
 //! Throws std::invalid_argument naming what is wrong: qod-node speaks plain HTTP only.
 HttpUrl ParseHttpUrl(const std::string &url);
 

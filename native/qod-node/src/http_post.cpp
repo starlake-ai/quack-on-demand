@@ -153,22 +153,107 @@ bool ParseHead(const std::string &raw, Head &head) {
 	return true;
 }
 
+//! Decodes a chunked body (RFC 9112 section 7.1) as it arrives, resuming where the last call stopped,
+//! so each received byte is looked at a bounded number of times however the body is split. Chunk
+//! extensions and trailer fields are dropped.
+class ChunkedReader {
+public:
+	//! `start`: where the body starts in the text Resume reads.
+	explicit ChunkedReader(size_t start = 0) : pos_(start), scanned_(start) {
+	}
+
+	//! True once `raw`, the bytes received so far (only appended to between calls), holds the whole
+	//! body, then in `body`. Throws std::runtime_error when it is malformed or over kMaxHttpReply.
+	bool Resume(const std::string &raw, std::string &body) {
+		while (true) {
+			if (state_ == State::SIZE) {
+				// A CR the last call saw at the end may start the line break.
+				auto line_end = raw.find("\r\n", scanned_ > pos_ + 1 ? scanned_ - 1 : pos_);
+				if (line_end == std::string::npos) {
+					if (raw.size() - pos_ > kMaxChunkLine) {
+						throw std::runtime_error("a malformed chunk size");
+					}
+					scanned_ = raw.size();
+					return false;
+				}
+				auto size_text = raw.substr(pos_, line_end - pos_);
+				size_text = Trim(size_text.substr(0, size_text.find(';')));
+				if (!AllHex(size_text) || size_text.size() > 7) {
+					throw std::runtime_error("a malformed chunk size");
+				}
+				size_ = static_cast<size_t>(std::stoul(size_text, nullptr, 16));
+				pos_ = line_end + 2;
+				scanned_ = pos_;
+				state_ = size_ == 0 ? State::TRAILER : State::DATA;
+			} else if (state_ == State::DATA) {
+				if (raw.size() < pos_ + size_ + 2) {
+					return false;
+				}
+				if (raw.compare(pos_ + size_, 2, "\r\n") != 0) {
+					throw std::runtime_error("a chunk without its line break");
+				}
+				body_.append(raw, pos_, size_);
+				if (body_.size() > kMaxHttpReply) {
+					throw std::runtime_error("the response is too large");
+				}
+				pos_ += size_ + 2;
+				scanned_ = pos_;
+				state_ = State::SIZE;
+			} else {
+				// The trailer section ends with an empty line: at once, or after its field lines.
+				if (raw.compare(pos_, 2, "\r\n") == 0 ||
+				    raw.find("\r\n\r\n", scanned_ > pos_ + 3 ? scanned_ - 3 : pos_) != std::string::npos) {
+					body = body_;
+					return true;
+				}
+				if (raw.size() - pos_ > kMaxTrailer) {
+					throw std::runtime_error("the trailer section is too long");
+				}
+				scanned_ = raw.size();
+				return false;
+			}
+		}
+	}
+
+private:
+	enum class State { SIZE, DATA, TRAILER };
+	//! A chunk size line, extensions included, and the trailer section, at most.
+	static constexpr size_t kMaxChunkLine = 4096;
+	static constexpr size_t kMaxTrailer = 64 * 1024;
+
+	State state_ = State::SIZE;
+	//! Where the current size line, chunk data or trailer section starts.
+	size_t pos_;
+	//! How far the current size line or trailer section was searched.
+	size_t scanned_;
+	//! The current chunk's size.
+	size_t size_ = 0;
+	std::string body_;
+};
+
 HttpReply ReadReply(SocketHandle handle, int64_t deadline) {
 	std::string raw;
 	Head head;
 	auto have_head = false;
+	ChunkedReader chunks;
 	char buffer[16 * 1024];
 	while (true) {
 		if (!have_head) {
 			have_head = ParseHead(raw, head);
+			if (have_head) {
+				chunks = ChunkedReader(head.body_start);
+			}
 		}
 		if (have_head && head.chunked) {
 			std::string body;
-			if (DecodeChunked(raw.substr(head.body_start), body)) {
+			if (chunks.Resume(raw, body)) {
 				return HttpReply {head.status, body};
 			}
 		} else if (have_head && head.has_length && raw.size() - head.body_start >= head.length) {
 			return HttpReply {head.status, raw.substr(head.body_start, head.length)};
+		} else if (have_head && !head.has_length && raw.size() - head.body_start > kMaxHttpReply) {
+			// Close-delimited: kMaxHttpReply bounds it like the others.
+			throw std::runtime_error("the response is too large");
 		}
 		if (raw.size() > kMaxHttpReply + 64 * 1024) {
 			throw std::runtime_error("the response is too large");
@@ -217,6 +302,11 @@ HttpUrl ParseHttpUrl(const std::string &url) {
 	if (result.path.find_first_of("?#") != std::string::npos) {
 		throw std::invalid_argument("a query or fragment in the URL");
 	}
+	for (auto c : result.path) {
+		if (static_cast<unsigned char>(c) <= 0x20 || c == 0x7f) {
+			throw std::invalid_argument("a space or control character in the URL path");
+		}
+	}
 	std::string port = "80";
 	if (result.authority[0] == '[') {
 		auto close = result.authority.find(']');
@@ -253,35 +343,8 @@ HttpUrl ParseHttpUrl(const std::string &url) {
 
 bool DecodeChunked(const std::string &raw, std::string &body) {
 	body.clear();
-	size_t pos = 0;
-	while (true) {
-		auto line_end = raw.find("\r\n", pos);
-		if (line_end == std::string::npos) {
-			return false;
-		}
-		auto size_text = raw.substr(pos, line_end - pos);
-		size_text = Trim(size_text.substr(0, size_text.find(';')));
-		if (!AllHex(size_text) || size_text.size() > 7) {
-			throw std::runtime_error("a malformed chunk size");
-		}
-		auto size = static_cast<size_t>(std::stoul(size_text, nullptr, 16));
-		pos = line_end + 2;
-		if (size == 0) {
-			// The trailer section ends with an empty line.
-			return raw.compare(pos, 2, "\r\n") == 0 || raw.find("\r\n\r\n", pos) != std::string::npos;
-		}
-		if (raw.size() < pos + size + 2) {
-			return false;
-		}
-		if (raw.compare(pos + size, 2, "\r\n") != 0) {
-			throw std::runtime_error("a chunk without its line break");
-		}
-		body.append(raw, pos, size);
-		if (body.size() > kMaxHttpReply) {
-			throw std::runtime_error("the response is too large");
-		}
-		pos += size + 2;
-	}
+	ChunkedReader reader;
+	return reader.Resume(raw, body);
 }
 
 HttpReply HttpPost(const HttpUrl &url, const std::string &path,

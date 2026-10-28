@@ -106,6 +106,10 @@ int main() {
 	ExpectQuery(alice, Prelude(Fresh("u-alice", kNode, 2)), "", "a refresh with a newer policy version");
 	ExpectQuery(alice, Prelude(Fresh("u-alice", kNode, 1)), "older policy version", "a policy version downgrade");
 	ExpectQuery(alice, Prelude(Fresh("u-mallory")), "another principal", "another principal on alice's connection");
+	// A refused prelude leaves the connection with no current principal, alice's included, until a
+	// prelude succeeds whole.
+	ExpectQuery(alice, "SELECT 42", "no verified principal", "no statement runs after a refused prelude");
+	ExpectQuery(alice, Prelude(Fresh("u-alice", kNode, 2)), "", "alice's next prelude makes it current again");
 
 	duckdb::Connection bob(db);
 	TagAsQuackSession(bob);

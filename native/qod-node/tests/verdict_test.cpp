@@ -146,7 +146,13 @@ int main(int argc, char **argv) {
 	screen.kind = "screen";
 	screen.expires_at = kNow - 5;
 	Expect(qod::VerifyVerdict(SignVerdict(VerdictJson(screen)), kKey, Expected("screen"), kNow).allow,
-	       "a screen verdict is not checked for expiry: it is used at once");
+	       "a screen verdict stamped a moment ago (expiresAt = the manager's now) is used at once");
+	screen.expires_at = kNow - qod::kMaxScreenVerdictAgeMs;
+	Expect(qod::VerifyVerdict(SignVerdict(VerdictJson(screen)), kKey, Expected("screen"), kNow).allow,
+	       "a screen verdict is accepted until kMaxScreenVerdictAgeMs after its expiresAt");
+	screen.expires_at = kNow - qod::kMaxScreenVerdictAgeMs - 1;
+	ExpectRefused(SignVerdict(VerdictJson(screen)), Expected("screen"), "verdict expired",
+	              "a screen verdict older than kMaxScreenVerdictAgeMs (a captured one replayed)");
 
 	// ---- every check
 	auto text = SignVerdict(VerdictJson(Good()));

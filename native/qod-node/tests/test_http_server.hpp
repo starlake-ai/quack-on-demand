@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
@@ -27,6 +28,14 @@ struct HttpAnswer {
 	int delay_ms = 0;
 	//! Send the body chunked instead of with a Content-Length.
 	bool chunked = false;
+	//! The size of each chunk; 0 sends two chunks, the split inside the body.
+	size_t chunk_bytes = 0;
+	//! Trailer field lines after the last chunk, each ending in CRLF.
+	std::string trailer;
+	//! Send neither a Content-Length nor chunks: closing the connection ends the body.
+	bool close_delimited = false;
+	//! Send the response in pieces of this many bytes, a millisecond apart; 0 sends it at once.
+	size_t segment_bytes = 0;
 	//! Close the connection without answering.
 	bool drop = false;
 };

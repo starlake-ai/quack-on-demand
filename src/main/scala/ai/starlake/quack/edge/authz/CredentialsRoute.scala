@@ -117,9 +117,10 @@ object CredentialsRoute:
   val ContextExpired: String = "authorization context expired; retry"
 
   /** The principal's credentials cannot be vouched for now (the store or the data-folder deny set
-    * could not be read): retryable.
+    * could not be read): retryable. The node quotes it after its own "S3 credentials unavailable,
+    * retry: ", so it does not say so again.
     */
-  val Unavailable: String = "S3 credentials unavailable; retry"
+  val Unavailable: String = "credential set cannot be served now"
 
   /** The answer's JSON, before its canonical rendering: the set by id, every member present. */
   def json(set: List[UserS3Credential], digest: String): Json =

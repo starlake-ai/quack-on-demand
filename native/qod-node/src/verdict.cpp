@@ -2,23 +2,12 @@
 
 #include "crypto.hpp"
 #include "json.hpp"
+#include "wire_text.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace qod {
-namespace {
-
-bool IsLowerHex(const std::string &text) {
-	for (auto c : text) {
-		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-			return false;
-		}
-	}
-	return !text.empty();
-}
-
-} // namespace
 
 Verdict VerifyVerdict(const std::string &text, const std::string &node_key, const VerdictExpectation &expected,
                       int64_t now_ms) {
@@ -81,7 +70,11 @@ Verdict VerifyVerdict(const std::string &text, const std::string &node_key, cons
 	if (verdict.ctx != expected.ctx) {
 		throw std::invalid_argument("verdict is for another session context");
 	}
-	if (verdict.kind != "screen" && verdict.expires_at <= now_ms) {
+	// A screen verdict carries expiresAt = now and is used once, at once: accepted for
+	// kMaxScreenVerdictAgeMs after it, so a captured one cannot be replayed without bound.
+	auto expired = verdict.kind == "screen" ? verdict.expires_at < now_ms - kMaxScreenVerdictAgeMs
+	                                        : verdict.expires_at <= now_ms;
+	if (expired) {
 		throw std::invalid_argument("verdict expired");
 	}
 	if (!no_extras) {

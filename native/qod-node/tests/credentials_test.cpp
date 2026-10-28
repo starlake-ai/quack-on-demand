@@ -201,12 +201,18 @@ int main() {
 	Answering(200, SignCredentials(good));
 	Expect(!client.Fetch(url, "a-handle", "u-alice", d1).cached && server.Requests() == requests + 3,
 	       "a set is fetched again once its time is up");
-	Expect(client.CachedSets() == 3, "three sets kept: alice's two digests and bob's");
+	Expect(client.CachedSets() == 1, "the expired sets were swept by that fetch: only alice's d1 is kept");
 
 	// ---- refusals and retries; none is cached
-	Answering(401, "handle refused: handle MAC does not verify");
+	// The manager's 401 bodies (CredentialsRoute): a handle from another node fails its MAC, so it is
+	// "handle does not verify" (CONTRACT.md Addendum 4 item 3).
+	Answering(401, "handle refused: handle does not verify");
 	ExpectFetch(client.Fetch(url, "h", "u-erin", d1), CredentialFetch::Status::Refuse,
-	            "qod-node: S3 credentials refused: handle refused: handle MAC does not verify", "a 401");
+	            "qod-node: S3 credentials refused: handle refused: handle does not verify",
+	            "a 401 for a handle that does not verify (another node's, say)");
+	Answering(401, "signature does not verify");
+	ExpectFetch(client.Fetch(url, "h", "u-erin", d1), CredentialFetch::Status::Refuse,
+	            "qod-node: S3 credentials refused: signature does not verify", "a 401 for the request signature");
 	Answering(503, "authorization context expired; retry");
 	ExpectFetch(client.Fetch(url, "h", "u-erin", d1), CredentialFetch::Status::Unavailable,
 	            "qod-node: S3 credentials unavailable, retry: authorization context expired; retry", "a 503");
@@ -228,9 +234,9 @@ int main() {
 	ExpectFetch(client.Fetch(url, "h", "u-erin", d1), CredentialFetch::Status::Refuse,
 	            "qod-node: S3 credentials refused: the answer does not verify: answer is for another credential set",
 	            "an answer for another digest");
-	Answering(503, "S3 credentials unavailable; retry");
+	Answering(503, "credential set cannot be served now");
 	ExpectFetch(client.Fetch(url, "h", "u-erin", qod::kUnavailableCreds), CredentialFetch::Status::Unavailable,
-	            "qod-node: S3 credentials unavailable, retry: S3 credentials unavailable; retry",
+	            "qod-node: S3 credentials unavailable, retry: credential set cannot be served now",
 	            "the unavailable digest: the replica answers 503");
 	Answering(200, SignCredentials(CredentialsJson(qod::kUnavailableCreds, {alice})));
 	ExpectFetch(client.Fetch(url, "h", "u-erin", qod::kUnavailableCreds), CredentialFetch::Status::Refuse,
@@ -239,7 +245,11 @@ int main() {
 	Answering(200, SignCredentials(good));
 	auto healed = client.Fetch(url, "h", "u-erin", d1);
 	Expect(healed.status == CredentialFetch::Status::Ok && !healed.cached, "no failure was cached");
-	Expect(client.CachedSets() == 4, "only the sets that verified are kept: alice's two, bob's, erin's");
+	Expect(client.CachedSets() == 2, "only the sets that verified are kept: alice's d1 and erin's");
+	now_ms += qod::kMaxCachedCredentialsMs;
+	Answering(200, SignCredentials(CredentialsJson(qod_test::Digest('3'), {alice})));
+	client.Fetch(url, "h", "u-gina", qod_test::Digest('3'));
+	Expect(client.CachedSets() == 1, "a fetch for anyone sweeps every expired set");
 
 	// ---- last: a slow replica (the test server stays busy with it after the client gave up)
 	Answering(200, SignCredentials(good), 1000);

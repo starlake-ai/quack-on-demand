@@ -90,6 +90,22 @@ std::string Run(duckdb::Connection &con, const std::string &handle, const std::s
 	return result->HasError() ? result->GetError() : "";
 }
 
+//! Like Run, each statement prepared then executed, as quack sends them.
+std::string RunPrepared(duckdb::Connection &con, const std::string &handle, const std::string &sql = "SELECT 1") {
+	for (auto &text : {qod_test::Prelude(handle), sql}) {
+		auto prepared = con.Prepare(text);
+		if (prepared->HasError()) {
+			return prepared->GetError();
+		}
+		duckdb::vector<duckdb::Value> none;
+		auto result = prepared->Execute(none);
+		if (result->HasError()) {
+			return result->GetError();
+		}
+	}
+	return "";
+}
+
 //! The name of the secret DuckDB would sign `url` with on `con` (what which_secret() answers), or
 //! "<none>". Read through the secret manager: which_secret() and duckdb_secrets() are superuser
 //! functions, which a user's statement may not call once Task 10 lands.
@@ -162,7 +178,8 @@ int main() {
 	duckdb::DuckDB db(nullptr);
 	auto authz = std::make_shared<qod::NodeAuthz>(kNode, kKey, [] { return now_ms; });
 	qod::RegisterNodeAuthz(*db.instance, authz);
-	// Stand in for httpfs's s3 secret type, so the test needs no extension (a node gets it from httpfs).
+	// Stand in for httpfs's s3 secret type, so the test needs no extension (on a node, RegisterSecret
+	// autoloads httpfs, installed at init, for the type).
 	duckdb::SecretType s3;
 	s3.name = "s3";
 	s3.deserializer = duckdb::KeyValueSecret::Deserialize<duckdb::KeyValueSecret>;
@@ -270,9 +287,9 @@ int main() {
 	Expect(refused->HasError() && refused->GetError().find(qod::kNoPrincipal) != std::string::npos,
 	       "no statement runs under the secrets alice held before the failed fetch");
 	// The sentinel the manager sends while it cannot serve her set: always fetched, always refused.
-	Fail(503, "S3 credentials unavailable; retry");
+	Fail(503, "credential set cannot be served now");
 	error = Run(alice, MintFrom(url, "u-alice", qod::kUnavailableCreds, exp));
-	Expect(error.find("qod-node: S3 credentials unavailable, retry: S3 credentials unavailable; retry") !=
+	Expect(error.find("qod-node: S3 credentials unavailable, retry: credential set cannot be served now") !=
 	           std::string::npos,
 	       "the unavailable digest is refused");
 	refused = alice.Query("SELECT 1");
@@ -335,6 +352,76 @@ int main() {
 	Serve(Digest('5'), {dave_entry});
 	Expect(Run(dave, MintFrom(url, "u-dave", Digest('5'), exp)).empty() && UserSecrets(dave).size() == 1,
 	       "the next verifying answer installs dave's secret and his statement runs");
+
+	// ---- a prelude refused before its sync (the handle, or its install) also stops every statement
+	// that follows, whatever an earlier prelude left installed
+	error = Run(dave, MintFrom(url, "u-mallory", Digest('5'), exp));
+	Expect(error.find("names another principal") != std::string::npos, "a handle for another principal is refused");
+	after = dave.Query("SELECT 1");
+	Expect(after->HasError() && after->GetError().find(qod::kNoPrincipal) != std::string::npos,
+	       "no statement runs after a refused install, under dave's earlier principal and secrets");
+	Expect(Run(dave, MintFrom(url, "u-dave", Digest('5'), exp)).empty(),
+	       "a prelude that succeeds whole makes the connection ready again");
+	// A handle another connection used. (The same connection binding its own last handle again is a
+	// rebind, which Install admits; on a node the parse screen refuses a used nonce before any bind.)
+	auto replayed = MintFrom(url, "u-dave", Digest('5'), exp);
+	duckdb::Connection dave2(db);
+	TagAsQuackSession(dave2);
+	Expect(Run(dave2, replayed).empty(), "dave's handle installs on his other connection");
+	error = Run(dave, replayed);
+	Expect(error.find("it was already used") != std::string::npos, "a replayed handle is refused");
+	after = dave.Query("SELECT 1");
+	Expect(after->HasError() && after->GetError().find(qod::kNoPrincipal) != std::string::npos,
+	       "no statement runs after a replayed handle");
+	error = Run(dave, "AAAA.0000000000000000000000000000000000000000000000000000000000000000");
+	Expect(error.find(qod::kHandleRefused) != std::string::npos, "a handle that does not verify is refused");
+	after = dave.Query("SELECT 1");
+	Expect(after->HasError() && after->GetError().find(qod::kNoPrincipal) != std::string::npos,
+	       "no statement runs after a handle that does not verify");
+	Expect(Run(dave, MintFrom(url, "u-dave", Digest('5'), exp)).empty() && UserSecrets(dave).size() == 1,
+	       "and the next good prelude recovers it");
+
+	// ---- the prelude prepared then executed, as quack sends it, autocommit and in a transaction
+	duckdb::Connection frank(db);
+	TagAsQuackSession(frank);
+	auto frank_entry = Entry('f', "s3://lake/frank/", "AKIAFRANK", "frank-secret");
+	Serve(Digest('a'), {frank_entry});
+	requests = server.Requests();
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('a'), exp)).empty() &&
+	           UserSecrets(frank)["qod_uc_ffffffff"].find("secret=frank-secret;") != std::string::npos &&
+	           server.Requests() == requests + 1,
+	       "a prepared prelude installs frank's secret, and it stays after the PREPARE's transaction");
+	Expect(Signer(frank, "s3://lake/frank/x.parquet") == "qod_uc_ffffffff", "frank's URLs are signed with it");
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('a'), exp)).empty() && server.Requests() == requests + 1,
+	       "the same digest prepared again installs nothing and fetches nothing");
+	auto frank2 = frank_entry;
+	frank2.secret = "frank-secret-2";
+	Serve(Digest('b'), {frank2});
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('a'), exp), "BEGIN TRANSACTION").empty(), "BEGIN");
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('b'), exp)).empty() &&
+	           UserSecrets(frank)["qod_uc_ffffffff"].find("secret=frank-secret-2;") != std::string::npos,
+	       "a prepared prelude in a transaction installs the new set there");
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('b'), exp), "COMMIT").empty() &&
+	           UserSecrets(frank)["qod_uc_ffffffff"].find("secret=frank-secret-2;") != std::string::npos,
+	       "COMMIT keeps it");
+	auto frank3 = frank_entry;
+	frank3.secret = "frank-secret-3";
+	Serve(Digest('c'), {frank3});
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('b'), exp), "BEGIN TRANSACTION").empty() &&
+	           RunPrepared(frank, MintFrom(url, "u-frank", Digest('c'), exp)).empty() &&
+	           RunPrepared(frank, MintFrom(url, "u-frank", Digest('c'), exp), "ROLLBACK").empty() &&
+	           UserSecrets(frank)["qod_uc_ffffffff"].find("secret=frank-secret-2;") != std::string::npos,
+	       "a ROLLBACK restores the committed version");
+	Expect(RunPrepared(frank, MintFrom(url, "u-frank", Digest('c'), exp)).empty() &&
+	           UserSecrets(frank)["qod_uc_ffffffff"].find("secret=frank-secret-3;") != std::string::npos,
+	       "and the next prepared prelude installs the current set again");
+	Fail(503, "authorization context expired; retry");
+	error = RunPrepared(frank, MintFrom(url, "u-frank", Digest('d'), exp));
+	Expect(error.find("qod-node: S3 credentials unavailable, retry") != std::string::npos,
+	       "a prepared prelude whose fetch fails is refused");
+	auto prepared_after = frank.Prepare("SELECT 1");
+	Expect(prepared_after->HasError() && prepared_after->GetError().find(qod::kNoPrincipal) != std::string::npos,
+	       "and nothing can be prepared after it");
 
 	// ---- the manager itself never fetches nor holds any; a superuser's own are installed like anyone's
 	requests = server.Requests();

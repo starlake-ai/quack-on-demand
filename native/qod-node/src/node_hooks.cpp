@@ -87,18 +87,27 @@ public:
 		installed_ = true;
 	}
 
-	//! True when a principal is installed, its handle has not expired at `now_ms`, and the last
-	//! SyncCredentials succeeded.
+	//! Called first by every qod_session bind: until this prelude succeeds whole (Install, then
+	//! SyncCredentials), no statement runs on the connection, whatever principal and secrets an earlier
+	//! prelude left. A refused handle, a refused install or a failed sync all leave it so.
+	void BeginPrelude() {
+		std::lock_guard<std::mutex> guard(lock_);
+		ready_ = false;
+	}
+
+	//! True when a principal is installed, its handle has not expired at `now_ms`, and the last prelude
+	//! succeeded whole (BeginPrelude).
 	bool CurrentAt(int64_t now_ms) {
 		std::lock_guard<std::mutex> guard(lock_);
-		return installed_ && current_.exp > now_ms && credentials_ready_;
+		return installed_ && current_.exp > now_ms && ready_;
 	}
 
 	//! Makes the connection's user credential secrets the set `handle.creds` names (decision 23): none
 	//! for the manager itself or an empty digest (any present are dropped), else the set the handle's
 	//! replica serves for the handle `text`, from the node's cache when it holds it, as connection
-	//! secrets (scoped to the connection, transactional). Does nothing while the secrets present are
-	//! exactly the ones last made for that digest. It compares what is present rather than trusting a
+	//! secrets (scoped to the connection, transactional). Installs nothing while the secrets present are
+	//! exactly the ones last made for that digest. Only a sync that succeeds makes the connection ready
+	//! again (BeginPrelude). It compares what is present rather than trusting a
 	//! flag: a client ROLLBACK undoes the secrets made in its transaction and restores the ones it
 	//! dropped. On a failure (a refused or unavailable fetch, kUnavailableCreds included, an answer for
 	//! another digest, an install that fails) the prelude is refused (the manager drops the link and
@@ -109,10 +118,11 @@ public:
 		auto wanted = handle.principal.system ? string() : handle.creds;
 		auto &manager = SecretManager::Get(context);
 		auto present = UserSecretPrints(manager, CatalogTransaction::GetSystemCatalogTransaction(context));
-		if (credentials_ready_ && wanted == creds_ && present == secret_prints_) {
+		if (synced_ && wanted == creds_ && present == secret_prints_) {
+			ready_ = true;
 			return;
 		}
-		credentials_ready_ = false;
+		synced_ = false;
 		creds_.clear();
 		secret_prints_.clear();
 		scopes_.clear();
@@ -148,13 +158,14 @@ public:
 		secret_prints_ = std::move(installed);
 		scopes_ = std::move(scopes);
 		creds_ = wanted;
-		credentials_ready_ = true;
+		synced_ = true;
+		ready_ = true;
 	}
 
 	//! The scopes of the user credential secrets last installed; none after a failed sync.
 	std::vector<std::string> CredentialScopes() {
 		std::lock_guard<std::mutex> guard(lock_);
-		return credentials_ready_ ? scopes_ : std::vector<std::string>();
+		return ready_ ? scopes_ : std::vector<std::string>();
 	}
 
 private:
@@ -166,8 +177,11 @@ private:
 	string creds_;
 	std::map<std::string, std::string> secret_prints_;
 	std::vector<std::string> scopes_;
-	//! False from a failed SyncCredentials to the next one that succeeds.
-	bool credentials_ready_ = true;
+	//! creds_, secret_prints_ and scopes_ describe the secrets the last successful sync installed; false
+	//! from a failed sync to the next one that succeeds.
+	bool synced_ = true;
+	//! The last prelude succeeded whole: set false by BeginPrelude, true only by a successful sync.
+	bool ready_ = false;
 };
 
 struct AuthzTableInfo : public TableFunctionInfo {
@@ -202,6 +216,8 @@ struct SessionScanState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> SessionBind(ClientContext &context, TableFunctionBindInput &input,
                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &authz = *input.info->Cast<AuthzTableInfo>().authz;
+	// First: whatever fails below, no statement runs on this connection until a prelude succeeds whole.
+	context.registered_state->GetOrCreate<SessionState>(SessionState::kKey)->BeginPrelude();
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
 		throw PermissionException("qod-node: qod_session takes one session handle");
 	}

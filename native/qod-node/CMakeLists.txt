@@ -158,7 +158,8 @@ set(QOD_NODE_CORE_SOURCES
   src/socket_compat.cpp
   src/sql_script.cpp
   src/utf8_args.cpp
-  src/verdict.cpp)
+  src/verdict.cpp
+  src/wire_text.cpp)
 if(QOD_NODE_DUCKDB_STATIC)
   list(APPEND QOD_NODE_CORE_SOURCES src/static_extensions.cpp)
 endif()

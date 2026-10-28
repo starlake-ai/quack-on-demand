@@ -3,6 +3,7 @@
 #include "crypto.hpp"
 #include "http_post.hpp"
 #include "json_writer.hpp"
+#include "wire_text.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -24,25 +25,6 @@ long long LimitValue(const char *name, const std::string &text, long long min, l
 		                            std::to_string(max));
 	}
 	return value;
-}
-
-//! A response body as a refusal may quote it: printable ASCII, at most 200 characters.
-std::string Quoted(const std::string &body) {
-	std::string text;
-	for (auto c : body) {
-		if (text.size() >= 200) {
-			text += "...";
-			break;
-		}
-		text += (c >= 0x20 && c < 0x7f) ? c : ' ';
-	}
-	auto first = text.find_first_not_of(' ');
-	return first == std::string::npos ? "" : text.substr(first, text.find_last_not_of(' ') - first + 1);
-}
-
-std::string TrimBlanks(const std::string &text) {
-	auto first = text.find_first_not_of(" \t\r\n");
-	return first == std::string::npos ? "" : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
 }
 
 DecideResult Refused(std::string reason) {
@@ -154,10 +136,10 @@ DecideResult DecideClient::Ask(const DecideCall &call, const std::string &finger
 		return Unavailable("authorization unavailable");
 	}
 	if (reply.status == 401) {
-		return Refused("authorization refused: " + Quoted(reply.body));
+		return Refused("authorization refused: " + QuotedBody(reply.body));
 	}
 	if (reply.status == 503) {
-		auto said = Quoted(reply.body);
+		auto said = QuotedBody(reply.body);
 		return Unavailable(said.empty() ? "authorization unavailable" : "authorization unavailable: " + said);
 	}
 	if (reply.status != 200) {

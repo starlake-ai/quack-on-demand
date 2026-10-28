@@ -27,10 +27,10 @@ extern const char *const kS3EnvironmentSettings[];
 void ResetS3EnvironmentDefaults(duckdb::DatabaseInstance &db);
 
 //! Registers on `config`, before the database opens, the callback that runs
-//! ResetS3EnvironmentDefaults each time httpfs loads (the init SQL's LOAD, an autoload, a superuser's
-//! later LOAD) and turns aws_default_credentials off each time the aws extension loads: that
-//! extension would otherwise sign every otherwise unmatched s3:// URL with the instance's credential
-//! chain.
+//! ResetS3EnvironmentDefaults each time httpfs loads (its autoload on first use, a user credential
+//! secret's included, or a superuser's LOAD) and turns aws_default_credentials off each time the aws
+//! extension loads: that extension would otherwise sign every otherwise unmatched s3:// URL with the
+//! instance's credential chain.
 void RegisterS3EnvironmentGuard(duckdb::DBConfig &config);
 
 } // namespace qod

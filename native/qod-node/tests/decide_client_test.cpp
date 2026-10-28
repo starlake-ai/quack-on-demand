@@ -53,9 +53,15 @@ qod_test::HttpAnswer Answer(const qod_test::HttpRequest &request) {
 		mode = replica.mode;
 	}
 	qod_test::HttpAnswer answer;
+	// The manager's 401 bodies (DecideRoute).
 	if (mode == "401") {
 		answer.status = 401;
-		answer.body = "the request signature does not verify";
+		answer.body = "signature does not verify";
+		return answer;
+	}
+	if (mode == "401-handle") {
+		answer.status = 401;
+		answer.body = "handle refused: handle does not verify";
 		return answer;
 	}
 	if (mode == "503") {
@@ -200,7 +206,13 @@ int main() {
 	// ---- status codes and transport
 	Mode("401");
 	ExpectRefusal(client.Decide(Call(server.Url())), DecideResult::Status::Refuse, false,
-	              "authorization refused: the request signature does not verify", "a 401");
+	              "authorization refused: signature does not verify", "a 401 for the request signature");
+	// A handle from another node fails its MAC first: "handle does not verify" (CONTRACT.md Addendum 4
+	// item 3).
+	Mode("401-handle");
+	ExpectRefusal(client.Decide(Call(server.Url())), DecideResult::Status::Refuse, false,
+	              "authorization refused: handle refused: handle does not verify",
+	              "a 401 for a handle that does not verify (another node's, say)");
 	Mode("503");
 	ExpectRefusal(client.Decide(Call(server.Url())), DecideResult::Status::Unavailable, true,
 	              "authorization unavailable: authorization context expired; retry", "a 503");

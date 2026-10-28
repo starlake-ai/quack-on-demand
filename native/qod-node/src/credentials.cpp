@@ -4,22 +4,15 @@
 #include "http_post.hpp"
 #include "json.hpp"
 #include "json_writer.hpp"
+#include "wire_text.hpp"
 
 #include <iostream>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 
 namespace qod {
 namespace {
-
-bool IsLowerHex(const std::string &text) {
-	for (auto c : text) {
-		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-			return false;
-		}
-	}
-	return !text.empty();
-}
 
 //! s3://<bucket>/ or s3://<bucket>/<prefix>/, printable ASCII without blanks: what Task 18's
 //! UserS3CredentialRules.normalizeScope stores.
@@ -33,25 +26,6 @@ bool IsS3Scope(const std::string &scope) {
 		}
 	}
 	return true;
-}
-
-//! A response body as a refusal may quote it: printable ASCII, at most 200 characters, trimmed.
-std::string Quoted(const std::string &body) {
-	std::string text;
-	for (auto c : body) {
-		if (text.size() >= 200) {
-			text += "...";
-			break;
-		}
-		text += (c >= 0x20 && c < 0x7f) ? c : ' ';
-	}
-	auto first = text.find_first_not_of(' ');
-	return first == std::string::npos ? "" : text.substr(first, text.find_last_not_of(' ') - first + 1);
-}
-
-std::string TrimBlanks(const std::string &text) {
-	auto first = text.find_first_not_of(" \t\r\n");
-	return first == std::string::npos ? "" : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
 }
 
 //! The optional string member `key` of `entry`; empty when null.
@@ -202,16 +176,18 @@ CredentialFetch CredentialClient::Fetch(const std::string &replica, const std::s
 	auto now = clock_();
 	{
 		std::lock_guard<std::mutex> guard(lock_);
+		// Every expired set goes, not only this key's: a removed credential's keys leave the node's
+		// memory once its time is up (a scan of at most kMaxCachedCredentialSets entries).
+		for (auto it = kept_.begin(); it != kept_.end();) {
+			it = it->second.until <= now ? kept_.erase(it) : std::next(it);
+		}
 		auto found = kept_.find(key);
 		if (found != kept_.end()) {
-			if (found->second.until > now) {
-				CredentialFetch hit;
-				hit.status = CredentialFetch::Status::Ok;
-				hit.set = found->second.set;
-				hit.cached = true;
-				return hit;
-			}
-			kept_.erase(found);
+			CredentialFetch hit;
+			hit.status = CredentialFetch::Status::Ok;
+			hit.set = found->second.set;
+			hit.cached = true;
+			return hit;
 		}
 	}
 	auto fetch = Ask(replica, handle, creds);
@@ -258,10 +234,10 @@ CredentialFetch CredentialClient::Ask(const std::string &replica, const std::str
 		return Unavailable("the replica could not be reached");
 	}
 	if (reply.status == 401) {
-		return Refused(Quoted(reply.body));
+		return Refused(QuotedBody(reply.body));
 	}
 	if (reply.status == 503) {
-		auto said = Quoted(reply.body);
+		auto said = QuotedBody(reply.body);
 		return Unavailable(said.empty() ? "the replica could not answer" : said);
 	}
 	if (reply.status != 200) {

@@ -2,23 +2,12 @@
 
 #include "crypto.hpp"
 #include "json.hpp"
+#include "wire_text.hpp"
 
 #include <iterator>
 #include <stdexcept>
 
 namespace qod {
-namespace {
-
-bool IsLowerHex(const std::string &text) {
-	for (auto c : text) {
-		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-			return false;
-		}
-	}
-	return !text.empty();
-}
-
-} // namespace
 
 Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id,
                     int64_t now_ms) {

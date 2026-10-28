@@ -2,6 +2,7 @@
 
 #include "socket_compat.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -131,19 +132,27 @@ void Answer(qod::SocketHandle connection, const HttpAnswer &answer) {
 	std::string response = "HTTP/1.1 " + std::to_string(answer.status) + " Test\r\nContent-Type: text/plain\r\n" +
 	                       "Connection: close\r\n";
 	if (answer.chunked) {
-		// Two chunks and an empty trailer section: the split lands inside the body.
-		auto half = answer.body.size() / 2;
+		// By default two chunks: the split lands inside the body.
+		auto step = answer.chunk_bytes > 0 ? answer.chunk_bytes : std::max<size_t>(1, answer.body.size() / 2);
 		response += "Transfer-Encoding: chunked\r\n\r\n";
-		for (auto &chunk : {answer.body.substr(0, half), answer.body.substr(half)}) {
-			if (!chunk.empty()) {
-				response += ToHex(chunk.size()) + "\r\n" + chunk + "\r\n";
-			}
+		for (size_t at = 0; at < answer.body.size(); at += step) {
+			auto chunk = answer.body.substr(at, step);
+			response += ToHex(chunk.size()) + "\r\n" + chunk + "\r\n";
 		}
-		response += "0\r\n\r\n";
+		response += "0\r\n" + answer.trailer + "\r\n";
+	} else if (answer.close_delimited) {
+		response += "\r\n" + answer.body;
 	} else {
 		response += "Content-Length: " + std::to_string(answer.body.size()) + "\r\n\r\n" + answer.body;
 	}
-	SendAll(connection, response);
+	if (answer.segment_bytes == 0) {
+		SendAll(connection, response);
+		return;
+	}
+	for (size_t at = 0; at < response.size(); at += answer.segment_bytes) {
+		SendAll(connection, response.substr(at, answer.segment_bytes));
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
 }
 
 void Serve(TestHttpServer::State &state) {

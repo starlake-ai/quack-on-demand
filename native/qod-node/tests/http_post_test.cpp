@@ -66,6 +66,9 @@ int main() {
 	ExpectBadUrl("http://manager:x", "port");
 	ExpectBadUrl("http://manager/a?b=c", "query");
 	ExpectBadUrl("http://[::1", "IPv6");
+	ExpectBadUrl("http://manager/a b", "space or control character");
+	ExpectBadUrl("http://manager/a\tb", "space or control character");
+	ExpectBadUrl(std::string("http://manager/a") + '\x7f', "space or control character");
 
 	// ---- chunked bodies
 	std::string body;
@@ -79,6 +82,18 @@ int main() {
 		qod::DecodeChunked("zz\r\nhello\r\n", body);
 		Expect(false, "a malformed chunk size is refused");
 	} catch (std::runtime_error &) {
+	}
+	try {
+		qod::DecodeChunked("5;" + std::string(5000, 'x'), body);
+		Expect(false, "a chunk size line with no end in sight is refused");
+	} catch (std::runtime_error &error) {
+		Expect(std::string(error.what()) == "a malformed chunk size", "a chunk size line too long");
+	}
+	try {
+		qod::DecodeChunked("0\r\n" + std::string(70 * 1024, 'x'), body);
+		Expect(false, "a trailer section with no end in sight is refused");
+	} catch (std::runtime_error &error) {
+		Expect(std::string(error.what()) == "the trailer section is too long", "a trailer section too long");
 	}
 
 	// ---- round trips
@@ -97,7 +112,36 @@ int main() {
 	answer.status = 503;
 	reply = qod::HttpPost(qod::ParseHttpUrl(server.Url()), "/x", {}, "{}", 2000);
 	Expect(reply.status == 503 && reply.body == "the verdict", "a chunked response");
+	// Many small chunks and a trailer, arriving a few bytes at a time: the decoder resumes across
+	// every boundary (inside a size line, a chunk, its line break and the trailer).
+	answer.status = 200;
+	answer.body = std::string(300, 'v') + "the end";
+	answer.chunk_bytes = 7;
+	answer.trailer = "X-Trailer: y\r\n";
+	answer.segment_bytes = 3;
+	reply = qod::HttpPost(qod::ParseHttpUrl(server.Url()), "/x", {}, "{}", 5000);
+	Expect(reply.status == 200 && reply.body == answer.body, "a chunked body trickled in 3-byte pieces");
+	answer.chunk_bytes = 0;
+	answer.trailer.clear();
+	answer.segment_bytes = 0;
+	// A chunked body over kMaxHttpReply, in chunks under it.
+	answer.body = std::string(qod::kMaxHttpReply + 1, 'v');
+	answer.chunk_bytes = 64 * 1024;
+	Expect(PostFailure(server.Url(), 5000) == "the response is too large", "a chunked body over kMaxHttpReply");
+	answer.chunk_bytes = 0;
 	answer.chunked = false;
+	// Close-delimited bodies: no Content-Length, the end of the connection ends the body.
+	answer.close_delimited = true;
+	answer.body = "until the close";
+	reply = qod::HttpPost(qod::ParseHttpUrl(server.Url()), "/x", {}, "{}", 2000);
+	Expect(reply.status == 200 && reply.body == "until the close", "a close-delimited response");
+	answer.body = std::string(qod::kMaxHttpReply, 'v');
+	reply = qod::HttpPost(qod::ParseHttpUrl(server.Url()), "/x", {}, "{}", 5000);
+	Expect(reply.body.size() == qod::kMaxHttpReply, "a close-delimited body of exactly kMaxHttpReply");
+	answer.body = std::string(qod::kMaxHttpReply + 1, 'v');
+	Expect(PostFailure(server.Url(), 5000) == "the response is too large", "a close-delimited body over kMaxHttpReply");
+	answer.close_delimited = false;
+	answer.body = "the verdict";
 	answer.drop = true;
 	Expect(PostFailure(server.Url(), 2000).find("closed before the response") != std::string::npos,
 	       "a dropped connection");

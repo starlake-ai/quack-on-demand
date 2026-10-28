@@ -283,6 +283,8 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     creds should not be f.cache.digest("u-1")
     f.call(body(handle)) shouldBe
       (Status.ServiceUnavailable, CredentialsRoute.Unavailable, Some(MediaType.text.plain))
+    // The wording qod-node quotes (credentials_test.cpp, credentials_engine_test.cpp).
+    CredentialsRoute.Unavailable shouldBe "credential set cannot be served now"
   }
 
   "a stale credential cache" should "answer 503 until a reload succeeds" in {

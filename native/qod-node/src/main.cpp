@@ -91,7 +91,8 @@ int Serve(const NodeOptions &options) {
 	duckdb::DBConfig config;
 	ApplyExtensionPolicy(config, options.extensions);
 	// Decision 23: no shared file cache, and no S3 setting the environment filled, from the first
-	// statement on (the init SQL's LOAD httpfs included).
+	// statement on. httpfs is installed at init and autoloaded on first use (a user's first credential
+	// secret included): the guard fires on that autoload too.
 	ApplyCachePolicy(config);
 	RegisterS3EnvironmentGuard(config);
 	duckdb::DuckDB db(nullptr, &config);

@@ -41,11 +41,16 @@ struct VerdictExpectation {
 	std::string ctx;
 };
 
+//! How long after its expiresAt a screen verdict is still accepted (CONTRACT.md Addendum 4 item 5): the
+//! manager stamps expiresAt = now, and the clocks of the manager and the node may differ by this much.
+constexpr int64_t kMaxScreenVerdictAgeMs = 60 * 1000;
+
 //! Verifies `text` with this node's 32-byte `node_key` against `expected` at `now_ms` and returns what
 //! it carries. Throws std::invalid_argument naming the first failed check: the format, the MAC, the
-//! shape, the version, kind, fingerprint, principal, policy version, ctx, expiry (plan verdicts only:
-//! a screen verdict carries expiresAt = now and is used once, at once), or a non-empty rowFilters or
-//! masks (reserved for part 2: refused until a node enforces them).
+//! shape, the version, kind, fingerprint, principal, policy version, ctx, expiry (a plan verdict while
+//! expiresAt > now; a screen verdict, which carries expiresAt = now and is used once, at once, while
+//! expiresAt >= now - kMaxScreenVerdictAgeMs), or a non-empty rowFilters or masks (reserved for part 2:
+//! refused until a node enforces them).
 Verdict VerifyVerdict(const std::string &text, const std::string &node_key, const VerdictExpectation &expected,
                       int64_t now_ms);
 
