@@ -9807,6 +9807,7 @@ components:
       - lockdown
       - lockdownEffective
       - pending
+      - initSqlTrusted
       properties:
         tenant:
           type: string
@@ -9855,6 +9856,8 @@ components:
           type: string
         pendingDetail:
           type: string
+        initSqlTrusted:
+          type: boolean
     PreviewColumn:
       title: PreviewColumn
       type: object
@@ -10819,6 +10822,7 @@ components:
       - initSql
       - effectiveDataPath
       - encrypted
+      - initSqlTrusted
       properties:
         id:
           type: string
@@ -10851,6 +10855,8 @@ components:
           type: integer
           format: int32
         encrypted:
+          type: boolean
+        initSqlTrusted:
           type: boolean
     TenantListResponse:
       title: TenantListResponse

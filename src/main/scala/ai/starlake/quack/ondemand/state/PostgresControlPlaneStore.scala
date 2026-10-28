@@ -464,8 +464,9 @@ final class PostgresControlPlaneStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_tenant_db
         |  (id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |   kind, default_database, default_schema, init_sql, branch_of, encrypted)
-        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+        |   kind, default_database, default_schema, init_sql, branch_of, encrypted,
+        |   init_sql_trusted)
+        |VALUES (?, ?, ?, ?::jsonb, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id            = EXCLUDED.tenant_id,
         |  name                 = EXCLUDED.name,
@@ -478,7 +479,8 @@ final class PostgresControlPlaneStore(
         |  default_schema       = EXCLUDED.default_schema,
         |  init_sql             = EXCLUDED.init_sql,
         |  branch_of            = EXCLUDED.branch_of,
-        |  encrypted            = EXCLUDED.encrypted""".stripMargin
+        |  encrypted            = EXCLUDED.encrypted,
+        |  init_sql_trusted     = EXCLUDED.init_sql_trusted""".stripMargin
     )
     try
       ps.setString(1, t.id)
@@ -494,6 +496,7 @@ final class PostgresControlPlaneStore(
       ps.setString(11, t.initSql)
       setNullable(ps, 12, t.branchOf)
       ps.setBoolean(13, t.encrypted)
+      ps.setBoolean(14, t.initSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -501,7 +504,8 @@ final class PostgresControlPlaneStore(
   def listTenantDbs(tenantId: String): List[TenantDb] = withConn { c =>
     val ps = c.prepareStatement(
       """SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled,
-        |       kind, default_database, default_schema, init_sql, branch_of, encrypted
+        |       kind, default_database, default_schema, init_sql, branch_of, encrypted,
+        |       init_sql_trusted
         |FROM qodstate_tenant_db WHERE tenant_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -534,7 +538,8 @@ final class PostgresControlPlaneStore(
       disabled = rs.getBoolean("disabled"),
       initSql = rs.getString("init_sql"),
       branchOf = Option(rs.getString("branch_of")),
-      encrypted = rs.getBoolean("encrypted")
+      encrypted = rs.getBoolean("encrypted"),
+      initSqlTrusted = rs.getBoolean("init_sql_trusted")
     )
 
   // ---------------- Pool ----------------
@@ -545,8 +550,9 @@ final class PostgresControlPlaneStore(
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
         |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |   cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
+        |   cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes,
+        |   init_sql_trusted)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -566,7 +572,8 @@ final class PostgresControlPlaneStore(
         |  suspended               = EXCLUDED.suspended,
         |  lockdown                = EXCLUDED.lockdown,
         |  min_nodes               = EXCLUDED.min_nodes,
-        |  max_nodes               = EXCLUDED.max_nodes""".stripMargin
+        |  max_nodes               = EXCLUDED.max_nodes,
+        |  init_sql_trusted        = EXCLUDED.init_sql_trusted""".stripMargin
     )
     try
       ps.setString(1, p.id)
@@ -597,6 +604,7 @@ final class PostgresControlPlaneStore(
       p.maxNodes match
         case Some(v) => ps.setInt(20, v)
         case None    => ps.setNull(20, Types.INTEGER)
+      ps.setBoolean(21, p.initSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -606,7 +614,8 @@ final class PostgresControlPlaneStore(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
         |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |       cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes
+        |       cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes,
+        |       init_sql_trusted
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
     try
@@ -647,7 +656,8 @@ final class PostgresControlPlaneStore(
         Option(rs.getObject("lockdown")).map(_.asInstanceOf[java.lang.Boolean].booleanValue),
       // Columns added in changeset 0025; NULL = fixed-size pool (no band).
       minNodes = Option(rs.getObject("min_nodes")).map(_.asInstanceOf[Number].intValue),
-      maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue)
+      maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue),
+      initSqlTrusted = rs.getBoolean("init_sql_trusted")
     )
 
   // ---------------- Pool load (autoscale demand buckets) ----------------
@@ -1790,12 +1800,12 @@ final class PostgresControlPlaneStore(
       tenants = selectAll(c, SelectTenants, readTenant),
       tenantDbs = selectAll(
         c,
-        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of, encrypted FROM qodstate_tenant_db ORDER BY name",
+        "SELECT id, tenant_id, name, metastore_params, data_path, object_store_params, disabled, kind, default_database, default_schema, init_sql, branch_of, encrypted, init_sql_trusted FROM qodstate_tenant_db ORDER BY name",
         readTenantDb
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes, init_sql_trusted FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(

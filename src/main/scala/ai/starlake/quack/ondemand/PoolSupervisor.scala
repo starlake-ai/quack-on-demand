@@ -1,5 +1,6 @@
 package ai.starlake.quack.ondemand
 
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import java.util.Locale
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.{
@@ -64,7 +65,10 @@ final case class TenantDbPatch(
     objectStore: Option[Map[String, String]] = None,
     defaultDatabase: Option[String] = None,
     defaultSchema: Option[String] = None,
-    initSql: Option[String] = None
+    initSql: Option[String] = None,
+    // The writer is a superuser or the manager: a carried initSql is then trusted
+    // (InitSqlTrust.afterWrite).
+    initSqlWriterTrusted: Boolean = false
 )
 
 /** Result of [[PoolSupervisor.updateTenantDb]]: updated row, restarted node ids, and per-node
@@ -2020,6 +2024,11 @@ final class PoolSupervisor(
       defaultDatabase: Option[String] = None,
       defaultSchema: Option[String] = None,
       initSql: String = "",
+      /** Whether a superuser or the manager wrote `initSql` (nodes run it as written) rather than a
+        * tenant admin (nodes run it under the tenant initSql allowlist). An empty `initSql` is
+        * stored trusted whatever this says ([[InitSqlTrust.onCreate]]).
+        */
+      initSqlTrusted: Boolean = false,
       /** Carve this database's storage out of the operator-managed bucket: the caller supplies
         * neither `dataPath` nor `objectStore`, and both are resolved here from [[managedStore]]
         * (prefix keyed by the freshly minted surrogate id, credentials from the config block).
@@ -2122,6 +2131,7 @@ final class PoolSupervisor(
                       defaultDatabase = defaultDatabase,
                       defaultSchema = defaultSchema,
                       initSql = initSql,
+                      initSqlTrusted = InitSqlTrust.onCreate(initSql, initSqlTrusted),
                       encrypted = encrypted
                     )
 
@@ -2310,7 +2320,13 @@ final class PoolSupervisor(
           objectStore = patch.objectStore.fold(td.objectStore)(mergeSecretKeys(td.objectStore, _)),
           defaultDatabase = patch.defaultDatabase.fold(td.defaultDatabase)(nonBlank),
           defaultSchema = patch.defaultSchema.fold(td.defaultSchema)(nonBlank),
-          initSql = patch.initSql.getOrElse(td.initSql)
+          initSql = patch.initSql.getOrElse(td.initSql),
+          initSqlTrusted = InitSqlTrust.afterWrite(
+            td.initSql,
+            td.initSqlTrusted,
+            patch.initSql,
+            patch.initSqlWriterTrusted
+          )
         )
         TenantDb.validateSafety(merged) match
           case Some(msg) => IO.pure(Left(SupervisorError.InvalidArgument(s"invalid: $msg")))
@@ -2360,7 +2376,8 @@ final class PoolSupervisor(
               val nodeAffecting =
                 merged.metastore != td.metastore ||
                   merged.objectStore != td.objectStore ||
-                  merged.initSql != td.initSql
+                  merged.initSql != td.initSql ||
+                  merged.initSqlTrusted != td.initSqlTrusted
               val refresh = withCacheRecoveryIO("updateTenantDb") {
                 IO.blocking {
                   store.upsertTenantDb(merged)
@@ -2476,6 +2493,8 @@ final class PoolSupervisor(
       // Free-form per-pool SQL prepended to the federation blob, shipped via $extraSetupSql. Order
       // matters: initSql runs FIRST so PRAGMAs are in effect before any federation source's ATTACH.
       initSql: String = "",
+      // Whether a superuser or the manager wrote `initSql` (see createTenantDb's initSqlTrusted).
+      initSqlTrusted: Boolean = false,
       cpu: String = "",
       memory: String = "",
       podTemplateYaml: String = "",
@@ -2574,6 +2593,7 @@ final class PoolSupervisor(
                   suspended = startSuspended,
                   cohorts = cohorts,
                   initSql = initSql,
+                  initSqlTrusted = InitSqlTrust.onCreate(initSql, initSqlTrusted),
                   cpu = cpu,
                   memory = memory,
                   podTemplateYaml = podTemplateYaml,

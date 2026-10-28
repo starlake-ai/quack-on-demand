@@ -32,6 +32,9 @@ final case class Pool(
       * sources. Empty by default for backward compat.
       */
     initSql: String = "",
+    // Whether `initSql` was written by a superuser or the manager (run as written) or by a tenant
+    // admin (run under qod-node's tenant initSql allowlist); see `TenantDb.initSqlTrusted`.
+    initSqlTrusted: Boolean = false,
     // Kubernetes node-pod sizing. Each applied as BOTH request and limit on the
     // quack container. Empty = unset. Kubernetes-only; ignored by the local backend.
     cpu: String = "",

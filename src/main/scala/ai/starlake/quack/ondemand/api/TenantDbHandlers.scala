@@ -124,7 +124,8 @@ final class TenantDbHandlers(
       initSql = td.initSql,
       effectiveDataPath = sup.effectiveMetastoreFor(tenantName, td.name).getOrElse("dataPath", ""),
       tableCount = tableCountFor(tenantName, td),
-      encrypted = td.encrypted
+      encrypted = td.encrypted,
+      initSqlTrusted = td.initSqlTrusted
     )
 
   def createTenantDb(req: TenantDbRequest, apiKey: Option[String])(
@@ -186,6 +187,7 @@ final class TenantDbHandlers(
                       defaultDatabase = req.defaultDatabase,
                       defaultSchema = req.defaultSchema,
                       initSql = req.initSql,
+                      initSqlTrusted = gateBypass,
                       managedStorage = req.managedStorage,
                       encrypted = req.encrypted,
                       gateBypass = gateBypass
@@ -345,7 +347,8 @@ final class TenantDbHandlers(
               objectStore = req.objectStore,
               defaultDatabase = req.defaultDatabase,
               defaultSchema = req.defaultSchema,
-              initSql = req.initSql
+              initSql = req.initSql,
+              initSqlWriterTrusted = SuperuserCheck.forScope(scopeOf(apiKey)).isEmpty
             )
             sup.updateTenantDb(req.tenant, req.name, patch).flatMap {
               case Right(r) =>

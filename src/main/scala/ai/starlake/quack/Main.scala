@@ -619,6 +619,12 @@ object Main extends IOApp with LazyLogging:
     // A clientSecretRef stored before changeset 0048 is parked and unused until a write stores a
     // secret source again: report it at ERROR, with the restore step, once per tenant per boot.
     ai.starlake.quack.ondemand.auth.ParkedSecretRefs.report(store.listTenants())
+    // An initSql a tenant admin wrote (Liquibase 0053 left every earlier one untrusted) runs only
+    // under the tenant initSql allowlist: report each, with how a superuser vouches for it.
+    locally {
+      val snap = store.snapshot()
+      ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.report(snap.tenantDbs, snap.pools)
+    }
     val moduleEventBus = new ai.starlake.quack.ondemand.module.ModuleEventBus(modules)
     val singletonTasks = new ai.starlake.quack.ondemand.module.SingletonTasksImpl
     // Constructed before the supervisor so its teardown hook can clear a torn-down

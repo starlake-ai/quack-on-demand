@@ -20,6 +20,10 @@ final case class TenantDb(
     // blob. Engine defaults live here: SET temp_directory, SET memory_limit,
     // INSTALL/LOAD. Edits take effect on the next node spawn.
     initSql: String = "",
+    // Whether `initSql` was written by a superuser or by the manager itself (nodes run it as
+    // written) or by a tenant admin (nodes run it under qod-node's tenant initSql allowlist). Set
+    // by every write from the writer (`InitSqlTrust.afterWrite`); Liquibase 0053.
+    initSqlTrusted: Boolean = false,
     // Parent tenant-db id when this row is a branch catalog (Epic 1); None for every ordinary
     // tenant-db. Branch rows attach on their nodes under the PARENT's catalog alias (metastore
     // key `catalogAlias`), are excluded from maintenance scheduling, and are torn down through

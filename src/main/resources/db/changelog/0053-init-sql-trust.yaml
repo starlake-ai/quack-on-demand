@@ -1,0 +1,35 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0053-init-sql-trust
+      author: qod
+      changes:
+        # Whether a database's or a pool's initSql was written by a superuser (or by the manager
+        # itself), which nodes run as written, or by a tenant admin, which nodes run only under the
+        # tenant initSql allowlist (qod-node's init policy). Set by every write from the writer.
+        - addColumn:
+            tableName: qodstate_tenant_db
+            columns:
+              - column:
+                  name: init_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        - addColumn:
+            tableName: qodstate_pool
+            columns:
+              - column:
+                  name: init_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        # Nothing to judge in an empty initSql. A database `qod serve` provisioned was written by the
+        # manager's boot hook, whose audit rows carry the actor `system`. Every other row keeps
+        # false: an initSql a tenant admin wrote before this change falls under the allowlist.
+        - sql:
+            sql: UPDATE qodstate_tenant_db SET init_sql_trusted = true WHERE init_sql = ''
+        - sql:
+            sql: UPDATE qodstate_pool SET init_sql_trusted = true WHERE init_sql IS NULL OR init_sql = ''
+        - sql:
+            sql: UPDATE qodstate_tenant_db td SET init_sql_trusted = true WHERE EXISTS (SELECT 1 FROM qodstate_audit a WHERE a.actor = 'system' AND a.actor_realm = 'system' AND a.action = 'database.create' AND a.outcome = 'ok' AND a.tenant = td.tenant_id AND a.target = td.name)

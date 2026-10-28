@@ -115,7 +115,8 @@ final class PoolHandlers(
         maxNodes = band.map(_._2),
         pending = sup.pendingCount(key),
         pendingReason = sup.pendingReason(key),
-        pendingDetail = sup.pendingDetail(key)
+        pendingDetail = sup.pendingDetail(key),
+        initSqlTrusted = sup.poolId(key).flatMap(sup.poolEntity).exists(_.initSqlTrusted)
       )
     }
 
@@ -294,6 +295,7 @@ final class PoolHandlers(
                       disabled = req.disabled,
                       startSuspended = req.startSuspended,
                       initSql = req.initSql.getOrElse(""),
+                      initSqlTrusted = gateBypass,
                       cpu = req.cpu,
                       memory = req.memory,
                       podTemplateYaml = req.podTemplateYaml,

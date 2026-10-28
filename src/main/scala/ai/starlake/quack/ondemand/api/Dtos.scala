@@ -167,7 +167,10 @@ final case class PoolResponse(
     pending: Int = 0,
     pendingReason: Option[String] = None,
     // The sentence behind pendingReason: servers by state and the next command. Replica-local too.
-    pendingDetail: Option[String] = None
+    pendingDetail: Option[String] = None,
+    // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
+    // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
+    initSqlTrusted: Boolean = false
 )
 
 final case class SetPoolResourcesRequest(
@@ -658,7 +661,10 @@ final case class TenantDbResponse(
     // Tables across all schemas via the DuckLake catalog reader; None for
     // non-DuckLake kinds or when the catalog is unreachable.
     tableCount: Option[Int] = None,
-    encrypted: Boolean = false
+    encrypted: Boolean = false,
+    // Read-only: whether initSql was written by a superuser or the manager (nodes run it as
+    // written) rather than a tenant admin (nodes run it under the tenant initSql allowlist).
+    initSqlTrusted: Boolean = false
 )
 final case class TenantDbListResponse(tenantDbs: List[TenantDbResponse])
 

@@ -322,6 +322,8 @@ final class BranchService(
           defaultDatabase = parent.defaultDatabase,
           defaultSchema = parent.defaultSchema,
           initSql = parent.initSql,
+          // The parent's text, so the parent's author: as trusted as it is there.
+          initSqlTrusted = parent.initSqlTrusted,
           branchOf = Some(parent.id),
           // A branch is a clone of the parent's catalog: BranchCloner copies ducklake_metadata
           // wholesale, so the clone is already encrypted or not exactly as the parent is. Carry the
@@ -344,6 +346,7 @@ final class BranchService(
                 RoleDistribution(writeonly = 0, readonly = 0, dual = 1),
                 maxConcurrentPerNode = donor.map(_.maxConcurrentPerNode).getOrElse(0),
                 initSql = donor.map(_.initSql).getOrElse(""),
+                initSqlTrusted = donor.exists(_.initSqlTrusted),
                 cpu = donor.map(_.cpu).getOrElse(""),
                 memory = donor.map(_.memory).getOrElse(""),
                 podTemplateYaml = donor.map(_.podTemplateYaml).getOrElse(""),

@@ -546,6 +546,8 @@ object ManifestImporter extends LazyLogging:
                   defaultDatabase = mtd.defaultDatabase,
                   defaultSchema = mtd.defaultSchema,
                   initSql = mtd.initSql,
+                  // Only a superuser imports a manifest (and the boot hook, as the manager).
+                  initSqlTrusted = true,
                   encrypted = mtd.encrypted
                 )
                 // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
@@ -623,6 +625,8 @@ object ManifestImporter extends LazyLogging:
               suspended = mp.suspended,
               cohorts = cohorts,
               initSql = mp.initSql,
+              // Only a superuser imports a manifest (and the boot hook, as the manager).
+              initSqlTrusted = true,
               cpu = mp.cpu,
               memory = mp.memory,
               podTemplateYaml = mp.podTemplateYaml,
