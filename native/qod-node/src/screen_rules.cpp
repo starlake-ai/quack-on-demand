@@ -1184,8 +1184,8 @@ private:
 		case CatalogType::VIEW_ENTRY: {
 			auto &view = info.Cast<CreateViewInfo>();
 			if (view.query) {
-				// Bound at creation, which evaluates its bind-time slots, and in no plan of the CREATE.
-				InSlot slot(*this, "a CREATE VIEW body");
+				// Bound at creation, which evaluates its bind-time slots: walked like a SELECT, so those slots
+				// get the slot rule and its readers the location checks (CONTRACT Addendum 4 item 13).
 				Node(*view.query->node);
 			}
 			break;

@@ -136,10 +136,11 @@ int main() {
 	Refused("DELETE FROM t USING read_csv('x.csv') s", "QoD: x.csv ", "DELETE ... USING");
 	Refused("MERGE INTO t USING read_csv('x.csv') s ON t.a = s.a WHEN MATCHED THEN DELETE", "QoD: x.csv ", "MERGE");
 	Admitted("CREATE TABLE t2 AS SELECT * FROM read_csv('s3://acme-etl/x.csv')", 1, "CREATE TABLE AS");
-	// A view body is bound at creation, outside any plan the manager judges: only allowed functions
-	// (CONTRACT Addendum 4 item 9).
-	Refused("CREATE VIEW v AS SELECT * FROM read_csv('s3://acme-etl/x.csv')",
-	        "QoD: read_csv is not allowed in a CREATE VIEW body", "CREATE VIEW over a reader");
+	// A view body is walked like a SELECT (CONTRACT Addendum 4 item 13): its readers are located, its own
+	// bind-time slots get the slot rule.
+	ExpectLocation(Admitted("CREATE VIEW v AS SELECT * FROM read_csv('s3://acme-etl/x.csv')", 1, "CREATE VIEW"),
+	               "s3://acme-etl/x.csv", "read", "read_csv", "a view's reader is a location like any other");
+	Refused("CREATE VIEW v AS SELECT * FROM read_csv('x.csv')", "QoD: x.csv ", "a view's reader on a relative path");
 	Admitted("CREATE VIEW v AS SELECT upper(a) FROM t", 0, "CREATE VIEW over a table");
 	Refused("CALL read_text('x.csv')", "QoD: x.csv ", "CALL");
 	Refused("SELECT * FROM \"read_csv\" ('x.csv')", "QoD: x.csv ", "a quoted name and a blank before the parenthesis");
@@ -530,8 +531,13 @@ int main() {
 	          "QoD: nextval is not allowed in unnest's parameters"},
 	         {"SELECT unnest([[1]], recursive := currval('seq1') > 0)",
 	          "currval is not allowed in unnest's parameters"},
-	         {"CREATE VIEW v AS SELECT nextval('seq1') AS n", "QoD: nextval is not allowed in a CREATE VIEW body"},
-	         {"CREATE VIEW v AS SELECT * FROM t LIMIT currval('seq1')", "currval is not allowed in a CREATE VIEW body"},
+	         // a view body's own slots (Addendum 4 item 13)
+	         {"CREATE VIEW v AS SELECT * FROM range(setval('seq1', 5))", "QoD: setval is reserved to superusers"},
+	         {"CREATE VIEW v AS SELECT * FROM range(nextval('seq1'))",
+	          "QoD: nextval is not allowed in a table function's arguments"},
+	         {"CREATE VIEW v AS SELECT * FROM t LIMIT currval('seq1')", "currval is not allowed in LIMIT and OFFSET"},
+	         {"CREATE VIEW v AS SELECT current_setting('memory_limit') AS m",
+	          "QoD: current_setting is reserved to superusers"},
 	         {"ALTER TABLE x ADD COLUMN w BIGINT DEFAULT nextval('seq1')",
 	          "QoD: nextval is not allowed in ALTER TABLE ADD COLUMN"},
 	         // IF NOT EXISTS keeps the plain ALTER, which runs the default itself (transform_alter.cpp:52-60)
