@@ -7,7 +7,8 @@ import ai.starlake.quack.edge.sql.{
   BacktickScreen,
   CatalogReachingCalls,
   DottedIdentifierScreen,
-  FileAccessScreen
+  FileAccessScreen,
+  FileAdmission
 }
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
@@ -67,13 +68,18 @@ final class ProtectedWriteGuard(
     * client's scan_data_from_quack_client source is set aside like AccessGate does
     * ([[ai.starlake.quack.edge.sql.ValidationContext.clientDataScans]]). False denies it as an
     * incomplete extraction.
+    *
+    * `admission`: the locations the principal's tenant authorized,
+    * [[ai.starlake.quack.edge.sql.FileAdmission]]. A COPY it admits still cannot be parsed here, so
+    * a policy holder's COPY stays refused as an incomplete extraction.
     */
   def check(
       sql: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext,
-      clientDataScans: Boolean = false
+      clientDataScans: Boolean = false,
+      admission: FileAdmission = FileAdmission.Closed
   ): GuardOutcome =
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
@@ -89,7 +95,7 @@ final class ProtectedWriteGuard(
         .find(sql)
         .orElse(DottedIdentifierScreen.find(sql))
         .orElse(CatalogReachingCalls.find(sql).map(CatalogReachingCalls.denyReason))
-        .orElse(FileAccessScreen.find(sql)) match
+        .orElse(FileAccessScreen.find(sql, admission)) match
         case Some(reason) => Deny(s"access denied: $reason")
         case None         =>
           val config =

@@ -106,7 +106,7 @@ private[sql] object FileReferences:
   /** The function name of a table function call as the parser prints it: its last name part,
     * unquoted and lowercased (`main."histogram"('x', b)` is `histogram`).
     */
-  private def callName(call: String): String =
+  private[sql] def callName(call: String): String =
     val head = call.takeWhile(_ != '(').trim
     val last = if head.contains('.') then head.substring(head.lastIndexOf('.') + 1) else head
     ai.starlake.sql.QuotedIdentifier.unquote(last).toLowerCase(Locale.ROOT)

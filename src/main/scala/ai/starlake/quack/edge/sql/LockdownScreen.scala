@@ -272,14 +272,28 @@ object LockdownScreen:
     * bypasses per-table grants and can corrupt catalog-referenced data files).
     */
   def screen(sql: String, deniedBuckets: Set[String]): Option[String] =
+    screen(sql, deniedBuckets, FileAdmission.Closed)
+
+  /** [[screen]] for a principal whose tenant authorized the locations `admission` admits: a file
+    * reader call or a lone COPY naming only such locations is not denied here, whatever bucket it
+    * addresses ([[FileLocations]]), since `admission` refuses every database data folder on whole
+    * path segments (a DuckLake bucket is authorized, its data folders never are). Everything else
+    * is judged as before.
+    */
+  def screen(sql: String, deniedBuckets: Set[String], admission: FileAdmission): Option[String] =
+    val admittedCopy = FileLocations.copy(sql).exists(c => admission.admits(c.location))
     // First: on a DuckDB 1.x engine a backtick pair can hide a call from every check below. A
     // quoted name holding a dot is one identifier to DuckDB and a qualified name to every
     // parser-based check (DottedIdentifierScreen).
     BacktickScreen
       .find(sql)
       .orElse(DottedIdentifierScreen.find(sql))
-      .orElse(splitStatements(sql).iterator.flatMap(screenOne(_, deniedBuckets)).nextOption())
-      .orElse(fileInTablePosition(sql, deniedBuckets))
+      .orElse(
+        splitStatements(sql).iterator
+          .flatMap(screenOne(_, deniedBuckets, admission, admittedCopy))
+          .nextOption()
+      )
+      .orElse(fileInTablePosition(sql, deniedBuckets, admission))
 
   /** A file DuckDB replacement-scans in a table position, in the tenant screen's two tiers
     * ([[FileReferences]]): when JSqlParser reads the whole batch, every file reference of the walk
@@ -290,8 +304,12 @@ object LockdownScreen:
     * strictly (denied unless provably remote), and every quoted chain shaped like a URL, glob or
     * local path.
     */
-  private def fileInTablePosition(sql: String, deniedBuckets: Set[String]): Option[String] =
-    val extraction = FileReferences.extraction(sql)
+  private def fileInTablePosition(
+      sql: String,
+      deniedBuckets: Set[String],
+      admission: FileAdmission
+  ): Option[String] =
+    val extraction = FileReferences.extraction(FileLocations.extractable(sql, admission))
     val macroRead  = FileReferences
       .readingTableMacro(sql, extraction)
       .map(m =>
@@ -323,7 +341,12 @@ object LockdownScreen:
         .flatMap(n => fromPathVerdict(n.toLowerCase(Locale.ROOT), true, deniedBuckets))
         .nextOption()
 
-  private def screenOne(stmt: String, deniedBuckets: Set[String]): Option[String] =
+  private def screenOne(
+      stmt: String,
+      deniedBuckets: Set[String],
+      admission: FileAdmission,
+      admittedCopy: Boolean
+  ): Option[String] =
     // Normalized ONLY for screening, in three passes, each closing a gap the previous one leaves
     // open. Every regex rule matches against `lower`; the token-based rules (function calls and
     // quoted identifiers, see the end of this comment) lex `stmt` instead. Neither rewrites what
@@ -384,7 +407,7 @@ object LockdownScreen:
         // escape and dollar-quoted strings decoded to plain ones): `TO 's3://lakebu'<LF>'cket/x'`
         // writes to lakebucket, and `TO e'/tmp/x'` to a local file.
         val copyHit =
-          if !first.contains("copy") then None
+          if !first.contains("copy") || admittedCopy then None
           else
             copyLocalPath(lower, deniedBuckets).orElse(
               ParserInput
@@ -418,7 +441,7 @@ object LockdownScreen:
         settingHit
           .orElse(copyHit)
           .orElse(exportHit)
-          .orElse(deniedFunctionIn(stmt, deniedBuckets))
+          .orElse(deniedFunctionIn(stmt, deniedBuckets, admission))
 
   /** Splits the input on top-level semicolons: a semicolon inside any of DuckDB's quoting forms
     * (plain `'...'`, escape `E'...'`, double-quoted and backtick identifiers, dollar-quoted
@@ -480,14 +503,23 @@ object LockdownScreen:
     * on the statement as lexed, never on folded text (dollar tags compare case-sensitively); each
     * argument list is then normalized and folded like the rest of this screen before it is judged.
     */
-  private def deniedFunctionIn(stmt: String, deniedBuckets: Set[String]): Option[String] =
+  private def deniedFunctionIn(
+      stmt: String,
+      deniedBuckets: Set[String],
+      admission: FileAdmission
+  ): Option[String] =
     val scan = FunctionCalls.scan(stmt)
     if scan.truncated then
       Some("string literals nested too deeply to screen are disabled on this deployment")
     else
       DeniedFunctions.iterator
         .flatMap { fn =>
-          val occurrences = scan.calls.filter(_.name == fn)
+          // A reader whose every location the tenant authorized is no local read to deny. The
+          // admission reads each call from its own unfolded text: a local path compared after
+          // folding could admit /SRV/QOD/ACME/IN/ for /srv/qod/acme/in/, another folder on a
+          // case-sensitive filesystem.
+          val occurrences =
+            scan.calls.filter(c => c.name == fn && !FileLocations.admitted(c, scan, admission))
           if occurrences.isEmpty then None
           else if !UrlExempt.contains(fn) then Some(deniedCallMessage(fn))
           else

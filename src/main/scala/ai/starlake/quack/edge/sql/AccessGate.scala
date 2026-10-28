@@ -55,6 +55,9 @@ object AccessGate:
     *
     * `clientDataScans` is [[ValidationContext.clientDataScans]]: true only for a statement from the
     * native Quack front door. Required, so no caller can admit the scan by omission.
+    *
+    * `admission`: the locations the principal's tenant authorized; a file reader or a lone COPY
+    * naming only those is judged by its table side alone ([[FileLocations]]).
     */
   def evaluate(
       statement: String,
@@ -62,10 +65,13 @@ object AccessGate:
       sessionCatalog: String,
       filteredMetadata: Boolean,
       clientDataScans: Boolean,
-      rewriteOf: Option[String] = None
+      rewriteOf: Option[String] = None,
+      admission: FileAdmission = FileAdmission.Closed
   ): GateOutcome =
     // Parsed once, by the file screen (when its lexical checks find nothing) or the gate below.
-    lazy val extraction = SqlParser.extract(statement, config)
+    // An admitted COPY is parsed as its table side, which JSqlParser can read.
+    lazy val extraction =
+      SqlParser.extract(FileLocations.extractable(statement, admission), config)
     // Ahead of every other arm, and never wildcard-coverable: the target of these calls is
     // a string the parser cannot see, so the wildcard's tenant-catalog scoping cannot apply.
     // The same holds for a batch that moves the schema or search path: every bare name after
@@ -82,7 +88,7 @@ object AccessGate:
       .find(statement)
       .orElse(DottedIdentifierScreen.find(statement, rewriteOf))
       .orElse(CatalogReachingCalls.find(statement).map(CatalogReachingCalls.denyReason))
-      .orElse(FileAccessScreen.find(statement, extraction))
+      .orElse(FileAccessScreen.find(statement, extraction, admission))
       .orElse(
         CatalogReachingCalls.sqlValuedSetting(statement).map(CatalogReachingCalls.settingDenyReason)
       )
@@ -95,7 +101,8 @@ object AccessGate:
           config,
           sessionCatalog,
           filteredMetadata,
-          clientDataScans
+          clientDataScans,
+          FileLocations.admittedReaderNames(statement, admission)
         )
 
   /** Some(reason) when `rewritten`, a statement an edge rewriter (column policies, row policies,
@@ -145,7 +152,8 @@ object AccessGate:
       config: Config,
       sessionCatalog: String,
       filteredMetadata: Boolean,
-      clientDataScans: Boolean
+      clientDataScans: Boolean,
+      admittedReaders: Set[String]
   ): GateOutcome =
 
     // Parse errors short-circuit to Denied unless the principal holds an
@@ -173,10 +181,18 @@ object AccessGate:
     // (TableExtractor.gatedUnsupported). Only on the native front door, the one edge that
     // relays SEND_DATA: from FlightSQL, MCP or `qod sql` nothing can feed the stream, the
     // statement would park on the node forever, so the scan stays unsupported there.
-    val allUnsupported = extraction.statements.collect {
-      case StatementResult.Extracted(_, _, a, _, u) if u.nonEmpty =>
-        TableExtractor.gatedUnsupported(a, u, clientDataScans)
-    }.flatten
+    //
+    // A file reader whose every location the tenant authorized (Task 12) is decided by the location
+    // rule the file screen applied, not by a grant: its "table function" marker is set aside.
+    val allUnsupported = extraction.statements
+      .collect {
+        case StatementResult.Extracted(_, _, a, _, u) if u.nonEmpty =>
+          TableExtractor.gatedUnsupported(a, u, clientDataScans)
+      }
+      .flatten
+      .filterNot { u =>
+        TableExtractor.tableFunctionName(u).map(FileReferences.callName).exists(admittedReaders)
+      }
     val (catalogFunctions, parsedUnsupported) =
       if filteredMetadata then
         allUnsupported.partition(u =>

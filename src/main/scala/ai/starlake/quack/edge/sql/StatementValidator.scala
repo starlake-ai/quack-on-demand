@@ -51,7 +51,11 @@ case class ValidationContext(
     // introduced (catalog column names of a star expansion, policy SQL) are no names the caller
     // chose, so they are not screened as misread table names (DottedIdentifierScreen); every one
     // the caller wrote still is. None for a statement as the caller wrote it.
-    rewriteOf: Option[String] = None
+    rewriteOf: Option[String] = None,
+    // The file locations the statement's principal may name (its tenant's authorized locations,
+    // Task 12): a file reader call or a lone COPY naming only those passes the file screens.
+    // Closed, the default, admits nothing, which keeps every file access refused.
+    fileAdmission: FileAdmission = FileAdmission.Closed
 )
 
 sealed trait ValidationResult

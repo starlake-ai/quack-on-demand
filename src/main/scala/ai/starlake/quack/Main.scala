@@ -1424,7 +1424,16 @@ object Main extends IOApp with LazyLogging:
         // see BootFactories.metadataFilterMounted.
         metadataFilterRewriter = BootFactories.metadataFilterRewriter(aclCfg),
         protectedWriteGuard = protectedWriteGuard,
-        adminExecutor = adminExecutor
+        adminExecutor = adminExecutor,
+        // The file screens admit a principal's authorized locations (Task 12), judged by the
+        // decider's own rules; a store failure (Left) admits nothing, as the decider answers 503.
+        locationRulesFor = (tenantId, userId) => locationRules.rulesFor(tenantId, userId).toOption,
+        // The node resolves a local path before its location is judged: the manager can do the
+        // same only when nodes run on its host (BootFactories.locationRules' sameHost).
+        resolveLocalPath =
+          if mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local" then
+            ai.starlake.quack.edge.authz.location.LocalRealPath.of
+          else identity
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a

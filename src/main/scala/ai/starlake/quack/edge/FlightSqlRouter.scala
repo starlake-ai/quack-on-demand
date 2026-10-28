@@ -10,6 +10,7 @@ import ai.starlake.quack.edge.sql.{
   CatalogWriteScreen,
   CheckpointScreen,
   Denied,
+  FileAdmission,
   LockdownScreen,
   NodeSettingScreen,
   NodeStateScreen,
@@ -115,7 +116,21 @@ final class FlightSqlRouter(
       * `metadataFilterRewriter` / `protectedWriteGuard`: `Main` passes the leading arguments
       * positionally.
       */
-    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
+    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None,
+    /** The authorized locations of a principal (Task 12, by tenant id and user id): its own S3
+      * credential scopes and its tenant's folders (decision 23), what the file screens let it read
+      * and write by path, judged by the decider's own LocationChecker. None (the default) admits
+      * nothing, so a construction site that does not wire it keeps every file access refused. TAIL
+      * param for the same reason as `metadataFilterRewriter`.
+      */
+    val locationRulesFor: (String, String) => Option[
+      ai.starlake.quack.edge.authz.location.LocationRules
+    ] = (_, _) => None,
+    /** How a node resolves a local path before its location is judged: Task 5's `LocalRealPath.of`
+      * when nodes run on this host (local runtime), else identity (the manager cannot see the
+      * nodes' filesystem). TAIL param.
+      */
+    val resolveLocalPath: String => String = identity
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -547,6 +562,9 @@ final class FlightSqlRouter(
       case "memory"                   => Some("main")
       case _                          => None
 
+    // The file locations the principal may name (Task 12), read only when a file screen asks.
+    val fileAdmission =
+      FlightSqlRouter.fileAdmissionFor(effectiveSet, locationRulesFor, resolveLocalPath)
     val ctx = ValidationContext(
       username = user,
       database = poolKey.toString,
@@ -562,7 +580,8 @@ final class FlightSqlRouter(
       statementClass = kind match
         case StatementKind.Ddl => "DDL"
         case StatementKind.Dml => "WRITE"
-        case _                 => "READ"
+        case _                 => "READ",
+      fileAdmission = fileAdmission
     )
     // No-op for probes. deniedRefs is non-empty only on the ACL denial arm and
     // feeds the journal event's "denied" key.
@@ -600,7 +619,7 @@ final class FlightSqlRouter(
     val isSuperuser    = effectiveSet.exists(_.user.tenant.isEmpty)
     val lockedDown     = lockdownFor(poolKey)
     val lockdownDenial =
-      if lockedDown && !isSuperuser then LockdownScreen.screen(sql, deniedBuckets())
+      if lockedDown && !isSuperuser then LockdownScreen.screen(sql, deniedBuckets(), fileAdmission)
       else None
     // Superuser-only, whatever the ACL mode and the grants, and nobody's under lockdown (the
     // screens' scaladocs have the why): the DuckLake metadata catalog and the key-returning
@@ -718,8 +737,9 @@ final class FlightSqlRouter(
     def protectedWrite(): Either[RouterFailure, Unit] = effectiveSet match
       case None      => Right(())
       case Some(eff) =>
-        val g0        = System.nanoTime()
-        val outcome   = protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans)
+        val g0      = System.nanoTime()
+        val outcome =
+          protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans, fileAdmission)
         val elapsedMs = (System.nanoTime() - g0) / 1_000_000L
         stmtInstruments.recordProtectedWriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1270,6 +1290,31 @@ object FlightSqlRouter:
     * set them.
     */
   val ReservedAuditKeys: Set[String] = Set("sql", "denied", "reason", "durationMs")
+
+  /** The file locations the principal of `effectiveSet` may name at the gateway (Task 12): its own
+    * S3 credential scopes and its own tenant's folders (decision 23), never a pool's, so the
+    * gateway and the decider (which judges the handle's principal) ask the same question. Nothing
+    * for a principal without a tenant or rules; a superuser skips the file screens anyway. The
+    * rules are read on the first location a screen asks about, once per statement; a store failure
+    * (`rulesFor` answering None) or an exception reading them admits nothing.
+    */
+  def fileAdmissionFor(
+      effectiveSet: Option[EffectiveSet],
+      rulesFor: (String, String) => Option[ai.starlake.quack.edge.authz.location.LocationRules],
+      resolveLocal: String => String = identity
+  ): FileAdmission =
+    effectiveSet
+      .filterNot(_.system)
+      .flatMap(eff => eff.user.tenant.map(tenant => (tenant, eff.user.id))) match
+      case None                 => FileAdmission.Closed
+      case Some((tenant, user)) =>
+        lazy val admission =
+          scala.util
+            .Try(rulesFor(tenant, user))
+            .toOption
+            .flatten
+            .fold(FileAdmission.Closed)(rules => FileAdmission.of(rules, resolveLocal))
+        FileAdmission(location => admission.admits(location))
 
   /** One node call for [[FlightSqlRouter.executeWith]]: `(node, wrappedSql, stampPrelude,
     * recordLoad, principal) => outcome`. `principal` is who the statement runs for: the call sends

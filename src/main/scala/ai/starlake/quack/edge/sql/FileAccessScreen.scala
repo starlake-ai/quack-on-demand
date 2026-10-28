@@ -50,6 +50,11 @@ import ai.starlake.sql.SqlLexer
   * consumers: [[PostgresAclValidator]] and the OPA path, both through [[AccessGate]] (which hands
   * over the extraction it parsed anyway), and
   * [[ai.starlake.quack.edge.policy.ProtectedWriteGuard]]. A superuser reaches none of them.
+  *
+  * A principal whose tenant authorized locations (decisions 15 and 18 of the in-engine
+  * authorization design) passes a file reader call or a lone COPY naming only those
+  * ([[FileAdmission]], [[FileLocations]]); the node judges the same statement again on what DuckDB
+  * parsed, and every other form above stays refused.
   */
 object FileAccessScreen:
 
@@ -151,23 +156,42 @@ object FileAccessScreen:
       FileReferences.ReadingTableMacros.contains(name)
 
   /** Some(reason) when `sql` reads or writes a file directly. */
-  def find(sql: String): Option[String] = find(sql, FileReferences.extraction(sql))
+  def find(sql: String): Option[String] = find(sql, FileAdmission.Closed)
 
-  /** [[find]] over the access check's own `extraction` of `sql`, evaluated only when the lexical
-    * checks find nothing (file references do not depend on the qualification config).
+  /** [[find]] for a principal whose tenant authorized the locations `admission` admits: a file
+    * reader call or a lone COPY naming only such locations is no direct file access to refuse here
+    * ([[FileLocations]] has the two shapes).
     */
-  def find(sql: String, extraction: => ExtractionResult): Option[String] =
+  def find(sql: String, admission: FileAdmission): Option[String] =
+    find(sql, FileReferences.extraction(FileLocations.extractable(sql, admission)), admission)
+
+  /** [[find]] over the access check's own `extraction` of `sql` (of an admitted COPY's table side,
+    * [[FileLocations.extractable]]), evaluated only when the lexical checks find nothing (file
+    * references do not depend on the qualification config).
+    */
+  def find(
+      sql: String,
+      extraction: => ExtractionResult,
+      admission: FileAdmission
+  ): Option[String] =
     if sql == null then None
     else
-      val scan = FunctionCalls.scan(sql)
+      val scan         = FunctionCalls.scan(sql)
+      val admittedCopy = FileLocations.copy(sql).exists(c => admission.admits(c.location))
       scan.calls.iterator
-        .map(_.name)
-        .find(FileFunctions)
-        .map(fn => reason(s"$fn reads files by path"))
+        .filter(c => FileFunctions(c.name))
+        .find(c => !FileLocations.admitted(c, scan, admission))
+        .map(c => reason(s"${c.name} reads files by path"))
         .orElse(
           Option.when(scan.truncated)(reason("a statement nesting string literals too deeply"))
         )
-        .orElse(LockdownScreen.splitStatements(sql).iterator.flatMap(statementVerb).nextOption())
+        .orElse(
+          LockdownScreen
+            .splitStatements(sql)
+            .iterator
+            .flatMap(statementVerb(_, admittedCopy))
+            .nextOption()
+        )
         .orElse(
           FileReferences
             .readingTableMacro(sql, extraction)
@@ -205,15 +229,16 @@ object FileAccessScreen:
       )
 
   /** The statement verbs that read or write files, judged on the statement an EXPLAIN / PREPARE
-    * wrapper carries.
+    * wrapper carries. `admittedCopy`: the submission is one COPY whose location the tenant
+    * authorized ([[FileLocations.copy]]), which is no direct file access to refuse.
     */
-  private def statementVerb(stmt: String): Option[String] =
+  private def statementVerb(stmt: String, admittedCopy: Boolean): Option[String] =
     val head = StatementHead.of(stmt)
     val k    = head.start
     head.word(k) match
       case Some("copy")
           if !(head.word(k + 1).contains("from") && head.word(k + 2).contains("database")) =>
-        Some(reason("COPY reads or writes a file"))
+        Option.unless(admittedCopy)(reason("COPY reads or writes a file"))
       case Some("export") | Some("import") =>
         Some(reason("EXPORT / IMPORT DATABASE reads or writes files"))
       case Some("attach") => Some(reason("ATTACH opens a database file or a connection"))
