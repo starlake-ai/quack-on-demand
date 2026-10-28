@@ -1432,6 +1432,18 @@ private:
 
 } // namespace
 
+bool IsReservedSessionSetting(const std::string &name) {
+	return IsReservedSetting(name);
+}
+
+bool IsReadOnlyPragma(const std::string &name) {
+	return Contains(kReadOnlyPragmas, name);
+}
+
+bool IsPlainExtensionName(const std::string &name) {
+	return IsExtensionName(name);
+}
+
 CallShapes CallShapesOf(const std::string &sql) {
 	return CallsInTokens(Parser::NormalizeSQLString(sql));
 }

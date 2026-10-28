@@ -112,7 +112,8 @@ message(STATUS "qod-node: build marker protocol=${QOD_NODE_PROTOCOL} duckdb=${du
 # with the Scala classification by scripts/dev/gen-qod-node-classification.sh, become constant arrays in
 # generated/file_functions.hpp. Each line must be a lowercase function name, the lines sorted.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  ${CMAKE_CURRENT_SOURCE_DIR}/file-functions.txt ${CMAKE_CURRENT_SOURCE_DIR}/admitted-table-functions.txt)
+  ${CMAKE_CURRENT_SOURCE_DIR}/file-functions.txt ${CMAKE_CURRENT_SOURCE_DIR}/admitted-table-functions.txt
+  ${CMAKE_CURRENT_SOURCE_DIR}/init-settings.txt ${CMAKE_CURRENT_SOURCE_DIR}/init-extensions.txt)
 function(qod_node_name_array file out)
   file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/${file} names)
   set(previous "")
@@ -135,6 +136,11 @@ endfunction()
 qod_node_name_array(file-functions.txt QOD_NODE_FILE_FUNCTIONS)
 qod_node_name_array(admitted-table-functions.txt QOD_NODE_ADMITTED_TABLE_FUNCTIONS)
 configure_file(cmake/file_functions.hpp.in ${CMAKE_BINARY_DIR}/generated/file_functions.hpp @ONLY)
+# The tenant initSql allowlist (init_policy.cpp): settings a tenant admin's initSql may set, extensions it
+# may install or load. Same shape as the lists above, written by hand.
+qod_node_name_array(init-settings.txt QOD_NODE_INIT_SETTINGS)
+qod_node_name_array(init-extensions.txt QOD_NODE_INIT_EXTENSIONS)
+configure_file(cmake/init_policy_lists.hpp.in ${CMAKE_BINARY_DIR}/generated/init_policy_lists.hpp @ONLY)
 
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
@@ -148,6 +154,7 @@ set(QOD_NODE_CORE_SOURCES
   src/functions_list.cpp
   src/handle.cpp
   src/http_post.cpp
+  src/init_policy.cpp
   src/init_runner.cpp
   src/json.cpp
   src/json_writer.cpp
@@ -252,6 +259,8 @@ if(QOD_NODE_TESTS)
   add_test(NAME locations COMMAND locations_test)
   qod_node_test(screen_rules_test)
   add_test(NAME screen_rules COMMAND screen_rules_test)
+  qod_node_test(init_policy_test)
+  add_test(NAME init_policy COMMAND init_policy_test)
   # The screen's location decisions ask a real replica.
   target_link_libraries(authz_engine_test PRIVATE qod_node_test_http)
   qod_node_test(credentials_test)

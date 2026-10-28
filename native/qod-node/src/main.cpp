@@ -7,12 +7,15 @@
 // secret directory, loading quack, the parse screen and quack_serve; the identity checks (node_hooks)
 // are registered before any SQL runs. The extension settings are fixed in the config before the
 // database opens (spec decision 17). So are the two shared file caches (off) and the guard that
-// resets the environment's S3 defaults whenever httpfs loads (decision 23).
+// resets the environment's S3 defaults whenever httpfs loads (decision 23). A tenant admin's initSql
+// arrives inside marked sections, which run under the tenant initSql allowlist (init_policy); the
+// manager checks such SQL at write time with --check-init, the same code.
 
 #include "authz.hpp"
 #include "build_info.hpp"
 #include "duckdb.hpp"
 #include "functions_list.hpp"
+#include "init_policy.hpp"
 #include "init_runner.hpp"
 #include "lifetime.hpp"
 #include "node_config.hpp"
@@ -36,8 +39,20 @@ using namespace qod;
 
 void RunInitFiles(duckdb::Connection &con, const NodeOptions &options) {
 	for (auto &file : options.init_files) {
-		RunBestEffort(con, ReadAll(file), "init");
+		RunInit(con, ReadAll(file));
 	}
+}
+
+//! --check-init: the tenant initSql allowlist's verdict on the SQL read from stdin, as one line of
+//! canonical JSON on stdout (InitVerdictJson). Judges, never runs: nothing of the SQL executes.
+int CheckInitMode(const NodeOptions &options) {
+	auto sql = ReadAll("-");
+	duckdb::DBConfig config;
+	ApplyExtensionPolicy(config, options.extensions);
+	duckdb::DuckDB db(nullptr, &config);
+	duckdb::Connection con(db);
+	std::cout << InitVerdictJson(CheckInit(*con.context, sql)) << std::endl;
+	return 0;
 }
 
 int ListSettingsMode(const NodeOptions &options) {
@@ -166,6 +181,9 @@ int main(int argc, char **argv) {
 		}
 		if (options.mode == NodeOptions::Mode::LIST_FUNCTIONS) {
 			return ListFunctionsMode(options);
+		}
+		if (options.mode == NodeOptions::Mode::CHECK_INIT) {
+			return CheckInitMode(options);
 		}
 		return Serve(options);
 	} catch (std::exception &error) {

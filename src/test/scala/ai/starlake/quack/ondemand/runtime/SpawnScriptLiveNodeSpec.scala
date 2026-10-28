@@ -79,7 +79,8 @@ class SpawnScriptLiveNodeSpec
     */
   private def startNode(
       extraSetupSql: String = "",
-      env: Seq[(String, String)] = Nil
+      env: Seq[(String, String)] = Nil,
+      moreSecrets: Map[String, String] = Map.empty
   ): (java.lang.Process, Int) =
     assume(QodNodeTestBinary.path.nonEmpty, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val port    = freePort()
@@ -88,7 +89,7 @@ class SpawnScriptLiveNodeSpec
         NodeSecretFiles.TokenKey -> Token,
         NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId),
         "extraSetupSql"          -> extraSetupSql
-      ),
+      ) ++ moreSecrets,
       Some(tempDir)
     )
     val pb = new java.lang.ProcessBuilder("bash", script, port.toString)
@@ -168,6 +169,42 @@ class SpawnScriptLiveNodeSpec
       rc should not be 0
       err should include("shell_history")
     }
+  }
+
+  // Task 20 Part C, live: a tenant admin's pool initSql reaches the node inside a marked section,
+  // where qod-node runs its SET and skips its CREATE SECURE VIEW over a host file; the node serves.
+  // The same SQL written by a superuser runs as written.
+  private val TenantInit =
+    "SET memory_limit = '2GB';\n" +
+      "CREATE SECURE VIEW tenant_hosts AS SELECT * FROM read_text('/etc/hosts');\n" +
+      "SET threads = 3;"
+
+  "a tenant admin's initSql" should "run only its allowlisted statements on a real node" in {
+    val (p, port) = startNode(
+      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> TenantInit),
+      env = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "0")
+    )
+    try
+      onNode(port, "SELECT current_setting('memory_limit')") shouldBe List("1.8 GiB")
+      onNode(port, "SELECT current_setting('threads')") shouldBe List("3")
+      onNode(port, "SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_hosts'") shouldBe
+        List("0")
+      val log = Files.readString(tempDir.resolve("node.log"))
+      log should include("tenant pool initSql: statement 2 of 3 skipped: CREATE is not allowed")
+      log should not include "/etc/hosts"
+    finally hardStop(p)
+  }
+
+  "a superuser's initSql" should "run as written on a real node" in {
+    val (p, port) = startNode(
+      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> TenantInit),
+      env = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "1")
+    )
+    try
+      onNode(port, "SELECT current_setting('memory_limit')") shouldBe List("1.8 GiB")
+      onNode(port, "SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_hosts'") shouldBe
+        List("1")
+    finally hardStop(p)
   }
 
   // DuckDB loads every persistent secret of its secret directory into a node on first secret use,

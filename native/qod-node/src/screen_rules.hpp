@@ -38,6 +38,16 @@ struct CallShapes {
 //! The CallShapes of `sql` (normalized as the screen normalizes it).
 CallShapes CallShapesOf(const std::string &sql);
 
+//! Whether a session may not SET or RESET the setting `name` (lower case): every s3_* and
+//! external_file_cache_* setting and the others decision 23 reserves.
+bool IsReservedSessionSetting(const std::string &name);
+
+//! Whether `name` (lower case) is one of the read-only listing PRAGMAs a non-superuser may run.
+bool IsReadOnlyPragma(const std::string &name);
+
+//! Whether `name` is a plain extension name (letters, digits, underscores): no path, no URL.
+bool IsPlainExtensionName(const std::string &name);
+
 //! How deep query('...') may nest query('...').
 constexpr int kMaxQueryNesting = 8;
 

@@ -39,6 +39,8 @@ NodeOptions ParseOptions(const std::vector<std::string> &args) {
 			options.mode = NodeOptions::Mode::LIST_SETTINGS;
 		} else if (arg == "--list-functions") {
 			options.mode = NodeOptions::Mode::LIST_FUNCTIONS;
+		} else if (arg == "--check-init") {
+			options.mode = NodeOptions::Mode::CHECK_INIT;
 		} else if (arg == "--port") {
 			options.port = static_cast<int>(Number(arg, Value(args, i), 1, 65535));
 		} else if (arg == "--bind") {
@@ -90,6 +92,7 @@ std::string Usage() {
 	       "  qod-node --build-info\n"
 	       "  qod-node --list-settings [--init <file>|-]... [<extension flag>]...\n"
 	       "  qod-node --list-functions [--init <file>|-]... [<extension flag>]...\n"
+	       "  qod-node --check-init     (a tenant initSql on stdin; its allowlist verdict as JSON)\n"
 	       "extension flags (each off unless given):\n"
 	       "  --allow-community-extensions --allow-unsigned-extensions --autoinstall-known-extensions\n";
 }

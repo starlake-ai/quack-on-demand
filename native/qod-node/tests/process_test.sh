@@ -337,6 +337,63 @@ ext_settings() {
 ext_settings default "false,false,false"
 ext_settings all "true,true,true" --allow-community-extensions --allow-unsigned-extensions --autoinstall-known-extensions
 
+# --- serve: a tenant's initSql runs under the allowlist, the rest of the init SQL as written ------
+# Task 20: the untrusted section's SET runs, its CREATEs and its COPY are skipped (each named by its
+# position, never by its text), the node still serves, and the trusted SQL after the section runs the
+# same kind of statement unrestricted. The COPY at the end records what the init did.
+cat > "$work/tenant-init.sql" <<SQL
+CREATE TABLE trusted_made AS SELECT 1 AS v;
+-- qod:untrusted-begin pool
+SET memory_limit = '1GB';
+CREATE SECURE VIEW tenant_leak AS SELECT * FROM read_text('/etc/hosts');
+CREATE OR REPLACE SECRET tenant_s3 (TYPE s3, KEY_ID 'AKIAQODPROCMARKER', SECRET 'x');
+COPY (SELECT 1) TO '$work/tenant-copy.csv';
+INSTALL x FROM 'http://example.com/repo';
+SET threads = 3;
+-- qod:untrusted-end
+COPY (SELECT current_setting('memory_limit') AS m, current_setting('threads') AS t, (SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_leak') AS leak, (SELECT count(*) FROM duckdb_secrets() WHERE name = 'tenant_s3') AS secrets, (SELECT count(*) FROM duckdb_tables() WHERE table_name = 'trusted_made') AS trusted) TO '$work/tenant-init.csv' (HEADER false);
+SQL
+"$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-tenant)" \
+  --secret-directory "$work/secret-dir" --node-id "$node_id" --init - < "$work/tenant-init.sql" \
+  > "$work/tenant.out" 2>&1 &
+tenant_node=$!
+pids+=("$tenant_node")
+if wait_for '\[qod-node\] ready' "$work/tenant.out"; then
+  for n in 2 3 4 5; do
+    grep -q "tenant pool initSql: statement $n of 6 skipped: " "$work/tenant.out" ||
+      fail "tenant initSql: statement $n was not skipped"
+  done
+  grep -q 'tenant pool initSql: 2 of 6 statement(s) ran under the tenant initSql allowlist' "$work/tenant.out" ||
+    fail "tenant initSql: expected 2 of 6 statements to run"
+  if grep -q -e 'AKIAQODPROCMARKER' -e '/etc/hosts' -e 'example.com' "$work/tenant.out"; then
+    fail "tenant initSql: a skipped statement's text reached the output"
+  fi
+  [[ ! -e "$work/tenant-copy.csv" ]] || fail "tenant initSql: the refused COPY wrote its file"
+  [[ "$(tr -d '\r\n' < "$work/tenant-init.csv" 2>/dev/null)" == "953.6 MiB,3,0,0,1" ]] ||
+    fail "tenant initSql: recorded $(tr -d '\r\n' < "$work/tenant-init.csv" 2>/dev/null), expected 953.6 MiB,3,0,0,1"
+  kill -TERM "$tenant_node"
+  wait_exit "$tenant_node" || fail "tenant initSql: the node did not stop"
+else
+  fail "tenant initSql: the node never became ready"
+  cat "$work/tenant.out"
+fi
+
+# --- --check-init: the same verdict, as JSON, for the manager's write-time check -----------------
+# The untrusted section of the init above, judged without running: the positions the node skipped.
+sed -n '/^-- qod:untrusted-begin/,/^-- qod:untrusted-end/p' "$work/tenant-init.sql" | sed '1d;$d' |
+  "$node_bin" --check-init > "$work/check.json" 2> "$work/check.err"
+status=$?
+[[ $status -eq 0 ]] || fail "--check-init: exit $status"
+check="$(cat "$work/check.json")"
+[[ "$check" == '{"refused":[{"reason":"'*'","statement":2},{"reason":"'*'","statement":3},{"reason":"'*'","statement":4},{"reason":"'*'","statement":5}],"statements":6}' ]] ||
+  fail "--check-init: unexpected verdict (or one quoting the text): $(tr -cd '[:alnum:][:punct:] ' < "$work/check.json" | sed 's/AKIA[A-Z]*/AKIA.../g')"
+if grep -q -e 'AKIAQODPROCMARKER' -e '/etc/hosts' "$work/check.json" "$work/check.err"; then
+  fail "--check-init: the verdict quotes a statement's text"
+fi
+printf 'SET threads = 2;\nRESET memory_limit;\nINSTALL httpfs;\nPRAGMA version;\n' | "$node_bin" --check-init > "$work/check-ok.json"
+[[ "$(cat "$work/check-ok.json")" == '{"refused":[],"statements":4}' ]] ||
+  fail "--check-init: an allowed initSql was refused: $(cat "$work/check-ok.json")"
+
 # --- serve: a quack_serve failure is fatal ---------------------------------------------------------
 # 192.0.2.1 (TEST-NET-1) is never a local address, so binding it fails. (A busy port is no test: quack
 # does not refuse a port another listener holds.)
