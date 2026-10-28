@@ -2,9 +2,11 @@
 
 #include "credentials.hpp"
 #include "crypto.hpp"
+#include "describer.hpp"
 #include "locations.hpp"
 #include "screen_rules.hpp"
 
+#include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
@@ -15,16 +17,23 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/operator/logical_reset.hpp"
+#include "duckdb/planner/operator/logical_copy_to_file.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_prepare.hpp"
 #include "duckdb/planner/operator/logical_set.hpp"
+#include "duckdb/planner/operator/logical_transaction.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <optional>
 
 namespace qod {
 namespace {
@@ -90,6 +99,8 @@ public:
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce,
 		                      handle.ctx,       text,                  handle.replica};
 		installed_ = true;
+		authz_ = &authz;
+		paths_watch_ = paths_recorded_ ? PathsWatch::IDLE : PathsWatch::WATCHING;
 	}
 
 	//! Called first by every qod_session bind: until this prelude succeeds whole (Install, then
@@ -98,6 +109,7 @@ public:
 	void BeginPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
 		ready_ = false;
+		paths_watch_ = PathsWatch::IDLE;
 	}
 
 	//! True when a principal is installed, its handle has not expired at `now_ms`, and the last prelude
@@ -185,10 +197,167 @@ public:
 		return ready_ ? scopes_ : std::vector<std::string>();
 	}
 
+	//! The statement's SQL while a query runs on this connection, for decision 19; nullopt otherwise:
+	//! GetCurrentQuery dereferences the active query unchecked, and ClientContext::BindStatement
+	//! plans without one.
+	std::optional<std::string> StatementText(ClientContext &context) {
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!query_active_) {
+			return std::nullopt;
+		}
+		return context.GetCurrentQuery();
+	}
+
+	//! The verdict the current statement runs under; kept with the prepared statement a PREPARE
+	//! registers, for OnRebindPreparedStatement.
+	void Admit(const Admitted &admitted, LogicalOperator &plan) {
+		std::lock_guard<std::mutex> guard(lock_);
+		pending_ = admitted;
+		if (plan.type != LogicalOperatorType::LOGICAL_PREPARE) {
+			return;
+		}
+		auto &prepare = plan.Cast<LogicalPrepare>();
+		if (!prepare.prepared || prepare.children.empty()) {
+			return;
+		}
+		for (auto it = prepared_.begin(); it != prepared_.end();) {
+			it = it->second.statement.expired() ? prepared_.erase(it) : std::next(it);
+		}
+		prepared_[prepare.prepared.get()] = Stored {weak_ptr<PreparedStatementData>(prepare.prepared), admitted};
+	}
+
+	//! The manager's prelude: the handle's own install step.
+	void AdmitPrelude() {
+		std::lock_guard<std::mutex> guard(lock_);
+		pending_ = Admitted {"", current_.principal.id, current_.policy_version, current_.ctx, kNeverExpires};
+	}
+
+	//! True when the current statement already runs under a verdict for the plan `fingerprint`
+	//! describes, taken for this session and still valid.
+	bool Covers(const std::string &fingerprint) {
+		std::lock_guard<std::mutex> guard(lock_);
+		return authz_ && pending_ && pending_->fingerprint == fingerprint &&
+		       !RebindRequired(&*pending_, current_, authz_->Now());
+	}
+
+	//! Follows the statements a handle runs, to record the connection's set paths once, right after the
+	//! manager's USE prelude (CONTRACT Addendum 4 items 11 and 16): true when `plan`, bound in
+	//! post_bind, is the one to record them before. The router prepends `USE
+	//! <db>.<schema>;` to every submission it does not send alone, after the transaction-ending
+	//! statements it opens with (FlightSqlRouter.wrapWithDefaultSchema), and a fresh session handle
+	//! precedes every PREPARE the manager sends: so the manager's USE is the first statement under its
+	//! handle that does not end a transaction, and another statement follows it under the same handle.
+	//! A session's own USE is sent alone, so a prelude, never a statement of its handle, follows it. The
+	//! paths are recorded at the bind of that next statement, after the USE ran and before the
+	//! statement does; never at qod_session, which the manager sends before every statement, the USE
+	//! prelude's included.
+	bool RecordPathsBefore(LogicalOperator &plan) {
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!query_active_ || paths_recorded_) {
+			return false;
+		}
+		if (paths_watch_ == PathsWatch::USE_RAN && query_seq_ != use_seq_) {
+			paths_watch_ = PathsWatch::IDLE;
+			paths_recorded_ = true;
+			return true;
+		}
+		if (paths_watch_ == PathsWatch::WATCHING) {
+			if (EndsTransaction(plan)) {
+				return false;
+			}
+			if (plan.type == LogicalOperatorType::LOGICAL_SET && plan.Cast<LogicalSet>().name == "schema") {
+				paths_watch_ = PathsWatch::USE_RAN;
+				use_seq_ = query_seq_;
+			} else {
+				paths_watch_ = PathsWatch::IDLE;
+			}
+		}
+		return false;
+	}
+
+	// ---- ClientContextState
+	//! True arms OnFinalizePrepare: DuckDB calls it only when a state can request a rebind
+	//! (duckdb: src/main/client_context.cpp, CreatePreparedStatement).
+	bool CanRequestRebind() override {
+		return true;
+	}
+
+	void QueryBegin(ClientContext &context) override {
+		std::lock_guard<std::mutex> guard(lock_);
+		query_active_ = true;
+		query_seq_++;
+		pending_.reset();
+	}
+
+	void QueryEnd(ClientContext &context, optional_ptr<ErrorData> error) override {
+		std::lock_guard<std::mutex> guard(lock_);
+		query_active_ = false;
+		pending_.reset();
+		// A USE that failed changed nothing: no paths are recorded after it.
+		if (paths_watch_ == PathsWatch::USE_RAN && use_seq_ == query_seq_ && error && error->HasError()) {
+			paths_watch_ = PathsWatch::IDLE;
+		}
+	}
+
+	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared_statement,
+	                                  PreparedStatementMode mode) override {
+		std::lock_guard<std::mutex> guard(lock_);
+		auto privileged = installed_ && (current_.principal.superuser || current_.principal.system);
+		auto refusal = FinalizeRefusal(installed_, privileged, pending_.has_value());
+		pending_.reset();
+		if (!refusal.empty()) {
+			throw PermissionException(refusal);
+		}
+		return RebindQueryInfo::DO_NOT_REBIND;
+	}
+
+	RebindQueryInfo OnRebindPreparedStatement(ClientContext &context, BindPreparedStatementCallbackInfo &info,
+	                                          RebindQueryInfo current_rebind) override {
+		std::lock_guard<std::mutex> guard(lock_);
+		const Admitted *stored = nullptr;
+		auto found = prepared_.find(&info.prepared_statement);
+		if (found != prepared_.end() && found->second.statement.lock().get() == &info.prepared_statement) {
+			stored = &found->second.admitted;
+		}
+		if (!installed_ || !authz_ || RebindRequired(stored, current_, authz_->Now())) {
+			return RebindQueryInfo::ATTEMPT_TO_REBIND;
+		}
+		return RebindQueryInfo::DO_NOT_REBIND;
+	}
+
 private:
+	//! COMMIT or ROLLBACK: the router puts its USE prelude after the ones a submission opens with.
+	static bool EndsTransaction(LogicalOperator &plan) {
+		if (plan.type != LogicalOperatorType::LOGICAL_TRANSACTION) {
+			return false;
+		}
+		auto type = plan.Cast<LogicalTransaction>().info->type;
+		return type == TransactionType::COMMIT || type == TransactionType::ROLLBACK;
+	}
+
+	struct Stored {
+		weak_ptr<PreparedStatementData> statement;
+		Admitted admitted;
+	};
+
+	//! Where RecordPathsBefore is in the statements of the current handle: looking for its first one
+	//! that does not end a transaction, past a USE that ran first, or done.
+	enum class PathsWatch { WATCHING, USE_RAN, IDLE };
+
 	std::mutex lock_;
 	bool installed_ = false;
 	Installed current_;
+	//! The node's checks (its clock), set at the first install; outlives the connection.
+	NodeAuthz *authz_ = nullptr;
+	bool query_active_ = false;
+	//! Counts the queries (statements) this connection has begun; use_seq_ is the USE prelude's.
+	uint64_t query_seq_ = 0;
+	uint64_t use_seq_ = 0;
+	PathsWatch paths_watch_ = PathsWatch::IDLE;
+	//! RecordSessionPaths ran for this connection: once for its life.
+	bool paths_recorded_ = false;
+	std::optional<Admitted> pending_;
+	std::map<const PreparedStatementData *, Stored> prepared_;
 	//! The digest the user credential secrets were last made from, their prints (UserSecretPrints)
 	//! and their scopes.
 	string creds_;
@@ -213,10 +382,22 @@ struct AuthzScalarInfo : public ScalarFunctionInfo {
 	std::shared_ptr<NodeAuthz> authz;
 };
 
-struct AuthzPlannerInfo : public PlannerExtensionInfo {
-	explicit AuthzPlannerInfo(std::shared_ptr<NodeAuthz> authz_p) : authz(std::move(authz_p)) {
-	}
+//! What the planner and optimizer hooks share: the identity checks and the decision callback.
+struct Gate {
 	std::shared_ptr<NodeAuthz> authz;
+	PlanDecider decider;
+};
+
+struct GatePlannerInfo : public PlannerExtensionInfo {
+	explicit GatePlannerInfo(std::shared_ptr<Gate> gate_p) : gate(std::move(gate_p)) {
+	}
+	std::shared_ptr<Gate> gate;
+};
+
+struct GateOptimizerInfo : public OptimizerExtensionInfo {
+	explicit GateOptimizerInfo(std::shared_ptr<Gate> gate_p) : gate(std::move(gate_p)) {
+	}
+	std::shared_ptr<Gate> gate;
 };
 
 bool IsQuackSession(ClientContext &context) {
@@ -384,23 +565,117 @@ void ScreenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
-// ---- post_bind -----------------------------------------------------------------------------------
+// ---- post_bind, pre_optimize -----------------------------------------------------------------------
 
-//! quack's callbacks: changing either from a session would switch the node's checks off. The whole
-//! tree, not just its root: EXPLAIN ANALYZE runs the SET or RESET it wraps.
-void RefuseCallbackSetting(LogicalOperator &op) {
-	const Identifier *name = nullptr;
-	if (op.type == LogicalOperatorType::LOGICAL_SET) {
-		name = &op.Cast<LogicalSet>().name;
-	} else if (op.type == LogicalOperatorType::LOGICAL_RESET) {
-		name = &op.Cast<LogicalReset>().name;
+//! The manager's prelude as DuckDB binds it: CALL qod_session(...) is a projection of that one scan.
+//! Prepared through the C++ API (Connection::Prepare, which DuckDB 2.0 runs as a PREPARE under a
+//! generated name) it is that projection under a PREPARE, and executed again under an EXECUTE that
+//! rebound it: no verdict is stored with it (Admit is never called), so every EXECUTE rebinds it and
+//! qod_session verifies its handle again. quack runs a client's text as is, so on a node only the bare
+//! form arrives.
+bool IsPrelude(LogicalOperator &plan) {
+	if ((plan.type == LogicalOperatorType::LOGICAL_PREPARE || plan.type == LogicalOperatorType::LOGICAL_EXECUTE) &&
+	    plan.children.size() == 1) {
+		return IsPrelude(*plan.children[0]);
 	}
-	if (name && (*name == "quack_authorization_function" || *name == "quack_authentication_function")) {
-		throw PermissionException("qod-node: " + name->GetIdentifierName() + " cannot be changed");
+	if (plan.type != LogicalOperatorType::LOGICAL_PROJECTION || plan.children.size() != 1) {
+		return false;
+	}
+	for (auto &expr : plan.expressions) {
+		if (expr->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			return false;
+		}
+	}
+	auto &child = *plan.children[0];
+	return child.type == LogicalOperatorType::LOGICAL_GET && child.children.empty() &&
+	       child.Cast<LogicalGet>().function.bind == SessionBind;
+}
+
+//! The COPY formats the parse screen trusts by name (screen_rules, kCoreCopyFormats), each with the
+//! extension DuckDB's own copy function of that name is registered by (copy_csv.cpp, copy_blob.cpp,
+//! parquet_extension.cpp, json_extension.cpp and copy_json.cpp at v2.0.0; empty: the core).
+const std::map<std::string, std::string> &CoreCopyOrigins() {
+	static const std::map<std::string, std::string> origins = {
+	    {"blob", ""},      {"csv", ""},       {"geojson", "json"}, {"geojsonl", "json"},
+	    {"json", "json"},  {"jsonl", "json"}, {"ndjson", "json"},  {"parquet", "parquet"}};
+	return origins;
+}
+
+//! Task 8 M7: the screen admits the COPY options of a core format by its name, so a COPY TO whose
+//! copy function carries a core format's name runs only when that function is DuckDB's own: its
+//! catalog entry registered by the extension (or the core) that defines it.
+void RefuseForeignCopyFunction(ClientContext &context, LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_COPY_TO_FILE) {
+		auto name = StringUtil::Lower(op.Cast<LogicalCopyToFile>().function.name.GetIdentifierName());
+		auto origin = CoreCopyOrigins().find(name);
+		if (origin != CoreCopyOrigins().end()) {
+			CatalogEntryRetriever retriever(context);
+			auto &catalog = Catalog::GetSystemCatalog(context);
+			auto entry = catalog.GetEntry(
+			    retriever, EntryLookupInfo(CatalogType::COPY_FUNCTION_ENTRY,
+			                               QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), Identifier(name))),
+			    OnEntryNotFound::RETURN_NULL);
+			if (!entry || StringUtil::Lower(entry->extension_name.GetIdentifierName()) != origin->second) {
+				throw PermissionException("QoD: statement uses a COPY format " + name +
+				                          " that is not DuckDB's own, which QoD does not support");
+			}
+		}
 	}
 	for (auto &child : op.children) {
-		RefuseCallbackSetting(*child);
+		RefuseForeignCopyFunction(context, *child);
 	}
+}
+
+//! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
+//! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
+Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
+	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version, installed.ctx,
+	                   kNeverExpires};
+	if (installed.principal.superuser || installed.principal.system) {
+		return admitted;
+	}
+	DecideCall call;
+	call.replica = installed.replica;
+	call.handle = installed.handle;
+	call.kind = "plan";
+	call.description = described.canonical;
+	call.principal = installed.principal;
+	call.policy_version = installed.policy_version;
+	call.ctx = installed.ctx;
+	auto result = gate.decider(call);
+	if (result.status != DecideResult::Status::Allow) {
+		throw PermissionException(result.Message());
+	}
+	admitted.expires_at = result.has_verdict ? result.verdict.expires_at : gate.authz->Now();
+	return admitted;
+}
+
+//! Describes `plan` and makes it the statement's: the verdict already held when it covers this plan,
+//! else a new one. Throws kNoPrincipal on a quack connection whose principal is not current. From
+//! post_bind it first records the connection's set paths when the manager's USE prelude just ran
+//! (SessionState::RecordPathsBefore).
+void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan, bool post_bind) {
+	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+	Installed installed;
+	if (!session || !session->Snapshot(gate.authz->Now(), installed)) {
+		throw PermissionException(kNoPrincipal);
+	}
+	if (IsPrelude(plan)) {
+		session->AdmitPrelude();
+		return;
+	}
+	if (post_bind && session->RecordPathsBefore(plan)) {
+		RecordSessionPaths(context);
+	}
+	auto text = session->StatementText(context);
+	auto described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
+	if (!installed.principal.superuser && !installed.principal.system) {
+		RefuseForeignCopyFunction(context, plan);
+	}
+	if (session->Covers(described.fingerprint)) {
+		return;
+	}
+	session->Admit(Decide(gate, installed, described), plan);
 }
 
 void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
@@ -408,14 +683,25 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 	if (!IsQuackSession(context)) {
 		return;
 	}
-	auto &authz = *static_cast<AuthzPlannerInfo &>(*input.info).authz;
-	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
-	if (!session || !session->CurrentAt(authz.Now())) {
-		throw PermissionException(kNoPrincipal);
+	auto &gate = *static_cast<GatePlannerInfo &>(*input.info).gate;
+	if (!statement.plan) {
+		auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+		if (!session || !session->CurrentAt(gate.authz->Now())) {
+			throw PermissionException(kNoPrincipal);
+		}
+		return;
 	}
-	if (statement.plan) {
-		RefuseCallbackSetting(*statement.plan);
+	Enforce(context, gate, *statement.plan, true);
+}
+
+//! Extensions loaded after qod-node may register a post_bind of their own that changes the plan
+//! (Iceberg does): the plan the optimizer receives runs only under a verdict for itself.
+void PreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	auto &context = input.context;
+	if (!plan || !IsQuackSession(context)) {
+		return;
 	}
+	Enforce(context, *static_cast<GateOptimizerInfo &>(*input.info).gate, *plan, false);
 }
 
 } // namespace
@@ -425,7 +711,7 @@ bool SessionSnapshot(ClientContext &context, int64_t now_ms, Installed &out) {
 	return session && session->Snapshot(now_ms, out);
 }
 
-void RegisterNodeAuthz(DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz) {
+void RegisterNodeAuthz(DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz, PlanDecider decider) {
 	ExtensionLoader loader(db, "qod_node");
 
 	TableFunction session("qod_session", {LogicalType::VARCHAR}, SessionScan, SessionBind, SessionInit);
@@ -438,10 +724,25 @@ void RegisterNodeAuthz(DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz) {
 	screen.SetExtraFunctionInfo(make_shared_ptr<AuthzScalarInfo>(authz));
 	loader.RegisterFunction(screen);
 
+	auto gate = std::make_shared<Gate>();
+	gate->authz = authz;
+	if (decider) {
+		gate->decider = std::move(decider);
+	} else {
+		gate->decider = [authz](const DecideCall &call) {
+			return authz->Decider().Decide(call);
+		};
+	}
+
 	PlannerExtension planner;
 	planner.post_bind_function = PostBind;
-	planner.planner_info = make_shared_ptr<AuthzPlannerInfo>(std::move(authz));
+	planner.planner_info = make_shared_ptr<GatePlannerInfo>(gate);
 	PlannerExtension::Register(DBConfig::GetConfig(db), planner);
+
+	OptimizerExtension optimizer;
+	optimizer.pre_optimize_function = PreOptimize;
+	optimizer.optimizer_info = make_shared_ptr<GateOptimizerInfo>(gate);
+	OptimizerExtension::Register(DBConfig::GetConfig(db), optimizer);
 }
 
 } // namespace qod

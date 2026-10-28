@@ -105,6 +105,34 @@ int main() {
 	Expect(authz.Screen("c-1", Prelude(Mint("u-9", now_ms + 60000))).empty(),
 	       "after expiry the book admits another principal");
 
+	// ---- prepare finalization: a verdict, or a system principal
+	Expect(qod::FinalizeRefusal(true, false, true).empty(), "a statement with a verdict");
+	Expect(qod::FinalizeRefusal(true, true, false).empty(), "a superuser or system statement");
+	Expect(qod::FinalizeRefusal(true, false, false) == qod::kNoVerdict, "a statement without a verdict");
+	Expect(qod::FinalizeRefusal(false, false, true) == qod::kNoPrincipal, "a connection without a principal");
+
+	// ---- a prepared statement's verdict holds only for the session it was taken for
+	qod::Installed session;
+	session.principal.id = "u-1";
+	session.policy_version = 7;
+	session.ctx = std::string(64, 'a');
+	qod::Admitted stored {"f", "u-1", 7, std::string(64, 'a'), now_ms + 1000};
+	Expect(!qod::RebindRequired(&stored, session, now_ms), "the same principal, policy version and ctx");
+	Expect(qod::RebindRequired(nullptr, session, now_ms), "no verdict stored with the statement");
+	auto stale = stored;
+	stale.principal_id = "u-2";
+	Expect(qod::RebindRequired(&stale, session, now_ms), "another principal");
+	stale = stored;
+	stale.policy_version = 6;
+	Expect(qod::RebindRequired(&stale, session, now_ms), "an older policy version");
+	stale = stored;
+	stale.ctx = std::string(64, 'b');
+	Expect(qod::RebindRequired(&stale, session, now_ms), "another session context");
+	Expect(qod::RebindRequired(&stored, session, now_ms + 1000), "an expired verdict");
+	stale = stored;
+	stale.expires_at = qod::kNeverExpires;
+	Expect(!qod::RebindRequired(&stale, session, now_ms + 1000), "a local allow never expires");
+
 	if (failures == 0) {
 		std::cout << "authz_test: all passed" << std::endl;
 	}

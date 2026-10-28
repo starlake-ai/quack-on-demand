@@ -128,4 +128,17 @@ std::vector<std::string> NodeAuthz::CredentialScopes(const std::string &nonce) {
 	                                                                    : std::vector<std::string>();
 }
 
+std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict) {
+	if (!installed) {
+		return kNoPrincipal;
+	}
+	return privileged || has_verdict ? "" : kNoVerdict;
+}
+
+bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms) {
+	return !stored || stored->principal_id != current.principal.id ||
+	       stored->policy_version != current.policy_version || stored->ctx != current.ctx ||
+	       stored->expires_at <= now_ms;
+}
+
 } // namespace qod

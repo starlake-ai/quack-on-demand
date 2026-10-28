@@ -83,8 +83,12 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private val poolKey   = PoolKey("acme", "acme_db", "sales")
   private val Token     = "tenant=acme&pool=sales&user=alice&password=x"
 
-  // The node's keys are the ones the router mints its session handles with.
-  private val keys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+  // The node's keys are the ones the router mints its session handles with. alice is an ordinary
+  // principal: the node decides her plans through the decision endpoint, here a stand-in that allows
+  // them (the gateway's own ACL gate still runs in front of it).
+  private val secret = ai.starlake.quack.edge.authz.NodeKeys.randomSecret()
+  private val decide = ai.starlake.quack.ondemand.runtime.StubDecideServer.start(secret)
+  private val keys   = new ai.starlake.quack.edge.authz.NodeKeys(secret, decide.url)
 
   private var dir: Path                    = null
   private var live: LiveQodNode            = null
@@ -224,6 +228,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     try if server != null then server.stop()
     finally
       if live != null then live.stop()
+      decide.stop()
       if dir != null then
         Thread.sleep(200)
         try
@@ -474,6 +479,21 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     )
     rc should not be 0
     err should include("requires a DuckDB 2.0 client")
+
+  "the node" should "decide every statement of an ordinary principal through the decision endpoint" in:
+    assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
+    // A plan no earlier case ran (min): the node's verdict cache, keyed by the description, holds
+    // none for it, so the endpoint is asked.
+    val before         = decide.requests.size
+    val (rc, out, err) =
+      cli(
+        s"SELECT count(*) FROM quack_query('$endpoint', 'SELECT min(id) FROM ids', token := '$Token');"
+      )
+    withClue(err)(rc shouldBe 0)
+    out.trim shouldBe "1"
+    decide.requests
+      .drop(before)
+      .exists((kind, d) => kind == "plan" && d.noSpaces.contains("\"name\":\"ids\"")) shouldBe true
 
 /** The Python `duckdb` packages the spec provisions. PyPI publishes no 2.0 release yet: the
   * pre-release's bundled quack extension (974927a394) is the commit the nodes run, so it speaks the

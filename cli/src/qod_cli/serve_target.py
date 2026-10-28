@@ -120,8 +120,10 @@ def _reader_for(filename: str) -> str | None:
 
 
 def _view(name: str, reader: str, target: str, hive: bool) -> str:
+    # A secure view: tenants read the files through a read grant on the view, the reader running
+    # with the view owner's rights (the node's init), not with theirs on a path they never authorized.
     args = _sql_str(target) + (", hive_partitioning = true" if hive else "")
-    return f"CREATE OR REPLACE VIEW {_sql_ident(name)} AS SELECT * FROM {reader}({args});"
+    return f"CREATE OR REPLACE SECURE VIEW {_sql_ident(name)} AS SELECT * FROM {reader}({args});"
 
 
 def _parse_tables(tables: list[str]) -> list[tuple[str, str]]:

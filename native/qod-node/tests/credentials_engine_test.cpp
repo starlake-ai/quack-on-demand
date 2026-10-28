@@ -178,7 +178,15 @@ CredentialEntry Entry(char digit, const std::string &scope, const std::string &k
 int main() {
 	duckdb::DuckDB db(nullptr);
 	auto authz = std::make_shared<qod::NodeAuthz>(kNode, kKey, [] { return now_ms; });
-	qod::RegisterNodeAuthz(*db.instance, authz);
+	// Every plan of a user's statement runs under a verdict; this test is about credentials, so every
+	// plan is allowed here.
+	qod::RegisterNodeAuthz(*db.instance, authz, [](const qod::DecideCall &) {
+		qod::DecideResult allowed;
+		allowed.status = qod::DecideResult::Status::Allow;
+		allowed.has_verdict = true;
+		allowed.verdict.expires_at = now_ms + 60000;
+		return allowed;
+	});
 	// Stand in for httpfs's s3 secret type, so the test needs no extension (on a node, RegisterSecret
 	// autoloads httpfs, installed at init, for the type).
 	duckdb::SecretType s3;

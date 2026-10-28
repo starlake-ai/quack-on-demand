@@ -23,6 +23,8 @@ struct MintSpec {
 	std::string node = kNode;
 	int64_t policy_version = 1;
 	bool superuser = false;
+	//! The manager's own statements.
+	bool system = false;
 	//! Where the node asks for verdicts on this connection's statements.
 	std::string replica = "http://127.0.0.1:20900";
 	std::string ctx = std::string(64, 'c');
@@ -38,7 +40,8 @@ inline std::string MintWith(const MintSpec &spec) {
 	auto payload = std::string("{\"v\":1,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
 	               "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
 	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
-	               ",\"superuser\":" + (spec.superuser ? "true" : "false") + ",\"system\":false}," +
+	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
+	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
 	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
 	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(spec.exp) + "}";

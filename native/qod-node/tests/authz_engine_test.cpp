@@ -1,8 +1,10 @@
-// Engine tests for node_hooks: qod_session, qod_screen and the post_bind backstop on a real DuckDB
-// instance. A connection stands in for a quack client connection by carrying quack's session tag,
-// which quack inserts on every connection it creates. Built with -DQOD_NODE_TESTS=ON, run by CTest.
+// Engine tests for node_hooks: qod_session, qod_screen, the plan verdicts (post_bind, pre_optimize) and
+// the connection state's backstops on a real DuckDB instance. A connection stands in for a quack client
+// connection by carrying quack's session tag, which quack inserts on every connection it creates. Built
+// with -DQOD_NODE_TESTS=ON, run by CTest.
 
 #include "authz.hpp"
+#include "decide_client.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -14,6 +16,8 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/planner_extension.hpp"
 #include "json.hpp"
 #include "test_http_server.hpp"
 #include "test_verdicts.hpp"
@@ -25,6 +29,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -67,6 +73,83 @@ void TagAsQuackSession(duckdb::Connection &con) {
 
 int64_t now_ms = 1761200000000;
 
+//! What the stand-in decision endpoint was asked: (principal id, policy version, description), oldest
+//! first.
+struct Asked {
+	std::string principal;
+	int64_t policy_version;
+	std::string description;
+};
+std::vector<Asked> decide_calls;
+
+//! The stand-in for the manager's decision endpoint: allows every description but the ones the test
+//! marks, `"statement":"LIMIT"` (the plan a later post_bind rewrote) and the `forbidden` table, and
+//! is unavailable for the `unavailable` table.
+qod::DecideResult TestDecider(const qod::DecideCall &call) {
+	decide_calls.push_back(Asked {call.principal.id, call.policy_version, call.description});
+	qod::DecideResult result;
+	if (call.description.find("\"name\":\"unavailable\"") != std::string::npos) {
+		result.status = qod::DecideResult::Status::Unavailable;
+		result.reason = "authorization unavailable";
+		result.retryable = true;
+	} else if (call.description.find("\"statement\":\"LIMIT\"") != std::string::npos ||
+	           call.description.find("\"name\":\"forbidden\"") != std::string::npos) {
+		result.status = qod::DecideResult::Status::Refuse;
+		result.reason = "denied by test";
+		result.has_verdict = true;
+		result.verdict.expires_at = now_ms + 60000;
+	} else {
+		result.status = qod::DecideResult::Status::Allow;
+		result.has_verdict = true;
+		result.verdict.expires_at = now_ms + 60000;
+	}
+	return result;
+}
+
+//! A post_bind registered after qod-node's: wraps a PROJECTION in a LIMIT while `rewrite` is on, as an
+//! extension that changes the plan after qod-node described it would.
+bool rewrite = false;
+
+void Rewrite(duckdb::PlannerExtensionInput &input, duckdb::BoundStatement &statement) {
+	if (!rewrite || !statement.plan || statement.plan->type != duckdb::LogicalOperatorType::LOGICAL_PROJECTION) {
+		return;
+	}
+	auto limit =
+	    duckdb::make_uniq<duckdb::LogicalLimit>(duckdb::BoundLimitNode::ConstantValue(100), duckdb::BoundLimitNode());
+	limit->children.push_back(std::move(statement.plan));
+	statement.plan = std::move(limit);
+}
+
+//! A handle for `principal_id` with the given flags, valid for a minute from now.
+std::string Flagged(const std::string &principal_id, bool superuser, bool system) {
+	qod_test::MintSpec spec;
+	spec.principal_id = principal_id;
+	spec.exp = now_ms + 60000;
+	spec.superuser = superuser;
+	spec.system = system;
+	return qod_test::MintWith(spec);
+}
+
+void ExpectAsked(size_t before, bool expected, const std::string &what) {
+	if ((decide_calls.size() > before) != expected) {
+		std::cerr << "FAIL: " << what << (expected ? ": the decision endpoint was not asked" : ": it was asked")
+		          << std::endl;
+		failures++;
+	}
+}
+
+//! True when a call since `before` was for a description holding `needle` (and policy version
+//! `policy_version`, unless negative).
+bool AskedFor(size_t before, const std::string &needle, int64_t policy_version = -1) {
+	for (auto i = before; i < decide_calls.size(); i++) {
+		if (decide_calls[i].description.find(needle) != std::string::npos &&
+		    (policy_version < 0 || decide_calls[i].policy_version == policy_version)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 //! A handle valid for a minute from now.
 std::string Fresh(const std::string &principal_id, const std::string &node = kNode, int64_t policy_version = 1) {
 	return Mint(principal_id, now_ms + 60000, node, policy_version);
@@ -83,7 +166,10 @@ std::string ScreenCall(const std::string &connection_id, const std::string &sql)
 int main() {
 	duckdb::DuckDB db(nullptr);
 	auto authz = std::make_shared<qod::NodeAuthz>(kNode, kKey, [] { return now_ms; });
-	qod::RegisterNodeAuthz(*db.instance, authz);
+	qod::RegisterNodeAuthz(*db.instance, authz, TestDecider);
+	duckdb::PlannerExtension rewriter;
+	rewriter.post_bind_function = Rewrite;
+	duckdb::PlannerExtension::Register(duckdb::DBConfig::GetConfig(*db.instance), rewriter);
 	// Stand in for the two settings quack registers, so SET and RESET reach post_bind.
 	auto &config = duckdb::DBConfig::GetConfig(*db.instance);
 	config.AddExtensionOption("quack_authorization_function", "test stand-in", duckdb::LogicalType::VARCHAR,
@@ -399,6 +485,176 @@ int main() {
 	      "", "the snapshot follows the refreshing handle");
 	Check("", qod::SessionSnapshot(*max.context, now_ms + 61000, snapshot), "", "no snapshot once it expired");
 	Check("", qod::SessionSnapshot(*internal.context, now_ms, snapshot), "", "no snapshot on an internal connection");
+
+	// ---- verdicts: an ordinary principal's plans run only under the endpoint's allow
+	duckdb::Connection frank(db);
+	TagAsQuackSession(frank);
+	ExpectQuery(frank, Prelude(Fresh("u-frank")), "", "frank installs");
+	// Created on an internal connection: the stand-in refuses every plan that names it.
+	ExpectQuery(internal, "CREATE TABLE forbidden AS SELECT 1 AS x", "", "a table the stand-in refuses");
+	auto before = decide_calls.size();
+	ExpectQuery(frank, "SELECT 7", "", "frank's statement runs under an allow");
+	ExpectAsked(before, true, "frank's statement");
+	ExpectQuery(frank, "SELECT * FROM forbidden", "QoD: denied by test", "a refused verdict");
+	ExpectQuery(frank, "CREATE TABLE unavailable AS SELECT 1 AS x", "QoD: authorization unavailable",
+	            "an unavailable decision refuses");
+	ExpectQuery(internal, "SELECT count(*) FROM unavailable", "does not exist", "and nothing ran");
+	// Transaction control is decided like any statement, and runs under its allow.
+	ExpectQuery(frank, "BEGIN", "", "frank opens a transaction");
+	ExpectQuery(frank, "SELECT 70", "", "a statement inside it");
+	ExpectQuery(frank, "ROLLBACK", "", "and rolls it back");
+	// DuckDB lowers grouping sets and distinct aggregates before the pre_optimize hooks run
+	// (Optimizer::LowerMandatoryAggregateRewrites): the description is the same, so one decision.
+	for (auto sql : {"SELECT a, count(DISTINCT b) FROM (VALUES (1, 2), (1, 3)) t(a, b) GROUP BY GROUPING SETS ((a), ())",
+	                 "SELECT a, sum(b) FROM (VALUES (1, 2)) t(a, b) GROUP BY ROLLUP (a)",
+	                 "SELECT count(DISTINCT b), sum(DISTINCT b) FROM (VALUES (1, 2)) t(a, b)"}) {
+		before = decide_calls.size();
+		ExpectQuery(frank, sql, "", sql);
+		if (decide_calls.size() != before + 1) {
+			std::cerr << "FAIL: " << sql << ": " << (decide_calls.size() - before) << " decisions, not one" << std::endl;
+			failures++;
+		}
+	}
+
+	// ---- pre_optimize: a plan changed after qod-node described it is decided again
+	rewrite = true;
+	ExpectQuery(frank, "SELECT 8", "QoD: denied by test", "the plan another post_bind rewrote");
+	rewrite = false;
+
+	// ---- a prepared statement runs under its verdict, and is decided again after a policy change
+	auto stored = frank.Prepare("SELECT 9");
+	Check(stored->HasError() ? stored->GetError() : "", stored->HasError(), "", "frank prepares");
+	before = decide_calls.size();
+	if (!stored->HasError()) {
+		auto executed = stored->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "",
+		      "the prepared statement under its verdict");
+	}
+	if (AskedFor(before, "\"statement\":\"PROJECTION\"")) {
+		std::cerr << "FAIL: a prepared statement under a live verdict was bound and decided again" << std::endl;
+		failures++;
+	}
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "a refresh to policy version 3");
+	before = decide_calls.size();
+	if (!stored->HasError()) {
+		auto executed = stored->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "",
+		      "the prepared statement after the refresh");
+	}
+	if (!AskedFor(before, "\"statement\":\"PROJECTION\"", 3)) {
+		std::cerr << "FAIL: the prepared statement was not decided again under policy version 3" << std::endl;
+		failures++;
+	}
+	// SQL PREPARE and EXECUTE: the EXECUTE runs the plan PREPARE was decided for.
+	ExpectQuery(frank, "PREPARE p9 AS SELECT * FROM forbidden", "QoD: denied by test",
+	            "a PREPARE of a plan the endpoint refuses");
+	ExpectQuery(frank, "PREPARE p10 AS SELECT 10", "", "a PREPARE the endpoint allows");
+	ExpectQuery(frank, "EXECUTE p10", "", "and its EXECUTE");
+	now_ms += 61000;
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's next handle");
+	before = decide_calls.size();
+	ExpectQuery(frank, "EXECUTE p10", "", "an EXECUTE whose verdict expired");
+	if (!AskedFor(before, "\"statement\":\"PROJECTION\"")) {
+		std::cerr << "FAIL: a prepared statement whose verdict expired was not decided again" << std::endl;
+		failures++;
+	}
+
+	// ---- one principal per connection (T2-X1): another principal's handle never takes it over, here
+	// with the parse screen's advisory record out of the way (the session is called directly)
+	auto prepared_before = frank.Prepare("SELECT 13");
+	Check(prepared_before->HasError() ? prepared_before->GetError() : "", prepared_before->HasError(), "",
+	      "frank prepares before the refused handle");
+	before = decide_calls.size();
+	ExpectQuery(frank, Prelude(Fresh("u-grace", kNode, 3)), "another principal", "grace's handle on frank's connection");
+	ExpectQuery(frank, "SELECT 11", "no verified principal", "nothing runs after it");
+	if (!prepared_before->HasError()) {
+		// Task 7 N2: its verdict is still live, but no statement runs until a prelude succeeds whole.
+		auto executed = prepared_before->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "no verified principal",
+		      "nor a statement prepared before it");
+	}
+	for (auto i = before; i < decide_calls.size(); i++) {
+		if (decide_calls[i].principal != "u-frank") {
+			std::cerr << "FAIL: a decision was asked for " << decide_calls[i].principal << " on frank's connection"
+			          << std::endl;
+			failures++;
+		}
+	}
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's own handle");
+	ExpectQuery(frank, "SELECT 12", "", "makes it frank's again");
+
+	// ---- superusers and the manager are admitted on the node, and still meet the local refusals
+	duckdb::Connection boss(db);
+	TagAsQuackSession(boss);
+	ExpectQuery(boss, Prelude(Flagged("u-boss", true, false)), "", "a superuser installs");
+	before = decide_calls.size();
+	ExpectQuery(boss, "SELECT * FROM forbidden", "", "a superuser reads what the endpoint would refuse");
+	ExpectAsked(before, false, "a superuser statement");
+	ExpectQuery(boss, "SET enable_optimizer = false", "cannot be changed", "a superuser cannot disable the optimizer");
+	duckdb::Connection manager(db);
+	TagAsQuackSession(manager);
+	ExpectQuery(manager, Prelude(Flagged("system", false, true)), "", "the manager installs its system principal");
+	before = decide_calls.size();
+	ExpectQuery(manager, "SELECT 1", "", "a system statement");
+	ExpectAsked(before, false, "a system statement");
+	ExpectQuery(manager, "RESET disabled_optimizers", "cannot be changed", "nor can the manager's statements");
+
+	// ---- the set paths a secure view is judged against are recorded once, after the manager's USE
+	// prelude (CONTRACT Addendum 4 items 11 and 16): the router sends `USE <db>.<schema>; <statement>`
+	// as one submission, a session's own USE alone.
+	ExpectQuery(internal, "ATTACH ':memory:' AS lake", "", "a second catalog");
+	ExpectQuery(internal, "CREATE SCHEMA lake.other", "", "with another schema");
+	ExpectQuery(internal, "CREATE TABLE lake.main.t AS SELECT 5 AS id", "", "a base table");
+	ExpectQuery(internal, "CREATE SECURE VIEW lake.main.sv AS SELECT id FROM lake.main.t", "", "a secure view over it");
+	duckdb::Connection nina(db);
+	TagAsQuackSession(nina);
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "nina installs");
+	ExpectQuery(nina, "USE lake.main", "", "nina's own USE, first on her connection");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "SELECT id FROM lake.main.sv", "search path differs",
+	            "her USE did not become the record: the session default still holds");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "USE lake.main; SELECT id FROM sv", "", "a secure-view read after the manager's USE prelude");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "USE lake.other", "", "nina moves her search path");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "SELECT id FROM lake.main.sv", "search path differs", "a secure-view read off the recorded path");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "USE lake.main; USE lake.other; SELECT id FROM lake.main.sv", "search path differs",
+	            "a USE batched after the manager's moves off the record");
+	ExpectQuery(nina, Prelude(Fresh("u-nina")), "", "her next handle");
+	ExpectQuery(nina, "USE lake.main; SELECT id FROM sv", "", "the manager's prelude puts the recorded path back");
+	duckdb::Connection otto(db);
+	TagAsQuackSession(otto);
+	ExpectQuery(otto, Prelude(Fresh("u-otto")), "", "otto installs");
+	ExpectQuery(otto, "BEGIN", "", "otto opens a transaction");
+	ExpectQuery(otto, Prelude(Fresh("u-otto")), "", "his next handle");
+	ExpectQuery(otto, "COMMIT; USE lake.main; SELECT id FROM sv", "",
+	            "the prelude spliced after a leading COMMIT is the manager's too");
+
+	// The prelude itself is never described: its argument is a credential. (dave's macros named
+	// qod_session are objects, not this table function entry.)
+	for (auto &call : decide_calls) {
+		if (call.description.find("\"name\":\"qod_session\",\"schema\":\"main\",\"type\":\"table\"") !=
+		    std::string::npos) {
+			std::cerr << "FAIL: a prelude reached the decision endpoint" << std::endl;
+			failures++;
+		}
+	}
+
+	// ---- Task 8 M7: COPY TO under a core format runs only through DuckDB's own copy function
+	auto out_dir = std::filesystem::temp_directory_path() /
+	               std::filesystem::u8path("qod-engine-copy-" +
+	                                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::filesystem::create_directories(out_dir);
+	auto out = std::filesystem::canonical(out_dir).u8string();
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's next handle");
+	ExpectQuery(frank, "COPY (SELECT 1 AS x) TO " + qod::QuoteLiteral(out + "/x.parquet") + " (FORMAT parquet)", "",
+	            "a COPY TO parquet");
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's next handle");
+	ExpectQuery(frank, "COPY (SELECT 1 AS x) TO " + qod::QuoteLiteral(out + "/x.csv") + " (FORMAT csv)", "",
+	            "a COPY TO csv");
+	std::filesystem::remove_all(out_dir, ignored);
 
 	if (failures == 0) {
 		std::cout << "authz_engine_test: all passed" << std::endl;

@@ -39,7 +39,8 @@ int main(int argc, char **argv) {
 	auto payload = "{\"v\":1,\"node\":\"" + node + "\",\"replica\":\"http://127.0.0.1:0\",\"principal\":{\"id\":\"" +
 	               principal + "\",\"name\":\"" + principal +
 	               "\",\"tenant\":null,\"superuser\":false,\"system\":false},\"pool\":\"test/test_db/test\"," +
-	               "\"policyVersion\":0,\"nonce\":\"" + nonce + "\",\"exp\":" + std::to_string(now + lifetime) + "}";
+	               "\"policyVersion\":0,\"ctx\":\"" + std::string(64, '0') + "\",\"creds\":\"\",\"nonce\":\"" + nonce +
+	               "\",\"exp\":" + std::to_string(now + lifetime) + "}";
 	std::cout << qod::ToBase64Url(payload) << "." << qod::Hex(qod::HmacSha256(key, payload)) << std::endl;
 	return 0;
 }

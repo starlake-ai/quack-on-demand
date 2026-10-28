@@ -24,7 +24,7 @@ option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
-set(QOD_NODE_PROTOCOL 2)
+set(QOD_NODE_PROTOCOL 3)
 
 if(NOT DUCKDB_HOME)
   set(DUCKDB_HOME $ENV{DUCKDB_HOME})
@@ -232,6 +232,9 @@ if(QOD_NODE_TESTS)
   qod_node_test(describer_extension_test)
   add_test(NAME describer_extensions COMMAND describer_extension_test)
   set_tests_properties(describer_extensions PROPERTIES SKIP_RETURN_CODE 77)
+  qod_node_test(enforcement_extension_test)
+  add_test(NAME enforcement_extensions COMMAND enforcement_extension_test)
+  set_tests_properties(enforcement_extensions PROPERTIES SKIP_RETURN_CODE 77)
   find_package(Threads REQUIRED)
   # A real HTTP server on 127.0.0.1 for the decide client's tests, on every platform.
   add_library(qod_node_test_http STATIC tests/test_http_server.cpp)

@@ -47,12 +47,24 @@ def test_local_directory_becomes_views(tmp_path):
     assert t.kind == "memory"
     assert t.name == "data"
     assert t.data_path == ""
-    assert 'CREATE OR REPLACE VIEW "customers" AS SELECT * FROM read_parquet(' in t.init_sql
-    assert 'CREATE OR REPLACE VIEW "regions" AS SELECT * FROM read_csv(' in t.init_sql
-    assert 'CREATE OR REPLACE VIEW "orders" AS SELECT * FROM read_parquet(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "customers" AS SELECT * FROM read_parquet(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "regions" AS SELECT * FROM read_csv(' in t.init_sql
+    assert 'CREATE OR REPLACE SECURE VIEW "orders" AS SELECT * FROM read_parquet(' in t.init_sql
     assert "hive_partitioning = true" in t.init_sql
     assert "_ignored" not in t.init_sql
 
+
+
+def test_served_files_are_never_plain_views(tmp_path):
+    # Under node enforcement a plain view's reader is judged with the reader's own rights, on a path
+    # the tenant never authorized; a secure view's reader runs with the view owner's rights.
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "customers.parquet").write_bytes(b"")
+    (data / "regions.csv").write_text("a,b\n")
+    t = resolve(str(data), data_root=tmp_path)
+    views = [line for line in t.init_sql.splitlines() if " VIEW " in line]
+    assert views and all(v.startswith("CREATE OR REPLACE SECURE VIEW ") for v in views)
 
 def test_empty_directory_is_an_error(tmp_path):
     empty = tmp_path / "empty"
@@ -90,7 +102,7 @@ def test_remote_prefix_gets_one_glob_view(tmp_path):
     assert t.data_path == "s3://bucket/sales/"
     assert t.object_store == {"s3_region": "eu-west-1"}
     assert "s3://bucket/sales/**/*.parquet" in t.init_sql
-    assert t.init_sql.count("CREATE OR REPLACE VIEW") == 1
+    assert t.init_sql.count("CREATE OR REPLACE SECURE VIEW") == 1
 
 
 def test_remote_prefix_with_explicit_tables(tmp_path):
@@ -99,7 +111,7 @@ def test_remote_prefix_with_explicit_tables(tmp_path):
         tables=["orders=s3://bucket/wh/orders/**/*.parquet", "items=s3://bucket/wh/items/*.parquet"],
         data_root=tmp_path,
     )
-    assert t.init_sql.count("CREATE OR REPLACE VIEW") == 2
+    assert t.init_sql.count("CREATE OR REPLACE SECURE VIEW") == 2
     assert 'VIEW "orders"' in t.init_sql
     assert 'VIEW "items"' in t.init_sql
 
@@ -115,7 +127,7 @@ def test_glob_target(tmp_path):
     t = resolve(str(tmp_path / "*.parquet"), name="stuff", data_root=tmp_path)
     assert t.kind == "memory"
     assert t.name == "stuff"
-    assert t.init_sql.count("CREATE OR REPLACE VIEW") == 1
+    assert t.init_sql.count("CREATE OR REPLACE SECURE VIEW") == 1
 
 
 def test_glob_matching_nothing_is_an_error(tmp_path):
@@ -292,7 +304,7 @@ def test_unnameable_directory_entries_are_skipped(tmp_path):
     (data / "---.parquet").write_bytes(b"")
     (data / "good.parquet").write_bytes(b"")
     t = resolve(str(data), data_root=tmp_path)
-    assert t.init_sql.count("CREATE OR REPLACE VIEW") == 1
+    assert t.init_sql.count("CREATE OR REPLACE SECURE VIEW") == 1
     assert 'VIEW "good"' in t.init_sql
 
 

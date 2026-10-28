@@ -42,10 +42,8 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 		handle.pool = json.Get("pool", JsonValue::Kind::STRING).string;
 		handle.policy_version = json.Get("policyVersion", JsonValue::Kind::INTEGER).integer;
 		handle.nonce = json.Get("nonce", JsonValue::Kind::STRING).string;
-		auto ctx = json.GetOptional("ctx", JsonValue::Kind::STRING);
-		handle.ctx = ctx ? ctx->string : "";
-		auto creds = json.GetOptional("creds", JsonValue::Kind::STRING);
-		handle.creds = creds ? creds->string : "";
+		handle.ctx = json.Get("ctx", JsonValue::Kind::STRING).string;
+		handle.creds = json.Get("creds", JsonValue::Kind::STRING).string;
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;
@@ -61,7 +59,7 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 	    handle.principal.id.empty()) {
 		throw std::invalid_argument("malformed handle: bad policyVersion, nonce or principal id");
 	}
-	if (!handle.ctx.empty() && (handle.ctx.size() != 64 || !IsLowerHex(handle.ctx))) {
+	if (handle.ctx.size() != 64 || !IsLowerHex(handle.ctx)) {
 		throw std::invalid_argument("malformed handle: bad ctx");
 	}
 	if (!handle.creds.empty() && (handle.creds.size() != 64 || !IsLowerHex(handle.creds))) {

@@ -29,8 +29,9 @@ struct Principal {
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
 //! {"v":1,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
-//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"nonce":..,"exp":..}. The MAC covers the payload bytes as
-//! sent, so no canonical form has to agree between the two sides.
+//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"nonce":..,"exp":..}, every member required ("ctx"
+//! and "creds" since node protocol 3). The MAC covers the payload bytes as sent, so no canonical form
+//! has to agree between the two sides.
 struct Handle {
 	std::string node;
 	//! The manager replica that minted it, which decides this statement's verdicts.
@@ -39,12 +40,12 @@ struct Handle {
 	std::string pool;
 	Principal principal;
 	int64_t policy_version = 0;
-	//! The session's authorization context digest (64 lowercase hex digits), which verdicts are cached
-	//! by; empty when the handle carries none (optional until node protocol 3).
+	//! The session's authorization context digest, which verdicts are cached by: 64 lowercase hex
+	//! digits, required (node protocol 3).
 	std::string ctx;
 	//! The digest of the principal's own S3 credentials (64 lowercase hex digits), empty when it has
-	//! none or the handle carries none (optional until node protocol 3). The node fetches the
-	//! credentials when it differs from the one its connection secrets were made from (Task 7).
+	//! none; required, as a string, since node protocol 3. The node fetches the credentials when it
+	//! differs from the one its connection secrets were made from (Task 7).
 	std::string creds;
 	std::string nonce;
 	//! Epoch milliseconds.

@@ -22,9 +22,11 @@ final case class DescribedObject(
   def qualified: String =
     if kind == "schema" then s"$catalog.$schema" else s"$catalog.$schema.$name"
 
-/** One function a bound plan calls (`functions[]`). `args`: a table function's constant-folded
-  * arguments as DuckDB renders them (None for a NULL); for a file reader, its resolved locations.
-  * `via`: as for objects (absent on the wire reads as None).
+/** One function a bound plan calls (`functions[]`). `args`: for a file reader (a `File` function,
+  * the names of native/qod-node/file-functions.txt) its resolved locations, None for a NULL; empty
+  * for every other function, so no credential a statement names (a connection string, a secret in a
+  * literal) leaves the node (CONTRACT Addendum 4 item 6). `via`: as for objects (absent on the wire
+  * reads as None).
   */
 final case class DescribedFunction(
     catalog: String,

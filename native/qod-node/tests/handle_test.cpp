@@ -43,31 +43,31 @@ const std::string kNode = "quack-acme-db-bi-1";
 const int64_t kNow = 1761200000000;
 const std::string kNonce = "0123456789abcdef0123456789abcdef";
 
+const std::string kCtx(64, 'c');
+
+//! A handle payload; `members` goes right before "nonce". Node protocol 3: every handle carries ctx and
+//! creds.
 std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000,
-                    const std::string &tenant = "\"acme\"") {
+                    const std::string &tenant = "\"acme\"",
+                    const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\"") {
 	return std::string("{\"v\":1,\"node\":\"") + node +
 	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
-	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42," +
-	       "\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
+	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
+	       members + ",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
 }
 
 std::string Sign(const std::string &payload, const std::string &key = kKey) {
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(key, payload));
 }
 
-const std::string kCtx(64, 'c');
-
+//! A handle with the given ctx member (raw JSON) and an empty creds.
 std::string PayloadWithCtx(const std::string &ctx_json) {
-	auto payload = Payload();
-	payload.insert(payload.find(",\"nonce\""), ",\"ctx\":" + ctx_json);
-	return payload;
+	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":" + ctx_json + ",\"creds\":\"\"");
 }
 
 //! A handle with a valid ctx and the given creds member (raw JSON).
 std::string PayloadWithCreds(const std::string &creds_json) {
-	auto payload = PayloadWithCtx("\"" + kCtx + "\"");
-	payload.insert(payload.find(",\"nonce\""), ",\"creds\":" + creds_json);
-	return payload;
+	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\",\"creds\":" + creds_json);
 }
 
 // The golden handle NodeHandlesSpec (Scala) mints from fixed inputs, and its prelude: both sides agree
@@ -161,18 +161,16 @@ int main(int argc, char **argv) {
 	ExpectRefused([&] { qod::VerifyHandle("!!" + good.substr(good.find('.')), kKey, kNode, kNow); }, "payload",
 	              "bad base64");
 	auto no_principal = std::string("{\"v\":1,\"node\":\"") + kNode +
-	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"nonce\":\"" + kNonce +
-	                    "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
+	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
+	                    "\",\"creds\":\"\",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
 	auto v2 = Payload();
 	v2.replace(v2.find("\"v\":1"), 5, "\"v\":2");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v2), kKey, kNode, kNow); }, "version", "version 2");
 
-	// ---- the session context digest (optional until node protocol 3)
-	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).ctx.empty(), "a handle without ctx");
+	// ---- the session context digest
 	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx + "\"")), kKey, kNode, kNow).ctx == kCtx,
 	       "the handle's ctx");
-	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("null")), kKey, kNode, kNow).ctx.empty(), "a null ctx is none");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx.substr(1) + "\"")), kKey, kNode, kNow); },
 	              "bad ctx", "a short ctx");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + std::string(64, 'C') + "\"")), kKey, kNode, kNow); },
@@ -180,9 +178,7 @@ int main(int argc, char **argv) {
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("42")), kKey, kNode, kNow); }, "malformed handle",
 	              "a ctx that is no string");
 
-	// ---- the user's S3 credential digest (optional until node protocol 3)
-	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx + "\"")), kKey, kNode, kNow).creds.empty(),
-	       "a handle without creds");
+	// ---- the user's S3 credential digest
 	Expect(qod::VerifyHandle(Sign(PayloadWithCreds("\"\"")), kKey, kNode, kNow).creds.empty(),
 	       "an empty creds: no credential");
 	Expect(qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'd') + "\"")), kKey, kNode, kNow).creds ==
@@ -222,6 +218,36 @@ int main(int argc, char **argv) {
 	} else {
 		VerifyGolden(argv[1]);
 	}
+
+	// ---- node protocol 3: every handle carries the session's authorization context digest
+	auto without_ctx = std::string("{\"v\":1,\"node\":\"") + kNode +
+	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
+	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
+	                   "\"policyVersion\":42,\"creds\":\"\",\"nonce\":\"" +
+	                   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
+	ExpectRefused([&] { qod::VerifyHandle(Sign(without_ctx), kKey, kNode, kNow); }, "ctx", "a handle without ctx");
+	auto null_ctx = without_ctx;
+	null_ctx.insert(null_ctx.find(",\"nonce\""), ",\"ctx\":null");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(null_ctx), kKey, kNode, kNow); }, "ctx", "a null ctx");
+	auto short_ctx = without_ctx;
+	short_ctx.insert(short_ctx.find(",\"nonce\""), ",\"ctx\":\"abc\"");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(short_ctx), kKey, kNode, kNow); }, "ctx",
+	              "a ctx that is not 64 lowercase hex digits");
+	auto upper_ctx = without_ctx;
+	upper_ctx.insert(upper_ctx.find(",\"nonce\""), ",\"ctx\":\"" + std::string(64, 'A') + "\"");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(upper_ctx), kKey, kNode, kNow); }, "ctx", "an uppercase ctx");
+	auto good_ctx = without_ctx;
+	good_ctx.insert(good_ctx.find(",\"nonce\""), ",\"ctx\":\"" + std::string(64, 'c') + "\"");
+	Expect(qod::VerifyHandle(Sign(good_ctx), kKey, kNode, kNow).ctx == std::string(64, 'c'), "a valid ctx is read");
+	// ---- node protocol 3: and the digest of the principal's S3 credentials (decision 23)
+	ExpectRefused(
+	    [&] {
+		    qod::VerifyHandle(Sign(Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\"")), kKey, kNode,
+		                      kNow);
+	    },
+	    "creds", "a handle without creds");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("null")), kKey, kNode, kNow); }, "creds", "a null creds");
+	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).creds.empty(), "an empty creds is no credential");
 
 	if (failures == 0) {
 		std::cout << "handle_test: all passed" << std::endl;

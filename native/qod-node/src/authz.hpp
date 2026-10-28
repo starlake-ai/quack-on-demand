@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -48,6 +49,31 @@ struct Installed {
 	//! The replica that minted it, which decides the connection's statements.
 	std::string replica;
 };
+
+//! What one verdict admitted: the plan it was taken for and the session it holds for.
+struct Admitted {
+	std::string fingerprint;
+	std::string principal_id;
+	int64_t policy_version = 0;
+	std::string ctx;
+	//! Epoch milliseconds; kNeverExpires for a local allow (superuser, system, the prelude).
+	int64_t expires_at = 0;
+};
+
+constexpr int64_t kNeverExpires = std::numeric_limits<int64_t>::max();
+
+//! The refusal of a statement that reached prepare finalization without a verdict.
+constexpr const char *kNoVerdict = "QoD: statement reached prepare finalization without a verdict";
+
+//! OnFinalizePrepare's rule: empty to admit, else the refusal. A connection without a principal runs
+//! nothing; a statement runs only under a verdict, unless the principal is privileged (a superuser or
+//! the manager's own), whose plans are admitted on the node.
+std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict);
+
+//! True when a prepared statement must be bound (described and decided) again before it executes:
+//! no verdict is stored with it (`stored` null), or the stored one was taken for another principal,
+//! policy version or session context than `current`, or has expired at `now_ms`.
+bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms);
 
 //! Why `next` may not install on a connection that holds `current` (null: none yet); empty when it
 //! may. The first handle installs its principal; a later one only refreshes it: the same principal,

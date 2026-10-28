@@ -81,7 +81,7 @@ new_secrets() {
 
 # --- build marker ---------------------------------------------------------------------------------
 marker="$("$node_bin" --build-info)"
-if [[ ! "$marker" =~ ^qod-node-build-info:protocol=2\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
+if [[ ! "$marker" =~ ^qod-node-build-info:protocol=3\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
   fail "unexpected build marker: $marker"
 fi
 
