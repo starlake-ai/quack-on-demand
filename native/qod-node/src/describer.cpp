@@ -185,6 +185,19 @@ std::set<std::string> QualifiersIn(const std::string &sql) {
 	return names;
 }
 
+//! The prefix DuckDB v2.0.0 names the temporary ENUM of a dynamic PIVOT with (one with no IN list):
+//! "__pivot_enum_" + a random UUID, src/parser/peg/transformer/transform_pivot.cpp:151 and :280.
+constexpr const char *kPivotEnumPrefix = "__pivot_enum_";
+
+//! A temporary type named like the ENUM a dynamic PIVOT leaves on the connection (CONTRACT Addendum 4
+//! item 19): exempt from the temporary-entry rule. A secure view's definition uses built-in types only
+//! (item 18) and no built-in type carries the prefix, so no body can resolve such an entry, whoever made
+//! it.
+bool IsPivotEnum(CatalogEntry &entry) {
+	return entry.type == CatalogType::TYPE_ENTRY &&
+	       StringUtil::StartsWith(StringUtil::Lower(Text(entry.name)), kPivotEnumPrefix);
+}
+
 //! The statement under the EXPLAIN and PREPARE that only carry it.
 SQLStatement *Unwrapped(SQLStatement *statement) {
 	while (statement && (statement->type == StatementType::EXPLAIN_STATEMENT ||
@@ -1430,7 +1443,7 @@ void Walker::CheckSession() {
 		                 CatalogType::SCHEMA_ENTRY}) {
 			schema.Scan(context_, set, [&](CatalogEntry &entry) {
 				if (!entry.internal && entry.type != CatalogType::TABLE_ENTRY &&
-				    entry.type != CatalogType::SEQUENCE_ENTRY) {
+				    entry.type != CatalogType::SEQUENCE_ENTRY && !IsPivotEnum(entry)) {
 					shadowing = true;
 				}
 			});
