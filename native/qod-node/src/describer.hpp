@@ -68,7 +68,9 @@ void RecordSessionPaths(duckdb::ClientContext &context);
 //! object, current_setting(), a time-travel (AT) read of the view, or an object or function of a
 //! catalog other than the view's that the view's definition does not name; a secure view whose
 //! definition (or a plain view it reads) names a table without its schema, outside the WITH clause
-//! that defines it, or reads tables through a SQL string (query, query_table); and a statement with a
+//! that defines it, or reads tables through a SQL string (query, query_table), or names without its
+//! schema a function, macro, table macro, type or sequence that resolves, view schema first, to an
+//! entry that is not DuckDB's own, or names x.n with x a catalog or ambiguously; and a statement with a
 //! secure view on a session holding user variables, temporary entries other than tables and
 //! sequences, a changed setting other than schema and search_path, or set paths other than its
 //! SessionPaths (getvariable() folds to a constant at bind, and a temporary macro, view or type, a

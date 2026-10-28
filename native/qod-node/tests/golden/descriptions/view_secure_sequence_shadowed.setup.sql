@@ -1,0 +1,3 @@
+CREATE SCHEMA rpt;
+CREATE SECURE VIEW rpt.sv_seq AS SELECT nextval('seq1') AS n;
+CREATE SEQUENCE rpt.seq1;

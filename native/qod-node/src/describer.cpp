@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
@@ -44,7 +45,7 @@
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
-#include "duckdb/parser/expression/subquery_expression.hpp"
+#include "duckdb/parser/expression/list.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/query_node/list.hpp"
 #include "duckdb/parser/tableref/list.hpp"
@@ -201,10 +202,19 @@ SQLStatement *Unwrapped(SQLStatement *statement) {
 //! defines it), and a table read through a SQL string (query, query_table), whose names the walk
 //! cannot see. Collects the catalogs the definition qualifies a table with, and those of every plain
 //! view it reads, whose definition is held to the same rule (they expand in the body, unseen).
+//!
+//! Item 17: an unqualified function, macro, table macro, type or sequence name (a nextval, currval or
+//! setval string included) is refused when it resolves outside the system catalog, so a user's entry in
+//! the view's schema cannot shadow what the body names. A two-part name x.n is resolved as DuckDB
+//! resolves it (Binder::BindTableName: ResolveCatalog, BindSchemaOrCatalog): refused when x names
+//! both a database and a schema (DuckDB's "Ambiguous reference to catalog or schema"), and when x is a
+//! catalog, which leaves the schema to the search path. Every lookup is DuckDB's own, through a
+//! CatalogEntryRetriever holding the search path the view binder holds (Binder::GetSearchPath(catalog,
+//! schema, true), bind_basetableref.cpp at v2.0.0).
 class Definition {
 public:
-	Definition(ClientContext &context, const std::string &view_catalog)
-	    : context_(context), view_catalog_(view_catalog) {
+	Definition(ClientContext &context, const std::string &view_catalog, const std::string &view_schema)
+	    : context_(context), view_catalog_(view_catalog), retriever_(ViewRetriever(view_catalog, view_schema)) {
 	}
 
 	void Query(const QueryNode &node, std::set<std::string> scope);
@@ -215,14 +225,142 @@ private:
 	//! How deep plain views may nest inside a secure view's definition.
 	static constexpr int kMaxViewDepth = 8;
 
+	unique_ptr<CatalogEntryRetriever> ViewRetriever(const std::string &catalog, const std::string &schema);
 	void Ref(const TableRef &ref, const std::set<std::string> &scope);
 	void Expr(const ParsedExpression &expr, const std::set<std::string> &scope);
 	void Table(const BaseTableRef &table, const std::set<std::string> &scope);
+	QualifiedName Resolved(const QualifiedName &name, const std::string &what);
+	optional_ptr<CatalogEntry> Lookup(CatalogType type, const QualifiedName &name);
+	void Unqualified(CatalogType type, const QualifiedName &name, const std::string &what);
+	void Function(const QualifiedName &name, CatalogType type, const std::string &what);
+	void Sequence(const FunctionExpression &call);
+	void Type(const TypeExpression &type);
 
 	ClientContext &context_;
 	std::string view_catalog_;
+	unique_ptr<CatalogEntryRetriever> retriever_;
 	int depth_ = 0;
 };
+
+unique_ptr<CatalogEntryRetriever> Definition::ViewRetriever(const std::string &catalog, const std::string &schema) {
+	auto retriever = make_uniq<CatalogEntryRetriever>(context_);
+	vector<CatalogSearchEntry> path;
+	path.emplace_back(Identifier(catalog), Identifier(schema));
+	path.emplace_back(Identifier(catalog), Identifier::InvalidSchema(), true);
+	retriever->SetSearchPath(std::move(path));
+	return retriever;
+}
+
+//! `name` with its qualification resolved as the binder resolves it, refused when it is ambiguous or
+//! names a catalog without a schema.
+QualifiedName Definition::Resolved(const QualifiedName &name, const std::string &what) {
+	QualifiedName bound;
+	try {
+		bound = Binder::BindTableName(*retriever_, name);
+	} catch (BinderException &) {
+		Unsupported("a secure view whose definition names the " + what + " " + name.ToString() +
+		            " ambiguously (a catalog and a schema of that name)");
+	}
+	if (name.Path().size() > 1 && bound.Schema().empty()) {
+		Unsupported("a secure view whose definition names the " + what + " " + name.ToString() +
+		            " with a catalog but without its schema");
+	}
+	return bound;
+}
+
+optional_ptr<CatalogEntry> Definition::Lookup(CatalogType type, const QualifiedName &name) {
+	return retriever_->GetEntry(EntryLookupInfo(type, name), OnEntryNotFound::RETURN_NULL);
+}
+
+//! DuckDB's own: the system catalog's entries, and the built-ins every DuckDB catalog generates on
+//! demand (DefaultTypeGenerator: an unqualified BIGINT resolves to temp.main.bigint, internal), which
+//! no session can create or replace.
+bool BuiltIn(CatalogEntry &entry) {
+	return entry.internal || Text(entry.ParentCatalog().GetName()) == Text(Identifier::SystemCatalog());
+}
+
+//! An unqualified name of `type` the body would resolve outside the system catalog.
+void Definition::Unqualified(CatalogType type, const QualifiedName &name, const std::string &what) {
+	auto entry = Lookup(type, name);
+	if (entry && !BuiltIn(*entry)) {
+		Unsupported("a secure view whose definition names the " + what + " " + Text(name.Name()) +
+		            " without its schema");
+	}
+}
+
+//! A function call as the binder looks it up: ColumnQualifier::QualifyFunction for a scalar function
+//! or macro (a qualified name that finds nothing is a dot call on a column, x.lower() = lower(x), and
+//! binds by the bare name), Binder::Bind(TableFunctionRef&) for a table function, and the window
+//! binder's direct lookup for a window or aggregate in OVER.
+void Definition::Function(const QualifiedName &name, CatalogType type, const std::string &what) {
+	if (name.Path().size() <= 1) {
+		Unqualified(type, Binder::BindTableName(*retriever_, name), what);
+		return;
+	}
+	auto bound = Resolved(name, what);
+	if (!Lookup(type, bound) && type == CatalogType::SCALAR_FUNCTION_ENTRY) {
+		Unqualified(type, QualifiedName(name.Name()), what);
+	}
+}
+
+//! nextval, currval and setval resolve their sequence from their first argument at bind (NextValBind,
+//! BindSequence: QualifiedName::TryParse, then BindTableName with the view binder's retriever).
+void Definition::Sequence(const FunctionExpression &call) {
+	auto function = StringUtil::Lower(Text(call.GetQualifiedName().Name()));
+	if (function != "nextval" && function != "currval" && function != "setval") {
+		return;
+	}
+	auto &arguments = call.GetArguments();
+	if (arguments.empty()) {
+		return;
+	}
+	auto &argument = arguments[0].GetExpression();
+	if (argument.GetExpressionClass() != ExpressionClass::CONSTANT) {
+		Unsupported("a secure view whose definition names a sequence by an expression");
+	}
+	auto &literal = argument.Cast<ConstantExpression>().GetLiteral();
+	if (literal.kind != LiteralKind::STRING) {
+		// NULL binds no sequence; anything else does not bind.
+		return;
+	}
+	QualifiedName name;
+	string error;
+	if (!QualifiedName::TryParse(literal.text, name, error)) {
+		return;
+	}
+	if (name.Path().size() <= 1) {
+		Unqualified(CatalogType::SEQUENCE_ENTRY, Binder::BindTableName(*retriever_, name), "sequence");
+	} else {
+		Resolved(name, "sequence");
+	}
+}
+
+//! A type as ExpressionBinder::BindExpression(TypeExpression&) finds it: the resolved name, then the
+//! name in the resolved catalog with any schema, then the name anywhere on the path, then system.main.
+void Definition::Type(const TypeExpression &type) {
+	auto &name = type.GetQualifiedName();
+	if (name.Path().size() > 1) {
+		Resolved(name, "type");
+		return;
+	}
+	auto valid = [](optional_ptr<CatalogEntry> entry) {
+		return entry && entry->type == CatalogType::TYPE_ENTRY &&
+		       entry->Cast<TypeCatalogEntry>().user_type.id() != LogicalTypeId::INVALID;
+	};
+	auto bound = Binder::BindTableName(*retriever_, name);
+	auto entry = Lookup(CatalogType::TYPE_ENTRY, bound);
+	if (!valid(entry)) {
+		entry =
+		    Lookup(CatalogType::TYPE_ENTRY, QualifiedName(bound.Catalog(), Identifier::InvalidSchema(), name.Name()));
+	}
+	if (!valid(entry)) {
+		entry = Lookup(CatalogType::TYPE_ENTRY,
+		               QualifiedName(Identifier::InvalidCatalog(), Identifier::InvalidSchema(), name.Name()));
+	}
+	if (valid(entry) && !BuiltIn(*entry)) {
+		Unsupported("a secure view whose definition names the type " + Text(name.Name()) + " without its schema");
+	}
+}
 
 void Definition::Query(const QueryNode &node, std::set<std::string> scope) {
 	// A WITH clause's names are in scope in its own bodies (a later one, or a recursive one, may read
@@ -311,13 +449,17 @@ void Definition::Ref(const TableRef &ref, const std::set<std::string> &scope) {
 		break;
 	case TableReferenceType::TABLE_FUNCTION: {
 		auto &function = *ref.Cast<TableFunctionRef>().function;
-		if (function.GetExpressionClass() == ExpressionClass::FUNCTION) {
-			auto name = StringUtil::Lower(Text(function.Cast<FunctionExpression>().GetQualifiedName().Name()));
-			if (name == "query" || name == "query_table") {
-				Unsupported("a secure view whose definition reads tables named in a string (" + name + ")");
-			}
+		if (function.GetExpressionClass() != ExpressionClass::FUNCTION) {
+			Unsupported("a secure view whose definition calls a table function DuckDB does not name");
 		}
-		Expr(function, scope);
+		auto &call = function.Cast<FunctionExpression>();
+		auto name = StringUtil::Lower(Text(call.GetQualifiedName().Name()));
+		if (name == "query" || name == "query_table") {
+			Unsupported("a secure view whose definition reads tables named in a string (" + name + ")");
+		}
+		Function(call.GetQualifiedName(), CatalogType::TABLE_FUNCTION_ENTRY, "table function");
+		ParsedExpressionIterator::EnumerateChildren(function,
+		                                            [&](const ParsedExpression &child) { Expr(child, scope); });
 		break;
 	}
 	case TableReferenceType::EXPRESSION_LIST:
@@ -361,6 +503,34 @@ void Definition::Expr(const ParsedExpression &expr, const std::set<std::string> 
 		}
 		return;
 	}
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::FUNCTION: {
+		auto &call = expr.Cast<FunctionExpression>();
+		Function(call.GetQualifiedName(), CatalogType::SCALAR_FUNCTION_ENTRY, "function");
+		Sequence(call);
+		break;
+	}
+	case ExpressionClass::WINDOW: {
+		auto &name = expr.Cast<WindowExpression>().GetQualifiedName();
+		if (name.Path().size() <= 1) {
+			Unqualified(CatalogType::SCALAR_FUNCTION_ENTRY, name, "function");
+		} else {
+			Resolved(name, "function");
+		}
+		break;
+	}
+	case ExpressionClass::CAST:
+		Expr(expr.Cast<CastExpression>().TargetType(), scope);
+		break;
+	case ExpressionClass::TYPE:
+		Type(expr.Cast<TypeExpression>());
+		for (auto &child : expr.Cast<TypeExpression>().GetChildren()) {
+			Expr(*child, scope);
+		}
+		break;
+	default:
+		break;
+	}
 	ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) { Expr(child, scope); });
 }
 
@@ -372,23 +542,14 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 		}
 		Unsupported("a secure view whose definition names the table " + Text(name.Name()) + " without its schema");
 	}
-	if (!name.Catalog().empty()) {
-		catalogs.insert(StringUtil::Lower(Text(name.Catalog())));
+	auto bound = Resolved(name, "table");
+	if (!bound.Catalog().empty()) {
+		catalogs.insert(StringUtil::Lower(Text(bound.Catalog())));
 	}
 	// A plain view it reads expands in the body, unseen: its definition follows the same rule, and the
-	// catalogs it qualifies are the body's too (review M-d). Looked up as the body binds it: the view's
-	// catalog first, then the session's resolution.
-	optional_ptr<CatalogEntry> entry;
-	if (name.Catalog().empty()) {
-		entry = Catalog::GetEntry(context_,
-		                          EntryLookupInfo(CatalogType::VIEW_ENTRY,
-		                                          QualifiedName(Identifier(view_catalog_), name.Schema(), name.Name())),
-		                          OnEntryNotFound::RETURN_NULL);
-	}
-	if (!entry) {
-		entry =
-		    Catalog::GetEntry(context_, EntryLookupInfo(CatalogType::VIEW_ENTRY, name), OnEntryNotFound::RETURN_NULL);
-	}
+	// catalogs it qualifies are the body's too (review M-d). Looked up as the body binds it (tables and
+	// views share a catalog set).
+	auto entry = Lookup(CatalogType::TABLE_ENTRY, bound);
 	if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
 		return;
 	}
@@ -401,10 +562,11 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 		Unsupported("a secure view whose definition nests plain views too deep");
 	}
 	catalogs.insert(StringUtil::Lower(Text(view.ParentCatalog().GetName())));
-	auto inner_catalog = view_catalog_;
-	view_catalog_ = Text(view.ParentCatalog().GetName());
+	// Its body binds with its own search path (its catalog and schema first).
+	auto outer = std::move(retriever_);
+	retriever_ = ViewRetriever(Text(view.ParentCatalog().GetName()), Text(view.ParentSchema().name));
 	Query(*view.GetQuery().node, {});
-	view_catalog_ = inner_catalog;
+	retriever_ = std::move(outer);
 	depth_--;
 }
 
@@ -680,7 +842,7 @@ std::string Walker::SecureView(LogicalSecureView &view, const std::string &via) 
 		Unsupported("a secure view without its catalog entry");
 	}
 	auto &query = entry->Cast<ViewCatalogEntry>().GetQuery();
-	Definition definition(context_, Text(path[0]));
+	Definition definition(context_, Text(path[0]), Text(path[1]));
 	definition.Query(*query.node, {});
 	auto catalogs = QualifiersIn(query.ToString());
 	catalogs.insert(definition.catalogs.begin(), definition.catalogs.end());

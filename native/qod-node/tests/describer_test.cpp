@@ -157,7 +157,7 @@ void RunGoldens(const fs::path &dir) {
 		names.push_back(file.substr(0, file.size() - suffix.size()));
 	}
 	std::sort(names.begin(), names.end());
-	if (names.size() < 116) {
+	if (names.size() < 129) {
 		Fail("expected the full golden corpus, found " + std::to_string(names.size()) + " cases in " + dir.string());
 	}
 	for (auto &name : names) {
@@ -306,6 +306,34 @@ void CheckSessionState() {
 	}
 	if (refused != "QoD: statement uses a time-travel (AT) read of a secure view, which QoD does not support") {
 		Fail("an AT read through a secure view: got \"" + refused + "\"");
+	}
+	con.Rollback();
+}
+
+//! A two-part name in a secure view's definition that has become ambiguous (a database attached under
+//! the name of the schema it qualifies) is refused (CONTRACT Addendum 4 item 17). DuckDB's binder
+//! refuses it too, before post_bind, so the boundary is built by hand to reach the describer.
+void CheckAmbiguousName() {
+	duckdb::DuckDB db(nullptr);
+	duckdb::Connection con(db);
+	for (auto sql : {"CREATE SCHEMA s", "CREATE TABLE s.t (id INTEGER)",
+	                 "CREATE SECURE VIEW sv_amb AS SELECT id FROM s.t", "ATTACH ':memory:' AS s"}) {
+		qod::RunStrict(con, sql, "setup");
+	}
+	con.BeginTransaction();
+	duckdb::LogicalSecureView view("sv_amb", duckdb::make_uniq<duckdb::LogicalDummyScan>(duckdb::TableIndex(0)));
+	view.has_source = true;
+	view.source_name = duckdb::QualifiedName(duckdb::Identifier("memory"), duckdb::Identifier("main"),
+	                                         duckdb::Identifier("sv_amb"));
+	std::string refused;
+	try {
+		qod::Describe(*con.context, view, qod_test::Alice());
+	} catch (duckdb::PermissionException &error) {
+		refused = duckdb::ErrorData(error).RawMessage();
+	}
+	if (refused != "QoD: statement uses a secure view whose definition names the table s.t ambiguously (a catalog "
+	               "and a schema of that name), which QoD does not support") {
+		Fail("an ambiguous two-part name: got \"" + refused + "\"");
 	}
 	con.Rollback();
 }
@@ -482,6 +510,7 @@ int main(int argc, char **argv) {
 	CheckExtensionOperators();
 	CheckSessionState();
 	CheckDescribeFailure();
+	CheckAmbiguousName();
 	RunGoldens(argv[1]);
 	if (failures == 0) {
 		std::cout << "describer_test: all passed" << std::endl;
