@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand
 
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.model.{Tenant, TenantAclPatch}
+import ai.starlake.quack.model.{Tenant, TenantAclPatch, TenantDbKind}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PostgresControlPlaneStore}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -78,3 +78,29 @@ class PoolSupervisorPolicyVersionSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     sup.policyVersions.current("globex") should be > before
   }
+
+  // Liquibase 0054 (CONTRACT Addendum 4 item 23): a tenant-db write bumps every tenant. The writing
+  // replica follows at once; a peer follows through the topology notice the write publishes (its
+  // handler is restore(), HaCoordinator's qod_topology), with nothing sent on qod_rbac.
+  "a tenant-db create" should "move every tenant's version, here and on a peer through qod_topology" in
+    withSup { (peer, store) =>
+      var rbac   = 0
+      val notify = new ai.starlake.quack.ondemand.ha.StateChangePublisher:
+        def topologyChanged(): Unit = peer.restore()
+        def rbacChanged(): Unit     = rbac += 1
+      val writer =
+        new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store, publish = notify)
+      writer.restore()
+      val acme   = peer.policyVersions.current("acme")
+      val globex = peer.policyVersions.current("globex")
+      writer
+        .createTenantDb("acme", "lake", TenantDbKind.InMemory, Map.empty, dataPath = "")
+        .unsafeRunSync()
+        .isRight shouldBe true
+      writer.policyVersions.current("acme") shouldBe stored(store, "acme")
+      writer.policyVersions.current("globex") shouldBe stored(store, "globex")
+      peer.policyVersions.current("acme") should be > acme
+      peer.policyVersions.current("globex") should be > globex
+      peer.policyVersions.current("acme") shouldBe stored(store, "acme")
+      rbac shouldBe 0
+    }

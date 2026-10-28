@@ -320,10 +320,12 @@ final class PoolSupervisor(
 
   /** A tenant-db came, went, or changed its metastore or data path: the database data folders, a
     * deny set every tenant's verdicts depend on, moved, and Liquibase 0054 bumped every tenant's
-    * policy version (CONTRACT Addendum 4 item 23). Reloaded here, and on every peer, so the next
-    * handles carry the new versions and no node verdict taken before outlives the change.
+    * policy version (CONTRACT Addendum 4 item 23). Reloaded here, so this replica's next handles
+    * carry the new versions and no node verdict taken before outlives the change. Local only: every
+    * caller then publishes `topologyChanged`, whose handler on a peer is [[restore]], which reloads
+    * the versions too. A tenant-db write is no RBAC mutation, so nothing goes out on `qod_rbac`.
     */
-  private def dataFoldersChanged(): Unit = invalidateEffectiveCache()
+  private def dataFoldersChanged(): Unit = invalidateEffectiveCacheLocal()
 
   // ---------- Tenant authorized locations (in-engine authorization) ----------
 
