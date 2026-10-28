@@ -1,1 +1,1 @@
-QoD: statement uses a secure view while the session holds temporary views or macros, which QoD does not support
+QoD: statement uses a secure view while the session holds temporary entries other than tables and sequences, which QoD does not support

@@ -8,6 +8,7 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
@@ -143,6 +144,43 @@ std::string KindOf(CatalogType type) {
 	}
 }
 
+bool IsSchemeCharacter(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' ||
+	       c == '.';
+}
+
+//! The catalogs `sql` names as a qualifier: every identifier (unquoted, lower case) a '.' follows.
+//! A table alias reads as one too, which can only widen the set to a name the body already uses.
+std::set<std::string> QualifiersIn(const std::string &sql) {
+	std::set<std::string> names;
+	auto tokens = Parser::Tokenize(sql);
+	auto text = [&](idx_t i) {
+		auto end = i + 1 < tokens.size() ? tokens[i + 1].start : sql.size();
+		auto token = sql.substr(tokens[i].start, end - tokens[i].start);
+		while (!token.empty() && StringUtil::CharacterIsSpace(token.back())) {
+			token.pop_back();
+		}
+		return token;
+	};
+	for (idx_t i = 0; i + 1 < tokens.size(); i++) {
+		auto type = tokens[i].type;
+		if (type != SimplifiedTokenType::SIMPLIFIED_TOKEN_IDENTIFIER &&
+		    type != SimplifiedTokenType::SIMPLIFIED_TOKEN_KEYWORD) {
+			continue;
+		}
+		auto next = text(i + 1);
+		if (next.empty() || next[0] != '.') {
+			continue;
+		}
+		auto name = text(i);
+		if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+			name = StringUtil::Replace(name.substr(1, name.size() - 2), "\"\"", "\"");
+		}
+		names.insert(StringUtil::Lower(name));
+	}
+	return names;
+}
+
 //! The statement under the EXPLAIN and PREPARE that only carry it.
 SQLStatement *Unwrapped(SQLStatement *statement) {
 	while (statement && (statement->type == StatementType::EXPLAIN_STATEMENT ||
@@ -202,6 +240,9 @@ private:
 	void SchemaPath(const std::string &access, const QualifiedName &name, const std::string &via);
 	void DefaultQualification(Identifier &catalog, Identifier &schema);
 	Identifier DefaultDatabase();
+	void InView(const std::string &catalog, const std::string &via);
+	std::string ChangedSetting();
+	bool SessionDefaultPaths(const vector<CatalogSearchEntry> &paths);
 	std::string ViewKind(const QualifiedName &name);
 
 	// ---- per operator
@@ -236,6 +277,9 @@ private:
 	const std::string *statement_text_;
 	LogicalOperator *core_;
 	bool boundary_ = false;
+	//! Per secure view (its `via`), the catalogs its body may use: the view's own and those its
+	//! definition names (CONTRACT Addendum 4 item 11 b).
+	std::map<std::string, std::set<std::string>> view_catalogs_;
 	bool parsed_ = false;
 	vector<unique_ptr<SQLStatement>> statements_;
 	Elements objects_;
@@ -252,6 +296,7 @@ void Walker::AddObject(const std::string &kind, const std::string &access, const
 	if (!via.empty() && temporary) {
 		Unsupported("a temporary object inside a secure view");
 	}
+	InView(catalog, via);
 	Add(objects_, JsonObject({{"access", JsonString(access)},
 	                          {"catalog", JsonString(catalog)},
 	                          {"catalogType", JsonString(catalog_type)},
@@ -307,6 +352,21 @@ void Walker::DefaultQualification(Identifier &catalog, Identifier &schema) {
 Identifier Walker::DefaultDatabase() {
 	auto catalog = Catalog::GetCatalogEntry(context_, Identifier());
 	return catalog ? catalog->GetName() : Identifier();
+}
+
+//! Inside the secure view `via`, `catalog` must be the view's own or one its definition names: a body
+//! binds unqualified names with the view's catalog first and then the session's search path, so an
+//! entry of another catalog the definition does not name came from the session (CONTRACT Addendum 4
+//! item 11 b). The system catalog holds DuckDB's own functions and no session can write to it.
+void Walker::InView(const std::string &catalog, const std::string &via) {
+	if (via.empty() || catalog == "system") {
+		return;
+	}
+	auto allowed = view_catalogs_.find(via);
+	if (allowed == view_catalogs_.end() || allowed->second.count(StringUtil::Lower(catalog)) == 0) {
+		Unsupported("an entry of catalog " + catalog + " inside the secure view " + via +
+		            ", whose definition does not name that catalog");
+	}
 }
 
 void Walker::Named(const std::string &kind, const std::string &access, const QualifiedName &name,
@@ -386,6 +446,10 @@ std::string Walker::SecureView(LogicalSecureView &view, const std::string &via) 
 			Unsupported("a secure view whose name holds '.'");
 		}
 	}
+	if (view.has_at_clause) {
+		// The body would read its tables as of another snapshot with the owner's rights (Addendum 4 item 12).
+		Unsupported("a time-travel (AT) read of a secure view");
+	}
 	auto catalog = Catalog::GetCatalogEntry(context_, path[0]);
 	if (!catalog) {
 		Unsupported("a secure view of an unknown catalog");
@@ -393,7 +457,16 @@ std::string Walker::SecureView(LogicalSecureView &view, const std::string &via) 
 	AddObject("secure_view", "read", Text(path[0]), catalog->GetCatalogType(), catalog->IsTemporaryCatalog(),
 	          Text(path[1]), Text(path[2]), {}, via);
 	boundary_ = true;
-	return Text(path[0]) + "." + Text(path[1]) + "." + Text(path[2]);
+	auto inner = Text(path[0]) + "." + Text(path[1]) + "." + Text(path[2]);
+	auto entry = Catalog::GetEntry(context_, EntryLookupInfo(CatalogType::VIEW_ENTRY, view.source_name),
+	                               OnEntryNotFound::RETURN_NULL);
+	if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
+		Unsupported("a secure view without its catalog entry");
+	}
+	auto catalogs = QualifiersIn(entry->Cast<ViewCatalogEntry>().GetQuery().ToString());
+	catalogs.insert(StringUtil::Lower(Text(path[0])));
+	view_catalogs_[inner] = std::move(catalogs);
+	return inner;
 }
 
 void Walker::Create(LogicalCreate &create, const std::string &via) {
@@ -406,6 +479,16 @@ void Walker::Create(LogicalCreate &create, const std::string &via) {
 		return;
 	case LogicalOperatorType::LOGICAL_CREATE_VIEW:
 		kind = info.Cast<CreateViewInfo>().security_type == ViewSecurityType::SECURE_VIEW ? "secure_view" : "view";
+		if (info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT && create.schema) {
+			// CREATE OR REPLACE drops the view it replaces: replacing a secure view is a secure-view change,
+			// whatever kind of view takes its name.
+			QualifiedName replaced(create.schema->ParentCatalog().GetName(), create.schema->name,
+			                       info.GetQualifiedName().Name());
+			if (ViewKind(replaced) == "secure_view") {
+				InSchema("secure_view", "drop", *create.schema, Text(info.GetQualifiedName().Name()), {}, via);
+				kind = "secure_view";
+			}
+		}
 		break;
 	case LogicalOperatorType::LOGICAL_CREATE_SEQUENCE:
 		kind = "sequence";
@@ -485,6 +568,17 @@ void Walker::Drop(DropInfo &info, const std::string &via) {
 	case CatalogType::SCHEMA_ENTRY:
 		SchemaPath("drop", info.GetQualifiedName(), via);
 		return;
+	case CatalogType::INDEX_ENTRY: {
+		// Like CREATE INDEX: an index changes its table (a UNIQUE index constrains every write to it).
+		Named("index", "drop", info.GetQualifiedName(), via);
+		auto entry = Catalog::GetEntry(context_, EntryLookupInfo(CatalogType::INDEX_ENTRY, info.GetQualifiedName()),
+		                               OnEntryNotFound::RETURN_NULL);
+		if (entry && entry->type == CatalogType::INDEX_ENTRY) {
+			auto &index = entry->Cast<IndexCatalogEntry>();
+			InSchema("table", "alter", index.ParentSchema(), Text(index.GetTableName()), {}, via);
+		}
+		return;
+	}
 	case CatalogType::TRIGGER_ENTRY:
 		Named("trigger", "drop", info.GetQualifiedName(), via);
 		if (info.extra_drop_info) {
@@ -845,7 +939,7 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 	case LogicalOperatorType::LOGICAL_LOAD: {
 		auto &info = *op.Cast<LogicalLoad>().info;
 		auto load = info.load_type == LoadType::LOAD || info.load_type == LoadType::LOAD_AS;
-		AddControl(load ? "load" : "install", info.filename, "");
+		AddControl(load ? "load" : "install", RedactedUrl(info.filename), "");
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_EXPLAIN:
@@ -923,20 +1017,85 @@ void Walker::CheckSession() {
 	if (!ClientConfig::GetConfig(context_).user_variables.empty()) {
 		Unsupported("a secure view while the session holds variables");
 	}
-	auto &temp =
-	    Catalog::GetCatalog(context_, Identifier::TempCatalog()).GetSchema(context_, Identifier::DefaultSchema());
+	// A body binds unqualified names in temp.main first: a temporary view, macro or type (and anything
+	// else but a table or a sequence, which the walk sees where they are used) can shadow what the body
+	// names and leave no trace in the plan (CONTRACT Addendum 4 item 10). Every set of every schema of
+	// the temporary catalog (DuckSchemaEntry::GetCatalogSet; views share the tables' set, table macros
+	// the table functions', macros the functions').
 	bool shadowing = false;
-	for (auto type : {CatalogType::VIEW_ENTRY, CatalogType::MACRO_ENTRY, CatalogType::TABLE_MACRO_ENTRY}) {
-		// A schema keeps views with its tables and table macros with its macros: scan by set, match by type.
-		temp.Scan(context_, type, [&](CatalogEntry &entry) {
-			if (entry.type == type && !entry.internal) {
-				shadowing = true;
-			}
-		});
-	}
+	Catalog::GetCatalog(context_, Identifier::TempCatalog()).ScanSchemas(context_, [&](SchemaCatalogEntry &schema) {
+		if (!schema.internal && Text(schema.name) != Text(Identifier::DefaultSchema())) {
+			shadowing = true;
+		}
+		for (auto set : {CatalogType::TABLE_ENTRY, CatalogType::INDEX_ENTRY, CatalogType::TABLE_FUNCTION_ENTRY,
+		                 CatalogType::COPY_FUNCTION_ENTRY, CatalogType::PRAGMA_FUNCTION_ENTRY,
+		                 CatalogType::SCALAR_FUNCTION_ENTRY, CatalogType::SEQUENCE_ENTRY,
+		                 CatalogType::COLLATION_ENTRY, CatalogType::COORDINATE_SYSTEM_ENTRY, CatalogType::TYPE_ENTRY,
+		                 CatalogType::SCHEMA_ENTRY}) {
+			schema.Scan(context_, set, [&](CatalogEntry &entry) {
+				if (!entry.internal && entry.type != CatalogType::TABLE_ENTRY &&
+				    entry.type != CatalogType::SEQUENCE_ENTRY) {
+					shadowing = true;
+				}
+			});
+		}
+	});
 	if (shadowing) {
-		Unsupported("a secure view while the session holds temporary views or macros");
+		Unsupported("a secure view while the session holds temporary entries other than tables and sequences");
 	}
+	// The session's settings steer a body too (default_order, default_collation, ...): only the schema
+	// and search path the manager sets are admitted (CONTRACT Addendum 4 item 11 a).
+	auto changed = ChangedSetting();
+	if (!changed.empty()) {
+		Unsupported("a secure view while the session has changed the setting " + changed);
+	}
+	auto &paths = ClientData::Get(context_).catalog_search_path->GetSetPaths();
+	auto recorded = context_.registered_state->Get<SessionPaths>(SessionPaths::kKey);
+	if (recorded ? CatalogSearchEntry::ListToString(paths) != CatalogSearchEntry::ListToString(recorded->set_paths)
+	             : !SessionDefaultPaths(paths)) {
+		Unsupported("a secure view while the session's search path differs from the one it was given");
+	}
+}
+
+//! The first setting (core or extension) the session changed for itself, other than schema and
+//! search_path, or empty. A changed setting is one set in ClientConfig::user_settings; the few that
+//! keep their own client state (profiling, progress bar, dialect and grammar, streaming buffer,
+//! operator memory limit, schema, search_path) change nothing a body binds or returns.
+std::string Walker::ChangedSetting() {
+	auto &user_settings = ClientConfig::GetConfig(context_).user_settings;
+	auto admitted = [](const std::string &name) {
+		return name == "schema" || name == "search_path";
+	};
+	for (idx_t i = 0; i < DBConfig::GetOptionCount(); i++) {
+		auto option = DBConfig::GetOptionByIndex(i);
+		if (option && option->setting_idx.IsValid() && user_settings.IsSet(option->setting_idx.GetIndex()) &&
+		    !admitted(option->name)) {
+			return option->name;
+		}
+	}
+	for (auto &entry : DBConfig::GetConfig(context_).GetExtensionSettings()) {
+		auto name = Text(entry.first);
+		if (entry.second.setting_index.IsValid() && user_settings.IsSet(entry.second.setting_index.GetIndex()) &&
+		    !admitted(name)) {
+			return name;
+		}
+	}
+	return "";
+}
+
+//! No set path, or the database the connection connected to (ClientData::default_database) with its
+//! default schema: the resolution a fresh connection has.
+bool Walker::SessionDefaultPaths(const vector<CatalogSearchEntry> &paths) {
+	if (paths.empty()) {
+		return true;
+	}
+	if (paths.size() != 1) {
+		return false;
+	}
+	auto &catalog = paths[0].GetCatalog();
+	auto &connected = ClientData::Get(context_).default_database;
+	return (IsInvalidCatalog(catalog) || Text(catalog) == Text(connected)) &&
+	       Text(paths[0].GetSchema()) == Text(Identifier::DefaultSchema());
 }
 
 // ---- expressions, functions, settings ----------------------------------------------------------
@@ -1029,10 +1188,17 @@ void Walker::AddFunction(const std::string &type, const QualifiedName &qualified
 		catalog = Text(path[0]);
 		schema = Text(path[1]);
 	} else if (type == "scalar" || type == "aggregate" || type == "window") {
-		// Bound by DuckDB for SQL syntax (comparisons, casts), never by name resolution.
+		// Bound by DuckDB for SQL syntax (comparisons, casts), never by name resolution. Also absent: every
+		// function a slot DuckDB evaluates while binding called (SET values, table-function arguments,
+		// EXECUTE parameters, AT clauses, foldable LIMIT and OFFSET, PIVOT IN lists, COLUMNS(), type
+		// expressions, unnest depth, CREATE VIEW bodies, ALTER ADD COLUMN DEFAULT and ALTER COLUMN TYPE
+		// USING): the plan holds their result, and the parse screen owns them (CONTRACT Addendum 4 item 9).
 		return;
 	} else if (path.size() == 2) {
 		schema = Text(path[0]);
+	}
+	if (!catalog.empty()) {
+		InView(catalog, via);
 	}
 	Add(functions_, JsonObject({{"args", Strings(args)},
 	                            {"catalog", JsonString(catalog)},
@@ -1123,9 +1289,12 @@ void Walker::AddSetting(const Identifier &raw, SetScope scope, const Value *valu
 		Locked(name);
 	}
 	auto resolved = global ? "global" : scope == SetScope::LOCAL ? "local" : "session";
+	// Only the values the manager reads leave the node: a setting can hold a credential
+	// (http_proxy_password, an azure_* key).
+	auto sent = value && (name == "schema" || name == "search_path");
 	Add(settings_, JsonObject({{"name", JsonString(name)},
 	                           {"scope", JsonString(resolved)},
-	                           {"value", value ? JsonString(value->ToString()) : JsonNull()}}));
+	                           {"value", sent ? JsonString(value->ToString()) : JsonNull()}}));
 }
 
 } // namespace
@@ -1147,6 +1316,9 @@ Handling OperatorHandling(LogicalOperatorType type) {
 	case LogicalOperatorType::LOGICAL_COPY_DATABASE:
 	case LogicalOperatorType::LOGICAL_SECURE_VIEW:
 	case LogicalOperatorType::LOGICAL_GET:
+	// DESCRIBE (query) and SHOW <setting> bind to a projection over a chunk DuckDB filled while binding,
+	// with nothing of what they read in the plan: the parse screen refuses both (screen_rules.cpp), and
+	// must keep doing so.
 	case LogicalOperatorType::LOGICAL_CHUNK_GET:
 	case LogicalOperatorType::LOGICAL_DELIM_GET:
 	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
@@ -1272,13 +1444,44 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		walker.Operator(plan, "");
 		walker.CheckSession();
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
+	} catch (duckdb::PermissionException &) {
+		throw;
 	} catch (std::invalid_argument &) {
 		// CanonicalJson refuses a string that is not UTF-8 (Task 1). DuckDB validates query text and
 		// identifiers, so only a value read from elsewhere could carry one.
 		throw duckdb::PermissionException(
 		    "QoD: statement uses text that is not valid UTF-8, which QoD does not support");
+	} catch (std::exception &) {
+		// A lookup or a cast that failed on a plan the walk did not expect. Its message may quote catalog
+		// names, and its type could invalidate the client's transaction (any but a binder, catalog,
+		// parser, permission... error does): a refusal, plain.
+		throw duckdb::PermissionException("QoD: statement could not be described");
 	}
 	return Described {canonical, Hex(Sha256(canonical))};
+}
+
+void RecordSessionPaths(duckdb::ClientContext &context) {
+	auto paths = context.registered_state->GetOrCreate<SessionPaths>(SessionPaths::kKey);
+	paths->set_paths = duckdb::ClientData::Get(context).catalog_search_path->GetSetPaths();
+}
+
+std::string RedactedUrl(const std::string &text) {
+	auto scheme_end = text.find("://");
+	if (scheme_end == std::string::npos || scheme_end == 0 ||
+	    !std::all_of(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(scheme_end), IsSchemeCharacter) ||
+	    duckdb::StringUtil::Lower(text.substr(0, scheme_end)) == "s3") {
+		return text;
+	}
+	auto start = scheme_end + 3;
+	auto rest = text.substr(start);
+	rest = rest.substr(0, rest.find_first_of("?#"));
+	auto authority_end = rest.find('/');
+	auto authority = rest.substr(0, authority_end);
+	auto at = authority.rfind('@');
+	if (at != std::string::npos) {
+		rest = rest.substr(at + 1);
+	}
+	return text.substr(0, start) + rest;
 }
 
 std::string DescribedLocation(const std::string &given, bool refuse_unresolved) {
@@ -1289,7 +1492,7 @@ std::string DescribedLocation(const std::string &given, bool refuse_unresolved) 
 		return location->resolved;
 	}
 	if (!refuse_unresolved) {
-		return given;
+		return RedactedUrl(given);
 	}
 	throw duckdb::PermissionException("QoD: " + given + " is outside the tenant's authorized locations");
 }

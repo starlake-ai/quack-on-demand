@@ -9,8 +9,11 @@
 #include "describe_harness.hpp"
 #include "describer.hpp"
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_drop.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
+#include "duckdb/planner/operator/logical_secure_view.hpp"
 #include "init_runner.hpp"
 #include "sql_script.hpp"
 
@@ -154,7 +157,7 @@ void RunGoldens(const fs::path &dir) {
 		names.push_back(file.substr(0, file.size() - suffix.size()));
 	}
 	std::sort(names.begin(), names.end());
-	if (names.size() < 94) {
+	if (names.size() < 107) {
 		Fail("expected the full golden corpus, found " + std::to_string(names.size()) + " cases in " + dir.string());
 	}
 	for (auto &name : names) {
@@ -229,6 +232,15 @@ void CheckLocationHelpers() {
 	// The screen's rule (MakeLocation): no other scheme, and an s3:// URL must name a bucket.
 	expect(qod::DescribedLocation("http://h.invalid/x.csv", false), "http://h.invalid/x.csv",
 	       "a trusted http URL is kept");
+	// What a kept URL loses (review M4): its userinfo, query string and fragment, s3:// excepted.
+	expect(qod::RedactedUrl("https://user:pw@acct.invalid/c/x.csv?sv=1&sig=qod-not-a-real-password#f"),
+	       "https://acct.invalid/c/x.csv", "a URL loses its userinfo, query and fragment");
+	expect(qod::DescribedLocation("https://acct.invalid/c/x.csv?sig=qod-not-a-real-password", false),
+	       "https://acct.invalid/c/x.csv", "a kept URL is redacted");
+	expect(qod::RedactedUrl("http://h.invalid/a@b/x.csv"), "http://h.invalid/a@b/x.csv",
+	       "an '@' past the authority is part of the path");
+	expect(qod::RedactedUrl("s3://b/x.csv?versionId=1"), "s3://b/x.csv?versionId=1", "an s3 URL is kept whole");
+	expect(qod::RedactedUrl("/srv/a?b"), "/srv/a?b", "a local path is no URL");
 	for (auto refused : {"http://h.invalid/x.csv", "file:///srv/x.csv", "s3://", "/srv/../x.csv"}) {
 		try {
 			qod::DescribedLocation(refused, true);
@@ -238,6 +250,88 @@ void CheckLocationHelpers() {
 			       "QoD: " + std::string(refused) + " is outside the tenant's authorized locations",
 			       std::string("the refusal of ") + refused);
 		}
+	}
+}
+
+//! Session state a secure view's body depends on, and failures inside Describe:
+//!  - a time-travel read through a boundary is refused (Addendum 4 item 12);
+//!  - the set paths are held to the session default, then to what RecordSessionPaths recorded (item 11 a);
+//!  - an exception other than a refusal becomes "QoD: statement could not be described" (review M5).
+void CheckSessionState() {
+	duckdb::DuckDB db(nullptr);
+	qod_test::RegisterCapture(db);
+	duckdb::Connection con(db);
+	auto &capture = TheCapture();
+	capture = qod_test::Capture();
+	capture.principal = qod_test::Alice();
+	for (auto sql : {"CREATE TABLE u (id INTEGER)", "CREATE SECURE VIEW sv AS SELECT id FROM u",
+	                 "ATTACH ':memory:' AS m1"}) {
+		qod::RunStrict(con, sql, "setup");
+	}
+	const std::string paths_refused = "QoD: statement uses a secure view while the session's search path differs "
+	                                  "from the one it was given, which QoD does not support";
+	auto read = [&](const std::string &what, const std::string &want_refused) {
+		capture.on = true;
+		capture.refused.clear();
+		capture.canonical.clear();
+		con.Query("SELECT * FROM memory.main.sv");
+		capture.on = false;
+		if (capture.refused != want_refused || (want_refused.empty() && capture.canonical.empty())) {
+			Fail(what + ": expected " + (want_refused.empty() ? "a description" : "\"" + want_refused + "\"") +
+			     ", got \"" + capture.refused + "\" / " + capture.canonical);
+		}
+	};
+	qod::RunStrict(con, "USE m1.main", "use");
+	read("another set path, none recorded", paths_refused);
+	qod::RecordSessionPaths(*con.context);
+	read("the recorded set path", "");
+	qod::RunStrict(con, "USE memory.main", "use");
+	read("a set path other than the recorded one", paths_refused);
+	qod::RecordSessionPaths(*con.context);
+	read("the recorded set path, again", "");
+
+	// A boundary read AT another snapshot, built by hand: an in-memory database has no time travel.
+	con.BeginTransaction();
+	auto &context = *con.context;
+	duckdb::LogicalSecureView view("sv", duckdb::make_uniq<duckdb::LogicalDummyScan>(duckdb::TableIndex(0)));
+	view.has_source = true;
+	view.source_name = duckdb::QualifiedName(duckdb::Identifier("memory"), duckdb::Identifier("main"),
+	                                         duckdb::Identifier("sv"));
+	view.has_at_clause = true;
+	std::string refused;
+	try {
+		qod::Describe(context, view, qod_test::Root());
+	} catch (duckdb::PermissionException &error) {
+		refused = duckdb::ErrorData(error).RawMessage();
+	}
+	if (refused != "QoD: statement uses a time-travel (AT) read of a secure view, which QoD does not support") {
+		Fail("an AT read through a secure view: got \"" + refused + "\"");
+	}
+	con.Rollback();
+}
+
+//! Outside a transaction a catalog lookup fails with DuckDB's InternalException: Describe refuses
+//! plainly instead (review M5).
+void CheckDescribeFailure() {
+	duckdb::DuckDB db(nullptr);
+	duckdb::Connection con(db);
+	con.Query("CREATE TABLE t (id INTEGER)");
+	auto drop_info = duckdb::make_uniq<duckdb::DropInfo>();
+	drop_info->type = duckdb::CatalogType::VIEW_ENTRY;
+	drop_info->SetQualifiedName(duckdb::QualifiedName(duckdb::Identifier("memory"), duckdb::Identifier("main"),
+	                                                  duckdb::Identifier("t")));
+	duckdb::LogicalDrop drop(std::move(drop_info));
+	std::string refused;
+	try {
+		qod::Describe(*con.context, drop, qod_test::Alice());
+		Fail("a description outside a transaction did not fail");
+	} catch (duckdb::PermissionException &error) {
+		refused = duckdb::ErrorData(error).RawMessage();
+	} catch (std::exception &error) {
+		refused = std::string("not a refusal: ") + error.what();
+	}
+	if (refused != "QoD: statement could not be described") {
+		Fail("a failing lookup: expected the plain refusal, got \"" + refused + "\"");
 	}
 }
 
@@ -386,6 +480,8 @@ int main(int argc, char **argv) {
 	CheckEnums();
 	CheckLocationHelpers();
 	CheckExtensionOperators();
+	CheckSessionState();
+	CheckDescribeFailure();
 	RunGoldens(argv[1]);
 	if (failures == 0) {
 		std::cout << "describer_test: all passed" << std::endl;

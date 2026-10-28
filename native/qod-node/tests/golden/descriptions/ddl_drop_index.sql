@@ -1,0 +1,1 @@
+DROP INDEX t_idx

@@ -1,0 +1,1 @@
+CREATE TEMP TYPE lvl AS ENUM ('a');
