@@ -350,7 +350,8 @@ rest:
   # Longest a streamed /rows answer (Arrow, Parquet) may take from the moment
   # its result arrives, in seconds; past it the stream is aborted, the node read
   # in progress forced to return and the result and slot released (a read
-  # stalled inside the embedded node client holds them until the node answers).
+  # blocked inside the native node client that this cannot end holds them until
+  # the node answers).
   maxStreamSec: 600
   # Parquet bodies streamed at once, edge-wide, at most one per user; each runs
   # an in-process DuckDB limited to 64 MB (off-heap). Past either the answer is

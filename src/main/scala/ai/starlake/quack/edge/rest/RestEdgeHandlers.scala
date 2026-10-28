@@ -16,7 +16,7 @@ import ai.starlake.quack.ondemand.auth.PatPrincipal
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.observability.metrics.RestEdgeInstruments
 import cats.data.EitherT
-import cats.effect.{IO, Outcome, Poll, Resource}
+import cats.effect.{Fiber, IO, Outcome, Poll, Resource}
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Json
 import org.apache.arrow.vector.ipc.ArrowReader
@@ -189,7 +189,9 @@ final class RestEdgeHandlers(
     metrics: RestEdgeInstruments = RestEdgeInstruments.noop
 ) extends LazyLogging:
 
-  private lazy val rowFormats: Set[RestFormat] =
+  // Probed once, at construction (boot): the host probe forks `mkfifo` and must never run on a
+  // request's compute thread.
+  private val rowFormats: Set[RestFormat] =
     if parquetAvailable then RestFormat.Rows else RestFormat.Rows - RestFormat.Parquet
 
   // Built from `cfg` when not given: a default parameter cannot refer to another one here.
@@ -311,6 +313,10 @@ final class RestEdgeHandlers(
     }
 
   def rows(tenant: String, tenantDb: String, schema: String, name: String, req: RestRequest): Out =
+    // The release of a streamed body that never left this handler: a cancel landing after the
+    // encoder opened (at the exit of any `poll` on the way out) drops the answer, and with it the
+    // only other owner of the body, so it is released here at once instead of by the watchdog.
+    val orphaned = new AtomicReference[IO[Unit]](IO.unit)
     respond(Route.Rows, req) {
       for
         p   <- authenticate(tenant, req)
@@ -336,13 +342,17 @@ final class RestEdgeHandlers(
             pinned = t.copy(caller = t.caller.copy(preferredNode = Some(pr._2)))
             sql    = RestSql.render(at, rq, limit)
             onFailure = dataFailure(req.requestId, filtered = rq.filters.nonEmpty)
-            out <- execute(pinned, sql, onFailure, req, slot) { qr =>
-              if f.streamed then
-                streamRows(f, qr, limit, req, timeoutFor(t.caller), userKey(p))
-                  .map(_.map(Right(_)))
-              else
-                reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))(qr)
-                  .map(_.map(Left(_)))
+            // A Parquet body's slot is taken before the data statement: one over the cap costs
+            // the node nothing.
+            out <- holding(if f == RestFormat.Parquet then Some(parquetLimiter) else None, p) { pq =>
+              execute(pinned, sql, onFailure, req, slot) { qr =>
+                if f.streamed then
+                  streamRows(f, qr, limit, req, timeoutFor(t.caller), pq, orphaned)
+                    .map(_.map(Right(_)))
+                else
+                  reading(r => RestResultEncoder.encode(f, r.rows, limit, cfg.maxResponseBytes))(qr)
+                    .map(_.map(Left(_)))
+              }
             }
           yield (sn, out)
         }
@@ -370,7 +380,7 @@ final class RestEdgeHandlers(
               ),
               RestBody.Streamed(bytes, IO(paging(w.rows, w.more, w.cut)), unstarted)
             )
-    }
+    }.onCancel(IO.defer(orphaned.get))
 
   // ---- step 2: authentication ----------------------------------------------------------------
 
@@ -385,18 +395,21 @@ final class RestEdgeHandlers(
       p <- EitherT(
         IO.blocking(RestAuth.authenticate(req.authorization, resolvePat, tenant, resolveOidc))
       )
-        .leftMap(authFailure(req.client))
-      _ <- lift(RestAuth.admit(p, tenant).left.map(authFailure(req.client)))
+        .leftSemiflatMap(authFailure(req.client))
+      _ <- lift(RestAuth.admit(p, tenant)).leftSemiflatMap(authFailure(req.client))
     yield p
 
   /** Counts `e` against `client` when it is an authentication failure ([[AuthThrottle.counts]]).
     * The failure that crosses the allowance is itself answered 429. A success is never recorded, so
-    * it resets nothing.
+    * it resets nothing. Blocking: the failure that places a block is audited synchronously.
     */
-  private def authFailure(client: String)(e: RestError): RestError =
-    if AuthThrottle.counts(e) && authThrottle.recordFailure(client) then
-      RestError.TooManyAuthFailures(cfg.authBlockSec)
-    else e
+  private def authFailure(client: String)(e: RestError): IO[RestError] =
+    if !AuthThrottle.counts(e) then IO.pure(e)
+    else
+      IO.blocking(
+        if authThrottle.recordFailure(client) then RestError.TooManyAuthFailures(cfg.authBlockSec)
+        else e
+      )
 
   /** Runs `body` under one in-flight slot of the request's principal, `(tenant, userId)` (for a PAT
     * its OWNER, never the token itself), so minting more tokens buys no extra slots; 429 when a cap
@@ -406,14 +419,25 @@ final class RestEdgeHandlers(
     * finished.
     */
   private def withSlot[A](p: RestPrincipal)(body: UserLimiter.Hold => Step[A]): Step[A] =
-    EitherT(
-      IO.uncancelable { poll =>
-        IO(userLimiter.tryAcquire(userKey(p))).flatMap {
-          case None       => IO.pure(Left(RestError.TooManyRequests))
-          case Some(slot) => poll(body(slot).value).guarantee(IO(slot.release()))
-        }
-      }
-    )
+    holding(Some(userLimiter), p)(body)
+
+  /** Runs `body` under one slot of `limiter` for the principal, as [[withSlot]] does; with no
+    * limiter, under a hold of nothing.
+    */
+  private def holding[A](limiter: Option[UserLimiter], p: RestPrincipal)(
+      body: UserLimiter.Hold => Step[A]
+  ): Step[A] =
+    limiter match
+      case None    => body(UserLimiter.Hold.Released)
+      case Some(l) =>
+        EitherT(
+          IO.uncancelable { poll =>
+            IO(l.tryAcquire(userKey(p))).flatMap {
+              case None       => IO.pure(Left(RestError.TooManyRequests))
+              case Some(slot) => poll(body(slot).value).guarantee(IO(slot.release()))
+            }
+          }
+        )
 
   /** The principal's key in the limiters: `(tenant, userId)`. */
   private def userKey(p: RestPrincipal): (String, String) = (p.user.tenant.getOrElse(""), p.user.id)
@@ -626,7 +650,9 @@ final class RestEdgeHandlers(
     * and released only when the node work is over: when the executor fails or raises, or when its
     * result is closed, by `use`, by the hand-off above or, after a timeout or a disconnect, by the
     * bounded wait's late close. An early HTTP answer (504, 503, a cancelled request) never frees
-    * it.
+    * it. That is why the executor is handed the caller WITHOUT the token's `stmtTimeoutMs`: the
+    * routed executor would bound the call itself and answer a failure while the node still runs,
+    * which would free the share early. The token's bound is this wait's ([[timeoutFor]]).
     */
   private def execute[A](
       t: Target,
@@ -636,10 +662,12 @@ final class RestEdgeHandlers(
       slot: UserLimiter.Hold,
       via: CatalogPreviewHandlers.PreviewExecutor = executor
   )(use: QueryResult => IO[Either[RestError, A]]): Step[A] =
-    val node                                    = new AtomicReference(UserLimiter.Hold.Released)
-    def releaseNode: IO[Unit]                   = IO(node.get.release())
+    val node                  = new AtomicReference(UserLimiter.Hold.Released)
+    def releaseNode: IO[Unit] = IO(node.get.release())
+    val unbounded             =
+      t.caller.copy(restriction = t.caller.restriction.copy(stmtTimeoutMs = None))
     val run: IO[Either[RestError, QueryResult]] =
-      IO.defer(via(t.caller, t.poolKey, sql))
+      IO.defer(via(unbounded, t.poolKey, sql))
         .guaranteeCase {
           case Outcome.Succeeded(out) =>
             out.flatMap(r => if r.isRight then IO.unit else releaseNode)
@@ -701,11 +729,11 @@ final class RestEdgeHandlers(
     * what it sent for the trailers. The `use` of [[execute]]: it owns `qr` from the first
     * instruction on.
     *
-    * A Parquet body first takes one of the principal's Parquet slots (one per principal,
-    * `maxConcurrentParquet` for the edge; 429 when none is free, `qr` closed), held only from here
-    * until the body is released: never across the probe, the catalog lookups or a resume. Each one
-    * runs an in-process DuckDB with its own memory limit, so their number is bounded apart from the
-    * in-flight cap.
+    * A Parquet body holds a share of the principal's Parquet slot (`pq`, one per principal,
+    * `maxConcurrentParquet` for the edge), taken by the caller right before the data statement and
+    * kept from here until the body is released: never across the probe, the catalog lookups or a
+    * resume. Each one runs an in-process DuckDB with its own memory limit, so their number is
+    * bounded apart from the in-flight cap.
     *
     * The deadline, `maxStreamSec`, runs from here. The first batch (and for Parquet the first
     * bytes) is pulled HERE, before the answer is committed, so a node that fails early still gets
@@ -721,10 +749,12 @@ final class RestEdgeHandlers(
     * rows left (a client must lower `limit` to page under it), and at the deadline (a slow or
     * stalled reader, or a stalled node: the read in progress is forced to return as above).
     *
-    * A body Ember never starts (the client went away before the head was written) would otherwise
-    * hold the result forever, so a watchdog releases it after `wait` (at least [[UnstartedFloor]],
-    * at most until the deadline) unless the stream has started by then; the two can never both own
-    * it.
+    * A body that never starts would otherwise hold the result forever. Its release is put in
+    * `orphaned` before it is handed out, for the caller to run when the request is cancelled before
+    * the answer leaves the handler; and a watchdog releases it after `wait` (at least
+    * [[UnstartedFloor]], at most until the deadline) when Ember never starts it (the client went
+    * away before the head was written). The watchdog is cancelled as soon as the body starts or is
+    * released; no two of them can both own it.
     */
   private def streamRows(
       format: RestFormat,
@@ -732,37 +762,34 @@ final class RestEdgeHandlers(
       limit: Int,
       req: RestRequest,
       wait: FiniteDuration,
-      user: (String, String)
+      pq: UserLimiter.Hold,
+      orphaned: AtomicReference[IO[Unit]]
   ): IO[Either[RestError, (fs2.Stream[IO, Byte], RowEncoder, RestUnstarted)]] =
     val rid    = req.requestId
     val closed = IO.blocking(qr.close()).attempt.void
     IO.uncancelable { poll =>
-      val slot =
-        if format == RestFormat.Parquet then parquetLimiter.tryAcquire(user)
-        else Some(UserLimiter.Hold.Released)
-      IO.monotonic.flatMap { handed =>
-        val deadline = handed + cfg.maxStreamSec.seconds
-        slot match
-          case None        => closed.as(Left(RestError.TooManyRequests))
-          case Some(share) =>
-            RowEncoder
-              .open(format, qr, limit, cfg.maxResponseBytes, ForcedReads.within(poll, deadline))
-              .onCancel(IO(share.release()) *> closed)
-              .attempt
-              .flatMap {
-                case Left(t) =>
-                  IO(share.release()) *> closed.as(Left(openFailure(rid, t)))
-                case Right(enc) =>
-                  // Cancelled while the first batch was read: nobody will stream it.
-                  val (bytes, watch, unstarted) = streamOf(enc, qr, share, rid, deadline)
-                  poll(IO.unit).onCancel(unstarted) *>
-                    IO.monotonic
-                      .flatMap { now =>
-                        val left = (deadline - now).max(Duration.Zero)
-                        (IO.sleep(wait.max(UnstartedFloor).min(left)) *> unstarted).start
-                      }
-                      .as(Right((bytes, enc, watch)))
-              }
+      IO(pq.retain()).flatMap { share =>
+        IO.monotonic.flatMap { handed =>
+          val deadline = handed + cfg.maxStreamSec.seconds
+          RowEncoder
+            .open(format, qr, limit, cfg.maxResponseBytes, ForcedReads.within(poll, deadline))
+            .onCancel(IO(share.release()) *> closed)
+            .attempt
+            .flatMap {
+              case Left(t) =>
+                IO(share.release()) *> closed.as(Left(openFailure(rid, t)))
+              case Right(enc) =>
+                val body = streamOf(enc, qr, share, rid, deadline)
+                IO(orphaned.set(body.orphan)) *>
+                  IO.monotonic
+                    .flatMap { now =>
+                      val left = (deadline - now).max(Duration.Zero)
+                      (IO.sleep(wait.max(UnstartedFloor).min(left)) *> body.unstarted).start
+                    }
+                    .flatMap(body.arm)
+                    .as(Right((body.bytes, enc, body.watch)))
+            }
+        }
       }
     }
 
@@ -778,6 +805,19 @@ final class RestEdgeHandlers(
       logger.warn(s"rest [$rid] reading the first batch failed: ${t.getClass.getName}")
       RestError.UpstreamError
 
+  /** A streamed body over an opened encoder (see [[streamOf]]). `unstarted` releases it unless it
+    * has started, and is what the watchdog runs; `orphan` is the same release run by the request's
+    * own cancellation, which also cancels the watchdog; `arm` records the watchdog, which the
+    * body's start cancels.
+    */
+  private final case class StreamedBody(
+      bytes: fs2.Stream[IO, Byte],
+      watch: RestUnstarted,
+      unstarted: IO[Unit],
+      orphan: IO[Unit],
+      arm: Fiber[IO, Throwable, Unit] => IO[Unit]
+  )
+
   /** The body over an opened encoder, the hook its metering registers, and the release of a body
     * never started (see [[streamRows]]). Exactly one of the stream and that release owns `enc`,
     * `qr` and `share`.
@@ -788,7 +828,7 @@ final class RestEdgeHandlers(
       share: UserLimiter.Hold,
       rid: String,
       deadline: FiniteDuration
-  ): (fs2.Stream[IO, Byte], RestUnstarted, IO[Unit]) =
+  ): StreamedBody =
     // 0: handed out, 1: streaming, 2: released.
     val state   = new java.util.concurrent.atomic.AtomicInteger(0)
     val release = enc.close
@@ -799,16 +839,23 @@ final class RestEdgeHandlers(
         logger.debug(s"rest [$rid] closing a streamed result failed: ${t.getMessage}")
       }
     // Released other than by a whole body: whatever may still block is forced first.
-    val forced    = enc.abort.attempt *> release
-    val watch     = new RestUnstarted
-    val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced *> watch.fire, IO.unit)
-    val expired   = IO.monotonic
+    val forced = enc.abort.attempt *> release
+    val watch  = new RestUnstarted
+    // Uncancelable: cancelling the watchdog that runs it must not cut a release short.
+    val unstarted = IO(state.compareAndSet(0, 2)).ifM(forced *> watch.fire, IO.unit).uncancelable
+    // The watchdog sleeps until the deadline at worst, holding all of the above: cancelled, not
+    // waited for (it may be the fiber cancelling), once the body no longer needs it.
+    val watchdog = new AtomicReference[Option[Fiber[IO, Throwable, Unit]]](None)
+    val disarm   = IO.defer(watchdog.getAndSet(None).fold(IO.unit)(_.cancel.start.void))
+    val expired  = IO.monotonic
       .flatMap(now => IO.sleep((deadline - now).max(Duration.Zero)))
       .as(Left(new java.util.concurrent.TimeoutException("maxStreamSec")))
     // The transition to streaming is the acquire of a bracket, so its release is registered with
     // it: no cancellation can fall between the two.
     val bytes = fs2.Stream
-      .bracketCase(IO(state.compareAndSet(0, 1))) {
+      .bracketCase(
+        IO(state.compareAndSet(0, 1)).flatTap(owned => if owned then disarm else IO.unit)
+      ) {
         case (true, Resource.ExitCase.Succeeded) => IO(state.set(2)) *> release
         case (true, _)                           => IO(state.set(2)) *> forced
         case (false, _)                          => IO.unit
@@ -820,7 +867,14 @@ final class RestEdgeHandlers(
       .handleErrorWith(t =>
         fs2.Stream.exec(IO(streamFailed(rid, t, enc.cut))) ++ fs2.Stream.raiseError[IO](t)
       )
-    (bytes, watch, unstarted)
+    StreamedBody(
+      bytes,
+      watch,
+      unstarted,
+      unstarted *> disarm,
+      // A body already started or released before the watchdog was recorded cancels it here.
+      f => IO(watchdog.set(Some(f))) *> IO(state.get != 0).ifM(disarm, IO.unit)
+    )
 
   /** Logs why a streamed body failed after its first byte: the byte cap is the client's paging
     * signal (INFO), anything else an abort (WARN). Only the class, never the text.
@@ -869,7 +923,8 @@ final class RestEdgeHandlers(
   private def common(rid: String, f: RouterFailure): RestError = f match
     // The router's hibernation hold expired, the same test MCP applies.
     case RouterFailure.Unavailable(r) if r.contains("resuming") => RestError.PoolResuming
-    // routedExecutor's own bound on the token's stmtTimeoutMs (RoutedExecution).
+    // routedExecutor's own bound on the token's stmtTimeoutMs (RoutedExecution); the edge hands it
+    // no such bound ([[execute]]), so this is only a defence.
     case RouterFailure.Unavailable(r) if r.startsWith("statement exceeded") =>
       RestError.StatementTimeout
     case RouterFailure.Unavailable(r) =>

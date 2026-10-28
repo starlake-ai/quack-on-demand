@@ -14,7 +14,9 @@ import scala.concurrent.duration.*
   * under `poll`. When the wait is cancelled or fails (a deadline), [[abort]] runs `unblock`
   * (closing what the read is blocked on: the node result, through its usual close, which is also
   * how an admin kill ends a statement) and interrupts the reading thread (which ends a JDK HTTP
-  * client read and a sleep), without waiting for either.
+  * client read and a sleep), without waiting for either. `unblock` therefore runs while the read
+  * may still be inside what it closes, which must tolerate that: the chained Quack reader marks
+  * itself closed and leaves the release of its batches to the reading thread.
   *
   * Whoever releases what the reads use waits for the last one first ([[settled]]), so nothing is
   * closed under a read still running. A read that neither the close nor the interrupt can end (a

@@ -810,6 +810,23 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     (System.nanoTime() - start).nanos should be < 3.seconds
   }
 
+  it should "keep the token's stmtTimeoutMs from the executor, so its slot stays held while the node works" in {
+    val gate    = new CountDownLatch(1)
+    val arrived = new AtomicInteger()
+    val lim     = new UserLimiter(perUser = 1, total = 64)
+    val fx      = fixture(
+      TokenRestriction.Unrestricted.copy(stmtTimeoutMs = Some(150)),
+      respond = Some(gated(gate, arrived)),
+      limiter = Some(lim)
+    )
+    errOf(rows(fx, "customer"))._1 shouldBe StatusCode.GatewayTimeout
+    // The routed executor would bound the call itself and answer while the node still runs.
+    fx.calls.map(_.caller.restriction.stmtTimeoutMs) shouldBe List(None)
+    lim.inFlightTotal shouldBe 1
+    gate.countDown()
+    awaitDrained(lim)
+  }
+
   "a resuming pool" should "get 503 pool_resuming with Retry-After" in {
     val resuming: AtomicInteger => Responder =
       _ => _ => IO.pure(Left(RouterFailure.Unavailable("pool is resuming, retry shortly")))
@@ -1697,9 +1714,10 @@ class RestEdgeHandlersSpec extends AnyFlatSpec with Matchers:
     val e     = errOf(parquetAs(fx, CarolToken))
     (e._1, e._3.error, header(e._2, "Retry-After")) shouldBe
       (StatusCode.TooManyRequests, "too_many_requests", Some("1"))
-    // Refused once its data result is in hand, then closed: both of its results are closed, the
-    // first body's data result is still open.
-    fx.closes.get shouldBe 3
+    // Refused before its data statement: only its probe ran (closed, like the first body's probe);
+    // the first body's data result is still open.
+    fx.calls.count(c => !c.sql.endsWith("LIMIT 0")) shouldBe 1
+    fx.closes.get shouldBe 2
     // Other formats are not bounded by it.
     drain(streamedOf(okOf(rows(fx, "customer", "format=arrow"))))
     drain(first)

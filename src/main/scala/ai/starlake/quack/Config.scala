@@ -1815,9 +1815,8 @@ final case class RestEdgeConfig(
         "Longest a streamed /rows answer (Arrow, Parquet) may take, in seconds, from the moment " +
           "its result arrives (a first batch still missing then is a 504); past it the stream is " +
           "aborted, the node read in progress forced to return (result closed, thread " +
-          "interrupted) and the result and in-flight slot released. A read stalled inside the " +
-          "embedded node client (QOD_NATIVE_CLIENT=false) ignores both and holds that until the " +
-          "node answers."
+          "interrupted) and the result and in-flight slot released. A read that neither ends " +
+          "(one blocked inside the native node client) holds that until the node answers."
     )
     maxStreamSec: Int = 600,
     @field @ConfigField(

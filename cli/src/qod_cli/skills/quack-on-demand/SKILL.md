@@ -2616,7 +2616,9 @@ curl -k -H "Authorization: Bearer $TOKEN" -o orders.parquet "$BASE/schemas/tpch1
   until a page fits under `QOD_REST_MAX_RESPONSE_BYTES`; a Parquet page that outgrows it
   before its first byte answers 400 `invalid_parameter`. An answer still running
   `QOD_REST_MAX_STREAM_SEC` (600 s) after its result arrived (a slow reader, or a stalled
-  node) is aborted too, or answered 504 if its first batch has not come. At most `QOD_REST_MAX_CONCURRENT_PARQUET` (2) Parquet bodies stream at
+  node) is aborted too, or answered 504 if its first batch has not come; a read blocked
+  inside the native node client that this cannot end holds the request's slot until the
+  node answers. At most `QOD_REST_MAX_CONCURRENT_PARQUET` (2) Parquet bodies stream at
   once, one per user (429 `too_many_requests` past either). Views keep their rules in these formats too. A body that
   breaks after the first byte means the transfer failed or was cut by a cap; retry, with a
   smaller `limit` if it was the cap. Parquet is not offered when the manager runs on Windows

@@ -403,6 +403,15 @@ private[adapter] final class ChainedQuackArrowReader(
   private val moreFetchPending: AtomicBoolean = AtomicBoolean(initialNeedsMoreFetch)
   private val closed: AtomicBoolean           = AtomicBoolean(false)
 
+  // `close` may come from another thread while a batch is being read: the REST data edge forces a
+  // stalled read to return by closing the result under it. That close must not release `out` or a
+  // child the read is still using (a FETCH answered after it would import a child nobody closes,
+  // loaded into a freed root), so it only marks the reader closed and disconnects; the reading
+  // thread releases them once its read returns. `reading` is guarded by `readLock`.
+  private val readLock        = new Object
+  private var reading         = false
+  private val batchesReleased = AtomicBoolean(false)
+
   // One STABLE root for the whole chained stream. Each child reader (the
   // initial PREPARE_RESPONSE plus every FETCH_RESPONSE) imports its own
   // `VectorSchemaRoot` from the C-data ABI; we copy each loaded child batch
@@ -432,7 +441,25 @@ private[adapter] final class ChainedQuackArrowReader(
     else false
 
   override def loadNextBatch(): Boolean =
-    if closed.get() then return false
+    val entered = readLock.synchronized {
+      val open = !closed.get()
+      if open then reading = true
+      open
+    }
+    if !entered then return false
+    val loaded =
+      try readNext()
+      finally
+        val closedMeanwhile = readLock.synchronized {
+          reading = false
+          closed.get()
+        }
+        if closedMeanwhile then releaseBatches()
+    // A batch loaded into a root released since is no batch.
+    if closed.get() then throw new IllegalStateException("result closed while reading")
+    loaded
+
+  private def readNext(): Boolean =
     // Drain the current child first. If it has more batches, return.
     // Otherwise loop: close it, fire next FETCH, swap, retry -- until
     // either we land a batch or the FETCH loop terminates.
@@ -456,6 +483,9 @@ private[adapter] final class ChainedQuackArrowReader(
           val ptr       = QuackNativeBridge.extractArrowStream(fetchBytes)
           val nextChild = QuackArrowImport.importStream(allocator, ptr)
           currentRef.set(nextChild)
+          // Closed while the FETCH was in flight: the child is recorded for the release, and the
+          // read fails rather than end the stream as if it were complete.
+          if closed.get() then throw new IllegalStateException("result closed while reading")
           // A non-empty FETCH_RESPONSE may still contain only zero-row
           // batches; if loadNextBatch returns false we loop again
           // rather than recurse (avoids stack-overflow on a pathological
@@ -487,16 +517,22 @@ private[adapter] final class ChainedQuackArrowReader(
 
   override def close(closeReadSource: Boolean): Unit =
     if closed.compareAndSet(false, true) then
-      // Release the stable root first: it holds a reference to the last
-      // loaded batch's buffers (shared from the current child), so it must
-      // drop that reference before (or alongside) the child's own release.
+      // A read in progress releases the batches itself when it returns.
+      if readLock.synchronized(!reading) then releaseBatches()
+      if closeReadSource then
+        try closeSync()
+        catch case _: Throwable => ()
+
+  /** Once, with no read in progress. Releases the stable root first: it holds a reference to the
+    * last loaded batch's buffers (shared from the current child), so it must drop that reference
+    * before (or alongside) the child's own release.
+    */
+  private def releaseBatches(): Unit =
+    if batchesReleased.compareAndSet(false, true) then
       try out.close()
       catch case _: Throwable => ()
       try currentRef.get().close()
       catch case _: Throwable => ()
-      if closeReadSource then
-        try closeSync()
-        catch case _: Throwable => ()
 
   /** Never called: we override `getVectorSchemaRoot` so the parent class's `ensureInitialized` path
     * (which is what invokes `readSchema`) never runs. Implementation exists solely to satisfy the

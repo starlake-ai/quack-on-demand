@@ -2,7 +2,6 @@ package ai.starlake.quack.edge.rest
 
 import org.apache.arrow.vector.ipc.{ArrowReader, ArrowStreamWriter}
 
-import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
 
@@ -24,17 +23,8 @@ import java.nio.channels.WritableByteChannel
 final class RestArrowWriter(reader: ArrowReader, maxRows: Int, maxBytes: Long = Long.MaxValue):
 
   private val capped = CappedArrowReader(reader, maxRows, maxBytes)
-  private val buffer = new ByteArrayOutputStream()
-  private val sink   = new WritableByteChannel:
-    @volatile private var open      = true
-    def write(src: ByteBuffer): Int =
-      val n = src.remaining()
-      val a = new Array[Byte](n)
-      src.get(a)
-      buffer.write(a)
-      n
-    def isOpen: Boolean = open
-    def close(): Unit   = open = false
+
+  private val sink = new RestArrowWriter.Sink
 
   private var writer: ArrowStreamWriter = null
   private var ended                     = false
@@ -79,12 +69,34 @@ final class RestArrowWriter(reader: ArrowReader, maxRows: Int, maxBytes: Long = 
       capped.loadNextBatch(): Unit
       writer.end()
 
-  private def drain(): Array[Byte] =
-    val bytes = buffer.toByteArray
-    buffer.reset()
-    bytes
+  private def drain(): Array[Byte] = sink.drain()
 
   /** Releases the writer and the capped root; the source reader stays with its owner. */
   def close(): Unit =
     try if writer != null then writer.close()
     finally capped.close()
+
+object RestArrowWriter:
+
+  /** The bytes of the batch being written, copied straight from the writer's buffers into one
+    * reused array that grows to the largest batch.
+    */
+  private final class Sink extends WritableByteChannel:
+    @volatile private var open      = true
+    private var buf                 = new Array[Byte](64 * 1024)
+    private var len                 = 0
+    def write(src: ByteBuffer): Int =
+      val n = src.remaining()
+      if len + n > buf.length then
+        buf = java.util.Arrays.copyOf(buf, math.max(len + n, buf.length * 2))
+      src.get(buf, len, n)
+      len += n
+      n
+    def isOpen: Boolean = open
+    def close(): Unit   = open = false
+
+    /** What was written since the last drain. */
+    def drain(): Array[Byte] =
+      val bytes = java.util.Arrays.copyOf(buf, len)
+      len = 0
+      bytes

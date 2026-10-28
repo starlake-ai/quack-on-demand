@@ -1427,10 +1427,12 @@ In-engine authorization, Phase D: the node decides every statement alone.
   `limit` to page under it (a Parquet page that outgrows it before its first byte answers
   `400 invalid_parameter`). An answer still running `QOD_REST_MAX_STREAM_SEC` (600) after its
   result arrived is aborted (a `504` before the first batch), the node read in progress forced to
-  return (result closed, thread interrupted) and everything released. At most `QOD_REST_MAX_CONCURRENT_PARQUET` (2) Parquet bodies stream at once, one
+  return (result closed, thread interrupted) and everything released; a read blocked inside the
+  native node client that neither ends holds the release until the node answers. At most
+  `QOD_REST_MAX_CONCURRENT_PARQUET` (2) Parquet bodies stream at once, one
   per user, each through an in-process DuckDB limited to 64 MB, past which the answer is
-  `429 too_many_requests`; the slot is held only while the body is written, never across the
-  probe or a resume.
+  `429 too_many_requests`, refused before the data statement runs; the slot is held from then
+  until the body is written, never across the probe or a resume.
   Views keep their rules in every format: no `AT` clause, no
   `X-QoD-Snapshot`, no caching, `asOf*` a 400. Parquet needs named pipes and is not offered on
   Windows (406). Buffered JSON and CSV answers now carry `Content-Length`. The OpenAPI document
