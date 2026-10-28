@@ -1,0 +1,1 @@
+CREATE SECURE VIEW sv_sub AS SELECT id FROM main.u WHERE id IN (SELECT id FROM t UNION SELECT id FROM main.t);

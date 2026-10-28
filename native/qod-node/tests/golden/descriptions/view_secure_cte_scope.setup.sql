@@ -1,0 +1,2 @@
+CREATE TABLE main.a (id INTEGER);
+CREATE SECURE VIEW sv_scope AS SELECT x.id FROM (WITH a AS (SELECT id FROM main.u) SELECT id FROM a) x JOIN a USING (id);

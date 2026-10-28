@@ -1,0 +1,1 @@
+CREATE SECURE VIEW sv_q AS SELECT * FROM query('SELECT id FROM main.u');

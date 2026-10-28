@@ -157,7 +157,7 @@ void RunGoldens(const fs::path &dir) {
 		names.push_back(file.substr(0, file.size() - suffix.size()));
 	}
 	std::sort(names.begin(), names.end());
-	if (names.size() < 107) {
+	if (names.size() < 116) {
 		Fail("expected the full golden corpus, found " + std::to_string(names.size()) + " cases in " + dir.string());
 	}
 	for (auto &name : names) {
@@ -264,7 +264,7 @@ void CheckSessionState() {
 	auto &capture = TheCapture();
 	capture = qod_test::Capture();
 	capture.principal = qod_test::Alice();
-	for (auto sql : {"CREATE TABLE u (id INTEGER)", "CREATE SECURE VIEW sv AS SELECT id FROM u",
+	for (auto sql : {"CREATE TABLE u (id INTEGER)", "CREATE SECURE VIEW sv AS SELECT id FROM main.u",
 	                 "ATTACH ':memory:' AS m1"}) {
 		qod::RunStrict(con, sql, "setup");
 	}

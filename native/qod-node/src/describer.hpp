@@ -66,7 +66,9 @@ void RecordSessionPaths(duckdb::ClientContext &context);
 //! principal: an operator type, expression class or extension operator it does not know, a locked
 //! setting, a nested schema, qod_session outside the prelude; inside a secure view a temporary
 //! object, current_setting(), a time-travel (AT) read of the view, or an object or function of a
-//! catalog other than the view's that the view's definition does not name; and a statement with a
+//! catalog other than the view's that the view's definition does not name; a secure view whose
+//! definition (or a plain view it reads) names a table without its schema, outside the WITH clause
+//! that defines it, or reads tables through a SQL string (query, query_table); and a statement with a
 //! secure view on a session holding user variables, temporary entries other than tables and
 //! sequences, a changed setting other than schema and search_path, or set paths other than its
 //! SessionPaths (getvariable() folds to a constant at bind, and a temporary macro, view or type, a

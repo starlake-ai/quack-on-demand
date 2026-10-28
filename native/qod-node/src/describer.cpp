@@ -44,7 +44,10 @@
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
-#include "duckdb/parser/tableref/basetableref.hpp"
+#include "duckdb/parser/expression/subquery_expression.hpp"
+#include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/query_node/list.hpp"
+#include "duckdb/parser/tableref/list.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/constraints/bound_check_constraint.hpp"
 #include "duckdb/planner/expression/list.hpp"
@@ -190,6 +193,219 @@ SQLStatement *Unwrapped(SQLStatement *statement) {
 		                : statement->Cast<PrepareStatement>().statement.get();
 	}
 	return statement;
+}
+
+//! A secure view's definition, read structurally (CONTRACT Addendum 4 item 14): a view body binds an
+//! unqualified table name in the view's own schema first, so a user with create there could shadow it.
+//! Refuses a base table reference without a schema (a CTE name in scope excepted, in the scope that
+//! defines it), and a table read through a SQL string (query, query_table), whose names the walk
+//! cannot see. Collects the catalogs the definition qualifies a table with, and those of every plain
+//! view it reads, whose definition is held to the same rule (they expand in the body, unseen).
+class Definition {
+public:
+	Definition(ClientContext &context, const std::string &view_catalog)
+	    : context_(context), view_catalog_(view_catalog) {
+	}
+
+	void Query(const QueryNode &node, std::set<std::string> scope);
+
+	std::set<std::string> catalogs;
+
+private:
+	//! How deep plain views may nest inside a secure view's definition.
+	static constexpr int kMaxViewDepth = 8;
+
+	void Ref(const TableRef &ref, const std::set<std::string> &scope);
+	void Expr(const ParsedExpression &expr, const std::set<std::string> &scope);
+	void Table(const BaseTableRef &table, const std::set<std::string> &scope);
+
+	ClientContext &context_;
+	std::string view_catalog_;
+	int depth_ = 0;
+};
+
+void Definition::Query(const QueryNode &node, std::set<std::string> scope) {
+	// A WITH clause's names are in scope in its own bodies (a later one, or a recursive one, may read
+	// them) and in the query it heads, subqueries included; not outside it.
+	for (auto &entry : node.cte_map.map) {
+		scope.insert(StringUtil::Lower(Text(entry.first)));
+	}
+	for (auto &entry : node.cte_map.map) {
+		if (entry.second && entry.second->query_node) {
+			Query(*entry.second->query_node, scope);
+		}
+	}
+	switch (node.type) {
+	case QueryNodeType::SELECT_NODE: {
+		auto &select = node.Cast<SelectNode>();
+		if (select.from_table) {
+			Ref(*select.from_table, scope);
+		}
+		for (auto &expr : select.select_list) {
+			Expr(*expr, scope);
+		}
+		for (auto &expr : select.groups.group_expressions) {
+			Expr(*expr, scope);
+		}
+		for (auto *clause : {&select.where_clause, &select.having, &select.qualify}) {
+			if (*clause) {
+				Expr(**clause, scope);
+			}
+		}
+		break;
+	}
+	case QueryNodeType::SET_OPERATION_NODE:
+		for (auto &child : node.Cast<SetOperationNode>().children) {
+			Query(*child, scope);
+		}
+		break;
+	case QueryNodeType::RECURSIVE_CTE_NODE: {
+		auto &recursive = node.Cast<RecursiveCTENode>();
+		scope.insert(StringUtil::Lower(Text(recursive.ctename)));
+		Query(*recursive.left, scope);
+		Query(*recursive.right, scope);
+		for (auto &expr : recursive.key_targets) {
+			Expr(*expr, scope);
+		}
+		break;
+	}
+	case QueryNodeType::CTE_NODE: {
+		auto &cte = node.Cast<CTENode>();
+		scope.insert(StringUtil::Lower(Text(cte.ctename)));
+		if (cte.query) {
+			Query(*cte.query, scope);
+		}
+		if (cte.child) {
+			Query(*cte.child, scope);
+		}
+		break;
+	}
+	default:
+		Unsupported("a secure view whose definition is a " + EnumUtil::ToString(node.type));
+	}
+	// LIMIT, OFFSET, ORDER BY and DISTINCT ON expressions (read only; the iterator wants a mutable node).
+	ParsedExpressionIterator::EnumerateQueryNodeModifiers(const_cast<QueryNode &>(node),
+	                                                      [&](unique_ptr<ParsedExpression> &child) {
+		                                                      if (child) {
+			                                                      Expr(*child, scope);
+		                                                      }
+	                                                      });
+}
+
+void Definition::Ref(const TableRef &ref, const std::set<std::string> &scope) {
+	switch (ref.type) {
+	case TableReferenceType::BASE_TABLE:
+		Table(ref.Cast<BaseTableRef>(), scope);
+		break;
+	case TableReferenceType::JOIN: {
+		auto &join = ref.Cast<JoinRef>();
+		Ref(*join.left, scope);
+		Ref(*join.right, scope);
+		if (join.condition) {
+			Expr(*join.condition, scope);
+		}
+		break;
+	}
+	case TableReferenceType::SUBQUERY:
+		Query(*ref.Cast<SubqueryRef>().subquery->node, scope);
+		break;
+	case TableReferenceType::TABLE_FUNCTION: {
+		auto &function = *ref.Cast<TableFunctionRef>().function;
+		if (function.GetExpressionClass() == ExpressionClass::FUNCTION) {
+			auto name = StringUtil::Lower(Text(function.Cast<FunctionExpression>().GetQualifiedName().Name()));
+			if (name == "query" || name == "query_table") {
+				Unsupported("a secure view whose definition reads tables named in a string (" + name + ")");
+			}
+		}
+		Expr(function, scope);
+		break;
+	}
+	case TableReferenceType::EXPRESSION_LIST:
+		for (auto &row : ref.Cast<ExpressionListRef>().values) {
+			for (auto &expr : row) {
+				Expr(*expr, scope);
+			}
+		}
+		break;
+	case TableReferenceType::PIVOT: {
+		auto &pivot = ref.Cast<PivotRef>();
+		Ref(*pivot.source, scope);
+		for (auto &expr : pivot.aggregates) {
+			Expr(*expr, scope);
+		}
+		for (auto &column : pivot.pivots) {
+			for (auto &expr : column.pivot_expressions) {
+				Expr(*expr, scope);
+			}
+		}
+		break;
+	}
+	case TableReferenceType::EMPTY_FROM:
+	case TableReferenceType::COLUMN_DATA:
+	case TableReferenceType::DELIM_GET:
+		break;
+	default:
+		// SHOW_REF (DESCRIBE, SUMMARIZE) and anything a DuckDB upgrade adds.
+		Unsupported("a secure view whose definition holds a " + EnumUtil::ToString(ref.type) + " reference");
+	}
+}
+
+void Definition::Expr(const ParsedExpression &expr, const std::set<std::string> &scope) {
+	if (expr.GetExpressionClass() == ExpressionClass::SUBQUERY) {
+		auto &subquery = expr.Cast<SubqueryExpression>();
+		if (subquery.Subquery() && subquery.Subquery()->node) {
+			Query(*subquery.Subquery()->node, scope);
+		}
+		if (subquery.GetChild()) {
+			Expr(*subquery.GetChild(), scope);
+		}
+		return;
+	}
+	ParsedExpressionIterator::EnumerateChildren(expr, [&](const ParsedExpression &child) { Expr(child, scope); });
+}
+
+void Definition::Table(const BaseTableRef &table, const std::set<std::string> &scope) {
+	auto &name = table.GetQualifiedName();
+	if (name.Schema().empty()) {
+		if (name.Catalog().empty() && scope.count(StringUtil::Lower(Text(name.Name()))) != 0) {
+			return;
+		}
+		Unsupported("a secure view whose definition names the table " + Text(name.Name()) + " without its schema");
+	}
+	if (!name.Catalog().empty()) {
+		catalogs.insert(StringUtil::Lower(Text(name.Catalog())));
+	}
+	// A plain view it reads expands in the body, unseen: its definition follows the same rule, and the
+	// catalogs it qualifies are the body's too (review M-d). Looked up as the body binds it: the view's
+	// catalog first, then the session's resolution.
+	optional_ptr<CatalogEntry> entry;
+	if (name.Catalog().empty()) {
+		entry = Catalog::GetEntry(context_,
+		                          EntryLookupInfo(CatalogType::VIEW_ENTRY,
+		                                          QualifiedName(Identifier(view_catalog_), name.Schema(), name.Name())),
+		                          OnEntryNotFound::RETURN_NULL);
+	}
+	if (!entry) {
+		entry =
+		    Catalog::GetEntry(context_, EntryLookupInfo(CatalogType::VIEW_ENTRY, name), OnEntryNotFound::RETURN_NULL);
+	}
+	if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
+		return;
+	}
+	auto &view = entry->Cast<ViewCatalogEntry>();
+	if (view.security_type == ViewSecurityType::SECURE_VIEW) {
+		// Its own boundary checks its definition when the walk reaches it.
+		return;
+	}
+	if (++depth_ > kMaxViewDepth) {
+		Unsupported("a secure view whose definition nests plain views too deep");
+	}
+	catalogs.insert(StringUtil::Lower(Text(view.ParentCatalog().GetName())));
+	auto inner_catalog = view_catalog_;
+	view_catalog_ = Text(view.ParentCatalog().GetName());
+	Query(*view.GetQuery().node, {});
+	view_catalog_ = inner_catalog;
+	depth_--;
 }
 
 class Walker {
@@ -463,7 +679,11 @@ std::string Walker::SecureView(LogicalSecureView &view, const std::string &via) 
 	if (!entry || entry->type != CatalogType::VIEW_ENTRY) {
 		Unsupported("a secure view without its catalog entry");
 	}
-	auto catalogs = QualifiersIn(entry->Cast<ViewCatalogEntry>().GetQuery().ToString());
+	auto &query = entry->Cast<ViewCatalogEntry>().GetQuery();
+	Definition definition(context_, Text(path[0]));
+	definition.Query(*query.node, {});
+	auto catalogs = QualifiersIn(query.ToString());
+	catalogs.insert(definition.catalogs.begin(), definition.catalogs.end());
 	catalogs.insert(StringUtil::Lower(Text(path[0])));
 	view_catalogs_[inner] = std::move(catalogs);
 	return inner;
