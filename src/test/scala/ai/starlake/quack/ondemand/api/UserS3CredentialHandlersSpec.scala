@@ -8,6 +8,8 @@ import ai.starlake.quack.ondemand.api.Dtos.given
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import cats.effect.unsafe.implicits.global
 import io.circe.syntax.*
 import org.scalatest.flatspec.AnyFlatSpec
@@ -22,8 +24,9 @@ class UserS3CredentialHandlersSpec extends AnyFlatSpec with Matchers:
   private val Token  = "user-session-token"
 
   private final class Fixture(overlap: String => Either[String, Option[String]] = _ => Right(None)):
-    val store = new InMemoryControlPlaneStore()
-    val sup   = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, store)
+    val store     = new InMemoryControlPlaneStore()
+    val auditRows = new RecordingTelemetryStore
+    val sup       = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, store)
     sup.restore()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenant(Tenant("globex")).unsafeRunSync()
@@ -54,7 +57,8 @@ class UserS3CredentialHandlersSpec extends AnyFlatSpec with Matchers:
       sup,
       RestCaller(sessionOf = sessions.get, patOf = _ => None),
       allowedEndpoints = List("http://127.0.0.1:9000"),
-      dataFolderOverlap = overlap
+      dataFolderOverlap = overlap,
+      audit = new AuditRecorder(auditRows, _ => None)
     )
 
     def add(token: String, req: ProfileS3AddRequest) = h.addMine(req, Some(token)).unsafeRunSync()
@@ -175,4 +179,21 @@ class UserS3CredentialHandlersSpec extends AnyFlatSpec with Matchers:
   "the add request" should "never print its secret or token" in {
     req().toString should not include Secret
     req().toString should not include Token
+  }
+
+  "an add and a remove" should "each write their audit row, naming the row but no key" in {
+    val f = new Fixture
+    val c = f.add("alice-tok", req()).toOption.get
+    f.h.removeMine(ProfileS3RemoveRequest(c.id), Some("alice-tok")).unsafeRunSync().isRight shouldBe
+      true
+    val rows = f.auditRows.events.toList
+    rows.map(_.action) shouldBe List(
+      AuditActions.UserS3CredentialAdd,
+      AuditActions.UserS3CredentialRemove
+    )
+    rows.foreach { r =>
+      r.target shouldBe Some("s3://acme-etl/")
+      r.detail shouldBe Map("user" -> f.alice, "id" -> c.id)
+      r.detail.values.mkString should not include Secret
+    }
   }

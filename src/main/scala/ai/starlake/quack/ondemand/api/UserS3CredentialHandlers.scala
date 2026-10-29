@@ -120,7 +120,8 @@ final class UserS3CredentialHandlers(
       "ok",
       tenant = u.tenant,
       target = Some(c.scope),
-      detail = Map("user" -> u.id, "credential" -> c.id)
+      // The row's own id, under a key AuditEvent admits (it refuses any key naming a credential).
+      detail = Map("user" -> u.id, "id" -> c.id)
     )
 
   private def missingUser(id: String): SupervisorError =
