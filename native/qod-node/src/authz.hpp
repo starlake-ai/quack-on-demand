@@ -72,6 +72,12 @@ constexpr const char *kNoVerdict = "QoD: statement reached prepare finalization 
 //! the manager's own), whose plans are admitted on the node.
 std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict);
 
+//! True when the statement's verdict `pending` was taken for `current`'s principal, policy version and
+//! session context, and only its time ran out at `now_ms`, between post_bind and prepare finalization
+//! (T10-N2). OnFinalizePrepare then asks DuckDB to bind the statement once more, which decides it
+//! again, instead of refusing it as one that never had a verdict.
+bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms);
+
 //! True when a prepared statement must be bound (described and decided) again before it executes:
 //! no verdict is stored with it (`stored` null), or the stored one was taken for another principal,
 //! policy version or session context than `current`, or has expired at `now_ms`.

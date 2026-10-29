@@ -16,6 +16,7 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 #include "json.hpp"
@@ -111,9 +112,22 @@ qod::DecideResult TestDecider(const qod::DecideCall &call) {
 	} else {
 		result.status = qod::DecideResult::Status::Allow;
 		result.has_verdict = true;
-		result.verdict.expires_at = now_ms + 60000;
+		// The `short_lived` table's verdicts run out within planning when `expire_in_planning` is on.
+		result.verdict.expires_at =
+		    now_ms + (call.description.find("\"name\":\"short_lived\"") != std::string::npos ? 10 : 60000);
 	}
 	return result;
+}
+
+//! An optimizer that runs after qod-node's pre_optimize: once `expire_in_planning` is on, it moves the
+//! clock 20 ms on (one shot), as planning that outlasts a verdict would (T10-N2).
+bool expire_in_planning = false;
+
+void ExpireInPlanning(duckdb::OptimizerExtensionInput &input, duckdb::unique_ptr<duckdb::LogicalOperator> &plan) {
+	if (expire_in_planning) {
+		expire_in_planning = false;
+		now_ms += 20;
+	}
 }
 
 //! A post_bind registered after qod-node's: wraps a PROJECTION in a LIMIT while `rewrite` is on, as an
@@ -180,6 +194,9 @@ int main() {
 	duckdb::PlannerExtension rewriter;
 	rewriter.post_bind_function = Rewrite;
 	duckdb::PlannerExtension::Register(duckdb::DBConfig::GetConfig(*db.instance), rewriter);
+	duckdb::OptimizerExtension expirer;
+	expirer.optimize_function = ExpireInPlanning;
+	duckdb::OptimizerExtension::Register(duckdb::DBConfig::GetConfig(*db.instance), expirer);
 	// Stand in for the two settings quack registers, so SET and RESET reach post_bind.
 	auto &config = duckdb::DBConfig::GetConfig(*db.instance);
 	config.AddExtensionOption("quack_authorization_function", "test stand-in", duckdb::LogicalType::VARCHAR,
@@ -530,6 +547,26 @@ int main() {
 	rewrite = true;
 	ExpectQuery(frank, "SELECT 8", "QoD: denied by test", "the plan another post_bind rewrote");
 	rewrite = false;
+
+	// ---- T10-N2: a verdict that runs out between post_bind and prepare finalization: DuckDB binds the
+	// statement once more and it is decided again, instead of failing as one without a verdict
+	ExpectQuery(internal, "CREATE TABLE short_lived AS SELECT 3 AS x", "", "a table with short verdicts");
+	expire_in_planning = true;
+	before = decide_calls.size();
+	auto short_lived = FirstValue(frank, "SELECT x FROM short_lived");
+	if (short_lived != "3") {
+		std::cerr << "FAIL: the statement whose verdict ran out did not run: " << short_lived << std::endl;
+		failures++;
+	}
+	if (expire_in_planning) {
+		std::cerr << "FAIL: the clock was never moved during planning" << std::endl;
+		failures++;
+	}
+	if (decide_calls.size() != before + 2) {
+		std::cerr << "FAIL: a verdict that ran out in planning: " << (decide_calls.size() - before)
+		          << " decisions, not two (the bind, and the bind again)" << std::endl;
+		failures++;
+	}
 
 	// ---- a prepared statement runs under its verdict, and is decided again after a policy change
 	auto stored = frank.Prepare("SELECT 9");

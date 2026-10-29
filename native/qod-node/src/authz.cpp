@@ -135,6 +135,12 @@ std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict) {
 	return privileged || has_verdict ? "" : kNoVerdict;
 }
 
+bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms) {
+	return pending && pending->principal_id == current.principal.id &&
+	       pending->policy_version == current.policy_version && pending->ctx == current.ctx &&
+	       pending->expires_at <= now_ms;
+}
+
 bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms) {
 	return !stored || stored->principal_id != current.principal.id ||
 	       stored->policy_version != current.policy_version || stored->ctx != current.ctx ||

@@ -129,6 +129,19 @@ int main() {
 	stale.ctx = std::string(64, 'b');
 	Expect(qod::RebindRequired(&stale, session, now_ms), "another session context");
 	Expect(qod::RebindRequired(&stored, session, now_ms + 1000), "an expired verdict");
+	// T10-N2: a verdict of this session whose time ran out during planning is decided again.
+	Expect(qod::ExpiredInPlanning(&stored, session, now_ms + 1000), "a verdict that ran out");
+	Expect(!qod::ExpiredInPlanning(&stored, session, now_ms), "a verdict still valid");
+	Expect(!qod::ExpiredInPlanning(nullptr, session, now_ms + 1000), "no verdict at all");
+	stale = stored;
+	stale.principal_id = "u-2";
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "another principal's verdict");
+	stale = stored;
+	stale.policy_version = 6;
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "an older policy version's");
+	stale = stored;
+	stale.ctx = std::string(64, 'b');
+	Expect(!qod::ExpiredInPlanning(&stale, session, now_ms + 1000), "another session context's");
 	stale = stored;
 	stale.expires_at = qod::kNeverExpires;
 	Expect(!qod::RebindRequired(&stale, session, now_ms + 1000), "a local allow never expires");

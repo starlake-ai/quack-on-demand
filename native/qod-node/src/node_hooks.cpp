@@ -261,9 +261,18 @@ public:
 		auto privileged = installed_ && (current_.principal.superuser || current_.principal.system);
 		// A verdict for this session, still valid: not one left by another principal, policy version or
 		// context, nor one that expired.
-		auto has_verdict = pending_.has_value() && authz_ && !RebindRequired(&*pending_, current_, authz_->Now());
+		auto now = authz_ ? authz_->Now() : 0;
+		auto has_verdict = pending_.has_value() && authz_ && !RebindRequired(&*pending_, current_, now);
 		auto refusal = FinalizeRefusal(installed_, privileged, has_verdict);
+		auto expired = !refusal.empty() && installed_ && authz_ && pending_.has_value() &&
+		               ExpiredInPlanning(&*pending_, current_, now);
 		pending_.reset();
+		if (expired) {
+			// The verdict ran out while the statement was planned: DuckDB binds it once more
+			// (ClientContext::CreatePreparedStatement), and post_bind decides it again. That second
+			// pass is not finalized through here: post_bind and pre_optimize enforce it.
+			return RebindQueryInfo::ATTEMPT_TO_REBIND;
+		}
 		if (!refusal.empty()) {
 			throw PermissionException(refusal);
 		}
