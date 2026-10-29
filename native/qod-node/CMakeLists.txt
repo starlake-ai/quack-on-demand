@@ -281,6 +281,11 @@ if(QOD_NODE_TESTS)
   qod_node_test(functions_list_test)
   add_test(NAME functions_list COMMAND functions_list_test)
   qod_node_test(handle_tool)
+  # Task 14's per-step timings, run by hand on a quiet machine (no add_test: timings are not tests).
+  if(NOT WIN32)
+    qod_node_test(authz_bench)
+    target_link_libraries(authz_bench PRIVATE qod_node_test_http)
+  endif()
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
     add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh

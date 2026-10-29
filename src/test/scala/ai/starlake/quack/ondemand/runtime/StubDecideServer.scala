@@ -27,11 +27,16 @@ final class StubDecideServer private (secret: String, server: HttpServer):
   @volatile var status: Int                                    = 200
 
   private val asked = new ConcurrentLinkedQueue[StubDecideServer.Asked]()
+  private val plans = new java.util.concurrent.atomic.AtomicLong(0)
 
   def url: String = s"http://127.0.0.1:${server.getAddress.getPort}"
 
   /** Every (kind, description) asked so far, oldest first. */
   def requests: List[(String, Json)] = asked.asScala.toList.map(a => (a.kind, a.description))
+
+  /** The plan decisions asked so far, in constant time (the latency spec reads it every statement).
+    */
+  def planCalls: Long = plans.get()
 
   /** The principal id of every call so far, oldest first. */
   def principals: List[String] = asked.asScala.toList.map(_.principal)
@@ -73,6 +78,7 @@ final class StubDecideServer private (secret: String, server: HttpServer):
       ctx       <- payload.hcursor.get[String]("ctx").left.map(_.message)
     yield
       asked.add(StubDecideServer.Asked(kind, description, principal))
+      if kind == "plan" then plans.incrementAndGet()
       val answer = decide(kind, description)
       val now    = System.currentTimeMillis()
       Verdicts.sign(
