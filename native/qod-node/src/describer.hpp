@@ -84,6 +84,14 @@ void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path);
 Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan, const Principal &principal,
                    const std::string *statement_text = nullptr);
 
+//! CONTRACT Addendum 4 item 32 B, for a statement that failed to bind (ClientContextState::OnPlanningError):
+//! the call names `statement` reaches, and the definitions of the views it reads, judged on `context` as
+//! Describe judges them for a non-superuser. Throws duckdb::PermissionException with the refusal, so it
+//! wins over the binder's error, which can quote the value of a call DuckDB folded while binding (a cast
+//! of current_setting(...) that fails). When the walk itself cannot resolve a name, returns: the binder's
+//! error stands.
+void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement);
+
 //! `given` as a description carries it, rendered as the parse screen renders it (MakeLocation): an
 //! s3:// URL naming a bucket unchanged, an absolute local path as ResolveLocalPath resolves it. Anything
 //! MakeLocation refuses (a relative path, an empty, '.' or '..' segment, another scheme) is refused

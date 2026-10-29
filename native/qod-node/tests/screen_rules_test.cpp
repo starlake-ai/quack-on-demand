@@ -4,6 +4,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "locations.hpp"
 #include "screen_rules.hpp"
 #include "sql_script.hpp"
@@ -745,29 +746,27 @@ int main() {
 	// ---- review m1: unlist is DuckDB's binder alias of unnest
 	Admitted("SELECT unlist([1, 2])", 0, "unlist, like unnest");
 
-	// ---- Addendum 4 item 30a: a catalog macro bearing a classified built-in name makes the name
-	// unclassified for users, however the call reaches it, unless the call names the system catalog
-	Admitted("SELECT lower('A')", 0, "a built-in no catalog shadows");
+	// ---- Addendum 4 item 32: what a name resolves to (a catalog macro shadowing a built-in) is judged at
+	// post_bind on the client's context (describer_test); the screen collects the names it reaches
 	auto planted = con.Query("ATTACH ':memory:' AS lk");
-	Expect(!planted->HasError(), "attach a catalog for the shadowing macros");
+	Expect(!planted->HasError(), "attach a catalog for a shadowing macro");
 	planted = con.Query("CREATE MACRO lk.main.lower(x) AS 'shadowed'");
 	Expect(!planted->HasError(), "a macro shadowing lower");
-	planted = con.Query("CREATE MACRO lk.main.generate_series(n) AS TABLE SELECT 1 AS x");
-	Expect(!planted->HasError(), "a table macro shadowing generate_series");
-	for (auto shadowed : {"SELECT lower('A')", "SELECT 'A'.lower()", "SELECT lk.main.lower('A')",
-	                      "SELECT main.lower('A')", "SELECT upper(lower(v)) FROM t",
-	                      "SELECT list_transform(['A'], x -> lower(x))"}) {
-		Refused(shadowed, "QoD: function lower is not classified: a catalog entry outside the system catalog",
-		        shadowed);
-	}
-	Refused("SELECT * FROM generate_series(1, 3)", "QoD: function generate_series is not classified",
-	        "a table macro shadowing a built-in table function");
-	for (auto known : {"SELECT system.main.lower('A')", "SELECT upper('A')",
-	                   "SELECT * FROM system.main.generate_series(1, 3)"}) {
-		Admitted(known, 0, known);
+	Admitted("SELECT lower('A')", 0, "a shadowed name, which the screen no longer judges by catalog");
+	{
+		duckdb::Parser parser(*context);
+		parser.ParseQuery("SELECT lk.main.lower(v), row_number() OVER () FROM t JOIN v2 ON true, range(3) "
+		                  "WHERE x IN (SELECT upper(y) FROM u)");
+		auto reached = qod::ReachedNames(*context, *parser.statements[0]);
+		std::string seen;
+		for (auto &name : reached) {
+			seen += std::to_string(static_cast<int>(name.kind)) + ":" + name.name.ToString() + " ";
+		}
+		for (auto needle : {"0:lk.main.lower", "2:row_number", "3:t", "3:v2", "1:\"range\"", "0:upper", "3:u"}) {
+			Expect(seen.find(needle) != std::string::npos, std::string("ReachedNames lacks ") + needle + ": " + seen);
+		}
 	}
 	con.Query("DETACH lk");
-	Admitted("SELECT lower('A')", 0, "the built-in again once the shadowing catalog is gone");
 
 	if (failures == 0) {
 		std::cout << "screen_rules_test: all passed" << std::endl;

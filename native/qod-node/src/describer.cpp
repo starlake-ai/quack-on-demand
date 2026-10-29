@@ -2,9 +2,11 @@
 
 #include "crypto.hpp"
 #include "file_functions.hpp"
+#include "function_classes.hpp"
 #include "json.hpp"
 #include "json_writer.hpp"
 #include "locations.hpp"
+#include "screen_rules.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
@@ -664,6 +666,374 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 		return;
 	}
 	Unsupported("a secure view whose definition reads the plain view " + bound.ToString());
+}
+
+//! CONTRACT Addendum 4 item 32 (B): the call names a statement reaches as written, resolved as DuckDB
+//! resolves them on the client's own context and transaction (its search path, the catalog snapshot its
+//! transaction holds). DuckDB folds a foldable argument to its value while binding
+//! (FunctionBinder::BindScalarFunction, HasNullConstantArgument), in the statement, in a view's body and
+//! in a macro's, so the plan the describer reads may hold no trace of a call: the names are judged here.
+//! A non-superuser may call a name that resolves to DuckDB's own entry (BuiltIn) and that the
+//! classification lists; outside a secure view's boundary, not a superuser-class one. Every view the
+//! statement reads by name, plain or secure, is walked transitively with the search path DuckDB binds
+//! its body with (Binder::GetSearchPath(view catalog, view schema, true), bind_basetableref.cpp:333-335,
+//! the client's set paths behind it); a macro that is not DuckDB's own is refused by name, so no macro
+//! body is walked (a built-in one calls built-ins only). The statement's own names come from the parse
+//! screen's walk (ReachedNames); a view's from the definition walk below, which follows the shapes a
+//! view's query takes (a SELECT, a set operation, CTEs).
+class CallNames {
+public:
+	explicit CallNames(ClientContext &context) : context_(context) {
+	}
+
+	//! Every statement of `sql`.
+	void Sql(const std::string &sql) {
+		Parser parser(context_);
+		parser.ParseQuery(sql);
+		for (auto &statement : parser.statements) {
+			Statement(*statement);
+		}
+	}
+
+	//! The statement's own names. The parse screen refused its unclassified and superuser-class names
+	//! before binding (items 9 and 30); what it cannot see is the entry a classified name resolves to on
+	//! the client's context, judged here, and the definitions of the views it reads, walked in full.
+	void Statement(SQLStatement &statement) {
+		CatalogEntryRetriever session(context_);
+		for (auto &reached : ReachedNames(context_, statement)) {
+			switch (reached.kind) {
+			case ReachedName::Kind::RELATION:
+				Relation(reached.name, session, false);
+				break;
+			case ReachedName::Kind::TABLE_CALL:
+				Resolution(reached.name, CatalogType::TABLE_FUNCTION_ENTRY, session);
+				break;
+			default:
+				Resolution(reached.name, CatalogType::SCALAR_FUNCTION_ENTRY, session);
+				break;
+			}
+		}
+	}
+
+private:
+	//! Views nested deeper than this are refused (fail closed).
+	static constexpr idx_t kMaxViewDepth = 16;
+
+	optional_ptr<CatalogEntry> Lookup(CatalogEntryRetriever &retriever, CatalogType type, const QualifiedName &name) {
+		return retriever.GetEntry(EntryLookupInfo(type, Binder::BindTableName(retriever, name)),
+		                          OnEntryNotFound::RETURN_NULL);
+	}
+
+	//! The entry a call binds to, as the binder looks it up: the name as written, then (a qualified name
+	//! that finds nothing is a dot call on a column, x.lower() = lower(x)) the bare name.
+	optional_ptr<CatalogEntry> Resolved(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever) {
+		optional_ptr<CatalogEntry> entry;
+		try {
+			entry = Lookup(retriever, type, name);
+		} catch (std::exception &) {
+			entry = nullptr;
+		}
+		if (!entry && name.Path().size() > 1) {
+			entry = Lookup(retriever, type, QualifiedName(name.Name()));
+		}
+		return entry;
+	}
+
+	[[noreturn]] static void NotOwn(const std::string &lower, CatalogEntry &entry) {
+		throw PermissionException("QoD: function " + lower + " is not classified: it resolves to " +
+		                          Text(entry.ParentCatalog().GetName()) + "." + Text(entry.ParentSchema().name) +
+		                          "." + Text(entry.name) + ", which is not DuckDB's own");
+	}
+
+	//! A classified name of the statement's own text that resolves to an entry that is not DuckDB's own
+	//! (a macro shadowing a built-in) is refused.
+	void Resolution(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever) {
+		auto lower = StringUtil::Lower(Text(name.Name()));
+		if (!IsClassifiedFunction(lower)) {
+			return;
+		}
+		auto entry = Resolved(name, type, retriever);
+		if (entry && !BuiltIn(*entry)) {
+			NotOwn(lower, *entry);
+		}
+	}
+
+	//! A call inside a view's or a macro's body, which no screen saw: the entry it resolves to, its
+	//! classification, and outside a secure view's boundary its class.
+	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, bool secure) {
+		auto lower = StringUtil::Lower(Text(name.Name()));
+		auto entry = Resolved(name, type, retriever);
+		if (entry && !BuiltIn(*entry) && secure &&
+		    (entry->type == CatalogType::MACRO_ENTRY || entry->type == CatalogType::TABLE_MACRO_ENTRY)) {
+			// Inside a secure view's boundary a superuser's macro runs with the owner's rights (item 20):
+			// its body's names are judged as the boundary's.
+			Macro(*entry, retriever);
+			return;
+		}
+		if (entry && !BuiltIn(*entry)) {
+			NotOwn(lower, *entry);
+		}
+		if (!IsClassifiedFunction(lower) && lower != "unlist") {
+			throw PermissionException("QoD: function " + lower + " is not classified");
+		}
+		if (!secure && IsSuperuserFunction(lower)) {
+			throw PermissionException("QoD: function " + lower + " is superuser-only");
+		}
+	}
+
+	void Macro(CatalogEntry &entry, CatalogEntryRetriever &retriever) {
+		if (path_.count(&entry) != 0) {
+			Unsupported("a macro that calls itself");
+		}
+		if (path_.size() >= kMaxViewDepth) {
+			Unsupported("views and macros nested deeper than " + std::to_string(kMaxViewDepth));
+		}
+		path_.insert(&entry);
+		for (auto &macro : entry.Cast<MacroCatalogEntry>().macros) {
+			for (auto &parameter : macro->default_parameters) {
+				if (parameter.second) {
+					Expr(*parameter.second, retriever, true);
+				}
+			}
+			if (macro->type == MacroType::SCALAR_MACRO) {
+				auto &body = macro->Cast<ScalarMacroFunction>().expression;
+				if (body) {
+					Expr(*body, retriever, true);
+				}
+			} else if (macro->type == MacroType::TABLE_MACRO) {
+				auto &body = macro->Cast<TableMacroFunction>().query_node;
+				if (body) {
+					Query(*body, retriever, true);
+				}
+			} else {
+				Unsupported("a macro of a kind QoD does not know");
+			}
+		}
+		path_.erase(&entry);
+	}
+
+	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, bool secure) {
+		auto entry = Lookup(retriever, CatalogType::TABLE_ENTRY, name);
+		if (!entry || entry->type != CatalogType::VIEW_ENTRY || BuiltIn(*entry)) {
+			return;
+		}
+		auto &view = entry->Cast<ViewCatalogEntry>();
+		if (path_.count(entry.get()) != 0) {
+			Unsupported("a view that reads itself");
+		}
+		if (path_.size() >= kMaxViewDepth) {
+			Unsupported("views and macros nested deeper than " + std::to_string(kMaxViewDepth));
+		}
+		path_.insert(entry.get());
+		CatalogEntryRetriever body(context_);
+		vector<CatalogSearchEntry> search;
+		search.emplace_back(view.ParentCatalog().GetName(), view.ParentSchema().name);
+		search.emplace_back(view.ParentCatalog().GetName(), Identifier::InvalidSchema(), true);
+		body.SetSearchPath(std::move(search));
+		auto inside = secure || view.security_type == ViewSecurityType::SECURE_VIEW;
+		Query(*view.GetQuery().node, body, inside);
+		path_.erase(entry.get());
+	}
+
+	// ---- a view's definition
+
+	void Query(const QueryNode &node, CatalogEntryRetriever &retriever, bool secure) {
+		for (auto &entry : node.cte_map.map) {
+			if (entry.second) {
+				if (entry.second->query_node) {
+					Query(*entry.second->query_node, retriever, secure);
+				}
+				for (auto &expr : entry.second->key_targets) {
+					Expr(*expr, retriever, secure);
+				}
+				for (auto &expr : entry.second->payload_aggregates) {
+					Expr(*expr, retriever, secure);
+				}
+			}
+		}
+		switch (node.type) {
+		case QueryNodeType::SELECT_NODE: {
+			auto &select = node.Cast<SelectNode>();
+			if (select.from_table) {
+				Ref(*select.from_table, retriever, secure);
+			}
+			for (auto &expr : select.select_list) {
+				Expr(*expr, retriever, secure);
+			}
+			for (auto &expr : select.groups.group_expressions) {
+				Expr(*expr, retriever, secure);
+			}
+			for (auto *clause : {&select.where_clause, &select.having, &select.qualify}) {
+				if (*clause) {
+					Expr(**clause, retriever, secure);
+				}
+			}
+			break;
+		}
+		case QueryNodeType::SET_OPERATION_NODE:
+			for (auto &child : node.Cast<SetOperationNode>().children) {
+				Query(*child, retriever, secure);
+			}
+			break;
+		case QueryNodeType::RECURSIVE_CTE_NODE: {
+			auto &recursive = node.Cast<RecursiveCTENode>();
+			Query(*recursive.left, retriever, secure);
+			Query(*recursive.right, retriever, secure);
+			for (auto &expr : recursive.key_targets) {
+				Expr(*expr, retriever, secure);
+			}
+			break;
+		}
+		case QueryNodeType::CTE_NODE: {
+			auto &cte = node.Cast<CTENode>();
+			if (cte.query) {
+				Query(*cte.query, retriever, secure);
+			}
+			if (cte.child) {
+				Query(*cte.child, retriever, secure);
+			}
+			break;
+		}
+		default:
+			Unsupported("a view whose definition is a " + EnumUtil::ToString(node.type));
+		}
+		ParsedExpressionIterator::EnumerateQueryNodeModifiers(const_cast<QueryNode &>(node),
+		                                                      [&](unique_ptr<ParsedExpression> &child) {
+			                                                      if (child) {
+				                                                      Expr(*child, retriever, secure);
+			                                                      }
+		                                                      });
+	}
+
+	void Ref(const TableRef &ref, CatalogEntryRetriever &retriever, bool secure) {
+		switch (ref.type) {
+		case TableReferenceType::BASE_TABLE: {
+			auto &base = ref.Cast<BaseTableRef>();
+			if (base.at_clause && base.at_clause->ExpressionMutable()) {
+				Expr(*base.at_clause->ExpressionMutable(), retriever, secure);
+			}
+			Relation(base.GetQualifiedName(), retriever, secure);
+			break;
+		}
+		case TableReferenceType::JOIN: {
+			auto &join = ref.Cast<JoinRef>();
+			Ref(*join.left, retriever, secure);
+			Ref(*join.right, retriever, secure);
+			if (join.condition) {
+				Expr(*join.condition, retriever, secure);
+			}
+			for (auto &expr : join.duplicate_eliminated_columns) {
+				Expr(*expr, retriever, secure);
+			}
+			if (join.ranking_expression) {
+				Expr(*join.ranking_expression, retriever, secure);
+			}
+			break;
+		}
+		case TableReferenceType::SUBQUERY:
+			Query(*ref.Cast<SubqueryRef>().subquery->node, retriever, secure);
+			break;
+		case TableReferenceType::TABLE_FUNCTION: {
+			auto &function = ref.Cast<TableFunctionRef>();
+			if (function.function && function.function->GetExpressionClass() == ExpressionClass::FUNCTION) {
+				auto &call = function.function->Cast<FunctionExpression>();
+				Call(call.GetQualifiedName(), CatalogType::TABLE_FUNCTION_ENTRY, retriever, secure);
+				ParsedExpressionIterator::EnumerateChildren(
+				    call, [&](const ParsedExpression &child) { Expr(child, retriever, secure); });
+			} else if (function.function) {
+				Unsupported("a view whose definition calls a table function DuckDB does not name");
+			}
+			if (function.subquery) {
+				Query(*function.subquery->node, retriever, secure);
+			}
+			break;
+		}
+		case TableReferenceType::EXPRESSION_LIST:
+			for (auto &row : ref.Cast<ExpressionListRef>().values) {
+				for (auto &expr : row) {
+					Expr(*expr, retriever, secure);
+				}
+			}
+			break;
+		case TableReferenceType::PIVOT: {
+			auto &pivot = ref.Cast<PivotRef>();
+			if (pivot.source) {
+				Ref(*pivot.source, retriever, secure);
+			}
+			for (auto &expr : pivot.aggregates) {
+				Expr(*expr, retriever, secure);
+			}
+			for (auto &column : pivot.pivots) {
+				for (auto &expr : column.pivot_expressions) {
+					Expr(*expr, retriever, secure);
+				}
+				for (auto &entry : column.entries) {
+					if (entry.expr) {
+						Expr(*entry.expr, retriever, secure);
+					}
+				}
+				if (column.subquery) {
+					Query(*column.subquery, retriever, secure);
+				}
+			}
+			break;
+		}
+		case TableReferenceType::EMPTY_FROM:
+		case TableReferenceType::COLUMN_DATA:
+		case TableReferenceType::DELIM_GET:
+			break;
+		default:
+			Unsupported("a view whose definition holds a " + EnumUtil::ToString(ref.type) + " reference");
+		}
+	}
+
+	void Expr(const ParsedExpression &expr, CatalogEntryRetriever &retriever, bool secure) {
+		switch (expr.GetExpressionClass()) {
+		case ExpressionClass::SUBQUERY: {
+			auto &subquery = expr.Cast<SubqueryExpression>();
+			if (subquery.Subquery() && subquery.Subquery()->node) {
+				Query(*subquery.Subquery()->node, retriever, secure);
+			}
+			break;
+		}
+		case ExpressionClass::FUNCTION:
+			Call(expr.Cast<FunctionExpression>().GetQualifiedName(), CatalogType::SCALAR_FUNCTION_ENTRY, retriever,
+			     secure);
+			break;
+		case ExpressionClass::WINDOW:
+			Call(expr.Cast<WindowExpression>().GetQualifiedName(), CatalogType::SCALAR_FUNCTION_ENTRY, retriever,
+			     secure);
+			break;
+		default:
+			break;
+		}
+		ParsedExpressionIterator::EnumerateChildren(expr,
+		                                            [&](const ParsedExpression &child) { Expr(child, retriever, secure); });
+	}
+
+	ClientContext &context_;
+	//! The views and macros on the walk's current path, for cycles.
+	std::set<const CatalogEntry *> path_;
+};
+
+//! The client statement's own statements: every statement of its text, and an EXECUTE's prepared one
+//! (the statement it re-binds now, under the catalog as it is now).
+void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::string &statement_text) {
+	CallNames names(context);
+	names.Sql(statement_text);
+	std::function<void(LogicalOperator &)> executes = [&](LogicalOperator &op) {
+		if (op.type == LogicalOperatorType::LOGICAL_EXECUTE) {
+			auto &prepared = op.Cast<LogicalExecute>().prepared;
+			if (!prepared || !prepared->unbound_statement) {
+				Unsupported("an EXECUTE whose prepared statement cannot be read");
+			}
+			names.Statement(*prepared->unbound_statement);
+		}
+		for (auto &child : op.children) {
+			executes(*child);
+		}
+	};
+	executes(plan);
 }
 
 class Walker {
@@ -1943,6 +2313,12 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		Walker walker(context, principal, statement_text, plan);
 		walker.Operator(plan, "");
 		walker.CheckSession();
+		if (!principal.superuser && !principal.system && statement_text) {
+			// Item 32 B: every call name the statement reaches, as written, which the plan may not show:
+			// DuckDB folded calls on constants away while binding. Without a text the caller refuses the
+			// statement (node_hooks, Enforce).
+			JudgeCallNames(context, plan, *statement_text);
+		}
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
 	} catch (duckdb::PermissionException &) {
 		throw;
@@ -1958,6 +2334,17 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		throw duckdb::PermissionException("QoD: statement could not be described");
 	}
 	return Described {canonical, Hex(Sha256(canonical))};
+}
+
+void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement) {
+	try {
+		CallNames(context).Statement(statement);
+	} catch (duckdb::PermissionException &) {
+		throw;
+	} catch (std::exception &) {
+		// The walk cannot resolve what the binder could not bind either (a missing catalog): the binder's
+		// own error stands, as it quotes no call's value.
+	}
 }
 
 void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path) {

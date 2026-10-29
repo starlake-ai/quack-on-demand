@@ -255,6 +255,22 @@ public:
 		pending_.reset();
 	}
 
+	//! A statement that failed to bind, for a principal that is neither superuser nor system: the
+	//! call-name walk's refusal replaces the binder's error, which can quote the value of a call DuckDB
+	//! folded while binding (CONTRACT Addendum 4 item 32). DuckDB rethrows its own error otherwise
+	//! (ClientContext::CreatePreparedStatement).
+	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
+		bool judged;
+		{
+			std::lock_guard<std::mutex> guard(lock_);
+			judged = installed_ && !current_.principal.superuser && !current_.principal.system;
+		}
+		if (judged) {
+			JudgeFailedStatement(context, statement);
+		}
+		return RebindQueryInfo::DO_NOT_REBIND;
+	}
+
 	RebindQueryInfo OnFinalizePrepare(ClientContext &context, PreparedStatementData &prepared_statement,
 	                                  PreparedStatementMode mode) override {
 		std::lock_guard<std::mutex> guard(lock_);
@@ -621,6 +637,11 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		return;
 	}
 	auto text = session->StatementText(context);
+	if (!text && !installed.principal.superuser && !installed.principal.system) {
+		// Item 32 B judges the call names as written: a statement whose text is out of reach is refused.
+		throw PermissionException("QoD: statement uses a statement whose text cannot be read, so its calls "
+		                          "cannot be judged, which QoD does not support");
+	}
 	auto described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
 	if (!installed.principal.superuser && !installed.principal.system) {
 		RefuseForeignCopyFunction(context, plan);

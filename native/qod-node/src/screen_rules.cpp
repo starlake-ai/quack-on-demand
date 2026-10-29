@@ -2,10 +2,7 @@
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/connection.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "duckdb/parser/expression/list.hpp"
 #include "duckdb/parser/parsed_data/alter_schema_info.hpp"
@@ -30,8 +27,6 @@
 #include "function_classes.hpp"
 
 #include <map>
-#include <optional>
-#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -391,6 +386,20 @@ public:
 	explicit Screener(ClientContext &context) : context_(context) {
 	}
 
+	//! Where Reach records names; null when nobody collects them.
+	std::vector<ReachedName> *reached_ = nullptr;
+
+	//! Screens one parsed statement as the outer SQL.
+	void Parsed(SQLStatement &statement) {
+		judged_.emplace_back();
+		named_.emplace_back();
+		targets_.emplace_back();
+		Statement(statement);
+		targets_.pop_back();
+		named_.pop_back();
+		judged_.pop_back();
+	}
+
 	//! Screens every statement of `sql`: the outer SQL (nesting 0) or a query() literal.
 	void Text(const std::string &sql, int nesting) {
 		if (nesting > kMaxQueryNesting) {
@@ -499,64 +508,19 @@ private:
 	//! macro: refused (Addendum 4 item 30), whatever qualifies it. DuckDB may fold such a call on
 	//! constants away before the describer sees the plan, so the manager could never class it. After
 	//! SlotCall, which names the slot of a call inside one. unlist is DuckDB's binder alias of unnest.
-	//!
-	//! Item 30a: a classified name is judged as unclassified too when a catalog entry other than the
-	//! system catalog's could be what DuckDB binds it to (a macro shadowing a built-in name, which
-	//! DuckLake persists in its metadata), unless the call names the system catalog itself.
-	void UnclassifiedCall(const QualifiedName &qualified, const std::string &name) {
+	//! What a name resolves to (a catalog macro shadowing a built-in) is judged at post_bind, on the
+	//! client's own context (item 32: the describer's call-name walk).
+	static void UnclassifiedCall(const std::string &name) {
 		if (!IsClassifiedFunction(name) && name != "unlist") {
 			Refuse("function " + name + " is not classified");
 		}
-		auto system = StringUtil::Lower(qualified.Catalog().GetIdentifierName()) == "system";
-		if (!system && ShadowNames().count(name) != 0) {
-			Refuse("function " + name + " is not classified: a catalog entry outside the system catalog " +
-			       "bears its name");
-		}
 	}
 
-	//! The function, macro and table macro names of every attached DuckDB or DuckLake catalog outside
-	//! the system and temp catalogs, lower case, read once per statement. The screen runs on quack's
-	//! own connection, not the client's, and a user may change the search path in the same batch, so
-	//! every such entry counts, not only the first match of one path: each could be the first match of
-	//! a path the user sets. Other catalog types (Postgres, Iceberg) hold no DuckDB macros, and their
-	//! schemas are not listed (a remote call each). A client's temp catalog is its own connection's,
-	//! and no user can create a macro. The catalogs come from duckdb_databases(), and their entries are
-	//! read in a transaction, on a connection of the screen's own (database_manager.hpp needs headers the
-	//! release include tree does not carry, and the screen may run outside a transaction); a failure
-	//! there leaves the statement unscreenable, refused.
-	const std::set<std::string> &ShadowNames() {
-		if (!shadows_) {
-			Connection lister(*context_.db);
-			auto listed = lister.Query("SELECT database_name FROM duckdb_databases() WHERE type IN "
-			                           "('duckdb', 'ducklake') AND database_name NOT IN ('system', 'temp')");
-			if (listed->HasError()) {
-				throw std::runtime_error("the attached catalogs cannot be listed: " + listed->GetError());
-			}
-			std::vector<std::string> catalogs;
-			for (auto &row : *listed) {
-				catalogs.push_back(row.GetValue<std::string>(0));
-			}
-			std::set<std::string> names;
-			auto add = [&](CatalogEntry &entry) {
-				names.insert(StringUtil::Lower(entry.name.GetIdentifierName()));
-			};
-			auto &context = *lister.context;
-			lister.BeginTransaction();
-			try {
-				for (auto &catalog : catalogs) {
-					for (auto &schema : Catalog::GetSchemas(context, catalog)) {
-						schema.get().Scan(context, CatalogType::SCALAR_FUNCTION_ENTRY, add);
-						schema.get().Scan(context, CatalogType::TABLE_FUNCTION_ENTRY, add);
-					}
-				}
-			} catch (...) {
-				lister.Rollback();
-				throw;
-			}
-			lister.Rollback();
-			shadows_ = std::move(names);
+	//! Records a name the walk reached, when a caller collects them (ReachedNames).
+	void Reach(ReachedName::Kind kind, const QualifiedName &name) {
+		if (reached_) {
+			reached_->push_back(ReachedName {kind, name});
 		}
-		return *shadows_;
 	}
 
 	//! A type expression (a CAST target, a column's type): its parameters are folded while binding
@@ -971,6 +935,7 @@ private:
 		switch (ref.type) {
 		case TableReferenceType::BASE_TABLE: {
 			auto &base = ref.Cast<BaseTableRef>();
+			Reach(ReachedName::Kind::RELATION, base.GetQualifiedName());
 			if (base.at_clause) {
 				// bind_basetableref.cpp:111-117 (BindAtClause).
 				InSlot slot(*this, "an AT clause");
@@ -1082,9 +1047,10 @@ private:
 		case ExpressionClass::WINDOW: {
 			auto &window = expression.Cast<WindowExpression>();
 			auto name = StringUtil::Lower(window.GetQualifiedName().Name().GetIdentifierName());
+			Reach(ReachedName::Kind::WINDOW_CALL, window.GetQualifiedName());
 			SuperuserCall(name);
 			SlotCall(window.GetQualifiedName(), name, {"window", "aggregate"});
-			UnclassifiedCall(window.GetQualifiedName(), name);
+			UnclassifiedCall(name);
 			break;
 		}
 		case ExpressionClass::SUBQUERY: {
@@ -1123,6 +1089,7 @@ private:
 	//! JOIN or CALL, whose own name TableFunction already checked.
 	void Call(const FunctionExpression &call, bool table_position) {
 		auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
+		Reach(table_position ? ReachedName::Kind::TABLE_CALL : ReachedName::Kind::CALL, call.GetQualifiedName());
 		if (IsRefusedCall(name)) {
 			Refuse(name + " is reserved to superusers: it runs SQL no screen sees");
 		}
@@ -1132,7 +1099,7 @@ private:
 		} else {
 			SlotCall(call.GetQualifiedName(), name, {"scalar", "aggregate", "macro"});
 		}
-		UnclassifiedCall(call.GetQualifiedName(), name);
+		UnclassifiedCall(name);
 		if (!IsJudgedCall(name)) {
 			return;
 		}
@@ -1151,6 +1118,22 @@ private:
 			auto flag = positional.size() == 1 || (positional.size() == 2 && IsBooleanLiteral(*positional[1]));
 			if (!names || !flag) {
 				Refuse("query_table() needs literal table names");
+			}
+			auto &listed = *positional[0];
+			std::vector<std::string> tables;
+			if (IsStringLiteral(listed)) {
+				tables.push_back(listed.Cast<ConstantExpression>().GetLiteral().text);
+			} else {
+				for (auto &element : listed.Cast<FunctionExpression>().GetArguments()) {
+					tables.push_back(element.GetExpression().Cast<ConstantExpression>().GetLiteral().text);
+				}
+			}
+			for (auto &table : tables) {
+				QualifiedName parsed;
+				std::string error;
+				if (QualifiedName::TryParse(table, parsed, error)) {
+					Reach(ReachedName::Kind::RELATION, parsed);
+				}
 			}
 		} else {
 			// Every DuckDB file reader takes its file, list or pattern as its first positional argument.
@@ -1181,6 +1164,7 @@ private:
 		auto &call = function->Cast<FunctionExpression>();
 		auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
 		if (!IsJudgedCall(name) && !IsRefusedCall(name) && !Contains(kAdmittedTableFunctions, name)) {
+			Reach(ReachedName::Kind::TABLE_CALL, call.GetQualifiedName());
 			Refuse("table function " + name + " is not available to non-superusers");
 		}
 		Deeper deeper(depth_);
@@ -1337,6 +1321,9 @@ private:
 	void Copy(CopyInfo &info) {
 		if (info.select_statement) {
 			Node(*info.select_statement);
+		} else if (!info.is_from) {
+			// COPY <table or view> TO reads it.
+			Reach(ReachedName::Kind::RELATION, info.GetQualifiedName());
 		}
 		CopyOptions(info);
 		if (!info.select_list.empty()) {
@@ -1478,8 +1465,6 @@ private:
 	}
 
 	ClientContext &context_;
-	//! ShadowNames, once read.
-	std::optional<std::set<std::string>> shadows_;
 	int nesting_ = 0;
 	idx_t depth_ = 0;
 	//! The judged calls of each Text level, innermost last.
@@ -1519,6 +1504,19 @@ bool IsPlainExtensionName(const std::string &name) {
 
 CallShapes CallShapesOf(const std::string &sql) {
 	return CallsInTokens(Parser::NormalizeSQLString(sql));
+}
+
+std::vector<ReachedName> ReachedNames(ClientContext &context, SQLStatement &statement) {
+	std::vector<ReachedName> reached;
+	try {
+		Screener screener(context);
+		screener.reached_ = &reached;
+		screener.Parsed(statement);
+	} catch (ScreenRefusal &) {
+		// The names the walk reached before the refusal. Only a text that never went through the screen
+		// gets here: in a session the screen judged the same text before it was bound.
+	}
+	return reached;
 }
 
 ScreenOutcome ScreenStatement(ClientContext &context, const std::string &sql) {

@@ -543,6 +543,34 @@ int main() {
 		}
 	}
 
+	// ---- CONTRACT Addendum 4 item 32: a superuser-class call DuckDB evaluates while binding a view's body
+	// never brings its value back, whether the statement binds or the binder fails on the value
+	auto zone = FirstValue(internal, "SELECT current_setting('TimeZone')");
+	for (auto sql : {"CREATE VIEW leak_cast AS SELECT CAST(current_setting('TimeZone') AS INTEGER) AS x",
+	                 "CREATE VIEW leak_arg AS SELECT abs(CAST(current_setting('TimeZone') AS INTEGER)) AS x"}) {
+		ExpectQuery(internal, sql, "", sql);
+	}
+	// A body DuckDB evaluates while binding (a table function's argument) that binds where it was created
+	// (a schema named 5) and fails on frank's connection, whose schema is not a number: the binder's error
+	// quotes the value.
+	duckdb::Connection creator(db);
+	for (auto sql : {"CREATE SCHEMA \"5\"", "USE memory.\"5\"",
+	                 "CREATE VIEW memory.main.leak_bind AS SELECT * FROM range(CAST(current_setting('schema') AS INTEGER))"}) {
+		ExpectQuery(creator, sql, "", sql);
+	}
+	auto binding = internal.Query("SELECT * FROM leak_bind");
+	Check(binding->HasError() ? binding->GetError() : "", binding->HasError(), "Could not convert string 'main'",
+	      "without the node, binding the view fails quoting the value (the case the refusal must win)");
+	for (auto view : {"leak_cast", "leak_arg", "leak_bind"}) {
+		auto read = frank.Query(std::string("SELECT * FROM ") + view);
+		auto error = read->HasError() ? read->GetError() : std::string();
+		if (error.find("QoD: function current_setting is superuser-only") == std::string::npos ||
+		    error.find(zone) != std::string::npos || error.find("Could not convert") != std::string::npos) {
+			std::cerr << "FAIL: reading " << view << " did not answer the node's refusal alone: " << error << std::endl;
+			failures++;
+		}
+	}
+
 	// ---- pre_optimize: a plan changed after qod-node described it is decided again
 	rewrite = true;
 	ExpectQuery(frank, "SELECT 8", "QoD: denied by test", "the plan another post_bind rewrote");

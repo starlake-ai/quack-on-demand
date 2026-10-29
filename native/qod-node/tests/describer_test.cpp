@@ -10,6 +10,7 @@
 #include "describer.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/operator/logical_drop.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
@@ -506,6 +507,94 @@ void CheckExtensionOperators() {
 
 } // namespace
 
+//! CONTRACT Addendum 4 item 32 B: the call names a statement reaches, judged on the client's context
+//! where DuckDB resolves them, in its text and in the views (plain or secure) and macros it reaches,
+//! which the plan does not show once DuckDB folded their calls on constants.
+void CheckCallNames() {
+	duckdb::DuckDB db(nullptr);
+	qod_test::RegisterCapture(db);
+	duckdb::Connection con(db);
+	duckdb::Connection other(db);
+	auto &capture = TheCapture();
+	capture = qod_test::Capture();
+	capture.principal = qod_test::Alice();
+	for (auto sql :
+	     {"CREATE TABLE u (id INTEGER, v VARCHAR)", "CREATE VIEW v_upper AS SELECT upper('a') AS x",
+	      "CREATE VIEW v_nested AS SELECT upper(lower(v)) AS x FROM main.u",
+	      "CREATE VIEW v_setting AS SELECT upper(current_setting('TimeZone')) AS x",
+	      "CREATE VIEW v_outer AS SELECT * FROM main.v_setting", "CREATE MACRO m_hidden(x) AS upper(lower(x))",
+	      "CREATE VIEW v_macro AS SELECT m_hidden('a') AS x",
+	      "CREATE SECURE VIEW sv_macro AS SELECT main.m_hidden('a') AS x"}) {
+		qod::RunStrict(con, sql, "setup");
+	}
+	auto read = [&](const std::string &sql, const std::string &want_refused) {
+		capture.on = true;
+		capture.refused.clear();
+		capture.canonical.clear();
+		auto result = con.Query(sql);
+		capture.on = false;
+		auto refused = capture.refused.empty() && result->HasError() ? result->GetError() : capture.refused;
+		if (want_refused.empty() ? (!refused.empty() || capture.canonical.empty())
+		                         : refused.find(want_refused) == std::string::npos) {
+			Fail(sql + ": expected " + (want_refused.empty() ? "a description" : "\"" + want_refused + "\"") +
+			     ", got \"" + refused + "\" / " + capture.canonical);
+		}
+	};
+	read("SELECT * FROM main.v_upper", "");
+	read("SELECT * FROM main.v_nested", "");
+	// a superuser-class call folded inside a view's body, and through another view
+	read("SELECT * FROM main.v_setting", "QoD: function current_setting is superuser-only");
+	read("SELECT * FROM main.v_outer", "QoD: function current_setting is superuser-only");
+	// a macro of the user catalog, in the text and in a view; inside a secure view's boundary it runs
+	// with the owner's rights, its body judged as the boundary's
+	// (the parse screen refuses m_hidden by name, item 30: a text the screen never saw is described)
+	read("SELECT m_hidden('a')", "");
+	read("SELECT * FROM main.v_macro", "QoD: function m_hidden is not classified");
+	read("SELECT * FROM main.sv_macro", "");
+	// a macro shadowing a built-in a view's body calls: the view reads it at every read
+	qod::RunStrict(con, "CREATE MACRO main.upper(x) AS 'shadowed'", "a shadowing macro");
+	read("SELECT * FROM main.v_upper", "QoD: function upper is not classified: it resolves to memory.main.upper");
+	read("SELECT upper('a')", "QoD: function upper is not classified: it resolves to memory.main.upper");
+	read("SELECT 'a'.upper()", "QoD: function upper is not classified: it resolves to memory.main.upper");
+	read("SELECT list_transform(['a'], lambda x: upper(x))", "QoD: function upper is not classified");
+	read("SELECT system.main.upper('a')", "");
+	// the client's own transaction: a macro dropped by another session after it began is still the one
+	// its statements bind to
+	con.BeginTransaction();
+	read("SELECT count(*) FROM main.u", "");
+	qod::RunStrict(other, "DROP MACRO main.upper", "drop the shadow elsewhere");
+	read("SELECT * FROM main.v_upper", "QoD: function upper is not classified: it resolves to memory.main.upper");
+	con.Commit();
+	read("SELECT * FROM main.v_upper", "");
+	// a view nested deeper than the walk follows
+	qod::RunStrict(con, "CREATE VIEW d0 AS SELECT 1 AS x", "depth");
+	for (int i = 1; i <= 17; i++) {
+		qod::RunStrict(con,
+		               "CREATE VIEW d" + std::to_string(i) + " AS SELECT * FROM main.d" + std::to_string(i - 1),
+		               "depth");
+	}
+	read("SELECT * FROM main.d15", "");
+	read("SELECT * FROM main.d17", "QoD: statement uses views and macros nested deeper than 16");
+	// a view that reads itself: DuckDB's binder fails first, so the walk is reached on its own
+	for (auto sql : {"CREATE VIEW c1 AS SELECT 1 AS x", "CREATE VIEW c2 AS SELECT * FROM main.c1",
+	                 "CREATE OR REPLACE VIEW c1 AS SELECT * FROM main.c2"}) {
+		qod::RunStrict(con, sql, "cycle");
+	}
+	duckdb::Parser parser(*con.context);
+	parser.ParseQuery("SELECT * FROM main.c1");
+	std::string refused;
+	con.BeginTransaction();
+	try {
+		qod::JudgeFailedStatement(*con.context, *parser.statements[0]);
+	} catch (duckdb::PermissionException &error) {
+		refused = duckdb::ErrorData(error).RawMessage();
+	}
+	con.Rollback();
+	if (refused.find("QoD: statement uses a view that reads itself") == std::string::npos) {
+		Fail("a view that reads itself: got \"" + refused + "\"");
+	}
+}
+
 int main(int argc, char **argv) {
 	if (argc != 2) {
 		std::cerr << "usage: describer_test <golden descriptions dir>" << std::endl;
@@ -517,6 +606,7 @@ int main(int argc, char **argv) {
 	CheckSessionState();
 	CheckDescribeFailure();
 	CheckAmbiguousName();
+	CheckCallNames();
 	RunGoldens(argv[1]);
 	if (failures == 0) {
 		std::cout << "describer_test: all passed" << std::endl;

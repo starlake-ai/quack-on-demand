@@ -2,6 +2,8 @@
 
 #include "locations.hpp"
 
+#include "duckdb/parser/qualified_name.hpp"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -9,6 +11,7 @@
 
 namespace duckdb {
 class ClientContext;
+class SQLStatement;
 }
 
 namespace qod {
@@ -47,6 +50,21 @@ bool IsReadOnlyPragma(const std::string &name);
 
 //! Whether `name` is a plain extension name (letters, digits, underscores): no path, no URL.
 bool IsPlainExtensionName(const std::string &name);
+
+//! A name the screen's walk reaches in a statement, qualified as written: a call (a scalar or aggregate
+//! function or macro, a table function in table position, a window function), or a relation it reads
+//! by name (a table or view in FROM or JOIN, the table of COPY ... TO, query_table's names).
+struct ReachedName {
+	enum class Kind { CALL, TABLE_CALL, WINDOW_CALL, RELATION };
+	Kind kind;
+	duckdb::QualifiedName name;
+};
+
+//! Every name the screen's walk reaches in `statement` and the query() literals it holds, for the
+//! describer's call-name walk (CONTRACT Addendum 4 item 32). It collects, it does not judge: where the
+//! screen would refuse the statement, the names reached up to that point (in a session the screen
+//! itself refused or admitted the same text before binding).
+std::vector<ReachedName> ReachedNames(duckdb::ClientContext &context, duckdb::SQLStatement &statement);
 
 //! How deep query('...') may nest query('...').
 constexpr int kMaxQueryNesting = 8;
