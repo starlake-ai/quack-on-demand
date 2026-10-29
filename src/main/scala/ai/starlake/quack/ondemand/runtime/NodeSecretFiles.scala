@@ -50,25 +50,40 @@ object NodeSecretFiles extends LazyLogging:
     */
   val NodeIdEnv: String = "QOD_NODE_ID"
 
-  /** Files holding the tenant-db's and the pool's initSql. Secrets like the federation SQL: a
-    * tenant's init SQL may carry credentials.
+  /** Files holding the tenant-db's and the pool's initSql, secrets like the federation SQL (a
+    * tenant's init SQL may carry credentials). The file's name says who wrote it: the spawn scripts
+    * run a `...Trusted` file (a superuser's or the manager's) as written and hand any other to
+    * qod-node in a marked section, under its tenant initSql allowlist. The trust rides the same
+    * object as the SQL on every backend, so no node can pair one value with the other's trust (a
+    * Kubernetes pod projects only the key its spec holds, from a Secret every spawn rewrites).
     */
-  val TenantDbInitKey: String   = "tenantDbInitSql"
-  val TenantPoolInitKey: String = "tenantPoolInitSql"
+  val TenantDbInitKey: String          = "tenantDbInitSql"
+  val TenantDbInitTrustedKey: String   = "tenantDbInitSqlTrusted"
+  val TenantPoolInitKey: String        = "tenantPoolInitSql"
+  val TenantPoolInitTrustedKey: String = "tenantPoolInitSqlTrusted"
 
-  /** Env vars saying whether [[TenantDbInitKey]] / [[TenantPoolInitKey]] are trusted (`1`: written
-    * by a superuser or the manager, run as written) or not (anything else: run by qod-node under
-    * its tenant initSql allowlist). Not secrets; every launcher sets both, always.
+  /** The file of this spawn's init marker nonce (32 lowercase hex digits, fresh per start): the
+    * spawn script writes it into both lines marking a tenant's section, and qod-node, which reads
+    * it with the token, honours only marker lines carrying it. Nothing a tenant writes can know it.
     */
-  val InitTrustedDbEnv: String   = "QOD_INIT_TRUSTED_DB"
-  val InitTrustedPoolEnv: String = "QOD_INIT_TRUSTED_POOL"
+  val InitNonceKey: String = "QOD_INIT_NONCE"
 
-  /** The values of [[InitTrustedDbEnv]] and [[InitTrustedPoolEnv]] for `spec`. */
-  def initTrustEnv(spec: ai.starlake.quack.model.NodeSpec): Map[String, String] =
+  /** A fresh [[InitNonceKey]] value. */
+  def newInitNonce(): String =
+    val bytes = new Array[Byte](16)
+    new java.security.SecureRandom().nextBytes(bytes)
+    bytes.map(b => f"${b & 0xff}%02x").mkString
+
+  /** The tenant initSql files of `spec`, each under the key its trust names, the empty ones left
+    * out.
+    */
+  def tenantInitFiles(spec: ai.starlake.quack.model.NodeSpec): Map[String, String] =
     Map(
-      InitTrustedDbEnv   -> (if spec.tenantDbInitTrusted then "1" else "0"),
-      InitTrustedPoolEnv -> (if spec.tenantPoolInitTrusted then "1" else "0")
-    )
+      (if spec.tenantDbInitTrusted then TenantDbInitTrustedKey else TenantDbInitKey) ->
+        spec.tenantDbInitSql,
+      (if spec.tenantPoolInitTrusted then TenantPoolInitTrustedKey else TenantPoolInitKey) ->
+        spec.tenantPoolInitSql
+    ).filter(_._2.nonEmpty)
 
   /** Object-store credentials the spawn script turns into a global `CREATE SECRET` for a remote
     * `dataPath`. Read from the manager's (or fleet join process's) own environment, never forwarded
@@ -95,7 +110,10 @@ object NodeSecretFiles extends LazyLogging:
       TokenKey,
       AuthzKey,
       TenantDbInitKey,
-      TenantPoolInitKey
+      TenantDbInitTrustedKey,
+      TenantPoolInitKey,
+      TenantPoolInitTrustedKey,
+      InitNonceKey
     ) ++ CloudCredKeys
 
   require(
@@ -128,15 +146,15 @@ object NodeSecretFiles extends LazyLogging:
 
   /** The values to deliver by file, keyed by canonical name. The metastore (tenant-admin input)
     * supplies only its own secrets ([[NodeMetastore.secrets]]: `pgPassword`, `encryptionKey`), the
-    * exact canonical spelling winning among spellings of one key; the cloud credentials, the SQL,
-    * the token and the node key all come from the manager.
+    * exact canonical spelling winning among spellings of one key; the cloud credentials, the SQL
+    * (`tenantInit`: [[tenantInitFiles]]), the token, the node key and a fresh [[InitNonceKey]] all
+    * come from the manager.
     */
   def collect(
       metastore: Map[String, String],
       extraSetupSql: String,
       objectStoreSql: String,
-      tenantDbInitSql: String = "",
-      tenantPoolInitSql: String = "",
+      tenantInit: Map[String, String] = Map.empty,
       token: String,
       authzKey: String,
       inheritedEnv: Map[String, String]
@@ -148,14 +166,13 @@ object NodeSecretFiles extends LazyLogging:
       .flatMap { case (k, v) => canonical(k).map(c => (c, k == c, v)) }
       .groupBy(_._1)
       .map { case (c, entries) => c -> entries.sortBy(e => !e._2).head._3 }
-    val sql = Seq(
-      "extraSetupSql"   -> extraSetupSql,
-      "objectStoreSql"  -> objectStoreSql,
-      TenantDbInitKey   -> tenantDbInitSql,
-      TenantPoolInitKey -> tenantPoolInitSql
-    ).filter(_._2.nonEmpty)
-    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey))
-      .filter(_._2.nonEmpty)
+    val sql = (Seq("extraSetupSql" -> extraSetupSql, "objectStoreSql" -> objectStoreSql) ++
+      tenantInit.toSeq.filter { case (k, _) =>
+        Set(TenantDbInitKey, TenantDbInitTrustedKey, TenantPoolInitKey, TenantPoolInitTrustedKey)
+          .contains(k)
+      }).filter(_._2.nonEmpty)
+    (inherited.toMap ++ fromMetastore ++ sql + (TokenKey -> token) + (AuthzKey -> authzKey) +
+      (InitNonceKey                                      -> newInitNonce())).filter(_._2.nonEmpty)
 
   /** Prefix of every secrets directory a launcher creates under the JVM temp dir. */
   val DirPrefix: String = "qod-node-secrets-"

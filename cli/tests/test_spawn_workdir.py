@@ -25,7 +25,7 @@ TEMP_DIR_RE = re.compile(r"^SET temp_directory = '([^']+)';$", re.M)
 
 def _env(tmp_path, **extra):
     from qod_cli.fleet_join import write_secrets_dir
-    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-file"})
+    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-file", "QOD_INIT_NONCE": "0f" * 16})
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "TMPDIR": str(tmpdir), "kind": "memory", "dbName": "m",

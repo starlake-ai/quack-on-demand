@@ -14,6 +14,13 @@ std::string ReadSecret(const std::string &dir, const std::string &key);
 //! it. Throws std::runtime_error naming the key, never its value, when missing or malformed.
 std::string ReadNodeKey(const std::string &dir);
 
+//! This spawn's init marker nonce, from QOD_INIT_NONCE (32 to 128 lowercase hex digits, a fresh one
+//! per node start, chosen by the launcher): the spawn script writes it into both lines that mark a
+//! tenant's initSql section, and qod-node honours only marker lines carrying it, so no SQL a tenant
+//! influences (its own text, a value the manager interpolates) can open or close a section. Throws
+//! std::runtime_error naming the key, never its value, when missing or malformed.
+std::string ReadInitNonce(const std::string &dir);
+
 //! Removes the secrets directory when it is ephemeral (the local and fleet launchers' private
 //! per-node directory). A Kubernetes Secret volume is not ephemeral and is left alone.
 void DisposeSecrets(const std::string &dir, bool ephemeral);

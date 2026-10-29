@@ -17,6 +17,8 @@ pids=()
 # The node key every test node gets, and its id.
 node_key="4242424242424242424242424242424242424242424242424242424242424242"
 node_id="quack-test-node-1"
+# The init marker nonce every test node gets (QOD_INIT_NONCE).
+init_nonce="0a1b2c3d4e5f60718293a4b5c6d7e8f9"
 
 cleanup() {
   for pid in "${pids[@]+"${pids[@]}"}"; do
@@ -76,12 +78,13 @@ new_secrets() {
   mkdir -p "$dir"
   printf '%s' "$1" > "$dir/QOD_NODE_TOKEN"
   printf '%s' "${2-$node_key}" > "$dir/QOD_NODE_AUTHZ_KEY"
+  printf '%s' "${3-$init_nonce}" > "$dir/QOD_INIT_NONCE"
   echo "$dir"
 }
 
 # --- build marker ---------------------------------------------------------------------------------
 marker="$("$node_bin" --build-info)"
-if [[ ! "$marker" =~ ^qod-node-build-info:protocol=3\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
+if [[ ! "$marker" =~ ^qod-node-build-info:protocol=4\;duckdb=v[0-9]+\.[0-9]+\.[0-9]+\;duckdb_source=[0-9a-f]+$ ]]; then
   fail "unexpected build marker: $marker"
 fi
 
@@ -150,6 +153,22 @@ refuses_key "63-digit" "${lower_key%?}" "$not_hex"
 refuses_key "65-digit" "${lower_key}0" "$not_hex"
 # An empty file never reaches the format check: the secret reader refuses it first.
 refuses_key "empty" "" "QOD_NODE_AUTHZ_KEY is empty"
+
+# A missing or malformed init marker nonce stops the node at start, never naming the value.
+refuses_nonce() {
+  local label="$1" value="$2" message="$3" status
+  local dir
+  dir="$(new_secrets tok-bad-nonce "$node_key" "$value")"
+  [[ "$value" == "<none>" ]] && rm -f "$dir/QOD_INIT_NONCE"
+  "$node_bin" --port "$(port)" --secrets-dir "$dir" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" > "$work/bad-nonce.out" 2>&1
+  status=$?
+  [[ $status -eq 1 ]] || fail "$label init nonce: exit $status, expected 1"
+  grep -q "$message" "$work/bad-nonce.out" || fail "$label init nonce: '$message' not found"
+}
+refuses_nonce "missing" "<none>" "has no QOD_INIT_NONCE"
+refuses_nonce "short" "abcdef" "QOD_INIT_NONCE is not 32 to 128 lowercase hex digits"
+refuses_nonce "uppercase" "0A1B2C3D4E5F60718293A4B5C6D7E8F9" "QOD_INIT_NONCE is not 32 to 128"
 
 # A malformed decide limit stops the node at start, naming the variable, never its value.
 QOD_AUTHZ_DECIDE_TIMEOUT_MS=qodbadlimit "$node_bin" --port "$(port)" --secrets-dir "$(new_secrets tok-bad-limit)" \
@@ -343,14 +362,14 @@ ext_settings all "true,true,true" --allow-community-extensions --allow-unsigned-
 # same kind of statement unrestricted. The COPY at the end records what the init did.
 cat > "$work/tenant-init.sql" <<SQL
 CREATE TABLE trusted_made AS SELECT 1 AS v;
--- qod:untrusted-begin pool
+-- qod:untrusted-begin $init_nonce pool
 SET memory_limit = '1GB';
 CREATE SECURE VIEW tenant_leak AS SELECT * FROM read_text('/etc/hosts');
 CREATE OR REPLACE SECRET tenant_s3 (TYPE s3, KEY_ID 'AKIAQODPROCMARKER', SECRET 'x');
 COPY (SELECT 1) TO '$work/tenant-copy.csv';
 INSTALL x FROM 'http://example.com/repo';
 SET threads = 3;
--- qod:untrusted-end
+-- qod:untrusted-end $init_nonce
 COPY (SELECT current_setting('memory_limit') AS m, current_setting('threads') AS t, (SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_leak') AS leak, (SELECT count(*) FROM duckdb_secrets() WHERE name = 'tenant_s3') AS secrets, (SELECT count(*) FROM duckdb_tables() WHERE table_name = 'trusted_made') AS trusted) TO '$work/tenant-init.csv' (HEADER false);
 SQL
 "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-tenant)" \

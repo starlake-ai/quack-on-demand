@@ -24,7 +24,7 @@ option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
-set(QOD_NODE_PROTOCOL 3)
+set(QOD_NODE_PROTOCOL 4)
 
 if(NOT DUCKDB_HOME)
   set(DUCKDB_HOME $ENV{DUCKDB_HOME})

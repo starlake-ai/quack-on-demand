@@ -40,7 +40,8 @@ def _fake_qod_node(path: pathlib.Path) -> pathlib.Path:
 def _spawn(tmp_path, name, node_port, marker, node_bin):
     """Start the real spawn script; `marker=None` starts an unmarked node (an older manager's)."""
     from qod_cli.fleet_join import write_secrets_dir
-    secrets = write_secrets_dir(tmp_path / f"secrets-{name}", {"QOD_NODE_TOKEN": "tok-scope"})
+    secrets = write_secrets_dir(tmp_path / f"secrets-{name}",
+                                {"QOD_NODE_TOKEN": "tok-scope", "QOD_INIT_NONCE": "0f" * 16})
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "TMPDIR": str(tmpdir), "kind": "memory", "dbName": "m",

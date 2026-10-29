@@ -139,6 +139,7 @@ def test_assignment_starts_node_with_spawn_contract_and_reports_running(tmp_path
     member.run_once()
     cmd, env, kw, secrets = procs[0]
     assert cmd[-1] == "21900" and env["kind"] == "memory"
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets.pop("QOD_INIT_NONCE"))
     assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
     assert env["QOD_NODE_BIND"] == "10.0.0.7" and env["QOD_SECRETS_DIR_EPHEMERAL"] == "1"
     assert env["QOD_NODE_ID"] == "quack-acme-db-bi-1"
@@ -275,8 +276,8 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
     assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
     assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
     assert env["lockdownSql"] == "" and env["resourceSql"] == ""
-    # No tenant initSql in the assignment: both untrusted, never from this process's environment.
-    assert env["QOD_INIT_TRUSTED_DB"] == "0" and env["QOD_INIT_TRUSTED_POOL"] == "0"
+    # Trust rides the secret file's name, never a variable: none reaches the node.
+    assert "QOD_INIT_TRUSTED_DB" not in env and "QOD_INIT_TRUSTED_POOL" not in env
     assert env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
 
 
@@ -306,6 +307,7 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
     for value in SECRET_VALUES | {"k3y"}:
         assert value not in env.values() and value not in cmd, value
         assert not any(value in v for v in env.values()), value
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets.pop("QOD_INIT_NONCE"))
     assert secrets == {"pgPassword": "hunter2", "encryptionKey": "k3y", "extraSetupSql": "fed-sql-secret",
                        "objectStoreSql": "store-sql-secret", "QOD_NODE_TOKEN": "tok",
                        "QOD_NODE_AUTHZ_KEY": "ab" * 32,
@@ -353,6 +355,8 @@ def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, c
     assert [env.get(k) for k in ("lockdownSql", "resourceSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
         ["", "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
     assert "dbInitSql" not in env
+    nonce = secrets.pop("QOD_INIT_NONCE")
+    assert re.fullmatch(r"[0-9a-f]{32}", nonce)
     assert secrets == {"pgPassword": "pw", "QOD_NODE_TOKEN": "tok", "QOD_NODE_AUTHZ_KEY": "ab" * 32}
     err = capsys.readouterr().err
     named = "'BASH_ENV'" in err and "'sec1Unknown'" in err
@@ -360,9 +364,9 @@ def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, c
     assert "sec1-marker" not in err, "a dropped value was printed"
 
 
-def test_tenant_init_sql_goes_to_files_and_its_trust_to_env(tmp_path):
-    # Task 20: the tenant-db's and the pool's initSql are secret files; whether each runs as written
-    # rides QOD_INIT_TRUSTED_DB / _POOL, "1" only for a JSON true.
+def test_tenant_init_sql_goes_to_the_file_its_trust_names(tmp_path):
+    # Task 20 (review I2): the tenant-db's and the pool's initSql are secret files whose name is their
+    # trust, ...Trusted only for a JSON true; and every start gets a fresh init marker nonce.
     a = dict(assignment(1), tenantDbInitSql="SET threads = 2;", tenantDbInitTrusted=True,
              tenantPoolInitSql="SET threads = 3;", tenantPoolInitTrusted="true")
     seen = []
@@ -371,10 +375,12 @@ def test_tenant_init_sql_goes_to_files_and_its_trust_to_env(tmp_path):
     http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
     make_member(http, popen, tmp_path).run_once()
     env, secrets = seen[0]
-    assert secrets["tenantDbInitSql"] == "SET threads = 2;"
+    assert secrets["tenantDbInitSqlTrusted"] == "SET threads = 2;"
     assert secrets["tenantPoolInitSql"] == "SET threads = 3;"
+    assert "tenantDbInitSql" not in secrets and "tenantPoolInitSqlTrusted" not in secrets
+    assert re.fullmatch(r"[0-9a-f]{32}", secrets["QOD_INIT_NONCE"])
     assert "SET threads" not in "".join(env.values())
-    assert env["QOD_INIT_TRUSTED_DB"] == "1" and env["QOD_INIT_TRUSTED_POOL"] == "0"
+    assert not any(k.startswith("QOD_INIT_") for k in env)
 
 
 EXTENSION_ENV = ("QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",

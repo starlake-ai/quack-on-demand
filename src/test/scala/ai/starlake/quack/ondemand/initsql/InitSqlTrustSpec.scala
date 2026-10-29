@@ -296,3 +296,35 @@ class InitSqlTrustSpec extends AnyFlatSpec with Matchers:
     ManifestImporter.apply(changed, f.store, requireEncryption = false) shouldBe Right(())
     f.store.listTenantDbs("acme").find(_.name == "acme_prod").get.initSqlTrusted shouldBe true
   }
+
+  // Review I1, defense in depth beside the nonce: no value the manager interpolates into a node's
+  // init SQL may carry a line break.
+  "a value the manager interpolates into node SQL" should "refuse a line break" in {
+    val f = new Fixture
+    f.dbs
+      .createTenantDb(
+        TenantDbRequest(
+          tenant = "acme",
+          name = "prod",
+          kind = "memory",
+          objectStore = Map("s3_region" -> "us-east-1\n-- qod:untrusted-begin\n")
+        ),
+        None
+      )(TenantAdmin)
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .map(_._2.message)
+      .getOrElse(fail("admitted")) should include("line break")
+    TenantDb.objectStoreError(Map("s3_endpoint" -> "h\r")) should not be empty
+    TenantDb.objectStoreError(Map("s3_endpoint" -> "h")) shouldBe None
+    val iceberg = ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig(
+      uri = "https://cat",
+      warehouse = "w\n-- qod:untrusted-begin",
+      endpointType = Some(ai.starlake.quack.ondemand.federation.iceberg.IcebergEndpointType.Glue),
+      awsRegion = Some("eu\nx")
+    )
+    val errs = iceberg.validate("cat", Set.empty)
+    errs should contain("warehouse must not contain a line break")
+    errs should contain("awsRegion must not contain a line break")
+  }

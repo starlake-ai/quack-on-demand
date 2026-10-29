@@ -23,8 +23,9 @@ import scala.jdk.CollectionConverters._
   *   - per-pool `qod-fedsql-${tenant}-${tenantDb}-${pool}` holds the pool's init SQL: the resolved
   *     federation SQL (`spec.extraSetupSql`) and the tenant-db's and the pool's own initSql
   *     (`spec.tenantDbInitSql`, `spec.tenantPoolInitSql`), each key only when non-empty, the Secret
-  *     only when one is; all pods of the pool share it. Whether each initSql is trusted rides plain
-  *     env ([[NodeSecretFiles.initTrustEnv]]).
+  *     only when one is; all pods of the pool share it. Each initSql sits under the key its trust
+  *     names ([[NodeSecretFiles.tenantInitFiles]]), and a pod projects only the keys its own spec
+  *     holds, so a pod started for a trusted text never reads a later untrusted one as trusted.
   *   - per-pool `qod-nodeenv-${tenant}-${tenantDb}-${pool}` holds the sensitive metastore values
   *     ([[ai.starlake.quack.model.TenantDb.NodeSecretEnvKeys]]: `pgPassword`, `encryptionKey`,
   *     taken from the metastore by [[NodeMetastore.secrets]]) plus the manager's own object-store
@@ -149,14 +150,6 @@ final class KubernetesQuackBackend(
     kindEnv.setName("kind")
     kindEnv.setValue(spec.kindWire)
     envs.add(kindEnv)
-    // Whether the tenant-db's and the pool's initSql (files of the pool's init SQL Secret) run as
-    // written or under qod-node's tenant initSql allowlist. Not secrets; both, always.
-    NodeSecretFiles.initTrustEnv(spec).toList.sorted.foreach { case (k, v) =>
-      val e = new EnvVar()
-      e.setName(k)
-      e.setValue(v)
-      envs.add(e)
-    }
     // Engine lockdown block (NodeLockdown.sql). Inlined like `kind` (not
     // credential-bearing): spawn-quack-node.sh appends it right before
     // quack_serve, so the value restrictions are in effect before the node
@@ -331,7 +324,8 @@ final class KubernetesQuackBackend(
           tokenSecretNameFor(spec.nodeId),
           Seq(
             TokenSecretKeyPath,
-            KubernetesQuackBackend.AuthzKeySecretKey -> NodeSecretFiles.AuthzKey
+            KubernetesQuackBackend.AuthzKeySecretKey  -> NodeSecretFiles.AuthzKey,
+            KubernetesQuackBackend.InitNonceSecretKey -> NodeSecretFiles.InitNonceKey
           )
         )
       ) ++
@@ -777,6 +771,9 @@ final class KubernetesQuackBackend(
     val data = new java.util.HashMap[String, String]()
     data.put(KubernetesQuackBackend.TokenSecretKey, token)
     data.put(KubernetesQuackBackend.AuthzKeySecretKey, nodeKeys.keyHex(nodeId))
+    // A fresh init marker nonce on every write (a restore of an incumbent's token included): each
+    // start of the pod's container reads the one the Secret holds then.
+    data.put(KubernetesQuackBackend.InitNonceSecretKey, NodeSecretFiles.newInitNonce())
     secret.setStringData(data)
     client.secrets.inNamespace(namespace).resource(secret).createOr(r => r.update())
     ()
@@ -835,11 +832,8 @@ final class KubernetesQuackBackend(
     * each file's name in the secrets volume (the names the spawn script reads).
     */
   private def initSqlValues(spec: NodeSpec): Map[String, String] =
-    Map(
-      KubernetesQuackBackend.FederationSecretKey -> spec.extraSetupSql,
-      NodeSecretFiles.TenantDbInitKey            -> spec.tenantDbInitSql,
-      NodeSecretFiles.TenantPoolInitKey          -> spec.tenantPoolInitSql
-    ).filter(_._2.nonEmpty)
+    (Map(KubernetesQuackBackend.FederationSecretKey -> spec.extraSetupSql) ++
+      NodeSecretFiles.tenantInitFiles(spec)).filter(_._2.nonEmpty)
 
   private def ensureFederationSecret(key: PoolKey, values: Map[String, String]): Unit =
     val name = secretNameFor(key)
@@ -1049,6 +1043,11 @@ object KubernetesQuackBackend:
 
   /** Key inside the per-pod token Secret holding the node's key (NodeSecretFiles.AuthzKey). */
   val AuthzKeySecretKey: String = "authzKey"
+
+  /** Key inside the per-pod token Secret holding the init marker nonce
+    * (NodeSecretFiles.InitNonceKey).
+    */
+  val InitNonceSecretKey: String = "initNonce"
 
   /** Key inside the per-pod object-store Secret holding the scoped `CREATE SECRET` SQL. Same string
     * as the env var name `buildPod` sets on the pod (matches the `objectStoreSql` env var

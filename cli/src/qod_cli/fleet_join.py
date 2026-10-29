@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from secrets import token_hex as _token_hex
 from typing import Callable
 
 import httpx
@@ -80,10 +81,12 @@ _ENV_PASSTHROUGH = (
 # Object-storage settings the spawn script reads.
 _ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
 _SQL_KEYS = ("resourceSql", "lockdownSql")
-# The tenant-db's and the pool's initSql (secret files) and the variable that says whether each runs
-# as written or under qod-node's tenant initSql allowlist: "1" only for a JSON true.
-_TENANT_INIT_KEYS = (("tenantDbInitSql", "tenantDbInitTrusted", "QOD_INIT_TRUSTED_DB"),
-                     ("tenantPoolInitSql", "tenantPoolInitTrusted", "QOD_INIT_TRUSTED_POOL"))
+# The tenant-db's and the pool's initSql: assignment key, its trust key, and the secret file it goes
+# to by trust. The file's name is the trust: the spawn script runs a ...Trusted file as written (a
+# superuser's or the manager's text) and any other under qod-node's tenant initSql allowlist. Trusted
+# only for a JSON true.
+_TENANT_INIT_KEYS = (("tenantDbInitSql", "tenantDbInitTrusted", "tenantDbInitSqlTrusted"),
+                     ("tenantPoolInitSql", "tenantPoolInitTrusted", "tenantPoolInitSqlTrusted"))
 # The manager's extension policy (quack-on-demand.nodeExtensions, spec decision 17), assignment key
 # -> the variable the spawn script reads. Always all three, from the assignment only.
 _NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"),
@@ -94,9 +97,10 @@ _NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS")
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
 # spawn-quack-node.sh and NodeSecretFiles.Keys on the manager.
 _SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql", "QOD_NODE_TOKEN",
-                "QOD_NODE_AUTHZ_KEY", "tenantDbInitSql", "tenantPoolInitSql", "QOD_S3_ACCESS_KEY_ID",
+                "QOD_NODE_AUTHZ_KEY", "tenantDbInitSql", "tenantDbInitSqlTrusted", "tenantPoolInitSql",
+                "tenantPoolInitSqlTrusted", "QOD_INIT_NONCE", "QOD_S3_ACCESS_KEY_ID",
                 "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
-_CLOUD_CRED_KEYS = _SECRET_KEYS[8:]
+_CLOUD_CRED_KEYS = _SECRET_KEYS[11:]
 # An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
 # reads from its environment are laid over the node's environment, and only the metastore's own
 # secrets below become files. Any other name (BASH_ENV, which bash expands before running the
@@ -532,10 +536,12 @@ class FleetMember:
         for key in ("extraSetupSql", "objectStoreSql"):
             if assignment.get(key):
                 secrets[key] = str(assignment[key])
-        for key, trusted, name in _TENANT_INIT_KEYS:
+        for key, trusted, trusted_file in _TENANT_INIT_KEYS:
             if assignment.get(key):
-                secrets[key] = str(assignment[key])
-            env[name] = "1" if assignment.get(trusted) is True else "0"
+                secrets[trusted_file if assignment.get(trusted) is True else key] = str(assignment[key])
+        # A fresh init marker nonce per start: the spawn script marks the tenant's sections with it,
+        # and qod-node honours only marker lines carrying it.
+        secrets["QOD_INIT_NONCE"] = _token_hex(16)
         secrets["QOD_NODE_TOKEN"] = str(assignment["token"])
         secrets["QOD_NODE_AUTHZ_KEY"] = str(assignment["authzKey"])
         env["QOD_NODE_ID"] = str(assignment["nodeId"])

@@ -37,9 +37,10 @@ namespace {
 
 using namespace qod;
 
-void RunInitFiles(duckdb::Connection &con, const NodeOptions &options) {
+//! Runs every init file; `nonce` marks a tenant's sections (empty: none, the --list-* modes).
+void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "") {
 	for (auto &file : options.init_files) {
-		RunInit(con, ReadAll(file));
+		RunInit(con, ReadAll(file), nonce);
 	}
 }
 
@@ -82,12 +83,15 @@ int ListFunctionsMode(const NodeOptions &options) {
 struct NodeSecrets {
 	std::string token;
 	std::string node_key;
+	//! This spawn's init marker nonce (ReadInitNonce).
+	std::string init_nonce;
 };
 
 // The secrets directory goes whether or not the reads succeed: nothing in it is needed again.
 NodeSecrets ReadNodeSecrets(const NodeOptions &options) {
 	try {
-		NodeSecrets secrets {ReadSecret(options.secrets_dir, "QOD_NODE_TOKEN"), ReadNodeKey(options.secrets_dir)};
+		NodeSecrets secrets {ReadSecret(options.secrets_dir, "QOD_NODE_TOKEN"), ReadNodeKey(options.secrets_dir),
+		                     ReadInitNonce(options.secrets_dir)};
 		DisposeSecrets(options.secrets_dir, options.secrets_ephemeral);
 		return secrets;
 	} catch (...) {
@@ -122,7 +126,7 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
 	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
 
-	RunInitFiles(con, options);
+	RunInitFiles(con, options, secrets.init_nonce);
 
 	RunStrict(con, "INSTALL quack", "installing quack");
 	RunStrict(con, "LOAD quack", "loading quack");

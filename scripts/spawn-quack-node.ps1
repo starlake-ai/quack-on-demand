@@ -30,8 +30,6 @@
   rest itself:
 
     kind                               (ducklake | duckdb-file | memory)
-    QOD_INIT_TRUSTED_DB                (1 when the tenant-db's initSql runs as written)
-    QOD_INIT_TRUSTED_POOL              (1 when the pool's initSql runs as written)
     lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs
                                         last, before qod-node serves)
 
@@ -41,7 +39,8 @@
   on PATH.
 
   Sensitive values (pgPassword, encryptionKey, extraSetupSql, objectStoreSql, the node token, the
-  node key, the tenant-db's and the pool's initSql (tenantDbInitSql, tenantPoolInitSql) and the
+  node key, the init marker nonce, the tenant-db's and the pool's initSql (tenantDbInitSql and
+  tenantPoolInitSql, or their ...Trusted twins for a superuser's or the manager's text) and the
   object-store credentials, see $SecretKeys below) NEVER arrive through the
   environment or the command line: another process of the same user can read both. They arrive as
   one file per key in the directory $env:QOD_SECRETS_DIR, which LocalQuackBackend creates with an
@@ -87,12 +86,13 @@ $startDir = (Get-Location).ProviderPath
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.sh and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
 $SecretKeys = @('pgPassword', 'encryptionKey', 'extraSetupSql', 'objectStoreSql',
-  'QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY', 'tenantDbInitSql', 'tenantPoolInitSql',
+  'QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY', 'tenantDbInitSql', 'tenantDbInitSqlTrusted',
+  'tenantPoolInitSql', 'tenantPoolInitSqlTrusted', 'QOD_INIT_NONCE',
   'QOD_S3_ACCESS_KEY_ID', 'QOD_S3_SECRET_ACCESS_KEY', 'QOD_AZURE_CONNECTION_STRING',
   'QOD_GCS_KEY_ID', 'QOD_GCS_SECRET')
-# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
-# script never reads them.
-$QodNodeKeys = @('QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY')
+# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token, the node key and the init
+# marker nonce); this script reads none of them but the nonce, which it never deletes (below).
+$QodNodeKeys = @('QOD_NODE_TOKEN', 'QOD_NODE_AUTHZ_KEY', 'QOD_INIT_NONCE')
 # Deletes a variable from this process's environment, so the qod-node child never inherits it.
 # [Environment]::SetEnvironmentVariable($name, $null) would not: PowerShell passes $null to a string
 # parameter as an empty string, which pwsh keeps as an empty variable.
@@ -146,13 +146,23 @@ foreach ($k in $SecretKeys) {
   }
 }
 
+# This spawn's init marker nonce (fresh per start, from the launcher), mirror of INIT_NONCE in
+# spawn-quack-node.sh. Left in place for qod-node.
+$initNonce = ''
+$nonceFile = Join-Path $secretsDir 'QOD_INIT_NONCE'
+if (Test-Path -LiteralPath $nonceFile -PathType Leaf) {
+  $initNonce = ([System.IO.File]::ReadAllText($nonceFile)).Trim()
+}
+
 function Secret-Or([string]$name, [string]$default) {
   $v = $Secrets[$name]
   if ([string]::IsNullOrEmpty($v)) { return $default } else { return $v }
 }
 
-$tenantDbInitSql   = Secret-Or 'tenantDbInitSql' ''
-$tenantPoolInitSql = Secret-Or 'tenantPoolInitSql' ''
+$tenantDbInitSql          = Secret-Or 'tenantDbInitSql' ''
+$tenantDbInitSqlTrusted   = Secret-Or 'tenantDbInitSqlTrusted' ''
+$tenantPoolInitSql        = Secret-Or 'tenantPoolInitSql' ''
+$tenantPoolInitSqlTrusted = Secret-Or 'tenantPoolInitSqlTrusted' ''
 $extraSetupSql  = Secret-Or 'extraSetupSql' ''
 $lockdownSql    = [Environment]::GetEnvironmentVariable('lockdownSql')
 $objectStoreSql = Secret-Or 'objectStoreSql' ''
@@ -566,18 +576,23 @@ $encryptionKey = Secret-Or 'encryptionKey' ''
 # refuses to change it from any session) and before loading quack and serving. Mirrors
 # spawn-quack-node.sh.
 #
-# A tenant's initSql as qod-node gets it, mirror of tenant_init_sql in spawn-quack-node.sh: as written
-# when its trust flag is exactly 1 (a superuser or the manager wrote it), otherwise between the lines
-# `-- qod:untrusted-begin <label>` and `-- qod:untrusted-end`, a section qod-node runs under its tenant
-# initSql allowlist. Every line holding the marker text, in any case (-notmatch ignores case), is
-# dropped first, so no initSql can end its own section or open one over the SQL after it. Empty: ''.
-function Format-TenantInitSql([string]$Label, [string]$Sql, [string]$Trusted) {
+# A tenant's initSql as qod-node gets it, mirror of tenant_init_sql in spawn-quack-node.sh: a
+# ...Trusted file (a superuser's or the manager's text) as written, any other between the lines
+# `-- qod:untrusted-begin <nonce> <label>` and `-- qod:untrusted-end <nonce>`, a section qod-node runs
+# under its tenant initSql allowlist; <nonce> is this spawn's, so no other line is a marker. Every
+# line holding the marker text, in any case (-notmatch ignores case), is also dropped first.
+# Empty: ''. An untrusted text without a well-formed nonce stops the spawn: it never runs unmarked.
+function Format-TenantInitSql([string]$Label, [string]$Sql, [bool]$Trusted) {
   if ([string]::IsNullOrEmpty($Sql)) { return '' }
   $kept = @($Sql -split "`n" | Where-Object { $_ -notmatch 'qod:untrusted-' })
   $clean = ($kept -join "`n").TrimEnd("`r", "`n")
   if ([string]::IsNullOrEmpty($clean)) { return '' }
-  if ($Trusted -ceq '1') { return $clean }
-  return "-- qod:untrusted-begin $Label`n$clean`n-- qod:untrusted-end"
+  if ($Trusted) { return $clean }
+  if ($initNonce -cnotmatch '^[0-9a-f]{32,128}$') {
+    [Console]::Error.WriteLine("ERROR: no well-formed init marker nonce (`$QOD_SECRETS_DIR\QOD_INIT_NONCE) for the $Label initSql")
+    Exit-Spawn 1
+  }
+  return "-- qod:untrusted-begin $initNonce $Label`n$clean`n-- qod:untrusted-end $initNonce"
 }
 
 $sb = [System.Text.StringBuilder]::new()
@@ -588,8 +603,10 @@ if (-not [string]::IsNullOrEmpty($proxySql))  { [void]$sb.AppendLine($proxySql) 
 # loading, httpfs and avro. Mirrors spawn-quack-node.sh.
 [void]$sb.AppendLine("INSTALL httpfs;")
 [void]$sb.AppendLine("INSTALL avro;")
-$tenantDbSection = Format-TenantInitSql 'database' $tenantDbInitSql ([Environment]::GetEnvironmentVariable('QOD_INIT_TRUSTED_DB'))
-if (-not [string]::IsNullOrEmpty($tenantDbSection)) { [void]$sb.AppendLine($tenantDbSection) }
+foreach ($section in @((Format-TenantInitSql 'database' $tenantDbInitSqlTrusted $true),
+                       (Format-TenantInitSql 'database' $tenantDbInitSql $false))) {
+  if (-not [string]::IsNullOrEmpty($section)) { [void]$sb.AppendLine($section) }
+}
 
 # Per-database object-store secret, emitted for EVERY kind: a `memory` or `duckdb-file`
 # database may carry an objectStore (TenantDb.validate permits it), and a `memory` database
@@ -656,8 +673,10 @@ switch ($kind) {
 }
 
 # The pool's initSql, before the federation SQL (mirrors spawn-quack-node.sh).
-$tenantPoolSection = Format-TenantInitSql 'pool' $tenantPoolInitSql ([Environment]::GetEnvironmentVariable('QOD_INIT_TRUSTED_POOL'))
-if (-not [string]::IsNullOrEmpty($tenantPoolSection)) { [void]$sb.AppendLine($tenantPoolSection) }
+foreach ($section in @((Format-TenantInitSql 'pool' $tenantPoolInitSqlTrusted $true),
+                       (Format-TenantInitSql 'pool' $tenantPoolInitSql $false))) {
+  if (-not [string]::IsNullOrEmpty($section)) { [void]$sb.AppendLine($section) }
+}
 if (-not [string]::IsNullOrEmpty($extraSetupSql)) { [void]$sb.AppendLine($extraSetupSql) }
 
 # Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala). Runs last, before

@@ -32,6 +32,7 @@ $nodeKey = '4242424242424242424242424242424242424242424242424242424242424242'
 $nodeId = 'quack-windows-smoke-1'
 [System.IO.File]::WriteAllText((Join-Path $secrets 'QOD_NODE_TOKEN'), $token)
 [System.IO.File]::WriteAllText((Join-Path $secrets 'QOD_NODE_AUTHZ_KEY'), $nodeKey)
+[System.IO.File]::WriteAllText((Join-Path $secrets 'QOD_INIT_NONCE'), '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f')
 # The second statement fails on purpose, naming a table nothing else creates: the spawn script's own
 # statements satisfy the init count alone, so only this failure shows extraSetupSql reached qod-node.
 $extraMarker = 'qod_smoke_extra_setup_marker'

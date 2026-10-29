@@ -173,11 +173,14 @@ int main() {
 		Expect(known, std::string("an init extension is not one of DuckDB's known extensions: ") + name);
 	}
 
-	// ---- sections: marker lines only, before any tokenizing, failing closed
+	// ---- sections: marker lines of this spawn's nonce only, before any tokenizing, failing closed
 	{
-		auto sections = qod::SplitInitSections("SET a = 1;\n-- qod:untrusted-begin database\nSELECT 'x\n"
-		                                       "-- qod:untrusted-end\r\nSET b = 2;\n  -- qod:untrusted-begin pool  \n"
-		                                       "SET c = 3;\n");
+		const std::string n = "0123456789abcdef0123456789abcdef";
+		const std::string b = "-- qod:untrusted-begin " + n;
+		const std::string e = "-- qod:untrusted-end " + n;
+		auto sections = qod::SplitInitSections("SET a = 1;\n" + b + " database\nSELECT 'x\n" + e + "\r\nSET b = 2;\n  " +
+		                                           b + " pool  \nSET c = 3;\n",
+		                                       n);
 		Expect(sections.size() == 4, "four sections");
 		if (sections.size() == 4) {
 			Expect(sections[0].trusted && sections[0].sql == "SET a = 1;\n", "a trusted head");
@@ -186,15 +189,27 @@ int main() {
 			Expect(sections[2].trusted && sections[2].sql == "SET b = 2;\n", "a CR before the newline still ends it");
 			Expect(!sections[3].trusted && sections[3].label == "pool", "a section never closed runs untrusted");
 		}
-		auto nested = qod::SplitInitSections("-- qod:untrusted-begin pool\n-- qod:untrusted-begin\nSELECT 1;\n"
-		                                     "-- qod:untrusted-end\nSELECT 2;\n-- qod:untrusted-end\nSELECT 3;\n");
+		auto nested = qod::SplitInitSections(b + " pool\n" + b + "\nSELECT 1;\n" + e + "\nSELECT 2;\n" + e + "\nSELECT 3;\n", n);
 		Expect(nested.size() == 2 && !nested[0].trusted && nested[0].label == "pool" &&
 		           nested[0].sql == "SELECT 1;\n" && nested[1].trusted && nested[1].sql == "SELECT 2;\nSELECT 3;\n",
 		       "a begin line inside a section keeps it untrusted; a stray end line closes nothing");
-		auto labelled = qod::SplitInitSections("-- qod:untrusted-begin Pool\nSELECT 1;\n");
+		auto labelled = qod::SplitInitSections(b + " Pool\nSELECT 1;\n", n);
 		Expect(labelled.size() == 1 && labelled[0].trusted, "a begin line with an odd label is no marker");
-		Expect(qod::SplitInitSections("-- qod:untrusted-begin\n\n-- qod:untrusted-end\n").empty(),
-		       "a blank section is dropped");
+		Expect(qod::SplitInitSections(b + "\n\n" + e + "\n", n).empty(), "a blank section is dropped");
+		// Review I1: a marker line inside the manager's own SQL (a value a tenant admin set, spread
+		// over lines inside a string literal) opens nothing without this spawn's nonce: neither the
+		// bare marker, nor one carrying another nonce.
+		auto forged = qod::SplitInitSections("CREATE SECRET s (TYPE s3, REGION 'x\n-- qod:untrusted-begin\n"
+		                                     "-- qod:untrusted-begin ffffffffffffffffffffffffffffffff\n');\n"
+		                                     "SET disabled_filesystems = 'LocalFileSystem';\n",
+		                                     n);
+		Expect(forged.size() == 1 && forged[0].trusted &&
+		           forged[0].sql.find("disabled_filesystems") != std::string::npos,
+		       "a marker without this spawn's nonce is no marker");
+		auto forged_end = qod::SplitInitSections(b + " pool\nSELECT 1;\n-- qod:untrusted-end\nCREATE TABLE t (a INT);\n", n);
+		Expect(forged_end.size() == 1 && !forged_end[0].trusted, "nor can a tenant's text end its own section");
+		auto no_nonce = qod::SplitInitSections(b + "\nSELECT 1;\n" + e + "\n", "");
+		Expect(no_nonce.size() == 1 && no_nonce[0].trusted, "an empty nonce recognizes no marker");
 	}
 
 	// ---- --check-init's verdict
@@ -224,12 +239,15 @@ int main() {
 	{
 		duckdb::DuckDB run_db(nullptr);
 		duckdb::Connection run(run_db);
-		auto skipped = qod::RunInit(run, "-- qod:untrusted-begin database\n"
-		                                 "SET memory_limit = '1GB';\n"
-		                                 "CREATE TABLE tenant_made AS SELECT 1 AS v;\n"
-		                                 "CREATE SECURE VIEW tenant_leak AS SELECT * FROM range(3);\n"
-		                                 "SET threads = 3;\n"
-		                                 "-- qod:untrusted-end\n");
+		const std::string n = "fedcba9876543210fedcba9876543210";
+		auto skipped = qod::RunInit(run,
+		                            "-- qod:untrusted-begin " + n + " database\n"
+		                            "SET memory_limit = '1GB';\n"
+		                            "CREATE TABLE tenant_made AS SELECT 1 AS v;\n"
+		                            "CREATE SECURE VIEW tenant_leak AS SELECT * FROM range(3);\n"
+		                            "SET threads = 3;\n"
+		                            "-- qod:untrusted-end " + n + "\n",
+		                            n);
 		Expect(skipped == 2, "two statements skipped, got " + std::to_string(skipped));
 		Expect(Scalar(run, "SELECT current_setting('memory_limit')") == "953.6 MiB",
 		       "the allowed SET took effect: " + Scalar(run, "SELECT current_setting('memory_limit')"));
@@ -238,8 +256,10 @@ int main() {
 		       "a refused CREATE TABLE did not run");
 		Expect(Scalar(run, "SELECT count(*) FROM duckdb_views() WHERE view_name = 'tenant_leak'") == "0",
 		       "a refused CREATE SECURE VIEW did not run");
-		auto trusted = qod::RunInit(run, "CREATE TABLE trusted_made AS SELECT 1 AS v;\n"
-		                                 "CREATE SECURE VIEW trusted_view AS SELECT * FROM range(3);\n");
+		auto trusted = qod::RunInit(run,
+		                            "CREATE TABLE trusted_made AS SELECT 1 AS v;\n"
+		                            "CREATE SECURE VIEW trusted_view AS SELECT * FROM range(3);\n",
+		                            n);
 		Expect(trusted == 0, "a trusted section runs unrestricted");
 		Expect(Scalar(run, "SELECT count(*) FROM duckdb_views() WHERE view_name = 'trusted_view'") == "1",
 		       "the trusted secure view exists");

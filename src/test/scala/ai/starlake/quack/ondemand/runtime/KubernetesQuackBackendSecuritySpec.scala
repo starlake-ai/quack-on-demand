@@ -260,18 +260,46 @@ class KubernetesQuackBackendSecuritySpec
         "objectStoreSql",
         "QOD_NODE_TOKEN",
         "QOD_NODE_AUTHZ_KEY",
+        NodeSecretFiles.InitNonceKey,
         NodeSecretFiles.TenantDbInitKey,
-        NodeSecretFiles.TenantPoolInitKey
+        NodeSecretFiles.TenantPoolInitTrustedKey
       )
-    // Task 20: the tenant initSql shares the pool's init SQL Secret; its trust rides plain env.
-    val values = env.map(e => e.getName -> e.getValue).toMap
-    values.get(NodeSecretFiles.InitTrustedDbEnv) shouldBe Some("0")
-    values.get(NodeSecretFiles.InitTrustedPoolEnv) shouldBe Some("1")
+    // Task 20 (review I2): the tenant initSql shares the pool's init SQL Secret, each text under the
+    // key its trust names, and the pod projects only the keys its spec holds: no env flag.
+    env.map(_.getName).filter(_.startsWith("QOD_INIT_")) shouldBe empty
     secretPayload("qod-fedsql-acme-acme-lake-bi").value shouldBe Map(
-      "extraSetupSql"                   -> "SELECT 1;",
-      NodeSecretFiles.TenantDbInitKey   -> "SET threads = 2;",
-      NodeSecretFiles.TenantPoolInitKey -> "SET threads = 3;"
+      "extraSetupSql"                          -> "SELECT 1;",
+      NodeSecretFiles.TenantDbInitKey          -> "SET threads = 2;",
+      NodeSecretFiles.TenantPoolInitTrustedKey -> "SET threads = 3;"
     )
+    // The init marker nonce rides the per-pod token Secret, fresh at every start.
+    val nonce = secretPayload("qod-token-quack-nodeenv-noenv").value(
+      KubernetesQuackBackend.InitNonceSecretKey
+    )
+    nonce should fullyMatch regex "[0-9a-f]{32}"
+
+  // Review I2: a pod started for a trusted text never reads a later untrusted one as trusted. The
+  // spawn rewrites the shared Secret with the untrusted key only; the earlier pod's projection names
+  // the trusted key, which the Secret no longer holds.
+  it should "never pair a later untrusted initSql with an earlier pod's trust" in:
+    val backend = makeBackend()
+    val base    = nodeEnvSpec("quack-trust-a", lakeMeta + ("pgPassword" -> "p"))
+    backend
+      .start(base.copy(tenantDbInitSql = "SET threads = 2;", tenantDbInitTrusted = true))
+      .unsafeRunSync()
+    backend
+      .start(
+        base.copy(nodeId = "quack-trust-b", tenantDbInitSql = "CREATE SECRET s (TYPE s3);")
+      )
+      .unsafeRunSync()
+    secretRefs("quack-trust-a").get(NodeSecretFiles.TenantDbInitTrustedKey).map(_._2) shouldBe
+      Some(NodeSecretFiles.TenantDbInitTrustedKey)
+    secretRefs("quack-trust-b").get(NodeSecretFiles.TenantDbInitKey).map(_._2) shouldBe
+      Some(NodeSecretFiles.TenantDbInitKey)
+    secretRefs("quack-trust-b").keySet should not contain NodeSecretFiles.TenantDbInitTrustedKey
+    val payload = secretPayload("qod-fedsql-acme-acme-lake-bi").value
+    payload.get(NodeSecretFiles.TenantDbInitTrustedKey) shouldBe None
+    payload.get(NodeSecretFiles.TenantDbInitKey) shouldBe Some("CREATE SECRET s (TYPE s3);")
 
   it should "leave non-secret metastore keys as plain env vars" in:
     val backend = makeBackend()
@@ -325,7 +353,6 @@ class KubernetesQuackBackendSecuritySpec
     names.distinct shouldBe names
     names.toSet shouldBe allowed.keySet ++
       Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
-      Set(NodeSecretFiles.InitTrustedDbEnv, NodeSecretFiles.InitTrustedPoolEnv) ++
       ai.starlake.quack.NodeExtensionsConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
@@ -333,8 +360,6 @@ class KubernetesQuackBackendSecuritySpec
     values.get(NodeSecretFiles.DirEnv) shouldBe Some(KubernetesQuackBackend.SecretsMountPath)
     values.get("QOD_NODE_PORT") shouldBe Some("8080")
     values.get(NodeSecretFiles.NodeIdEnv) shouldBe Some("quack-nodeenv-sec1")
-    values.get(NodeSecretFiles.InitTrustedDbEnv) shouldBe Some("0")
-    values.get(NodeSecretFiles.InitTrustedPoolEnv) shouldBe Some("0")
     withClue("a metastore marker in the pod env: ")(
       env.exists(e => Option(e.getValue).exists(_.contains("sec1-marker"))) shouldBe false
     )

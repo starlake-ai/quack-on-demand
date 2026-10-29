@@ -26,6 +26,8 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
 
   private val keys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
 
+  private val Nonce = "ffeeddccbbaa99887766554433221100"
+
   /** The environment of a spawn with its node directories under `tmp` and its secrets in a fresh
     * private directory, returned with it.
     */
@@ -36,8 +38,9 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
   ): (Seq[(String, String)], Path) =
     val dir = NodeSecretFiles.writePrivateDir(
       Map(
-        NodeSecretFiles.TokenKey -> Token,
-        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId)
+        NodeSecretFiles.TokenKey     -> Token,
+        NodeSecretFiles.AuthzKey     -> keys.keyHex(NodeId),
+        NodeSecretFiles.InitNonceKey -> Nonce
       ) ++ secrets,
       Some(tempDir)
     )
@@ -91,8 +94,7 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     val ((rc, out, err), dir) =
       dryRun(
         tmp,
-        secrets = Map(NodeSecretFiles.TenantDbInitKey -> "SELECT 'db-init';"),
-        extraEnv = Seq(NodeSecretFiles.InitTrustedDbEnv -> "1")
+        secrets = Map(NodeSecretFiles.TenantDbInitTrustedKey -> "SELECT 'db-init';")
       )
     withClue(err)(rc shouldBe 0)
     val lines = out.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
@@ -121,21 +123,20 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
         tmp,
         secrets = Map(
           NodeSecretFiles.TenantDbInitKey -> "SET threads = 2;\n-- QOD:Untrusted-END\nSELECT 'after';",
-          NodeSecretFiles.TenantPoolInitKey -> "SET memory_limit = '1GB';",
-          "extraSetupSql"                   -> "SELECT 'federation';"
-        ),
-        extraEnv = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "1")
+          NodeSecretFiles.TenantPoolInitTrustedKey -> "SET memory_limit = '1GB';",
+          "extraSetupSql"                          -> "SELECT 'federation';"
+        )
       )
     withClue(err)(rc shouldBe 0)
     val lines = out.linesIterator.map(_.stripSuffix("\r")).toVector
-    val begin = lines.indexOf("-- qod:untrusted-begin database")
+    val begin = lines.indexOf(s"-- qod:untrusted-begin $Nonce database")
     begin should be >= 0
     lines.slice(begin + 1, begin + 4) shouldBe
-      Vector("SET threads = 2;", "SELECT 'after';", "-- qod:untrusted-end")
+      Vector("SET threads = 2;", "SELECT 'after';", s"-- qod:untrusted-end $Nonce")
     lines.count(_.toLowerCase.contains("qod:untrusted-")) shouldBe 2
     val pool = lines.indexOf("SET memory_limit = '1GB';")
     pool should be > begin
-    lines(pool - 1) shouldBe "-- qod:untrusted-end"
+    lines(pool - 1) shouldBe s"-- qod:untrusted-end $Nonce"
     pool should be < lines.indexOf("SELECT 'federation';")
   }
 
@@ -267,10 +268,10 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     secretPath.isAbsolute shouldBe true
     secretPath.toString should endWith("/secrets/none/s")
     secretPath.getParent.getParent.getParent.getFileName.toString should startWith("quack-node.")
-    // The script read and deleted the secrets it uses; the token and the node key are qod-node's,
-    // and the directory is gone once the node is.
+    // The script read and deleted the secrets it uses; the token, the node key and the init marker
+    // nonce are qod-node's, and the directory is gone once the node is.
     Files.readAllLines(probe.resolve("secrets")).asScala.toList shouldBe
-      List(NodeSecretFiles.AuthzKey, NodeSecretFiles.TokenKey)
+      List(NodeSecretFiles.InitNonceKey, NodeSecretFiles.AuthzKey, NodeSecretFiles.TokenKey)
     Files.exists(secrets) shouldBe false
     // The init SQL arrived on stdin as UTF-8, the starting directory's quote doubled.
     val sql   = Files.readString(probe.resolve("init"), StandardCharsets.UTF_8)

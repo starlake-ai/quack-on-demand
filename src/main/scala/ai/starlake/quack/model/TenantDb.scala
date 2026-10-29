@@ -288,9 +288,13 @@ object TenantDb {
     * instead of re-implementing the check.
     */
   def objectStoreError(objectStore: Map[String, String]): Option[String] =
-    objectStore.find { case (_, v) => v.contains(";") }.map { case (k, _) =>
-      s"invalid objectStore value for '$k': must not contain ';'"
-    }
+    // A line break is refused too: the values are interpolated into the node's init SQL, where a
+    // value spread over lines could fake a line of that SQL (Task 20 review I1).
+    objectStore
+      .find { case (_, v) => v.contains(";") || v.contains('\n') || v.contains('\r') }
+      .map { case (k, _) =>
+        s"invalid objectStore value for '$k': must not contain ';' or a line break"
+      }
 
   /** Injection-safety checks only: reject any script-interpolated value that carries a
     * SQL-literal-breaking or identifier-breaking metacharacter, validating each field only when it

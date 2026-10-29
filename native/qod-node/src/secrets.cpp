@@ -41,6 +41,18 @@ std::string ReadNodeKey(const std::string &dir) {
 	return FromHex(hex);
 }
 
+std::string ReadInitNonce(const std::string &dir) {
+	auto nonce = ReadSecret(dir, "QOD_INIT_NONCE");
+	bool lower_hex = nonce.size() >= 32 && nonce.size() <= 128;
+	for (auto c : nonce) {
+		lower_hex = lower_hex && ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+	}
+	if (!lower_hex) {
+		throw std::runtime_error("the secrets directory's QOD_INIT_NONCE is not 32 to 128 lowercase hex digits");
+	}
+	return nonce;
+}
+
 void DisposeSecrets(const std::string &dir, bool ephemeral) {
 	if (!ephemeral || dir.empty()) {
 		return;

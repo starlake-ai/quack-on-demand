@@ -86,9 +86,10 @@ class SpawnScriptLiveNodeSpec
     val port    = freePort()
     val secrets = NodeSecretFiles.writePrivateDir(
       Map(
-        NodeSecretFiles.TokenKey -> Token,
-        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId),
-        "extraSetupSql"          -> extraSetupSql
+        NodeSecretFiles.TokenKey     -> Token,
+        NodeSecretFiles.AuthzKey     -> keys.keyHex(NodeId),
+        NodeSecretFiles.InitNonceKey -> NodeSecretFiles.newInitNonce(),
+        "extraSetupSql"              -> extraSetupSql
       ) ++ moreSecrets,
       Some(tempDir)
     )
@@ -181,8 +182,7 @@ class SpawnScriptLiveNodeSpec
 
   "a tenant admin's initSql" should "run only its allowlisted statements on a real node" in {
     val (p, port) = startNode(
-      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> TenantInit),
-      env = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "0")
+      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> TenantInit)
     )
     try
       onNode(port, "SELECT current_setting('memory_limit')") shouldBe List("1.8 GiB")
@@ -197,8 +197,7 @@ class SpawnScriptLiveNodeSpec
 
   "a superuser's initSql" should "run as written on a real node" in {
     val (p, port) = startNode(
-      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> TenantInit),
-      env = Seq(NodeSecretFiles.InitTrustedPoolEnv -> "1")
+      moreSecrets = Map(NodeSecretFiles.TenantPoolInitTrustedKey -> TenantInit)
     )
     try
       onNode(port, "SELECT current_setting('memory_limit')") shouldBe List("1.8 GiB")
@@ -284,9 +283,9 @@ class SpawnScriptLiveNodeSpec
   "the node init SQL" should "leave the secret directory to qod-node and hold no dot-command" in {
     val dir = NodeSecretFiles.writePrivateDir(
       Map(
-        NodeSecretFiles.TokenKey        -> Token,
-        "pgPassword"                    -> "p",
-        NodeSecretFiles.TenantDbInitKey -> "SELECT 'db-init';"
+        NodeSecretFiles.TokenKey               -> Token,
+        "pgPassword"                           -> "p",
+        NodeSecretFiles.TenantDbInitTrustedKey -> "SELECT 'db-init';"
       ),
       Some(tempDir)
     )

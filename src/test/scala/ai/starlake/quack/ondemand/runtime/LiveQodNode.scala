@@ -118,7 +118,11 @@ object LiveQodNode:
   ): LiveQodNode =
     val bin     = QodNodeTestBinary.path.getOrElse(throw new IllegalStateException("no qod-node"))
     val secrets = NodeSecretFiles.writePrivateDir(
-      Map(NodeSecretFiles.TokenKey -> token, NodeSecretFiles.AuthzKey -> keys.keyHex(nodeId)),
+      Map(
+        NodeSecretFiles.TokenKey     -> token,
+        NodeSecretFiles.AuthzKey     -> keys.keyHex(nodeId),
+        NodeSecretFiles.InitNonceKey -> NodeSecretFiles.newInitNonce()
+      ),
       Some(dir)
     )
     val logFile = dir.resolve(s"node-$port.log")

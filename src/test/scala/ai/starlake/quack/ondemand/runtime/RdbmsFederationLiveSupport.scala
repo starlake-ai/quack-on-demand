@@ -54,9 +54,10 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     nodePort = RdbmsFederationLiveNode.freePort()
     val secrets = NodeSecretFiles.writePrivateDir(
       Map(
-        NodeSecretFiles.TokenKey -> Token,
-        NodeSecretFiles.AuthzKey -> keys.keyHex(NodeId),
-        "extraSetupSql"          -> extraSetupSql
+        NodeSecretFiles.TokenKey     -> Token,
+        NodeSecretFiles.AuthzKey     -> keys.keyHex(NodeId),
+        NodeSecretFiles.InitNonceKey -> NodeSecretFiles.newInitNonce(),
+        "extraSetupSql"              -> extraSetupSql
       ),
       Some(tempDir)
     )

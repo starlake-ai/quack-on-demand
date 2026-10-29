@@ -30,8 +30,9 @@ class SpawnScriptWorkDirSpec extends AnyFlatSpec with Matchers with SpawnScriptT
     val (secret, plain) = env.partition { case (k, _) => NodeSecretFiles.isKey(k) }
     val dir             = NodeSecretFiles.writePrivateDir(
       (Seq(
-        NodeSecretFiles.TokenKey -> "tok-workdir",
-        NodeSecretFiles.AuthzKey -> ("ab" * 32)
+        NodeSecretFiles.TokenKey     -> "tok-workdir",
+        NodeSecretFiles.AuthzKey     -> ("ab" * 32),
+        NodeSecretFiles.InitNonceKey -> NodeSecretFiles.newInitNonce()
       ) ++ secret).toMap,
       Some(tempDir)
     )

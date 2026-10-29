@@ -118,6 +118,29 @@ final case class IcebergRestConfig(
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2Scope", oauth2Scope)
     errs ++= IcebergRestConfig.strayBraceErrors("oauth2GrantType", oauth2GrantType)
 
+    // Every field is interpolated into the node's init SQL: a line break there could spread a value
+    // over lines of that SQL, which nothing a tenant writes should do (Task 20 review I1).
+    List(
+      "uri"                -> Some(uri),
+      "warehouse"          -> Some(warehouse),
+      "clientId"           -> clientId,
+      "clientSecret"       -> clientSecret,
+      "oauth2ServerUri"    -> oauth2ServerUri,
+      "oauth2Scope"        -> oauth2Scope,
+      "oauth2GrantType"    -> oauth2GrantType,
+      "token"              -> token,
+      "awsRegion"          -> awsRegion,
+      "awsKeyId"           -> awsKeyId,
+      "awsSecretAccessKey" -> awsSecretAccessKey,
+      "awsSessionToken"    -> awsSessionToken
+    ).foreach { (name, value) =>
+      if value.exists(v => v.contains('\n') || v.contains('\r')) then
+        errs += s"$name must not contain a line break"
+    }
+    awsScope.foreach { v =>
+      if v.contains('\n') || v.contains('\r') then errs += "awsScope must not contain a line break"
+    }
+
     if authType.isDefined == endpointType.isDefined then
       errs += "set exactly one of authType / endpointType (DuckDB refuses AUTHORIZATION_TYPE " +
         "combined with ENDPOINT_TYPE)"

@@ -89,8 +89,7 @@ final class LocalQuackBackend(
       spec.metastore,
       spec.extraSetupSql,
       spec.objectStoreSql,
-      spec.tenantDbInitSql,
-      spec.tenantPoolInitSql,
+      NodeSecretFiles.tenantInitFiles(spec),
       token,
       nodeKeys.keyHex(spec.nodeId),
       inherited
@@ -121,10 +120,6 @@ final class LocalQuackBackend(
     // always, after the metastore overlay, so neither a variable this process inherited (they are
     // also the manager's own config variables) nor a metastore entry decides one.
     nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
-    // Whether the tenant-db's and the pool's initSql (secret files) run as written or under
-    // qod-node's tenant initSql allowlist: both, always, after the metastore overlay, so no
-    // inherited variable decides one.
-    NodeSecretFiles.initTrustEnv(spec).foreach { case (k, v) => env.put(k, v) }
     // Engine lockdown block (NodeLockdown.sql). spawn-quack-node.sh appends it after extraSetupSql,
     // last, so the restrictions are in effect before qod-node serves any tenant statement.
     if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)

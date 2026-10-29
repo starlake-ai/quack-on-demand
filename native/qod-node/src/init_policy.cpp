@@ -46,9 +46,13 @@ bool Blank(const std::string &text) {
 	return text.find_first_not_of(" \t\r\n") == std::string::npos;
 }
 
-//! A begin marker line: kUntrustedBegin alone, or followed by one space and a lowercase label.
-bool BeginLine(const std::string &line, std::string &label) {
-	std::string begin = kUntrustedBegin;
+//! A begin marker line of `nonce`: kUntrustedBegin and the nonce, alone or followed by one space and a
+//! lowercase label.
+bool BeginLine(const std::string &line, const std::string &nonce, std::string &label) {
+	if (nonce.empty()) {
+		return false;
+	}
+	std::string begin = std::string(kUntrustedBegin) + " " + nonce;
 	if (line == begin) {
 		label.clear();
 		return true;
@@ -140,7 +144,7 @@ std::string JudgeLoad(SQLStatement &statement) {
 
 } // namespace
 
-std::vector<InitSection> SplitInitSections(const std::string &sql) {
+std::vector<InitSection> SplitInitSections(const std::string &sql, const std::string &nonce) {
 	std::vector<InitSection> sections;
 	InitSection current {true, "", ""};
 	auto close = [&]() {
@@ -155,13 +159,13 @@ std::vector<InitSection> SplitInitSections(const std::string &sql) {
 		auto line = sql.substr(start, stop - start);
 		auto trimmed = TrimLine(line);
 		std::string label;
-		if (BeginLine(trimmed, label)) {
+		if (BeginLine(trimmed, nonce, label)) {
 			// A begin line inside an untrusted section keeps it untrusted (and its label).
 			if (current.trusted) {
 				close();
 				current = InitSection {false, label, ""};
 			}
-		} else if (trimmed == kUntrustedEnd) {
+		} else if (!nonce.empty() && trimmed == std::string(kUntrustedEnd) + " " + nonce) {
 			// An end line outside an untrusted section closes nothing.
 			if (!current.trusted) {
 				close();
@@ -273,9 +277,9 @@ size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &
 	return skipped;
 }
 
-size_t RunInit(Connection &con, const std::string &sql) {
+size_t RunInit(Connection &con, const std::string &sql, const std::string &nonce) {
 	size_t skipped = 0;
-	for (auto &section : SplitInitSections(sql)) {
+	for (auto &section : SplitInitSections(sql, nonce)) {
 		if (section.trusted) {
 			skipped += RunBestEffort(con, section.sql, "init");
 		} else {

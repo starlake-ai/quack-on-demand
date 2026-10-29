@@ -283,7 +283,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       // developer's shell exports is delivered too (the backend forwards the manager's own), so it
       // is set aside rather than counted.
       (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
-        Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
+        Set(NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey, NodeSecretFiles.InitNonceKey)
       val onDisk = java.nio.file.Files.readString(dir.resolve(NodeSecretFiles.AuthzKey))
       withClue("the key file does not hold the key derived for the node id")(
         (onDisk == key) shouldBe true
@@ -425,7 +425,12 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
             .stripPrefix(s"${NodeSecretFiles.DirEnv}=")
         )
         (dir.toFile.list().toSet -- NodeSecretFiles.CloudCredKeys) shouldBe
-          Set("pgPassword", NodeSecretFiles.TokenKey, NodeSecretFiles.AuthzKey)
+          Set(
+            "pgPassword",
+            NodeSecretFiles.TokenKey,
+            NodeSecretFiles.AuthzKey,
+            NodeSecretFiles.InitNonceKey
+          )
         val s3 = dir.resolve("QOD_S3_SECRET_ACCESS_KEY")
         withClue("the metastore's cloud credential in its file: ")(
           (java.nio.file.Files.exists(s3) &&

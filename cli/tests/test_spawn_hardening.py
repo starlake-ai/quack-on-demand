@@ -27,7 +27,8 @@ STOP_JAR = ROOT / "scripts" / "stop-jar.sh"
 
 def _dry_run(tmp_path, secrets=None, **env_extra):
     from qod_cli.fleet_join import write_secrets_dir
-    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-hard", **(secrets or {})})
+    d = write_secrets_dir(tmp_path / "secrets", {"QOD_NODE_TOKEN": "tok-hard", "QOD_INIT_NONCE": "0f" * 16,
+                                               **(secrets or {})})
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir(exist_ok=True)
     start = tmp_path / "start"

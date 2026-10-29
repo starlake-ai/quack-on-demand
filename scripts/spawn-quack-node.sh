@@ -75,11 +75,12 @@ START_DIR="${START_DIR%/}"
 # Keep in sync with NodeSecretFiles.Keys (Scala), SECRET_KEYS in spawn-quack-node.ps1 and
 # _SECRET_KEYS in cli/src/qod_cli/fleet_join.py; NodeSecretFilesSpec pins all four.
 SECRET_KEYS=(pgPassword encryptionKey extraSetupSql objectStoreSql QOD_NODE_TOKEN
-  QOD_NODE_AUTHZ_KEY tenantDbInitSql tenantPoolInitSql QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY
-  QOD_AZURE_CONNECTION_STRING QOD_GCS_KEY_ID QOD_GCS_SECRET)
-# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token and the node key); this
-# script never reads them.
-QOD_NODE_KEYS=" QOD_NODE_TOKEN QOD_NODE_AUTHZ_KEY "
+  QOD_NODE_AUTHZ_KEY tenantDbInitSql tenantDbInitSqlTrusted tenantPoolInitSql tenantPoolInitSqlTrusted
+  QOD_INIT_NONCE QOD_S3_ACCESS_KEY_ID QOD_S3_SECRET_ACCESS_KEY QOD_AZURE_CONNECTION_STRING
+  QOD_GCS_KEY_ID QOD_GCS_SECRET)
+# The keys qod-node reads from $QOD_SECRETS_DIR itself (the node token, the node key and the init
+# marker nonce); this script reads none of them but the nonce, which it never deletes (below).
+QOD_NODE_KEYS=" QOD_NODE_TOKEN QOD_NODE_AUTHZ_KEY QOD_INIT_NONCE "
 # qod-node removes an ephemeral secrets directory once it has read its keys. This script removes it
 # too, on every exit, so no exit before the launch (a failed check, a dry run) leaves the node token
 # on disk; by the time it exits, its qod-node has read the directory or never will (cleanup below
@@ -114,9 +115,16 @@ for key in "${SECRET_KEYS[@]}"; do
     fi
   fi
 done
+# This spawn's init marker nonce (a fresh one per start, from the launcher): it goes into both lines
+# marking a tenant's initSql section, and qod-node, which reads the same file, honours only marker
+# lines carrying it. Left in place for qod-node.
+INIT_NONCE=""
+if [[ -f "$QOD_SECRETS_DIR/QOD_INIT_NONCE" ]]; then
+  IFS= read -r INIT_NONCE < "$QOD_SECRETS_DIR/QOD_INIT_NONCE" || true
+fi
 # Plain shell variables from here on: nothing below exports them, so neither qod-node nor psql
 # inherits them.
-export -n "${SECRET_KEYS[@]}" QOD_SECRETS_DIR QOD_SECRETS_DIR_EPHEMERAL 2>/dev/null || true
+export -n "${SECRET_KEYS[@]}" INIT_NONCE QOD_SECRETS_DIR QOD_SECRETS_DIR_EPHEMERAL 2>/dev/null || true
 
 pgHost="${pgHost:-localhost}"
 pgPort="${pgPort:-5432}"
@@ -529,12 +537,14 @@ fi
 #                 no ATTACH needed. Federation aliases (in extraSetupSql)
 #                 are typically the only catalogs available.
 
-# A tenant's initSql (tenantDbInitSql, tenantPoolInitSql: secret files) as qod-node gets it. As
-# written when its trust flag (QOD_INIT_TRUSTED_DB, QOD_INIT_TRUSTED_POOL) is exactly 1: a superuser
-# or the manager wrote it. Otherwise between the lines `-- qod:untrusted-begin <label>` and
-# `-- qod:untrusted-end`, a section qod-node runs under its tenant initSql allowlist, statement by
-# statement. Every line holding the marker text, in any case, is dropped first (the manager refuses
-# it at write time), so no initSql can end its own section or open one over the SQL after it.
+# A tenant's initSql as qod-node gets it. The file's name says who wrote it: tenantDbInitSqlTrusted
+# and tenantPoolInitSqlTrusted (a superuser or the manager) run as written; tenantDbInitSql and
+# tenantPoolInitSql (a tenant admin) go between `-- qod:untrusted-begin <nonce> <label>` and
+# `-- qod:untrusted-end <nonce>`, a section qod-node runs under its tenant initSql allowlist,
+# statement by statement. <nonce> is this spawn's INIT_NONCE, so no line of any other text (a value
+# the manager interpolates into its own SQL included) is a marker. Every line holding the marker
+# text, in any case, is also dropped from a tenant's text first (the manager refuses it at write
+# time).
 strip_init_markers() {
   local rest="$1" line out="" restore_case=1
   shopt -q nocasematch && restore_case=0
@@ -554,21 +564,28 @@ strip_init_markers() {
   fi
   printf '%s' "$out"
 }
-# Prints the section for one initSql (nothing for an empty one), newline-terminated.
+# Prints the section for one initSql (nothing for an empty one), newline-terminated. Fails, writing
+# nothing, for an untrusted text without a well-formed nonce: it is never run unmarked.
 tenant_init_sql() {
   local label="$1" sql trusted="$3"
   sql="$(strip_init_markers "$2")"
   [[ -n "$sql" ]] || return 0
-  if [[ "$trusted" == "1" ]]; then
+  if [[ "$trusted" == "trusted" ]]; then
     printf '%s\n' "$sql"
+  elif [[ "$INIT_NONCE" =~ ^[0-9a-f]{32,128}$ ]]; then
+    printf -- '-- qod:untrusted-begin %s %s\n%s\n-- qod:untrusted-end %s\n' "$INIT_NONCE" "$label" "$sql" \
+      "$INIT_NONCE"
   else
-    printf -- '-- qod:untrusted-begin %s\n%s\n-- qod:untrusted-end\n' "$label" "$sql"
+    echo "ERROR: no well-formed init marker nonce (\$QOD_SECRETS_DIR/QOD_INIT_NONCE) for the $label initSql" >&2
+    return 1
   fi
 }
 # Appends tenant_init_sql's section to INIT_SQL (a command substitution drops the final newline).
 append_tenant_init_sql() {
   local section
-  section="$(tenant_init_sql "$1" "$2" "$3")"
+  if ! section="$(tenant_init_sql "$1" "$2" "$3")"; then
+    exit 1
+  fi
   if [[ -n "$section" ]]; then
     INIT_SQL+="$section"$'\n'
   fi
@@ -599,7 +616,8 @@ INIT_SQL+=$'INSTALL httpfs;\nINSTALL avro;\n'
 # proxy and resource settings, and long before qod-node loads quack, so engine-level defaults
 # (SET memory_limit, extension INSTALLs) are already in effect when quack starts. The pool's
 # initSql and the federation SQL run further down.
-append_tenant_init_sql database "${tenantDbInitSql:-}" "${QOD_INIT_TRUSTED_DB:-}"
+append_tenant_init_sql database "${tenantDbInitSqlTrusted:-}" trusted
+append_tenant_init_sql database "${tenantDbInitSql:-}" untrusted
 
 # Per-database object-store secret (objectStoreSql env, authored by ObjectStoreSecret.scala).
 # A scoped CREATE SECRET for this database's own bucket/credentials, emitted for EVERY kind:
@@ -673,7 +691,8 @@ esac
 
 # The pool's initSql, before the federation SQL, so its PRAGMAs and SETs are in effect before any
 # federated source is attached.
-append_tenant_init_sql pool "${tenantPoolInitSql:-}" "${QOD_INIT_TRUSTED_POOL:-}"
+append_tenant_init_sql pool "${tenantPoolInitSqlTrusted:-}" trusted
+append_tenant_init_sql pool "${tenantPoolInitSql:-}" untrusted
 if [[ -n "${extraSetupSql:-}" ]]; then
   INIT_SQL+="$extraSetupSql"$'\n'
 fi
