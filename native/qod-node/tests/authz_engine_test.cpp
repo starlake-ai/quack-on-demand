@@ -523,7 +523,7 @@ int main() {
 	ExpectQuery(frank, "SELECT 7", "", "frank's statement runs under an allow");
 	ExpectAsked(before, true, "frank's statement");
 	ExpectQuery(frank, "SELECT * FROM forbidden", "QoD: denied by test", "a refused verdict");
-	ExpectQuery(frank, "CREATE TABLE unavailable AS SELECT 1 AS x", "QoD: authorization unavailable",
+	ExpectQuery(frank, "CREATE TABLE unavailable AS SELECT 1 AS x", "QoD: authorization unavailable, retry",
 	            "an unavailable decision refuses");
 	ExpectQuery(internal, "SELECT count(*) FROM unavailable", "does not exist", "and nothing ran");
 	// Transaction control is decided like any statement, and runs under its allow.

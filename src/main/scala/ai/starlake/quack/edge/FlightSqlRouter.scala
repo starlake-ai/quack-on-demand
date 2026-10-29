@@ -1579,18 +1579,26 @@ final class FlightSqlRouter(
           case _ =>
             IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
 
-  /** Map a permanent DuckDB error to a typed failure: missing-object errors become NotFound, the
-    * rest BadRequest. The "permanent failure:" prefix is preserved for operators.
+  /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
+    * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
+    * Unavailable, which the client may retry; missing-object errors become NotFound; the rest
+    * BadRequest. The "permanent failure:" prefix is preserved for operators.
     */
   private def classifyPermanent(message: String): RouterFailure =
     val lower    = message.toLowerCase(Locale.ROOT)
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $message"
-    if notFound then RouterFailure.NotFound(full)
+    if message.contains(FlightSqlRouter.NodeAuthzUnavailable) then RouterFailure.Unavailable(full)
+    else if notFound then RouterFailure.NotFound(full)
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  /** How qod-node words a statement it refused because no verdict could be had (the decision
+    * replica unreachable, slow or answering 503): retryable, unlike every other node refusal.
+    */
+  val NodeAuthzUnavailable: String = "QoD: authorization unavailable, retry"
 
   /** The target of the USE prelude [[wrapWithDefaultSchema]] sends before a pool's statements,
     * `<alias>.<schema>`, or None when it sends none (no catalog alias). Every session handle for

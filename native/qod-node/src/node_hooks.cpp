@@ -436,6 +436,8 @@ std::vector<NodeSecretScope> NodeS3SecretScopes(ClientContext &context) {
 	return scopes;
 }
 
+std::string RefusalMessage(const DecideResult &decided);
+
 //! The parse screen's content rules for a statement on a connection whose principal is current
 //! (`recorded`): nothing for a superuser or the manager itself; else ScreenStatement, then, when the
 //! statement names locations, a refusal of any s3:// one a node secret would sign over the user's own
@@ -476,16 +478,7 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 	if (decided.status == DecideResult::Status::Allow) {
 		return "";
 	}
-	if (decided.status == DecideResult::Status::Unavailable) {
-		// Every unavailable decision is retryable (a 503, a timeout, a transport failure): say so, like
-		// the credential fetch does.
-		std::string unavailable = "authorization unavailable";
-		auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0
-		                ? decided.reason.substr(unavailable.size())
-		                : ": " + decided.reason;
-		return "QoD: " + unavailable + ", retry" + rest;
-	}
-	return decided.Message();
+	return RefusalMessage(decided);
 }
 
 // ---- qod_screen ----------------------------------------------------------------------------------
@@ -578,6 +571,19 @@ void RefuseForeignCopyFunction(ClientContext &context, LogicalOperator &op) {
 	}
 }
 
+//! A refused decision as the client reads it. Every unavailable one is retryable (a 503, a timeout, a
+//! transport failure): it says so, like the credential fetch does, in the words the manager maps to a
+//! retryable failure (FlightSqlRouter.NodeAuthzUnavailable).
+std::string RefusalMessage(const DecideResult &decided) {
+	if (decided.status != DecideResult::Status::Unavailable) {
+		return decided.Message();
+	}
+	std::string unavailable = "authorization unavailable";
+	auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0 ? decided.reason.substr(unavailable.size())
+	                                                                             : ": " + decided.reason;
+	return "QoD: " + unavailable + ", retry" + rest;
+}
+
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
 //! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
@@ -596,7 +602,7 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 	call.ctx = installed.ctx;
 	auto result = gate.decider(call);
 	if (result.status != DecideResult::Status::Allow) {
-		throw PermissionException(result.Message());
+		throw PermissionException(RefusalMessage(result));
 	}
 	admitted.expires_at = result.has_verdict ? result.verdict.expires_at : gate.authz->Now();
 	return admitted;

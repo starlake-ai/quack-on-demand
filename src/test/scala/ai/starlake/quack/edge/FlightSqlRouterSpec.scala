@@ -481,6 +481,27 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val out            = router.execute("c-bad", "alice", poolKey, "SELECTT 1").unsafeRunSync()
     out.swap.toOption.get shouldBe a[RouterFailure.BadRequest]
 
+  it should "tag the node's refusal for an unavailable decision as RouterFailure.Unavailable" in:
+    val perm = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
+        ),
+        1L
+      )
+    val (router, _, _) = setup(stub = perm)
+    val out            = router.execute("c-unavail", "alice", poolKey, "SELECT 1").unsafeRunSync()
+    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
+    // Any other node refusal stays a bad request.
+    val refusal        = QuackError.Permanent("Permission Error: QoD: user:alice lacks")
+    val (denied, _, _) = setup(stub = () => QuackResponse.Failed(refusal, 1L))
+    denied
+      .execute("c-refused", "alice", poolKey, "SELECT 1")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.BadRequest]
+
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
     router.execute("c-4", "alice", poolKey, "BEGIN").unsafeRunSync()
