@@ -68,20 +68,23 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
     pb.environment()
       .putAll(
         Map(
-          "kind"                 -> "memory",
-          "schemaName"           -> "main",
-          "dbName"               -> "acme_mem",
-          "QOD_NODE_BIN"         -> QodNodeTestBinary.path.get.toString,
-          "QOD_NODE_BIND"        -> "127.0.0.1",
-          "HOME"                 -> Files.createDirectories(tempDir.resolve("node-home")).toString,
-          NodeSecretFiles.DirEnv -> secrets.toString,
+          "kind"          -> "memory",
+          "schemaName"    -> "main",
+          "dbName"        -> "acme_mem",
+          "QOD_NODE_BIN"  -> QodNodeTestBinary.path.get.toString,
+          "QOD_NODE_BIND" -> "127.0.0.1",
+          "HOME"          -> LiveExtensionCache
+            .seed(Files.createDirectories(tempDir.resolve("node-home")))
+            .toString,
+          NodeSecretFiles.DirEnv       -> secrets.toString,
           NodeSecretFiles.EphemeralEnv -> "1",
           NodeSecretFiles.NodeIdEnv    -> NodeId
         ).asJava
       )
     val p = pb.start()
     process = Some(p)
-    val deadline = System.currentTimeMillis() + 60000
+    // Generous: the first start of a run may still download its extensions (LiveExtensionCache).
+    val deadline = System.currentTimeMillis() + 180000
     while !RdbmsFederationLiveNode.listening(nodePort) && p.isAlive &&
       System.currentTimeMillis() < deadline
     do Thread.sleep(100)
@@ -127,7 +130,7 @@ private[runtime] object RdbmsFederationLiveNode:
   /** Whether the pinned CLI can load `extension` (statically linked, or installable). */
   def canLoad(extension: String): Boolean =
     pinnedDuckdb.exists { bin =>
-      val home = Files.createTempDirectory("rdbms-ext-probe")
+      val home = LiveExtensionCache.seed(Files.createTempDirectory("rdbms-ext-probe"))
       try
         Process(
           Seq(bin.toString, "-c", s"INSTALL $extension; LOAD $extension; SELECT 42;"),
@@ -135,7 +138,9 @@ private[runtime] object RdbmsFederationLiveNode:
           "DUCKDB_AGENT_MODE" -> "0",
           "HOME"              -> home.toString
         ).!(ProcessLogger(_ => (), _ => ())) == 0
-      finally Try(Files.walk(home).iterator().asScala.toSeq.reverse.foreach(Files.deleteIfExists))
+      finally
+        // The link goes, never the shared cache behind it (Files.walk does not follow it).
+        Try(Files.walk(home).iterator().asScala.toSeq.reverse.foreach(Files.deleteIfExists))
     }
 
   def freePort(): Int =

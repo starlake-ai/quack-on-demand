@@ -106,9 +106,11 @@ class SpawnScriptLiveNodeSpec
           "QOD_NODE_BIN"  -> QodNodeTestBinary.path.get.toString,
           "QOD_NODE_BIND" -> "127.0.0.1",
           // A throwaway HOME, so the node never reads the developer's own ~/.duckdb (extensions
-          // resolve the same; before the persistent-secrets fix a real HOME also leaked stored
-          // secrets into the node).
-          "HOME" -> Files.createDirectories(tempDir.resolve("node-home")).toString,
+          // resolve the same, from the run's shared cache; before the persistent-secrets fix a
+          // real HOME also leaked stored secrets into the node).
+          "HOME" -> LiveExtensionCache
+            .seed(Files.createDirectories(tempDir.resolve("node-home")))
+            .toString,
           // The node directory (and the secret directory in it) lands where the test can see it.
           "TMPDIR"                     -> nodeTmp.toString,
           NodeSecretFiles.DirEnv       -> secrets.toString,
