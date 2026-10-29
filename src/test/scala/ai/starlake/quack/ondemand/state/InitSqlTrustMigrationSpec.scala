@@ -69,9 +69,11 @@ class InitSqlTrustMigrationSpec extends AnyFlatSpec with Matchers:
               "outcome, origin, detail) VALUES (now() - interval '1 hour', 'control-plane', " +
               "'system', 'system', 'acme', 'database.create', 'acme_served_then_edited', 'ok', " +
               "'rest', '{}')",
+            // Spelled in upper case, as a request may name it (review N5): the update path
+            // lowercases the name, the audit row keeps the request's spelling.
             "INSERT INTO qodstate_audit (ts, family, actor, actor_realm, tenant, action, target, " +
-              "outcome, origin, detail) VALUES (now(), 'control-plane', 'alice', 'acme', 'acme', " +
-              "'database.update', 'acme_served_then_edited', 'ok', 'rest', '{}')",
+              "outcome, origin, detail) VALUES (now(), 'control-plane', 'alice', 'acme', 'ACME', " +
+              "'database.update', 'ACME_SERVED_THEN_EDITED', 'ok', 'rest', '{}')",
             // Back to the state before 0053, then let Liquibase apply it: the upgrade path.
             "ALTER TABLE qodstate_tenant_db DROP COLUMN init_sql_trusted",
             "ALTER TABLE qodstate_pool DROP COLUMN init_sql_trusted",
@@ -94,6 +96,38 @@ class InitSqlTrustMigrationSpec extends AnyFlatSpec with Matchers:
               "acme_served"             -> true,
               "acme_served_then_edited" -> false
             )
+        finally c.close()
+      finally store.close()
+    finally Try(TestPostgres.dropDatabase(dbName))
+  }
+
+  // Review N4: 0053 was edited before release; a control plane that ran an earlier text boots, and
+  // only those texts: the first changeSet pins their checksums instead of accepting any.
+  it should "accept only the checksums of its earlier texts on a control plane that ran one" in {
+    TestPostgres.ensureReachable()
+    val dbName = s"qodist_${java.util.UUID.randomUUID().toString.take(8)}"
+    TestPostgres.psql("postgres", s"""CREATE DATABASE "$dbName"""")
+    try
+      val url = TestPostgres.dbUrl(dbName)
+      new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
+      val store = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        val c = store.jdbcDataSource.getConnection
+        try
+          def ranWith(md5: String): Unit = exec(c)(
+            s"UPDATE databasechangelog SET md5sum = '$md5' WHERE id = '0053-init-sql-trust'"
+          )
+          for earlier <- List(
+              "9:5dbd4e88ca271bdc2f4df48c39da1461",
+              "9:382e9904bd7d0817561f8d27e9c38cd6"
+            )
+          do
+            ranWith(earlier)
+            noException should be thrownBy
+              new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
+          ranWith("9:00000000000000000000000000000000")
+          an[Exception] should be thrownBy
+            new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
         finally c.close()
       finally store.close()
     finally Try(TestPostgres.dropDatabase(dbName))
