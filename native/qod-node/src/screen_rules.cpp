@@ -1506,6 +1506,32 @@ CallShapes CallShapesOf(const std::string &sql) {
 	return CallsInTokens(Parser::NormalizeSQLString(sql));
 }
 
+std::optional<std::string> QueryLiteral(const FunctionExpression &call) {
+	auto positional = Positional(call);
+	if (positional.size() != 1 || !IsStringLiteral(*positional[0])) {
+		return std::nullopt;
+	}
+	return positional[0]->Cast<ConstantExpression>().GetLiteral().text;
+}
+
+std::optional<std::vector<std::string>> QueryTableLiterals(const FunctionExpression &call) {
+	auto positional = Positional(call);
+	auto names = !positional.empty() && (IsStringLiteral(*positional[0]) || IsStringList(*positional[0]));
+	auto flag = positional.size() == 1 || (positional.size() == 2 && IsBooleanLiteral(*positional[1]));
+	if (!names || !flag) {
+		return std::nullopt;
+	}
+	std::vector<std::string> tables;
+	if (IsStringLiteral(*positional[0])) {
+		tables.push_back(positional[0]->Cast<ConstantExpression>().GetLiteral().text);
+	} else {
+		for (auto &element : positional[0]->Cast<FunctionExpression>().GetArguments()) {
+			tables.push_back(element.GetExpression().Cast<ConstantExpression>().GetLiteral().text);
+		}
+	}
+	return tables;
+}
+
 std::vector<ReachedName> ReachedNames(ClientContext &context, SQLStatement &statement) {
 	std::vector<ReachedName> reached;
 	try {

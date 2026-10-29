@@ -593,6 +593,70 @@ void CheckCallNames() {
 	if (refused.find("QoD: statement uses a view that reads itself") == std::string::npos) {
 		Fail("a view that reads itself: got \"" + refused + "\"");
 	}
+
+	// ---- review I2-R1: a built-in macro's body binds its calls on the caller's path, so a user catalog's
+	// macro shadows a name inside it, even when the call names system.main
+	read("SELECT array_append([1], 2)", "");
+	qod::RunStrict(con, "CREATE VIEW v_append AS SELECT array_append([1], 2) AS a", "a view over a built-in macro");
+	qod::RunStrict(con, "CREATE MACRO main.list_append(l, e) AS 'shadowed'", "a shadow inside a built-in body");
+	const std::string inside = "QoD: function list_append is not classified: it resolves to memory.main.list_append";
+	read("SELECT array_append([1], 2)", inside);
+	read("SELECT system.main.array_append([1], 2)", inside);
+	read("SELECT * FROM main.v_append", inside);
+	qod::RunStrict(con, "DROP MACRO main.list_append", "drop the shadow");
+	read("SELECT system.main.array_append([1], 2)", "");
+	// a built-in table macro's body
+	read("SELECT count(*) FROM duckdb_logs_parsed('QueryLog')", "");
+	qod::RunStrict(con, "CREATE MACRO main.parse_duckdb_log_message(t, m) AS {'shadowed': m}", "a shadow in a table macro");
+	read("SELECT count(*) FROM duckdb_logs_parsed('QueryLog')",
+	     "QoD: function parse_duckdb_log_message is not classified: it resolves to memory.main.parse_duckdb_log_message");
+	qod::RunStrict(con, "DROP MACRO main.parse_duckdb_log_message", "drop the shadow");
+	// histogram's body reads its source through query_table(source): a parameter, which no walk reads, so
+	// a view over it is refused (it would read v_setting's folded value)
+	qod::RunStrict(con, "CREATE VIEW v_hist AS SELECT * FROM histogram('main.v_setting', x)", "a histogram view");
+	read("SELECT * FROM main.v_hist", "query_table() without literal table names");
+
+	// ---- review I2-R2: query() and query_table() in a body: the literal is walked as a query, the names as
+	// relations, a computed argument refused
+	for (auto sql : {"CREATE VIEW v_q AS SELECT * FROM query('SELECT upper(lower(''Ab'')) AS u')",
+	                 "CREATE VIEW v_qq AS SELECT * FROM main.v_q",
+	                 "CREATE VIEW v_qs AS SELECT * FROM query('SELECT upper(current_setting(''TimeZone'')) AS z')",
+	                 "CREATE VIEW v_qt AS SELECT * FROM query_table('main.v_setting')",
+	                 "CREATE VIEW v_qn AS SELECT * FROM query('SELECT ' || '1 AS one')"}) {
+		qod::RunStrict(con, sql, "query() views");
+	}
+	read("SELECT * FROM main.v_q", "");
+	read("SELECT * FROM main.v_qs", "QoD: function current_setting is superuser-only");
+	read("SELECT * FROM main.v_qt", "QoD: function current_setting is superuser-only");
+	read("SELECT * FROM main.v_qn", "query() without a literal SQL string");
+	qod::RunStrict(con, "CREATE MACRO main.lower(x) AS 'shadowed'", "a shadow inside a query() literal");
+	read("SELECT * FROM main.v_q", "QoD: function lower is not classified: it resolves to memory.main.lower");
+	read("SELECT * FROM main.v_qq", "QoD: function lower is not classified: it resolves to memory.main.lower");
+	qod::RunStrict(con, "DROP MACRO main.lower", "drop the shadow");
+
+	// ---- review m-R7: inside a secure view's boundary current_setting() is refused by name, also folded
+	qod::RunStrict(con, "CREATE SECURE VIEW sv_set AS SELECT upper(current_setting('TimeZone')) AS z", "secure");
+	read("SELECT * FROM main.sv_set",
+	     "QoD: statement uses current_setting() inside a secure view, which QoD does not support");
+	qod::RunStrict(con, "CREATE SECURE VIEW sv_var AS SELECT 1 AS one WHERE getvariable('h') IS NULL", "secure");
+	read("SELECT * FROM main.sv_var",
+	     "QoD: statement uses getvariable() inside a secure view, which QoD does not support");
+
+	// ---- review m-R6: an EXECUTE whose own bind fails is judged with its prepared statement too
+	qod::RunStrict(con, "PREPARE p_setting AS SELECT * FROM main.v_setting", "prepare");
+	duckdb::Parser execute(*con.context);
+	execute.ParseQuery("EXECUTE p_setting");
+	refused.clear();
+	con.BeginTransaction();
+	try {
+		qod::JudgeFailedStatement(*con.context, *execute.statements[0]);
+	} catch (duckdb::PermissionException &error) {
+		refused = duckdb::ErrorData(error).RawMessage();
+	}
+	con.Rollback();
+	if (refused.find("QoD: function current_setting is superuser-only") == std::string::npos) {
+		Fail("an EXECUTE's prepared statement in JudgeFailedStatement: got \"" + refused + "\"");
+	}
 }
 
 int main(int argc, char **argv) {

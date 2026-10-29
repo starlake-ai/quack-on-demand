@@ -6,11 +6,13 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace duckdb {
 class ClientContext;
+class FunctionExpression;
 class SQLStatement;
 }
 
@@ -65,6 +67,13 @@ struct ReachedName {
 //! screen would refuse the statement, the names reached up to that point (in a session the screen
 //! itself refused or admitted the same text before binding).
 std::vector<ReachedName> ReachedNames(duckdb::ClientContext &context, duckdb::SQLStatement &statement);
+
+//! query(sql)'s literal SQL, as the screen reads it (one positional string literal), or nullopt.
+std::optional<std::string> QueryLiteral(const duckdb::FunctionExpression &call);
+
+//! query_table(names[, flag])'s literal table names, as the screen reads them (a string literal or a
+//! list of them, an optional boolean literal), or nullopt.
+std::optional<std::vector<std::string>> QueryTableLiterals(const duckdb::FunctionExpression &call);
 
 //! How deep query('...') may nest query('...').
 constexpr int kMaxQueryNesting = 8;

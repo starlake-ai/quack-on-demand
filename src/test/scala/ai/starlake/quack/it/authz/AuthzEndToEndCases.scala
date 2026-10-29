@@ -1003,14 +1003,21 @@ abstract class AuthzEndToEndCases(
       alwaysNode = true
     )
     // getvariable() folds to a constant at bind, so the describer refuses any boundary while the
-    // session holds a user variable; without one the body's getvariable('h') is NULL.
+    // session holds a user variable, and refuses the call by name in the body even without one
+    // (review m-R7: a folded call leaves no plan for the plan rule).
     refused(
       "alice",
       "files",
       s"SET VARIABLE h = 7; SELECT * FROM $files.main.sv_var",
       alwaysNode = true
     )
-    allowed("alice", "files", s"SELECT count(*) FROM $files.main.sv_var", Some(List("0")))
+    refused(
+      "alice",
+      "files",
+      s"SELECT count(*) FROM $files.main.sv_var",
+      node = "getvariable() inside a secure view",
+      alwaysNode = true
+    )
   }
 
   "temp tables" should "work for every principal" in {
@@ -1115,6 +1122,46 @@ abstract class AuthzEndToEndCases(
     finally admin("lake", s"DROP MACRO $lake.main.levenshtein")
     allowed("alice", "lake", "SELECT levenshtein('kitten', 'sitting')", Some(List("3")))
     allowed("alice", "lake", s"SELECT d FROM $lake.main.v_lev", Some(List("3")))
+  }
+
+  "a built-in macro's body" should "be judged where the caller's path binds it" in {
+    ready()
+    // Review I2-R1: DuckDB binds a built-in macro's calls on the caller's search path, so a macro
+    // planted in the pool's DuckLake catalog shadows list_append inside array_append, even called
+    // system.main.
+    allowed("alice", "lake", "SELECT len(array_append([1], 2))", Some(List("2")))
+    admin("lake", s"CREATE MACRO $lake.main.list_append(l, e) AS 'shadowed'")
+    try
+      val shadowed =
+        s"function list_append is not classified: it resolves to $lake.main.list_append"
+      refused("alice", "lake", "SELECT array_append([1], 2)", node = shadowed, alwaysNode = true)
+      refused(
+        "alice",
+        "lake",
+        "SELECT system.main.array_append([1], 2)",
+        node = shadowed,
+        alwaysNode = true
+      )
+    finally admin("lake", s"DROP MACRO $lake.main.list_append")
+    allowed("alice", "lake", "SELECT len(array_append([1], 2))", Some(List("2")))
+  }
+
+  "a query() in a view's body" should "be walked like the body" in {
+    ready()
+    // Review I2-R2: the literal of a query() in a view body is parsed and bound at every read.
+    admin(
+      "lake",
+      s"CREATE VIEW $lake.main.v_q AS SELECT * FROM query(" +
+        "'SELECT upper(current_setting(''TimeZone'')) AS z')"
+    )
+    grant(lake, "main", "v_q", "RO")
+    refused(
+      "alice",
+      "lake",
+      s"SELECT z FROM $lake.main.v_q",
+      node = "function current_setting is superuser-only",
+      alwaysNode = true
+    )
   }
 
   "a view's body" should "be judged by the calls it makes, folded or not" in {

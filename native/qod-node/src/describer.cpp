@@ -48,6 +48,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/statement/execute_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
 #include "duckdb/parser/expression/list.hpp"
@@ -677,10 +678,17 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 //! classification lists; outside a secure view's boundary, not a superuser-class one. Every view the
 //! statement reads by name, plain or secure, is walked transitively with the search path DuckDB binds
 //! its body with (Binder::GetSearchPath(view catalog, view schema, true), bind_basetableref.cpp:333-335,
-//! the client's set paths behind it); a macro that is not DuckDB's own is refused by name, so no macro
-//! body is walked (a built-in one calls built-ins only). The statement's own names come from the parse
-//! screen's walk (ReachedNames); a view's from the definition walk below, which follows the shapes a
-//! view's query takes (a SELECT, a set operation, CTEs).
+//! the client's set paths behind it). A macro that is not DuckDB's own is refused by name, except inside a
+//! secure view's boundary (item 20), where its body is walked. A built-in macro's or table macro's body is
+//! walked at the call site: DuckDB binds its calls along the caller's search path
+//! (CatalogEntryRetriever::SetSearchPath drops the system catalog), so a user catalog's macro can shadow a
+//! name inside it, even when the call names system.main; there only the entry each name resolves to is
+//! judged. query() and query_table() in a body are walked too: the literal SQL as a query, the literal
+//! names as relations (a computed one is refused). Inside a secure view's boundary current_setting() and
+//! getvariable() are refused by name as the plan rule refuses them, since a folded call leaves no plan.
+//! The statement's own names come from the parse screen's walk (ReachedNames); a body's from the
+//! definition walk below, which follows the shapes a view's query takes (a SELECT, a set operation,
+//! CTEs).
 class CallNames {
 public:
 	explicit CallNames(ClientContext &context) : context_(context) {
@@ -703,7 +711,7 @@ public:
 		for (auto &reached : ReachedNames(context_, statement)) {
 			switch (reached.kind) {
 			case ReachedName::Kind::RELATION:
-				Relation(reached.name, session, false);
+				Relation(reached.name, session, Rules::PLAIN);
 				break;
 			case ReachedName::Kind::TABLE_CALL:
 				Resolution(reached.name, CatalogType::TABLE_FUNCTION_ENTRY, session);
@@ -718,6 +726,10 @@ public:
 private:
 	//! Views nested deeper than this are refused (fail closed).
 	static constexpr idx_t kMaxViewDepth = 16;
+
+	//! How a body's names are judged: a plain view's (PLAIN), inside a secure view's boundary (SECURE,
+	//! the owner's rights), or inside a built-in macro's body (BUILTIN: only what each name resolves to).
+	enum class Rules { PLAIN, SECURE, BUILTIN };
 
 	optional_ptr<CatalogEntry> Lookup(CatalogEntryRetriever &retriever, CatalogType type, const QualifiedName &name) {
 		return retriever.GetEntry(EntryLookupInfo(type, Binder::BindTableName(retriever, name)),
@@ -756,18 +768,42 @@ private:
 		if (entry && !BuiltIn(*entry)) {
 			NotOwn(lower, *entry);
 		}
+		if (entry) {
+			BuiltInBody(*entry, retriever);
+		}
+	}
+
+	//! A built-in macro or table macro: its body, at the call site (review I2-R1).
+	void BuiltInBody(CatalogEntry &entry, CatalogEntryRetriever &retriever) {
+		if ((entry.type == CatalogType::MACRO_ENTRY || entry.type == CatalogType::TABLE_MACRO_ENTRY) &&
+		    BuiltIn(entry)) {
+			Macro(entry, retriever, Rules::BUILTIN);
+		}
 	}
 
 	//! A call inside a view's or a macro's body, which no screen saw: the entry it resolves to, its
 	//! classification, and outside a secure view's boundary its class.
-	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, bool secure) {
+	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, Rules rules) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
 		auto entry = Resolved(name, type, retriever);
-		if (entry && !BuiltIn(*entry) && secure &&
+		if (rules == Rules::BUILTIN) {
+			if (entry && !BuiltIn(*entry)) {
+				NotOwn(lower, *entry);
+			}
+			if (entry) {
+				BuiltInBody(*entry, retriever);
+			}
+			return;
+		}
+		if (rules == Rules::SECURE && (lower == "current_setting" || lower == "getvariable")) {
+			// The plan rule (Walker::AddFunction), for a call DuckDB folded away (review m-R7).
+			Unsupported(lower + "() inside a secure view");
+		}
+		if (entry && !BuiltIn(*entry) && rules == Rules::SECURE &&
 		    (entry->type == CatalogType::MACRO_ENTRY || entry->type == CatalogType::TABLE_MACRO_ENTRY)) {
 			// Inside a secure view's boundary a superuser's macro runs with the owner's rights (item 20):
 			// its body's names are judged as the boundary's.
-			Macro(*entry, retriever);
+			Macro(*entry, retriever, Rules::SECURE);
 			return;
 		}
 		if (entry && !BuiltIn(*entry)) {
@@ -776,12 +812,15 @@ private:
 		if (!IsClassifiedFunction(lower) && lower != "unlist") {
 			throw PermissionException("QoD: function " + lower + " is not classified");
 		}
-		if (!secure && IsSuperuserFunction(lower)) {
+		if (rules == Rules::PLAIN && IsSuperuserFunction(lower)) {
 			throw PermissionException("QoD: function " + lower + " is superuser-only");
+		}
+		if (entry) {
+			BuiltInBody(*entry, retriever);
 		}
 	}
 
-	void Macro(CatalogEntry &entry, CatalogEntryRetriever &retriever) {
+	void Macro(CatalogEntry &entry, CatalogEntryRetriever &retriever, Rules rules) {
 		if (path_.count(&entry) != 0) {
 			Unsupported("a macro that calls itself");
 		}
@@ -792,18 +831,18 @@ private:
 		for (auto &macro : entry.Cast<MacroCatalogEntry>().macros) {
 			for (auto &parameter : macro->default_parameters) {
 				if (parameter.second) {
-					Expr(*parameter.second, retriever, true);
+					Expr(*parameter.second, retriever, rules);
 				}
 			}
 			if (macro->type == MacroType::SCALAR_MACRO) {
 				auto &body = macro->Cast<ScalarMacroFunction>().expression;
 				if (body) {
-					Expr(*body, retriever, true);
+					Expr(*body, retriever, rules);
 				}
 			} else if (macro->type == MacroType::TABLE_MACRO) {
 				auto &body = macro->Cast<TableMacroFunction>().query_node;
 				if (body) {
-					Query(*body, retriever, true);
+					Query(*body, retriever, rules);
 				}
 			} else {
 				Unsupported("a macro of a kind QoD does not know");
@@ -812,7 +851,7 @@ private:
 		path_.erase(&entry);
 	}
 
-	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, bool secure) {
+	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, Rules rules) {
 		auto entry = Lookup(retriever, CatalogType::TABLE_ENTRY, name);
 		if (!entry || entry->type != CatalogType::VIEW_ENTRY || BuiltIn(*entry)) {
 			return;
@@ -830,24 +869,25 @@ private:
 		search.emplace_back(view.ParentCatalog().GetName(), view.ParentSchema().name);
 		search.emplace_back(view.ParentCatalog().GetName(), Identifier::InvalidSchema(), true);
 		body.SetSearchPath(std::move(search));
-		auto inside = secure || view.security_type == ViewSecurityType::SECURE_VIEW;
+		auto inside = rules == Rules::SECURE || view.security_type == ViewSecurityType::SECURE_VIEW ? Rules::SECURE
+		                                                                                              : Rules::PLAIN;
 		Query(*view.GetQuery().node, body, inside);
 		path_.erase(entry.get());
 	}
 
 	// ---- a view's definition
 
-	void Query(const QueryNode &node, CatalogEntryRetriever &retriever, bool secure) {
+	void Query(const QueryNode &node, CatalogEntryRetriever &retriever, Rules rules) {
 		for (auto &entry : node.cte_map.map) {
 			if (entry.second) {
 				if (entry.second->query_node) {
-					Query(*entry.second->query_node, retriever, secure);
+					Query(*entry.second->query_node, retriever, rules);
 				}
 				for (auto &expr : entry.second->key_targets) {
-					Expr(*expr, retriever, secure);
+					Expr(*expr, retriever, rules);
 				}
 				for (auto &expr : entry.second->payload_aggregates) {
-					Expr(*expr, retriever, secure);
+					Expr(*expr, retriever, rules);
 				}
 			}
 		}
@@ -855,42 +895,42 @@ private:
 		case QueryNodeType::SELECT_NODE: {
 			auto &select = node.Cast<SelectNode>();
 			if (select.from_table) {
-				Ref(*select.from_table, retriever, secure);
+				Ref(*select.from_table, retriever, rules);
 			}
 			for (auto &expr : select.select_list) {
-				Expr(*expr, retriever, secure);
+				Expr(*expr, retriever, rules);
 			}
 			for (auto &expr : select.groups.group_expressions) {
-				Expr(*expr, retriever, secure);
+				Expr(*expr, retriever, rules);
 			}
 			for (auto *clause : {&select.where_clause, &select.having, &select.qualify}) {
 				if (*clause) {
-					Expr(**clause, retriever, secure);
+					Expr(**clause, retriever, rules);
 				}
 			}
 			break;
 		}
 		case QueryNodeType::SET_OPERATION_NODE:
 			for (auto &child : node.Cast<SetOperationNode>().children) {
-				Query(*child, retriever, secure);
+				Query(*child, retriever, rules);
 			}
 			break;
 		case QueryNodeType::RECURSIVE_CTE_NODE: {
 			auto &recursive = node.Cast<RecursiveCTENode>();
-			Query(*recursive.left, retriever, secure);
-			Query(*recursive.right, retriever, secure);
+			Query(*recursive.left, retriever, rules);
+			Query(*recursive.right, retriever, rules);
 			for (auto &expr : recursive.key_targets) {
-				Expr(*expr, retriever, secure);
+				Expr(*expr, retriever, rules);
 			}
 			break;
 		}
 		case QueryNodeType::CTE_NODE: {
 			auto &cte = node.Cast<CTENode>();
 			if (cte.query) {
-				Query(*cte.query, retriever, secure);
+				Query(*cte.query, retriever, rules);
 			}
 			if (cte.child) {
-				Query(*cte.child, retriever, secure);
+				Query(*cte.child, retriever, rules);
 			}
 			break;
 		}
@@ -900,80 +940,81 @@ private:
 		ParsedExpressionIterator::EnumerateQueryNodeModifiers(const_cast<QueryNode &>(node),
 		                                                      [&](unique_ptr<ParsedExpression> &child) {
 			                                                      if (child) {
-				                                                      Expr(*child, retriever, secure);
+				                                                      Expr(*child, retriever, rules);
 			                                                      }
 		                                                      });
 	}
 
-	void Ref(const TableRef &ref, CatalogEntryRetriever &retriever, bool secure) {
+	void Ref(const TableRef &ref, CatalogEntryRetriever &retriever, Rules rules) {
 		switch (ref.type) {
 		case TableReferenceType::BASE_TABLE: {
 			auto &base = ref.Cast<BaseTableRef>();
 			if (base.at_clause && base.at_clause->ExpressionMutable()) {
-				Expr(*base.at_clause->ExpressionMutable(), retriever, secure);
+				Expr(*base.at_clause->ExpressionMutable(), retriever, rules);
 			}
-			Relation(base.GetQualifiedName(), retriever, secure);
+			Relation(base.GetQualifiedName(), retriever, rules);
 			break;
 		}
 		case TableReferenceType::JOIN: {
 			auto &join = ref.Cast<JoinRef>();
-			Ref(*join.left, retriever, secure);
-			Ref(*join.right, retriever, secure);
+			Ref(*join.left, retriever, rules);
+			Ref(*join.right, retriever, rules);
 			if (join.condition) {
-				Expr(*join.condition, retriever, secure);
+				Expr(*join.condition, retriever, rules);
 			}
 			for (auto &expr : join.duplicate_eliminated_columns) {
-				Expr(*expr, retriever, secure);
+				Expr(*expr, retriever, rules);
 			}
 			if (join.ranking_expression) {
-				Expr(*join.ranking_expression, retriever, secure);
+				Expr(*join.ranking_expression, retriever, rules);
 			}
 			break;
 		}
 		case TableReferenceType::SUBQUERY:
-			Query(*ref.Cast<SubqueryRef>().subquery->node, retriever, secure);
+			Query(*ref.Cast<SubqueryRef>().subquery->node, retriever, rules);
 			break;
 		case TableReferenceType::TABLE_FUNCTION: {
 			auto &function = ref.Cast<TableFunctionRef>();
 			if (function.function && function.function->GetExpressionClass() == ExpressionClass::FUNCTION) {
 				auto &call = function.function->Cast<FunctionExpression>();
-				Call(call.GetQualifiedName(), CatalogType::TABLE_FUNCTION_ENTRY, retriever, secure);
+				Call(call.GetQualifiedName(), CatalogType::TABLE_FUNCTION_ENTRY, retriever, rules);
+				QueryCall(call, retriever, rules);
 				ParsedExpressionIterator::EnumerateChildren(
-				    call, [&](const ParsedExpression &child) { Expr(child, retriever, secure); });
+				    call, [&](const ParsedExpression &child) { Expr(child, retriever, rules); });
 			} else if (function.function) {
 				Unsupported("a view whose definition calls a table function DuckDB does not name");
 			}
 			if (function.subquery) {
-				Query(*function.subquery->node, retriever, secure);
+				Query(*function.subquery->node, retriever, rules);
 			}
 			break;
 		}
 		case TableReferenceType::EXPRESSION_LIST:
 			for (auto &row : ref.Cast<ExpressionListRef>().values) {
 				for (auto &expr : row) {
-					Expr(*expr, retriever, secure);
+					Expr(*expr, retriever, rules);
 				}
 			}
 			break;
 		case TableReferenceType::PIVOT: {
 			auto &pivot = ref.Cast<PivotRef>();
 			if (pivot.source) {
-				Ref(*pivot.source, retriever, secure);
+				Ref(*pivot.source, retriever, rules);
 			}
 			for (auto &expr : pivot.aggregates) {
-				Expr(*expr, retriever, secure);
+				Expr(*expr, retriever, rules);
 			}
 			for (auto &column : pivot.pivots) {
 				for (auto &expr : column.pivot_expressions) {
-					Expr(*expr, retriever, secure);
+					Expr(*expr, retriever, rules);
 				}
 				for (auto &entry : column.entries) {
 					if (entry.expr) {
-						Expr(*entry.expr, retriever, secure);
+						Expr(*entry.expr, retriever, rules);
 					}
 				}
 				if (column.subquery) {
-					Query(*column.subquery, retriever, secure);
+					Query(*column.subquery, retriever, rules);
 				}
 			}
 			break;
@@ -987,33 +1028,74 @@ private:
 		}
 	}
 
-	void Expr(const ParsedExpression &expr, CatalogEntryRetriever &retriever, bool secure) {
+	//! query(sql) and query_table(names) in a body (review I2-R2): DuckDB parses and binds them at every
+	//! read, on the body's search path, so the literal is walked as a query and the names as relations; a
+	//! computed argument, which no walk can read, is refused.
+	void QueryCall(const FunctionExpression &call, CatalogEntryRetriever &retriever, Rules rules) {
+		auto name = StringUtil::Lower(Text(call.GetQualifiedName().Name()));
+		auto relations = rules == Rules::SECURE ? Rules::SECURE : Rules::PLAIN;
+		if (name == "query") {
+			auto literal = QueryLiteral(call);
+			if (!literal) {
+				Unsupported("a view or macro whose body calls query() without a literal SQL string");
+			}
+			if (++query_depth_ > kMaxQueryNesting) {
+				Unsupported("query() nested deeper than " + std::to_string(kMaxQueryNesting));
+			}
+			Parser parser(context_);
+			parser.ParseQuery(*literal);
+			for (auto &statement : parser.statements) {
+				if (statement->type != StatementType::SELECT_STATEMENT) {
+					Unsupported("a query() that runs a statement other than a query");
+				}
+				Query(*statement->Cast<SelectStatement>().node, retriever, rules);
+			}
+			query_depth_--;
+		} else if (name == "query_table") {
+			auto tables = QueryTableLiterals(call);
+			if (!tables) {
+				Unsupported("a view or macro whose body calls query_table() without literal table names");
+			}
+			for (auto &table : *tables) {
+				QualifiedName parsed;
+				std::string error;
+				if (!QualifiedName::TryParse(table, parsed, error)) {
+					Unsupported("a query_table() name QoD cannot read");
+				}
+				Relation(parsed, retriever, relations);
+			}
+		}
+	}
+
+	void Expr(const ParsedExpression &expr, CatalogEntryRetriever &retriever, Rules rules) {
 		switch (expr.GetExpressionClass()) {
 		case ExpressionClass::SUBQUERY: {
 			auto &subquery = expr.Cast<SubqueryExpression>();
 			if (subquery.Subquery() && subquery.Subquery()->node) {
-				Query(*subquery.Subquery()->node, retriever, secure);
+				Query(*subquery.Subquery()->node, retriever, rules);
 			}
 			break;
 		}
 		case ExpressionClass::FUNCTION:
 			Call(expr.Cast<FunctionExpression>().GetQualifiedName(), CatalogType::SCALAR_FUNCTION_ENTRY, retriever,
-			     secure);
+			     rules);
 			break;
 		case ExpressionClass::WINDOW:
 			Call(expr.Cast<WindowExpression>().GetQualifiedName(), CatalogType::SCALAR_FUNCTION_ENTRY, retriever,
-			     secure);
+			     rules);
 			break;
 		default:
 			break;
 		}
 		ParsedExpressionIterator::EnumerateChildren(expr,
-		                                            [&](const ParsedExpression &child) { Expr(child, retriever, secure); });
+		                                            [&](const ParsedExpression &child) { Expr(child, retriever, rules); });
 	}
 
 	ClientContext &context_;
 	//! The views and macros on the walk's current path, for cycles.
 	std::set<const CatalogEntry *> path_;
+	//! How deep query() literals nest on the current path.
+	int query_depth_ = 0;
 };
 
 //! The client statement's own statements: every statement of its text, and an EXECUTE's prepared one
@@ -2338,7 +2420,16 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 
 void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement) {
 	try {
-		CallNames(context).Statement(statement);
+		CallNames names(context);
+		names.Statement(statement);
+		// An EXECUTE whose own bind failed: the prepared statement it would have bound too (review m-R6).
+		if (statement.type == duckdb::StatementType::EXECUTE_STATEMENT) {
+			auto &prepared = duckdb::ClientData::Get(context).prepared_statements;
+			auto found = prepared.find(statement.Cast<duckdb::ExecuteStatement>().name);
+			if (found != prepared.end() && found->second && found->second->unbound_statement) {
+				names.Statement(*found->second->unbound_statement);
+			}
+		}
 	} catch (duckdb::PermissionException &) {
 		throw;
 	} catch (std::exception &) {
