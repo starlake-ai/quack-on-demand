@@ -302,11 +302,12 @@ size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &
 	return skipped;
 }
 
-size_t RunInit(Connection &con, const std::string &sql, const std::string &nonce) {
+size_t RunInit(Connection &con, const std::string &sql, const std::string &nonce,
+               const std::function<void(const std::string &)> &before_trusted) {
 	size_t skipped = 0;
 	for (auto &section : SplitInitSections(sql, nonce)) {
 		if (section.trusted) {
-			skipped += RunBestEffort(con, section.sql, "init");
+			skipped += RunBestEffort(con, section.sql, "init", before_trusted);
 		} else {
 			skipped += RunUntrusted(con, section.sql,
 			                        "tenant " + (section.label.empty() ? std::string("") : section.label + " ") +

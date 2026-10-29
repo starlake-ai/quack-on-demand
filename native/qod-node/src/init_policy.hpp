@@ -2,6 +2,7 @@
 
 #include "duckdb.hpp"
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -83,7 +84,8 @@ size_t RunUntrusted(duckdb::Connection &con, const std::string &sql, const std::
 
 //! Runs an init script: its trusted sections as RunBestEffort does, its untrusted ones (marked with
 //! `nonce`, see SplitInitSections) through RunUntrusted. Returns how many statements were refused or
-//! failed.
-size_t RunInit(duckdb::Connection &con, const std::string &sql, const std::string &nonce);
+//! failed. `before_trusted`, when set, is called with each trusted statement before it runs.
+size_t RunInit(duckdb::Connection &con, const std::string &sql, const std::string &nonce,
+               const std::function<void(const std::string &)> &before_trusted = nullptr);
 
 } // namespace qod

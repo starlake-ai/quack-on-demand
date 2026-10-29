@@ -351,6 +351,25 @@ else
   cat "$work/lockdown.out"
 fi
 
+# --- serve: quack installs where the trusted init SQL says extensions come from -------------------
+# A trusted init statement that points the extension directory and repository elsewhere applies to the
+# quack install (an air-gapped mirror): here an empty directory and a repository no one serves, so
+# installing quack fails, naming the repository.
+mkdir -p "$work/empty-extensions"
+{ nonce_line; printf "SET extension_directory = '%s';\nSET custom_extension_repository = 'http://127.0.0.1:9/qod-no-repository';\n" "$work/empty-extensions"; } |
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-extdir)" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/extdir.out" 2>&1 &
+extdir_node=$!
+pids+=("$extdir_node")
+if wait_exit "$extdir_node"; then
+  [[ "$exit_status" -ne 0 ]] || fail "extension settings: the node started without its repository"
+  grep -q 'installing quack failed' "$work/extdir.out" && grep -q 'qod-no-repository' "$work/extdir.out" ||
+    { fail "extension settings: the quack install did not use the init SQL's repository"; cat "$work/extdir.out"; }
+else
+  fail "extension settings: the node neither started nor stopped"
+  kill_quietly "$extdir_node"
+fi
+
 # --- serve: the extension settings are fixed before the database opens ----------------------------
 # Off unless a flag turns one on (decision 17). The init SQL tries to turn both allow_* settings on:
 # DuckDB refuses while the database runs, so neither can a pool's or a database's initSql. The node

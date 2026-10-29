@@ -2,6 +2,7 @@
 
 #include "duckdb.hpp"
 
+#include <functional>
 #include <string>
 
 namespace qod {
@@ -9,8 +10,16 @@ namespace qod {
 //! Runs every statement of sql on con, one at a time. A failing statement is reported on stderr with
 //! its position and DuckDB's error (ErrorWithoutStatement), and the next one runs: the node has always
 //! carried on past an unreachable federated source or an offline INSTALL. Returns the number of
-//! statements that failed.
-size_t RunBestEffort(duckdb::Connection &con, const std::string &sql, const std::string &label);
+//! statements that failed. `before`, when set, is called with each statement's text before it runs;
+//! what it throws stops the run.
+size_t RunBestEffort(duckdb::Connection &con, const std::string &sql, const std::string &label,
+                     const std::function<void(const std::string &)> &before = nullptr);
+
+//! Whether `statement` is a SET of a setting that restricts what the node may read or reach
+//! (disabled_filesystems, enable_external_access, lock_configuration, allowed_directories,
+//! allowed_paths), as the manager's lockdown block ends a node's init SQL with: whatever needs the
+//! local file system (loading quack) must run before it. False for anything that does not parse.
+bool RestrictsNodeAccess(duckdb::ClientContext &context, const std::string &statement);
 
 //! Runs one statement and throws std::runtime_error with label and DuckDB's error
 //! (ErrorWithoutStatement) if it fails.

@@ -40,10 +40,11 @@ using namespace qod;
 //! Runs every init file; `nonce` marks a tenant's sections (empty: none, the --list-* modes). A
 //! serving node's init file must open with the nonce line (RequireInitNonceLine): a stream whose
 //! script read another nonce is refused whole, never run with its tenant sections trusted.
-void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "") {
+void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "",
+                  const std::function<void(const std::string &)> &before_trusted = nullptr) {
 	for (auto &file : options.init_files) {
 		auto sql = ReadAll(file);
-		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce);
+		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce, before_trusted);
 	}
 }
 
@@ -129,12 +130,25 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
 	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
 
-	// Before the init SQL: a lockdown pool's ends by disabling the local file system
-	// (NodeLockdown.sql), and quack's extension file is local.
-	RunStrict(con, "INSTALL quack", "installing quack");
-	RunStrict(con, "LOAD quack", "loading quack");
-
-	RunInitFiles(con, options, secrets.init_nonce);
+	// quack loads after the trusted init statements that set where extensions come from
+	// (custom_extension_repository, extension_directory), and before the first one that restricts the
+	// node's file or network access: a lockdown pool's init SQL ends by disabling the local file system
+	// (NodeLockdown.sql), and quack's extension file is local. Without such a statement, after the init
+	// SQL.
+	auto quack_loaded = false;
+	auto load_quack = [&]() {
+		if (!quack_loaded) {
+			quack_loaded = true;
+			RunStrict(con, "INSTALL quack", "installing quack");
+			RunStrict(con, "LOAD quack", "loading quack");
+		}
+	};
+	RunInitFiles(con, options, secrets.init_nonce, [&](const std::string &statement) {
+		if (RestrictsNodeAccess(*con.context, statement)) {
+			load_quack();
+		}
+	});
+	load_quack();
 
 	// After the init SQL, so nothing it ran can replace the screen.
 	RunStrict(con, std::string("SET GLOBAL quack_authorization_function = ") + QuoteLiteral(kScreenFunction),
