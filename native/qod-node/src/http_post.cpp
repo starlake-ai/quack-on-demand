@@ -63,10 +63,10 @@ std::vector<ResolvedAddress> Resolve(const std::string &host, const std::string 
 	return addresses;
 }
 
-//! The first of `addresses` that accepts a connection before `deadline`, else kNoSocket with `failure`
-//! saying why.
-SocketHandle ConnectAny(const HttpUrl &url, const std::vector<ResolvedAddress> &addresses, int64_t deadline,
-                        std::string &failure) {
+//! The first of `addresses` that accepts a connection before `deadline` (made the name's preferred
+//! address in `known`), else kNoSocket with `failure` saying why.
+SocketHandle ConnectAny(const HttpUrl &url, ResolvedAddresses &known, const std::vector<ResolvedAddress> &addresses,
+                        int64_t deadline, std::string &failure) {
 	failure = "cannot connect to " + url.authority;
 	for (auto &address : addresses) {
 		auto handle = OpenStreamSocket(address.family);
@@ -86,6 +86,9 @@ SocketHandle ConnectAny(const HttpUrl &url, const std::vector<ResolvedAddress> &
 			ok = ready == 1 && ConnectResult(handle) == 0;
 		}
 		if (ok) {
+			if (&address != &addresses.front()) {
+				known.Prefer(url.host, url.port, address);
+			}
 			return handle;
 		}
 		CloseSocket(handle);
@@ -93,22 +96,24 @@ SocketHandle ConnectAny(const HttpUrl &url, const std::vector<ResolvedAddress> &
 	return kNoSocket;
 }
 
-SocketHandle Connect(const HttpUrl &url, int64_t deadline) {
-	auto &known = HostAddresses();
+SocketHandle Connect(const HttpUrl &url, ResolvedAddresses &known, int64_t deadline) {
 	auto fresh = false;
 	auto addresses = known.Get(url.host, url.port, fresh);
 	std::string failure;
-	auto connected = ConnectAny(url, addresses, deadline, failure);
+	auto connected = ConnectAny(url, known, addresses, deadline, failure);
 	if (connected == kNoSocket) {
 		known.Forget(url.host, url.port);
-		// Kept addresses that no longer answer (a replica that moved): the name once more, now.
+		// Kept addresses that refused (a replica that moved, its old address refusing at once): the name
+		// once more, now. A kept address that drops the connect instead spends the deadline, and the
+		// call fails; the next one resolves the name again (Forget).
 		if (!fresh && MonotonicMs() < deadline) {
 			auto renewed = known.Get(url.host, url.port, fresh);
+			// The same addresses again: not tried twice in one call.
 			if (!(renewed == addresses)) {
-				connected = ConnectAny(url, renewed, deadline, failure);
-				if (connected == kNoSocket) {
-					known.Forget(url.host, url.port);
-				}
+				connected = ConnectAny(url, known, renewed, deadline, failure);
+			}
+			if (connected == kNoSocket) {
+				known.Forget(url.host, url.port);
 			}
 		}
 	}
@@ -379,41 +384,104 @@ HttpUrl ParseHttpUrl(const std::string &url) {
 	return result;
 }
 
-ResolvedAddresses::ResolvedAddresses(Resolver resolver, std::function<int64_t()> clock, int64_t lifetime_ms)
-    : resolver_(std::move(resolver)), clock_(std::move(clock)), lifetime_ms_(lifetime_ms) {
+ResolvedAddresses::ResolvedAddresses(Resolver resolver, std::function<int64_t()> clock, int64_t lifetime_ms,
+                                     int64_t retry_ms)
+    : resolver_(std::move(resolver)), clock_(std::move(clock)), lifetime_ms_(lifetime_ms), retry_ms_(retry_ms) {
 }
 
 std::vector<ResolvedAddress> ResolvedAddresses::Get(const std::string &host, const std::string &port, bool &fresh) {
 	// host:port is unambiguous: a port holds no ':', and every ':' of an IPv6 host comes before it.
 	auto key = host + ":" + port;
-	{
-		std::lock_guard<std::mutex> guard(lock_);
-		auto found = entries_.find(key);
-		if (found != entries_.end() && clock_() - found->second.resolved_at < lifetime_ms_) {
+	std::unique_lock<std::mutex> guard(lock_);
+	while (true) {
+		auto &entry = entries_[key];
+		auto now = clock_();
+		auto kept = !entry.addresses.empty();
+		if (kept && now - entry.resolved_at < lifetime_ms_) {
 			fresh = false;
-			return found->second.addresses;
+			return entry.addresses;
 		}
+		if (now < entry.retry_at) {
+			if (kept) {
+				fresh = false;
+				return entry.addresses;
+			}
+			throw std::runtime_error(entry.failure);
+		}
+		if (!entry.resolving) {
+			entry.resolving = true;
+			break;
+		}
+		if (kept) {
+			fresh = false;
+			return entry.addresses;
+		}
+		resolved_.wait(guard);
 	}
-	auto addresses = resolver_(host, port);
-	if (addresses.empty()) {
-		throw std::runtime_error("cannot resolve " + host);
+	guard.unlock();
+	std::vector<ResolvedAddress> addresses;
+	std::string failure;
+	try {
+		addresses = resolver_(host, port);
+		if (addresses.empty()) {
+			failure = "cannot resolve " + host;
+		}
+	} catch (std::exception &error) {
+		failure = error.what();
 	}
-	{
-		std::lock_guard<std::mutex> guard(lock_);
-		entries_[key] = Entry {addresses, clock_()};
+	guard.lock();
+	// Looked up again: a Forget meanwhile may have dropped the entry this call marked.
+	auto &entry = entries_[key];
+	entry.resolving = false;
+	resolved_.notify_all();
+	if (failure.empty()) {
+		entry.addresses = addresses;
+		entry.resolved_at = clock_();
+		entry.retry_at = 0;
+		fresh = true;
+		return addresses;
 	}
-	fresh = true;
-	return addresses;
+	entry.retry_at = clock_() + retry_ms_;
+	entry.failure = failure;
+	if (!entry.addresses.empty()) {
+		fresh = false;
+		return entry.addresses;
+	}
+	throw std::runtime_error(failure);
 }
 
 void ResolvedAddresses::Forget(const std::string &host, const std::string &port) {
 	std::lock_guard<std::mutex> guard(lock_);
-	entries_.erase(host + ":" + port);
+	auto found = entries_.find(host + ":" + port);
+	if (found == entries_.end()) {
+		return;
+	}
+	if (found->second.resolving) {
+		// Its resolver's result lands in this entry: keep the mark, drop the addresses.
+		found->second.addresses.clear();
+		found->second.retry_at = 0;
+	} else {
+		entries_.erase(found);
+	}
+}
+
+void ResolvedAddresses::Prefer(const std::string &host, const std::string &port, const ResolvedAddress &address) {
+	std::lock_guard<std::mutex> guard(lock_);
+	auto found = entries_.find(host + ":" + port);
+	if (found == entries_.end()) {
+		return;
+	}
+	auto &addresses = found->second.addresses;
+	auto at = std::find(addresses.begin(), addresses.end(), address);
+	if (at != addresses.end()) {
+		std::rotate(addresses.begin(), at, at + 1);
+	}
 }
 
 ResolvedAddresses &HostAddresses() {
-	static ResolvedAddresses addresses(Resolve, MonotonicMs, kResolvedLifetimeMs);
-	return addresses;
+	// Never destroyed, like the node's other process-lifetime singletons (lifetime.cpp).
+	static auto *addresses = new ResolvedAddresses(Resolve, MonotonicMs, kResolvedLifetimeMs);
+	return *addresses;
 }
 
 bool DecodeChunked(const std::string &raw, std::string &body) {
@@ -425,6 +493,12 @@ bool DecodeChunked(const std::string &raw, std::string &body) {
 HttpReply HttpPost(const HttpUrl &url, const std::string &path,
                    const std::vector<std::pair<std::string, std::string>> &headers, const std::string &body,
                    int64_t timeout_ms) {
+	return HttpPost(url, path, headers, body, timeout_ms, HostAddresses());
+}
+
+HttpReply HttpPost(const HttpUrl &url, const std::string &path,
+                   const std::vector<std::pair<std::string, std::string>> &headers, const std::string &body,
+                   int64_t timeout_ms, ResolvedAddresses &known) {
 	if (HasLineBreak(path)) {
 		throw std::invalid_argument("a line break in the request path");
 	}
@@ -441,7 +515,7 @@ HttpReply HttpPost(const HttpUrl &url, const std::string &path,
 	StartSockets();
 	auto deadline = MonotonicMs() + timeout_ms;
 	SocketGuard socket;
-	socket.handle = Connect(url, deadline);
+	socket.handle = Connect(url, known, deadline);
 	SendAll(socket.handle, request, deadline);
 	return ReadReply(socket.handle, deadline);
 }

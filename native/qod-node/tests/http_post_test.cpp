@@ -3,16 +3,37 @@
 // -DQOD_NODE_TESTS=ON and run by CTest.
 
 #include "http_post.hpp"
+#include "socket_compat.hpp"
 #include "test_http_server.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
 int failures = 0;
+
+#ifdef _WIN32
+constexpr bool kWindows = true;
+#else
+constexpr bool kWindows = false;
+#endif
+
+//! 127.0.0.1:`port`, as a resolver lists it.
+qod::ResolvedAddress Loopback(uint16_t port) {
+	sockaddr_in address {};
+	address.sin_family = AF_INET;
+	address.sin_port = htons(port);
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	return qod::ResolvedAddress {AF_INET, std::string(reinterpret_cast<const char *>(&address), sizeof(address))};
+}
 
 void Expect(bool condition, const std::string &what) {
 	if (!condition) {
@@ -173,7 +194,7 @@ int main() {
 		    }
 		    return std::vector<qod::ResolvedAddress> {{2, host + "/" + port + "/" + std::to_string(resolved)}};
 	    },
-	    [&] { return now; }, 30000);
+	    [&] { return now; }, 30000, 1000);
 	auto fresh = false;
 	auto first = known.Get("manager", "20900", fresh);
 	Expect(fresh && resolved == 1, "a name is resolved the first time");
@@ -183,8 +204,8 @@ int main() {
 	known.Get("manager", "20901", fresh);
 	Expect(fresh && resolved == 2, "another port is another entry");
 	now += 1;
-	Expect(!(known.Get("manager", "20900", fresh) == first) && fresh && resolved == 3,
-	       "a name past its lifetime is resolved again");
+	auto second = known.Get("manager", "20900", fresh);
+	Expect(!(second == first) && fresh && resolved == 3, "a name past its lifetime is resolved again");
 	known.Forget("manager", "20900");
 	known.Get("manager", "20900", fresh);
 	Expect(fresh && resolved == 4, "a forgotten name is resolved again");
@@ -196,28 +217,185 @@ int main() {
 	} catch (std::runtime_error &error) {
 		Expect(std::string(error.what()) == "cannot resolve missing", "naming the host");
 	}
+	try {
+		known.Get("missing", "1", fresh);
+		Expect(false, "a failure within the retry window throws again");
+	} catch (std::runtime_error &error) {
+		Expect(resolved == 5 && std::string(error.what()) == "cannot resolve missing",
+		       "without resolving the name again");
+	}
 	fail_next = false;
+	now += 1000;
 	known.Get("missing", "1", fresh);
-	Expect(fresh && resolved == 6, "a failed resolution is not kept");
+	Expect(fresh && resolved == 6, "a failed resolution is retried after the window");
+	// A refresh that fails serves the last addresses, for the retry window, then resolves again.
+	auto kept = known.Get("manager", "20900", fresh);
+	now += 30000;
+	fail_next = true;
+	Expect(known.Get("manager", "20900", fresh) == kept && !fresh && resolved == 7,
+	       "a failed refresh serves the stale addresses");
+	Expect(known.Get("manager", "20900", fresh) == kept && !fresh && resolved == 7,
+	       "and keeps serving them within the retry window, without resolving");
+	fail_next = false;
+	now += 1000;
+	Expect(!(known.Get("manager", "20900", fresh) == kept) && fresh && resolved == 8,
+	       "then resolves the name again");
+	// The stale addresses go with Forget, as fresh ones do.
+	now += 30000;
+	fail_next = true;
+	known.Get("manager", "20900", fresh);
+	known.Forget("manager", "20900");
+	now += 1000;
+	try {
+		known.Get("manager", "20900", fresh);
+		Expect(false, "a forgotten name whose refresh fails throws");
+	} catch (std::runtime_error &) {
+	}
+	fail_next = false;
 	qod::ResolvedAddresses empty([](const std::string &, const std::string &) { return std::vector<qod::ResolvedAddress> {}; },
 	                             [] { return int64_t(0); }, 30000);
 	try {
 		empty.Get("nothing", "1", fresh);
 		Expect(false, "a name with no address throws");
-	} catch (std::runtime_error &) {
+	} catch (std::runtime_error &error) {
+		Expect(std::string(error.what()) == "cannot resolve nothing", "a name with no address names the host");
 	}
-	// HttpPost reaches a server by name twice: the second call takes the kept addresses.
+	// Prefer moves the address that connected to the front, the others keeping their order.
+	qod::ResolvedAddresses ordered(
+	    [](const std::string &, const std::string &) {
+		    return std::vector<qod::ResolvedAddress> {{2, "a"}, {2, "b"}, {2, "c"}};
+	    },
+	    [] { return int64_t(0); }, 30000);
+	ordered.Get("n", "1", fresh);
+	ordered.Prefer("n", "1", qod::ResolvedAddress {2, "c"});
+	auto reordered = ordered.Get("n", "1", fresh);
+	Expect(reordered.size() == 3 && reordered[0].sockaddr == "c" && reordered[1].sockaddr == "a" &&
+	           reordered[2].sockaddr == "b" && !fresh,
+	       "the preferred address first");
+	ordered.Prefer("n", "1", qod::ResolvedAddress {2, "z"});
+	Expect(ordered.Get("n", "1", fresh).size() == 3, "an address the name does not list changes nothing");
+
+	// One caller resolves a name at a time: the others wait for a first resolution, and are served the
+	// last addresses while a refresh is in flight.
+	{
+		std::mutex gate_lock;
+		std::condition_variable gate;
+		auto open = false;
+		std::atomic<int> calls {0};
+		std::atomic<int64_t> clock {0};
+		qod::ResolvedAddresses single(
+		    [&](const std::string &, const std::string &) {
+			    calls++;
+			    std::unique_lock<std::mutex> guard(gate_lock);
+			    gate.wait(guard, [&] { return open; });
+			    return std::vector<qod::ResolvedAddress> {{2, "r" + std::to_string(calls.load())}};
+		    },
+		    [&] { return clock.load(); }, 30000);
+		std::vector<std::thread> waiters;
+		std::atomic<int> got {0};
+		for (int i = 0; i < 4; i++) {
+			waiters.emplace_back([&] {
+				auto unused = false;
+				if (single.Get("n", "1", unused)[0].sockaddr == "r1") {
+					got++;
+				}
+			});
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		Expect(calls == 1, "concurrent first resolutions of one name resolve it once");
+		{
+			std::lock_guard<std::mutex> guard(gate_lock);
+			open = true;
+		}
+		gate.notify_all();
+		for (auto &waiter : waiters) {
+			waiter.join();
+		}
+		Expect(got == 4, "and every caller gets its addresses");
+		// A refresh in flight: the other callers get the stale addresses at once.
+		{
+			std::lock_guard<std::mutex> guard(gate_lock);
+			open = false;
+		}
+		clock = 30000;
+		std::thread refresher([&] {
+			auto unused = false;
+			single.Get("n", "1", unused);
+		});
+		while (calls < 2) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		Expect(single.Get("n", "1", fresh)[0].sockaddr == "r1" && !fresh && calls == 2,
+		       "a refresh in flight serves the stale addresses to the others");
+		{
+			std::lock_guard<std::mutex> guard(gate_lock);
+			open = true;
+		}
+		gate.notify_all();
+		refresher.join();
+		Expect(single.Get("n", "1", fresh)[0].sockaddr == "r2" && !fresh, "then the refreshed ones");
+	}
+
+	// The in-call re-resolution: kept addresses that refuse are forgotten and the name is resolved again
+	// within the same call; a replica that moved costs no failed call. Platform-free (127.0.0.1 only).
+	{
+		auto live = static_cast<uint16_t>(std::stoi(qod::ParseHttpUrl(server.Url()).port));
+		auto dead = static_cast<uint16_t>(qod_test::UnusedPort());
+		std::vector<uint16_t> answers;
+		int lookups = 0;
+		qod::ResolvedAddresses moving(
+		    [&](const std::string &, const std::string &) {
+			    auto port = answers[std::min<size_t>(lookups, answers.size() - 1)];
+			    lookups++;
+			    return std::vector<qod::ResolvedAddress> {Loopback(port)};
+		    },
+		    [] { return int64_t(0); }, 30000);
+		answers = {dead, live};
+		answer = qod_test::HttpAnswer {};
+		answer.body = "moved";
+		auto replica = qod::ParseHttpUrl("http://replica:20900");
+		moving.Get(replica.host, replica.port, fresh);
+		// 10 s: on Windows a refused connect is retried for about 2 s before it fails.
+		Expect(qod::HttpPost(replica, "/x", {}, "{}", 10000, moving).body == "moved" && lookups == 2,
+		       "a replica that moved is reached in the same call, the name resolved again");
+		moving.Get(replica.host, replica.port, fresh);
+		Expect(!fresh && lookups == 2, "and its new address is kept");
+		// The name still resolves to the address that refuses: tried once, the call fails.
+		answers = {dead};
+		lookups = 0;
+		auto stuck = qod::ParseHttpUrl("http://stuck:20900");
+		moving.Get(stuck.host, stuck.port, fresh);
+		try {
+			qod::HttpPost(stuck, "/x", {}, "{}", 10000, moving);
+			Expect(false, "a replica whose name resolves to the same refusing address fails");
+		} catch (std::runtime_error &error) {
+			auto message = std::string(error.what());
+			Expect(lookups == 2 && (message.find("cannot connect") != std::string::npos ||
+			                        message.find("timed out connecting") != std::string::npos),
+			       "after one more resolution, not a second connect to the same address: " + message);
+		}
+		moving.Get(stuck.host, stuck.port, fresh);
+		Expect(fresh, "its addresses are forgotten");
+	}
+
+	// HttpPost reaches a server by name twice: the second call takes the kept addresses. 10 s and either
+	// failure message: on Windows `localhost` lists ::1 first and a refused connect is retried for about
+	// 2 s, which a 2 s deadline would spend on ::1 alone.
 	answer = qod_test::HttpAnswer {};
 	answer.body = "by name";
 	auto by_name = qod::ParseHttpUrl("http://localhost:" + qod::ParseHttpUrl(server.Url()).port);
-	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 2000).body == "by name", "a replica named localhost");
+	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 10000).body == "by name", "a replica named localhost");
 	qod::HostAddresses().Get(by_name.host, by_name.port, fresh);
 	Expect(!fresh, "its addresses are kept");
-	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 2000).body == "by name", "and used again");
+	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 10000).body == "by name", "and used again");
+	Expect(qod::HostAddresses().Get(by_name.host, by_name.port, fresh).front().family == AF_INET,
+	       "the address that connected (the listener's IPv4 one) first");
 	// Kept addresses that stop answering are forgotten, so the next call resolves the name again.
 	auto gone = qod::ParseHttpUrl("http://localhost:" + std::to_string(qod_test::UnusedPort()));
-	Expect(PostFailure("http://" + gone.authority, 2000).find("cannot connect") != std::string::npos,
-	       "nothing listening on a named replica");
+	auto refused = PostFailure("http://" + gone.authority, 10000);
+	Expect(refused.find("cannot connect") != std::string::npos ||
+	           (kWindows && refused.find("timed out connecting") != std::string::npos),
+	       "nothing listening on a named replica: " + refused);
 	qod::HostAddresses().Get(gone.host, gone.port, fresh);
 	Expect(fresh, "a named replica that did not answer is resolved again");
 
