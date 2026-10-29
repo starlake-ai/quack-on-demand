@@ -184,6 +184,23 @@ def set_disabled(ctx: typer.Context, tenant: str = TENANT, db: str = DB, pool: s
     call(ctx, "POST", "/api/pool/setDisabled", body={**_key(tenant, db, pool), "disabled": disabled})
 
 
+@app.command("set-init-sql")
+@covers(
+    "POST",
+    "/api/pool/setInitSql",
+    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "initSql": "--init-sql"},
+)
+def set_init_sql(
+    ctx: typer.Context,
+    tenant: str = TENANT,
+    db: str = DB,
+    pool: str = POOL,
+    init_sql: str = typer.Option(..., "--init-sql", help=_INIT_SQL_HELP + " Empty clears it; takes effect on the next node spawn."),
+):
+    """Replace a pool's init SQL."""
+    warn_init_sql(call(ctx, "POST", "/api/pool/setInitSql", body={**_key(tenant, db, pool), "initSql": init_sql}))
+
+
 @app.command("set-resources")
 @covers(
     "POST",

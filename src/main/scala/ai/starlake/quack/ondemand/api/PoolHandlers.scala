@@ -143,29 +143,6 @@ final class PoolHandlers(
       scope: SessionScope,
       actor: AuditActor
   ): Out[PoolResponse] =
-    // A tenant admin's initSql is judged by the tenant initSql allowlist first (a caller outside the
-    // tenant gets its 403 from the scope gate, unjudged).
-    if TenantScopeCheck.forScope(scope, req.tenant).isDefined then createChecked(req, scope, actor)
-    else
-      InitSqlChecker
-        .writeCheck(
-          initSqlChecker,
-          SuperuserCheck.forScope(scope).isEmpty,
-          req.initSql.getOrElse(""),
-          None
-        )
-        .flatMap {
-          case Left(message) =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message))))
-          case Right(warning) =>
-            createChecked(req, scope, actor).map(_.map(_.copy(initSqlWarning = warning)))
-        }
-
-  private def createChecked(
-      req: CreatePoolRequest,
-      scope: SessionScope,
-      actor: AuditActor
-  ): Out[PoolResponse] =
     TenantScopeCheck.forScope(scope, req.tenant) match
       case Some(err) =>
         actor.controlPlane(audit, AuditActions.PoolCreate, "denied", tenant = Some(req.tenant))
@@ -238,6 +215,10 @@ final class PoolHandlers(
           bandShapeErr.getOrElse("elastic pools cannot use authored cohorts (scaling clears them)")
         )
       else bandShapeErr
+    // The marker text, and a tenant admin's initSql over the size cap.
+    val initSqlRefusal = req.initSql.flatMap(sql =>
+      InitSqlTrust.markerRefusal(sql).orElse(InitSqlTrust.sizeRefusal(sql, gateBypass))
+    )
     LockdownTriState.parse(req.lockdown) match
       case Left(msg) =>
         IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
@@ -269,15 +250,12 @@ final class PoolHandlers(
               )
             )
           )
-        else if req.initSql.flatMap(InitSqlTrust.markerRefusal).isDefined then
+        else if initSqlRefusal.isDefined then
           IO.pure(
             Left(
               (
                 StatusCode.BadRequest,
-                ErrorResponse(
-                  "init_sql_refused",
-                  req.initSql.flatMap(InitSqlTrust.markerRefusal).getOrElse("")
-                )
+                ErrorResponse("init_sql_refused", initSqlRefusal.getOrElse(""))
               )
             )
           )
@@ -323,57 +301,79 @@ final class PoolHandlers(
                     )
                   )
                 case None =>
-                  val cohorts = req.cohorts.map(PoolCohortDto.toModel)
-                  sup
-                    .createPool(
-                      key,
-                      req.roleDistribution,
-                      maxConcurrentPerNode = req.maxConcurrentPerNode,
-                      cohorts = cohorts,
-                      disabled = req.disabled,
-                      startSuspended = req.startSuspended,
-                      initSql = req.initSql.getOrElse(""),
-                      initSqlTrusted = gateBypass,
-                      cpu = req.cpu,
-                      memory = req.memory,
-                      podTemplateYaml = req.podTemplateYaml,
-                      lockdown = lockdownValue,
-                      minNodes = req.minNodes,
-                      maxNodes = req.maxNodes,
-                      // -1 is the DTO's "not provided" sentinel: inherit the manager-wide
-                      // hibernation default. 0 opts the pool out; positive sets its window.
-                      idleTimeoutSec = Some(req.idleTimeoutSec).filter(_ >= 0),
-                      gateBypass = gateBypass
-                    )
-                    .map(_ =>
-                      actor.controlPlane(
-                        audit,
-                        AuditActions.PoolCreate,
-                        "ok",
-                        tenant = Some(req.tenant),
-                        target = Some(key.toString),
-                        detail = Map("size" -> req.size.toString)
-                      )
-                      Right(
-                        respond(key, Map.empty).getOrElse(
-                          PoolResponse(req.tenant, req.tenantDb, req.pool, Nil, "ready", Map.empty)
+                  // A tenant admin's initSql is judged by the tenant initSql allowlist now that every
+                  // cheap check passed; a superuser's is not.
+                  InitSqlChecker
+                    .writeCheck(initSqlChecker, gateBypass, req.initSql.getOrElse(""), None)
+                    .flatMap {
+                      case Left(message) =>
+                        IO.pure(
+                          Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message)))
                         )
-                      )
-                    )
-                    .handleError {
-                      case q: ai.starlake.quack.spi.QuotaExceededException =>
-                        Left(
-                          (StatusCode.TooManyRequests, ErrorResponse("quota_exceeded", q.reason))
-                        )
-                      case t =>
-                        // The supervisor logs nothing when the first node fails to start.
-                        logger.error(s"pool create for $key failed", t)
-                        Left(
-                          (
-                            StatusCode.InternalServerError,
-                            ErrorResponse("start_failed", t.getMessage)
+                      case Right(warning) =>
+                        val cohorts = req.cohorts.map(PoolCohortDto.toModel)
+                        sup
+                          .createPool(
+                            key,
+                            req.roleDistribution,
+                            maxConcurrentPerNode = req.maxConcurrentPerNode,
+                            cohorts = cohorts,
+                            disabled = req.disabled,
+                            startSuspended = req.startSuspended,
+                            initSql = req.initSql.getOrElse(""),
+                            initSqlTrusted = gateBypass,
+                            cpu = req.cpu,
+                            memory = req.memory,
+                            podTemplateYaml = req.podTemplateYaml,
+                            lockdown = lockdownValue,
+                            minNodes = req.minNodes,
+                            maxNodes = req.maxNodes,
+                            // -1 is the DTO's "not provided" sentinel: inherit the manager-wide
+                            // hibernation default. 0 opts the pool out; positive sets its window.
+                            idleTimeoutSec = Some(req.idleTimeoutSec).filter(_ >= 0),
+                            gateBypass = gateBypass
                           )
-                        )
+                          .map(_ =>
+                            actor.controlPlane(
+                              audit,
+                              AuditActions.PoolCreate,
+                              "ok",
+                              tenant = Some(req.tenant),
+                              target = Some(key.toString),
+                              detail = Map("size" -> req.size.toString)
+                            )
+                            Right(
+                              respond(key, Map.empty).getOrElse(
+                                PoolResponse(
+                                  req.tenant,
+                                  req.tenantDb,
+                                  req.pool,
+                                  Nil,
+                                  "ready",
+                                  Map.empty
+                                )
+                              )
+                            )
+                          )
+                          .handleError {
+                            case q: ai.starlake.quack.spi.QuotaExceededException =>
+                              Left(
+                                (
+                                  StatusCode.TooManyRequests,
+                                  ErrorResponse("quota_exceeded", q.reason)
+                                )
+                              )
+                            case t =>
+                              // The supervisor logs nothing when the first node fails to start.
+                              logger.error(s"pool create for $key failed", t)
+                              Left(
+                                (
+                                  StatusCode.InternalServerError,
+                                  ErrorResponse("start_failed", t.getMessage)
+                                )
+                              )
+                          }
+                          .map(_.map(_.copy(initSqlWarning = warning)))
                     }
 
   def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
@@ -655,6 +655,67 @@ final class PoolHandlers(
           case Left(err) =>
             Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message)))
         }
+
+  /** POST /api/pool/setInitSql (CONTRACT Addendum 4 item 27): the tenant-scope gate, the marker and
+    * size checks, then, for a tenant admin's changed text, the tenant initSql allowlist's
+    * write-time check (`400 init_sql_refused`, or accepted with `initSqlWarning` where this manager
+    * cannot check); a superuser's write is never checked and is stored trusted.
+    */
+  def setInitSql(req: SetPoolInitSqlRequest, apiKey: Option[String])(
+      scopeOf: SessionScope.Resolver
+  ): Out[PoolResponse] =
+    TenantScopeCheck.reject(apiKey, req.tenant)(scopeOf) match
+      case Some(err) =>
+        audit.rest(
+          apiKey,
+          "control-plane",
+          AuditActions.PoolSetInitSql,
+          "denied",
+          tenant = Some(req.tenant)
+        )
+        IO.pure(Left(err))
+      case None =>
+        val key           = PoolKey(req.tenant, req.tenantDb, req.pool)
+        val writerTrusted = SuperuserCheck.reject(apiKey)(scopeOf).isEmpty
+        val stored        = sup.poolId(key).flatMap(sup.poolEntity).map(_.initSql)
+        InitSqlTrust
+          .markerRefusal(req.initSql)
+          .orElse(InitSqlTrust.sizeRefusal(req.initSql, writerTrusted)) match
+          case Some(msg) =>
+            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", msg))))
+          case None if stored.isEmpty =>
+            IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", s"pool $key not found"))))
+          case None =>
+            InitSqlChecker
+              .writeCheck(initSqlChecker, writerTrusted, req.initSql, stored)
+              .flatMap {
+                case Left(message) =>
+                  IO.pure(Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message))))
+                case Right(warning) =>
+                  sup.setPoolInitSql(key, req.initSql, writerTrusted).map {
+                    case Left(err) =>
+                      Left((StatusCode.NotFound, ErrorResponse("not_found", err.message)))
+                    case Right(_) =>
+                      // The field name only, never the SQL: init SQL may carry credentials.
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.PoolSetInitSql,
+                        "ok",
+                        tenant = Some(req.tenant),
+                        target = Some(key.toString)
+                      )
+                      respond(key, Map.empty) match
+                        case Some(r) => Right(r.copy(initSqlWarning = warning))
+                        case None    =>
+                          Left(
+                            (
+                              StatusCode.NotFound,
+                              ErrorResponse("not_found", s"pool $key disappeared after update")
+                            )
+                          )
+                  }
+              }
 
   def setResources(req: SetPoolResourcesRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver

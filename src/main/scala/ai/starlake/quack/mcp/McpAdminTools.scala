@@ -19,6 +19,7 @@ import ai.starlake.quack.ondemand.api.{
   SetMaxConcurrentRequest,
   SetPoolAutoscaleRequest,
   SetPoolDisabledRequest,
+  SetPoolInitSqlRequest,
   SetPoolLockdownRequest,
   SetPoolResourcesRequest,
   SetPoolTemplateRequest,
@@ -86,6 +87,7 @@ final class McpAdminTools(
     stopPoolTool,
     setPoolDisabledTool,
     setPoolResourcesTool,
+    setPoolInitSqlTool,
     setPoolPodTemplateTool,
     setPoolLockdownTool,
     setPoolAutoscaleTool,
@@ -637,7 +639,7 @@ final class McpAdminTools(
                 maxConcurrentPerNode = int(args, "max_concurrent_per_node").getOrElse(0),
                 disabled = bool(args, "disabled").getOrElse(false),
                 startSuspended = bool(args, "start_suspended").getOrElse(false),
-                initSql = str(args, "init_sql"),
+                initSql = args("init_sql").flatMap(_.asString),
                 cpu = str(args, "cpu").getOrElse(""),
                 memory = str(args, "memory").getOrElse(""),
                 lockdown = str(args, "lockdown").getOrElse("inherit"),
@@ -720,6 +722,32 @@ final class McpAdminTools(
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))
+  )
+
+  private val setPoolInitSqlTool = McpToolDef(
+    name = "set_pool_init_sql",
+    description = "Replace a pool's init SQL. Takes effect on the next node spawn.",
+    inputSchema = objectSchema(
+      required = List("database", "pool", "init_sql"),
+      props = "database" -> strProp("Database (tenant-db) name."),
+      "pool"     -> strProp("Pool name."),
+      "init_sql" -> strProp(initSqlHelp("The new init SQL (empty clears it).")),
+      tenantProp
+    ),
+    adminOnly = true,
+    run = (principal, args) =>
+      poolTarget(principal, args) match
+        case Left(err)                       => IO.pure(Left(err))
+        case Right((tenant, database, pool)) =>
+          // As sent, untrimmed (an empty one clears it): the text's own bytes decide its trust.
+          args("init_sql").flatMap(_.asString).toRight("the 'init_sql' argument is required") match
+            case Left(err)  => IO.pure(Left(err))
+            case Right(sql) =>
+              pools
+                .setInitSql(SetPoolInitSqlRequest(tenant, database, pool, sql), keyOf(principal))(
+                  scopeOf
+                )
+                .map(res => bridge(res).map(_.asJson))
   )
 
   private val setPoolResourcesTool = McpToolDef(
@@ -912,7 +940,7 @@ final class McpAdminTools(
                 objectStore = mapArg(args, "object_store"),
                 defaultDatabase = str(args, "default_database"),
                 defaultSchema = str(args, "default_schema"),
-                initSql = str(args, "init_sql").getOrElse(""),
+                initSql = args("init_sql").flatMap(_.asString).getOrElse(""),
                 managedStorage = bool(args, "managed_storage").getOrElse(false),
                 encrypted = bool(args, "encrypted").getOrElse(false),
                 encryptionKey = str(args, "encryption_key").filter(_.nonEmpty)
@@ -968,7 +996,7 @@ final class McpAdminTools(
                 objectStore = mapArgOpt(args, "object_store"),
                 defaultDatabase = str(args, "default_database"),
                 defaultSchema = str(args, "default_schema"),
-                initSql = str(args, "init_sql")
+                initSql = args("init_sql").flatMap(_.asString)
               ),
               keyOf(principal)
             )(scopeOf)

@@ -2826,6 +2826,41 @@ final class PoolSupervisor(
         }
     }
 
+  /** Replace a pool's initSql (CONTRACT Addendum 4 item 27), its trust set by the writer
+    * ([[InitSqlTrust.afterWrite]]: a superuser's write is trusted, a tenant admin's change is not,
+    * a tenant admin's unchanged resend keeps the flag). Like every pool initSql edit, it takes
+    * effect on the next node spawn (scale-up, restart, crash recovery); running nodes keep their
+    * setup.
+    */
+  def setPoolInitSql(
+      key: PoolKey,
+      initSql: String,
+      writerTrusted: Boolean
+  ): IO[Either[SupervisorError, Pool]] =
+    locks.withLock(key)(IO.blocking {
+      withCacheRecovery("setPoolInitSql") {
+        pools.get(key) match
+          case None        => Left(SupervisorError.NotFound(s"pool not found: $key"))
+          case Some(state) =>
+            poolIdByKey.get(key).flatMap(poolRows.get) match
+              case None =>
+                Left(
+                  SupervisorError.Internal(
+                    s"pool entity missing for $key (control-plane out of sync)"
+                  )
+                )
+              case Some(p) =>
+                val trusted =
+                  InitSqlTrust.afterWrite(p.initSql, p.initSqlTrusted, Some(initSql), writerTrusted)
+                val updated = p.copy(initSql = initSql, initSqlTrusted = trusted)
+                store.upsertPool(updated)
+                poolRows.put(updated.id, updated)
+                pools.put(key, state.copy(initSql = initSql, initSqlTrusted = trusted))
+                publish.topologyChanged()
+                Right(updated)
+      }
+    })
+
   def setPoolTemplate(key: PoolKey, yaml: String): IO[Either[SupervisorError, Pool]] =
     IO.blocking {
       withCacheRecovery("setPoolTemplate") {

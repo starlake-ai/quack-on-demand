@@ -163,6 +163,48 @@ class InitSqlWriteCheckSpec extends AnyFlatSpec with Matchers:
     counting.calls shouldBe 0
   }
 
+  // Review M7: the cheap checks run first, and a tenant admin's initSql is bounded.
+  "a malformed write" should "get its own 400, unjudged" in {
+    val counting = new Counting(nodeChecker)
+    val f        = new Fixture(counting)
+    val badKind  = f.dbs
+      .createTenantDb(
+        TenantDbRequest(tenant = "acme", name = "prod", kind = "bogus", initSql = "SELECT 1;"),
+        None
+      )(TenantAdmin)
+      .unsafeRunSync()
+    refusal(badKind)._2 shouldBe "invalid_kind"
+    f.createDb("", Superuser).isRight shouldBe true
+    val badPool = f.pools
+      .createPool(
+        CreatePoolRequest(
+          tenant = "acme",
+          tenantDb = "acme_prod",
+          pool = "bi",
+          size = 2,
+          roleDistribution = RoleDistribution(0, 0, 1),
+          initSql = Some("SELECT 1;")
+        ),
+        None
+      )(TenantAdmin)
+      .unsafeRunSync()
+    refusal(badPool)._2 shouldBe "invalid_distribution"
+    counting.calls shouldBe 0
+  }
+
+  "a tenant admin's initSql" should s"hold at most ${InitSqlTrust.MaxTenantInitSqlBytes} bytes" in {
+    val counting = new Counting(nodeChecker)
+    val f        = new Fixture(counting)
+    val big      = "SET threads = 2;\n" * (InitSqlTrust.MaxTenantInitSqlBytes / 17 + 1)
+    val (code, error, message) = refusal(f.createDb(big, TenantAdmin))
+    (code, error) shouldBe (400, "init_sql_refused")
+    message should include("at most 65536")
+    refusal(f.createPool(big, TenantAdmin))._2 shouldBe "init_sql_refused"
+    counting.calls shouldBe 0
+    // A superuser's is not bounded, nor checked.
+    f.createDb(big, Superuser).isRight shouldBe true
+  }
+
   "a manager without a local qod-node" should "accept a tenant admin's initSql with a warning" in {
     val f   = new Fixture(InitSqlChecker.unavailable)
     val out = f.createDb("SELECT 1;", TenantAdmin).fold(e => fail(e.toString), identity)
@@ -201,4 +243,64 @@ class InitSqlWriteCheckSpec extends AnyFlatSpec with Matchers:
     InitSqlTrustReport
       .lineAfter(row, InitSqlVerdict.Unchecked("x"))
       .getOrElse(fail("no line")) should include("will be checked on the node")
+  }
+
+  // CONTRACT Addendum 4 item 27: a pool's initSql can be changed, under the same trust rule.
+  "pool/setInitSql" should "check a tenant admin's change, trust a superuser's, and keep a resend's flag" in {
+    val counting = new Counting(nodeChecker)
+    val f        = new Fixture(counting)
+    f.createDb("", Superuser).isRight shouldBe true
+    f.createPool("", Superuser).isRight shouldBe true
+    def set(sql: String, as: SessionScope.Resolver) =
+      f.pools
+        .setInitSql(
+          ai.starlake.quack.ondemand.api.SetPoolInitSqlRequest("acme", "acme_prod", "bi", sql),
+          None
+        )(as)
+        .unsafeRunSync()
+    def stored = f.sup
+      .poolId(ai.starlake.quack.model.PoolKey("acme", "acme_prod", "bi"))
+      .flatMap(f.sup.poolEntity)
+      .get
+    val (code, error, message) =
+      refusal(set("SET threads = 2;\nCOPY (SELECT 1) TO '/tmp/x';", TenantAdmin))
+    (code, error) shouldBe (400, "init_sql_refused")
+    message should include("statement 2 of 2: COPY is not allowed")
+    stored.initSql shouldBe ""
+    set("SET threads = 2;", TenantAdmin).fold(
+      e => fail(e.toString),
+      _.initSqlTrusted
+    ) shouldBe false
+    (stored.initSql, stored.initSqlTrusted) shouldBe ("SET threads = 2;", false)
+    val calls = counting.calls
+    set("COPY (SELECT 1) TO '/tmp/x';", Superuser).fold(
+      e => fail(e.toString),
+      _.initSqlTrusted
+    ) shouldBe
+      true
+    counting.calls shouldBe calls
+    // A tenant admin resending the superuser's text unchanged keeps it trusted, unchecked.
+    set("COPY (SELECT 1) TO '/tmp/x';", TenantAdmin).fold(
+      e => fail(e.toString),
+      _.initSqlTrusted
+    ) shouldBe
+      true
+    counting.calls shouldBe calls
+    // The running pool's state carries it to the next spawn.
+    f.sup
+      .get(ai.starlake.quack.model.PoolKey("acme", "acme_prod", "bi"))
+      .map(s => (s.initSql, s.initSqlTrusted)) shouldBe Some(("COPY (SELECT 1) TO '/tmp/x';", true))
+    val other: SessionScope.Resolver =
+      _ => SessionScope(superuser = false, manageableTenants = Set("globex"))
+    refusal(set("SET threads = 3;", other))._1 shouldBe 403
+    refusal(
+      f.pools
+        .setInitSql(
+          ai.starlake.quack.ondemand.api.SetPoolInitSqlRequest("acme", "acme_prod", "nope", ""),
+          None
+        )(
+          Superuser
+        )
+        .unsafeRunSync()
+    )._1 shouldBe 404
   }

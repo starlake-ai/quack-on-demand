@@ -89,6 +89,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/pool/setLockdown"             -> "set_pool_lockdown",
     "POST /api/pool/setPodTemplate"          -> "set_pool_pod_template",
     "POST /api/pool/setResources"            -> "set_pool_resources",
+    "POST /api/pool/setInitSql"              -> "set_pool_init_sql",
     "POST /api/pool/stop"                    -> "stop_pool",
     "POST /api/pool/suspend"                 -> "suspend_pool",
     "POST /api/profile/s3/list"              -> "list_my_s3_credentials",

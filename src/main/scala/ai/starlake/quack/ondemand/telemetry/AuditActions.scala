@@ -49,6 +49,7 @@ object AuditActions:
   val PoolResume           = "pool.resume"
   val PoolSetDisabled      = "pool.setDisabled"
   val PoolSetResources     = "pool.setResources"
+  val PoolSetInitSql       = "pool.setInitSql"
   val PoolSetPodTemplate   = "pool.setPodTemplate"
   val PoolSetLockdown      = "pool.setLockdown"
   val PoolSetAutoscale     = "pool.setAutoscale"
@@ -171,6 +172,7 @@ object AuditActions:
     PoolResume,
     PoolSetDisabled,
     PoolSetResources,
+    PoolSetInitSql,
     PoolSetPodTemplate,
     PoolSetLockdown,
     PoolSetAutoscale,

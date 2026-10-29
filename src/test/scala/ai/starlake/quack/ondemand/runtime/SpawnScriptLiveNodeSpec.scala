@@ -206,6 +206,25 @@ class SpawnScriptLiveNodeSpec
     finally hardStop(p)
   }
 
+  // Task 20 review M5 (CONTRACT Addendum 4 item 28 keeps errors_as_json on the allowlist): a tenant
+  // admin's SET GLOBAL errors_as_json must not change the error text the manager classifies by
+  // substring (FlightSqlRouter.classifyPermanent: "does not exist" / "not found" / "catalog error";
+  // QuackFrontDoor: "Current transaction is aborted", "conflict").
+  "a tenant admin's SET GLOBAL errors_as_json" should "leave the manager's error classification as is" in {
+    val (p, port) = startNode(
+      moreSecrets = Map(NodeSecretFiles.TenantPoolInitKey -> "SET GLOBAL errors_as_json = true;")
+    )
+    try
+      onNode(port, "SELECT current_setting('errors_as_json')") shouldBe List("true")
+      val (rc, _, err) = onNodeResult(port, "SELECT * FROM memory.main.no_such_table")
+      rc shouldBe 1
+      withClue(err) {
+        err should include("Catalog Error")
+        err should include("does not exist")
+      }
+    finally hardStop(p)
+  }
+
   // DuckDB loads every persistent secret of its secret directory into a node on first secret use,
   // and the default is the OS user's ~/.duckdb/stored_secrets, so an operator's own cloud keys would
   // serve every tenant on the node. The node's secret directory is an empty read-only one of its

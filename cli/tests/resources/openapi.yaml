@@ -6114,6 +6114,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/pool/setInitSql:
+    post:
+      operationId: postApiPoolSetinitsql
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPoolInitSqlRequest'
+        required: true
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolResponse'
+        '400':
+          description: 'Invalid value for: body, Invalid value for: header X-API-Key,
+            Invalid value for: cookie qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/pool/setLockdown:
     post:
       operationId: postApiPoolSetlockdown
@@ -10450,6 +10490,23 @@ components:
           type: string
         disabled:
           type: boolean
+    SetPoolInitSqlRequest:
+      title: SetPoolInitSqlRequest
+      type: object
+      required:
+      - tenant
+      - tenantDb
+      - pool
+      - initSql
+      properties:
+        tenant:
+          type: string
+        tenantDb:
+          type: string
+        pool:
+          type: string
+        initSql:
+          type: string
     SetPoolLockdownRequest:
       title: SetPoolLockdownRequest
       type: object

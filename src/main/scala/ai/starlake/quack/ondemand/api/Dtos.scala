@@ -175,6 +175,17 @@ final case class PoolResponse(
     initSqlWarning: Option[String] = None
 )
 
+/** POST /api/pool/setInitSql: replace a pool's initSql (CONTRACT Addendum 4 item 27). A tenant
+  * admin's is judged by the tenant initSql allowlist (400 init_sql_refused); a superuser's is
+  * trusted. Takes effect on the next node spawn.
+  */
+final case class SetPoolInitSqlRequest(
+    tenant: String,
+    tenantDb: String,
+    pool: String,
+    initSql: String
+)
+
 final case class SetPoolResourcesRequest(
     tenant: String,
     tenantDb: String,
@@ -1758,6 +1769,7 @@ object Dtos:
   given Codec[NodeInfo]                     = ConfiguredCodec.derived
   given Codec[PoolResponse]                 = deriveCodec
   given Codec[SetPoolResourcesRequest]      = deriveCodec
+  given Codec[SetPoolInitSqlRequest]        = deriveCodec
   given Codec[SetPoolTemplateRequest]       = deriveCodec
   given Codec[SetPoolLockdownRequest]       = deriveCodec
   given Codec[SetPoolAutoscaleRequest]      = ConfiguredCodec.derived

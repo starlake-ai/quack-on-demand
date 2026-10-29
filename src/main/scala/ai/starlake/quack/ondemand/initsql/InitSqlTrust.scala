@@ -54,6 +54,19 @@ object InitSqlTrust:
   def onCreate(sql: String, writerTrusted: Boolean): Boolean =
     afterWrite("", storedTrusted = true, Some(sql), writerTrusted)
 
+  /** The largest tenant admin's initSql, in UTF-8 bytes: refused at write time above it, and the
+    * same bound in qod-node (`kMaxTenantInitSqlBytes`: its --check-init refuses a larger text, and
+    * its init runner skips a larger section whole). A superuser's initSql is not bounded.
+    */
+  val MaxTenantInitSqlBytes: Int = 65536
+
+  /** Why a write of `sql` by a non-superuser (`writerTrusted` false) is refused for its size. */
+  def sizeRefusal(sql: String, writerTrusted: Boolean): Option[String] =
+    val bytes = sql.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+    Option.when(!writerTrusted && bytes > MaxTenantInitSqlBytes)(
+      s"initSql is $bytes bytes; a tenant admin's may hold at most $MaxTenantInitSqlBytes"
+    )
+
   /** What the spawn scripts write around an untrusted section; any line holding it, in any case, is
     * removed from an `initSql` before the scripts mark it, so no text can end its own section.
     * Refused at write time for every writer ([[markerRefusal]]).

@@ -105,7 +105,7 @@ int main() {
 	// ---- allowed: INSTALL / LOAD of a listed extension by bare name
 	Allowed("INSTALL httpfs", "INSTALL httpfs");
 	Allowed("LOAD httpfs", "LOAD httpfs");
-	Allowed("FORCE INSTALL spatial", "FORCE INSTALL");
+	Refused("FORCE INSTALL spatial", "FORCE INSTALL", "FORCE INSTALL (review M4)");
 	Allowed("INSTALL postgres", "an alias DuckDB resolves (postgres_scanner)");
 	Allowed("LOAD 'json'", "a quoted bare name");
 
@@ -232,6 +232,15 @@ int main() {
 		       "every statement of the refused corpus is refused");
 		Expect(qod::InitVerdictJson(all).find("AKIAQODINITMARKER") == std::string::npos,
 		       "the verdict quotes no statement text");
+		// Review M7: the manager's size cap, here too.
+		std::string big;
+		while (big.size() <= qod::kMaxTenantInitSqlBytes) {
+			big += "SET threads = 2;\n";
+		}
+		auto too_big = qod::CheckInit(*context, big);
+		Expect(too_big.refused.size() == 1 && too_big.refused[0].first == 0 &&
+		           too_big.refused[0].second.find("at most 65536") != std::string::npos,
+		       "a text over the cap is refused whole");
 	}
 
 	// ---- a real run: an untrusted section skips what it refuses and runs the rest; the same SQL in a

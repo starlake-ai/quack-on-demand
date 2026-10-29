@@ -952,6 +952,9 @@ final class ManagerServer(
       PoolEndpoints.setPoolDisabled.serverLogic { case (req, token) =>
         pools.setPoolDisabled(req, token)(scopeOfToken)
       },
+      PoolEndpoints.setPoolInitSql.serverLogic { case (req, token) =>
+        pools.setInitSql(req, token)(scopeOfToken)
+      },
       PoolEndpoints.setPoolResources.serverLogic { case (req, token) =>
         pools.setResources(req, token)(scopeOfToken)
       },

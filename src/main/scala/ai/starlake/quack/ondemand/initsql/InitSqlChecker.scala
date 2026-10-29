@@ -97,7 +97,10 @@ object InitSqlChecker extends LazyLogging:
 
   /** The refusal message of a write whose initSql the allowlist refuses. */
   def refusalMessage(statements: Int, refused: List[InitSqlRefusal]): String =
-    val each = refused.map(r => s"statement ${r.statement} of $statements: ${r.reason}")
+    // Statement 0 is the text as a whole (qod-node's size cap).
+    val each = refused.map(r =>
+      if r.statement == 0 then r.reason else s"statement ${r.statement} of $statements: ${r.reason}"
+    )
     s"initSql holds ${refused.size} statement(s) a tenant admin may not run at node start (only " +
       "SET or RESET of an allowlisted setting to a literal, read-only PRAGMAs, and INSTALL or LOAD " +
       s"of an allowlisted extension by name; a superuser's initSql is not restricted): ${each.mkString("; ")}"

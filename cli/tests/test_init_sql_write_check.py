@@ -41,6 +41,9 @@ def test_a_refused_init_sql_is_the_error(runner, respx_mock):
     (["pool", "create", "--tenant", "acme", "--db", "acme_sales", "--pool", "bi", "--size", "1",
       "--dual", "1", "--init-sql", "SET threads = 2;"], "/api/pool/create",
      {"pool": "bi", "initSqlWarning": WARNING}),
+    (["pool", "set-init-sql", "--tenant", "acme", "--db", "acme_sales", "--pool", "bi",
+      "--init-sql", "SET threads = 2;"], "/api/pool/setInitSql",
+     {"pool": "bi", "initSqlWarning": WARNING}),
 ])
 def test_an_unchecked_init_sql_warns_on_stderr(runner, respx_mock, args, path, payload):
     respx_mock.post(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=payload))

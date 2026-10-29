@@ -19,6 +19,7 @@ object EndpointSchemas:
   given Schema[PoolListResponse]         = Schema.derived
   given Schema[CreatePoolRequest]        = Schema.derived
   given Schema[SetPoolResourcesRequest]  = Schema.derived
+  given Schema[SetPoolInitSqlRequest]    = Schema.derived
   given Schema[SetPoolTemplateRequest]   = Schema.derived
   given Schema[SetPoolLockdownRequest]   = Schema.derived
   given Schema[SetPoolAutoscaleRequest]  = Schema.derived

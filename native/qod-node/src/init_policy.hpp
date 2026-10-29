@@ -17,6 +17,11 @@ namespace qod {
 constexpr const char *kUntrustedBegin = "-- qod:untrusted-begin";
 constexpr const char *kUntrustedEnd = "-- qod:untrusted-end";
 
+//! The largest tenant admin's initSql, in bytes (InitSqlTrust.MaxTenantInitSqlBytes, the manager's
+//! write-time cap): --check-init refuses a larger text (statement 0) and the init runner skips a
+//! larger untrusted section whole.
+constexpr size_t kMaxTenantInitSqlBytes = 65536;
+
 //! One stretch of an init script: SQL a superuser or the manager wrote (trusted, run as written), or a
 //! tenant admin's (untrusted, run under the tenant initSql allowlist).
 struct InitSection {
@@ -41,7 +46,7 @@ std::vector<InitSection> SplitInitSections(const std::string &sql, const std::st
 //! - SET / RESET, at the default or GLOBAL scope, of a setting in kInitSettings that the parse screen
 //!   does not reserve, to a single literal value;
 //! - a PRAGMA of the parse screen's read-only list, with literal arguments only;
-//! - INSTALL / FORCE INSTALL / LOAD of a bare extension name that DuckDB's aliases resolve into
+//! - INSTALL / LOAD (never FORCE INSTALL) of a bare extension name that DuckDB's aliases resolve into
 //!   kInitExtensions, with no FROM, no VERSION, no path and no URL.
 //! Everything else is refused, as is a text that does not parse or holds more than one statement.
 std::string JudgeInitStatement(duckdb::ClientContext &context, const std::string &statement,

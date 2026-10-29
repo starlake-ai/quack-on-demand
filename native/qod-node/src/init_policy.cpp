@@ -126,8 +126,10 @@ std::string JudgePragma(SQLStatement &statement) {
 std::string JudgeLoad(SQLStatement &statement) {
 	auto &info = *statement.Cast<LoadStatement>().info;
 	auto kind = info.load_type;
-	if (kind != LoadType::LOAD && kind != LoadType::INSTALL && kind != LoadType::FORCE_INSTALL) {
-		return "extension repositories and LOAD ... AS are not allowed in a tenant initSql";
+	// Not FORCE INSTALL: on the local runtime every node shares one extension directory, so a forced
+	// re-download would replace the file other tenants' nodes load (Task 20 review M4).
+	if (kind != LoadType::LOAD && kind != LoadType::INSTALL) {
+		return "FORCE INSTALL, extension repositories and LOAD ... AS are not allowed in a tenant initSql";
 	}
 	if (!info.repository.empty() || !info.version.empty() || !info.repository_url.empty() ||
 	    !info.public_keys.empty()) {
@@ -140,6 +142,11 @@ std::string JudgeLoad(SQLStatement &statement) {
 		return "this extension is not on the tenant initSql allowlist";
 	}
 	return "";
+}
+
+std::string TooLarge(size_t bytes) {
+	return "the initSql is " + std::to_string(bytes) + " bytes; a tenant admin's may hold at most " +
+	       std::to_string(kMaxTenantInitSqlBytes);
 }
 
 } // namespace
@@ -227,6 +234,10 @@ std::string JudgeInitStatement(ClientContext &context, const std::string &statem
 
 InitVerdict CheckInit(ClientContext &context, const std::string &sql) {
 	InitVerdict verdict;
+	if (sql.size() > kMaxTenantInitSqlBytes) {
+		verdict.refused.emplace_back(0, TooLarge(sql.size()));
+		return verdict;
+	}
 	auto statements = SplitStatements(sql);
 	verdict.statements = statements.size();
 	for (size_t i = 0; i < statements.size(); i++) {
@@ -250,6 +261,10 @@ std::string InitVerdictJson(const InitVerdict &verdict) {
 }
 
 size_t RunUntrusted(Connection &con, const std::string &sql, const std::string &label) {
+	if (sql.size() > kMaxTenantInitSqlBytes) {
+		std::cerr << "[qod-node] " << label << ": skipped whole: " << TooLarge(sql.size()) << std::endl;
+		return 1;
+	}
 	auto statements = SplitStatements(sql);
 	size_t skipped = 0;
 	for (size_t i = 0; i < statements.size(); i++) {
