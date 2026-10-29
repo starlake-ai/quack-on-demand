@@ -20,7 +20,8 @@ object InitSqlTrustReport extends LazyLogging:
         td.tenantId,
         s"database '${td.name}'",
         td.initSql,
-        "a superuser re-saves it unchanged (database/update with the same initSql)"
+        "a superuser re-saves it unchanged (database/update, qod database update --init-sql, " +
+          "with the same initSql)"
       )
     }
     val ps = pools.filter(p => !p.initSqlTrusted && p.initSql.trim.nonEmpty).map { p =>
@@ -28,7 +29,8 @@ object InitSqlTrustReport extends LazyLogging:
         p.tenantId,
         s"pool '${p.name}' of database '${dbNames.getOrElse(p.tenantDbId, p.tenantDbId)}'",
         p.initSql,
-        "a superuser re-creates the pool with the same initSql (a pool's initSql has no update)"
+        "a superuser re-saves it unchanged (pool/setInitSql, qod pool set-init-sql, with the " +
+          "same initSql)"
       )
     }
     (dbs ++ ps).sortBy(r => (r.tenant, r.label))
@@ -69,6 +71,30 @@ object InitSqlTrustReport extends LazyLogging:
           "it, then have a superuser re-save it unchanged (federation create with the same " +
           "body) or delete it."
     }.sorted
+
+  /** The WARN line of every `sql` federated source whose stored template holds a secret placeholder
+    * outside a single-quoted literal (CONTRACT Addendum 4 item 29, amended): a save of it is now
+    * refused, and at render such a placeholder is substituted only for a plain-token value, else
+    * the source is left out of the node's init. Names the placeholders, never a value or the SQL.
+    */
+  def unquotedSecretLines(sources: List[(TenantDb, FederatedSource)]): List[String] =
+    sources
+      .collect {
+        case (td, s) if s.sourceType == FederatedSourceType.Sql =>
+          ai.starlake.quack.ondemand.federation.SecretPlaceholderScan.unquoted(s.setupSql) match
+            case Nil   => None
+            case names =>
+              Some(
+                s"tenant '${td.tenantId}' database '${td.name}' federated source '${s.alias}' " +
+                  s"(sourceType sql): ${names.map(n => s"{{secret.$n}}").mkString(", ")} sits " +
+                  "outside a single-quoted literal. Nodes substitute such a placeholder only when " +
+                  "its value is a plain token ([A-Za-z0-9_.-]+) and otherwise leave the source " +
+                  "out; a save of the template is refused until each placeholder sits inside " +
+                  "'...' (a superuser re-saves it, quoted)."
+              )
+      }
+      .flatten
+      .sorted
 
   /** Logs [[lineAfter]] for every untrusted row, each checked with `checker` (one qod-node run per
     * row on a manager that has one), one row after the other.

@@ -1130,3 +1130,28 @@ class FederatedSourceHandlersSpec
       lines.head should include("tenant 'acme' database 'acme_prod' federated source 'legacy'")
       lines.head should not include "AKIAQODFEDMARKER"
     }
+
+  // CONTRACT Addendum 4 item 29 (amended): a secret placeholder of a sql source sits inside a
+  // single-quoted literal, or the save is refused, naming the placeholder (whoever saves).
+  "a sql source" should "be refused at save with a secret placeholder outside a literal" in
+    withEnv { (fs, resolver, tdId) =>
+      val h =
+        new FederatedSourceHandlers(fs, resolver, scopeOf = scopes, catalogAliasOf = _ => None)
+      val req = FederatedSourceCreateRequest(
+        alias = "legacy",
+        setupSql = Some("ATTACH 'host=h' AS {{alias}} (TYPE postgres, PORT {{secret.PORT}});")
+      )
+      val out = h.createSource("acme", "acme_prod", req, Some(SuperTok)).unsafeRunSync()
+      out.left.value._1 shouldBe StatusCode.BadRequest
+      out.left.value._2.message should include("{{secret.PORT}} outside a single-quoted literal")
+      fs.getSource(tdId, "legacy") shouldBe None
+      h.createSource(
+        "acme",
+        "acme_prod",
+        req.copy(setupSql =
+          Some("ATTACH 'host=h port={{secret.PORT}}' AS {{alias}} (TYPE postgres);")
+        ),
+        Some(SuperTok)
+      ).unsafeRunSync()
+        .isRight shouldBe true
+    }

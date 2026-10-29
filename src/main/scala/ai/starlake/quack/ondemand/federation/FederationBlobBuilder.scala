@@ -10,6 +10,17 @@ import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, Iceberg
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind, RdbmsSetupSql}
 import cats.effect.IO
 import cats.syntax.all.*
+import com.typesafe.scalalogging.LazyLogging
+
+/** A `sql` source block refused at render (CONTRACT Addendum 4 item 29, amended): its template,
+  * stored before the rule, holds `{{secret.<name>}}` outside a single-quoted literal and the value
+  * is not a plain token. Names the source and the placeholder, never the value.
+  */
+final class UnquotedSecretRefused(val alias: String, val name: String)
+    extends RuntimeException(
+      s"federated source '$alias': {{secret.$name}} sits outside a single-quoted literal and its " +
+        "value is not a plain token ([A-Za-z0-9_.-]+); the source is left out of the node's init"
+    )
 
 /** One source's resolved setup SQL, plus the plaintext secret VALUES that were substituted into it.
   *
@@ -72,7 +83,7 @@ final class FederationBlobBuilder(
     loadSecrets: String => IO[List[FederatedSecret]],
     resolver: SecretResolver,
     catalogAliasOf: String => IO[Option[String]]
-) {
+) extends LazyLogging {
 
   private val PlaceholderRegex = """\{\{[^}]*\}\}""".r
   private val SecretRegex      = """\{\{secret\.([A-Za-z0-9_]+)\}\}""".r
@@ -112,9 +123,16 @@ final class FederationBlobBuilder(
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
     sources  <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
     ownAlias <- ownAliasOf(tenantDbId)
-    blobs    <- sources.traverse { src =>
-      renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias)).map(_.sql)
+    rendered <- sources.traverse { src =>
+      renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias))
+        .map(b => Option(b.sql))
+        // Only that source's block goes: its siblings still attach.
+        .recover { case e: UnquotedSecretRefused =>
+          logger.warn(e.getMessage)
+          None
+        }
     }
+    blobs = rendered.flatten
   } yield if blobs.isEmpty then None else Some(blobs.mkString("\n"))
 
   /** The tenant-db's own DuckDB catalog alias, if the caller can resolve it, folded once here so
@@ -312,9 +330,24 @@ final class FederationBlobBuilder(
               )
         }
 
+    // 3b. A `sql` template stored before secret placeholders had to sit inside a literal: an
+    //     unquoted one is substituted only when its value is a plain token (CONTRACT Addendum 4
+    //     item 29, amended). The value is matched, never quoted in the refusal.
+    val unquoted =
+      if src.sourceType == FederatedSourceType.Sql && !redactSecrets then
+        SecretPlaceholderScan.unquoted(step1).toSet
+      else Set.empty[String]
+    def plainCheck(pairs: List[(String, String)]): IO[Unit] =
+      pairs.find((name, value) =>
+        unquoted.contains(name) && !SecretPlaceholderScan.PlainToken.matches(value)
+      ) match
+        case Some((name, _)) => IO.raiseError(new UnquotedSecretRefused(src.alias, name))
+        case None            => IO.unit
+
     for {
       _     <- strayCheck
       pairs <- resolvePairs
+      _     <- plainCheck(pairs)
       lookup =
         if redactSecrets then pairs.toMap
         else pairs.map((name, value) => name -> sqlEscapeSingleQuote(value)).toMap

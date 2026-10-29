@@ -632,10 +632,11 @@ object Main extends IOApp with LazyLogging:
       val snap = store.snapshot()
       manifestFedStore.foreach { fs =>
         scala.util
-          .Try(
-            ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
-              .federationLines(snap.tenantDbs.flatMap(td => fs.listSources(td.id).map(td -> _)))
-          )
+          .Try {
+            val sources = snap.tenantDbs.flatMap(td => fs.listSources(td.id).map(td -> _))
+            ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.federationLines(sources) ++
+              ai.starlake.quack.ondemand.initsql.InitSqlTrustReport.unquotedSecretLines(sources)
+          }
           .fold(
             e => logger.warn(s"federated source boot report: ${e.getClass.getSimpleName}"),
             _.foreach(l => logger.warn(l))

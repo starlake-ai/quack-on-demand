@@ -173,7 +173,7 @@ class InitSqlTrustSpec extends AnyFlatSpec with Matchers:
     val checked = InitSqlTrustReport.line(rows(1), Some(List("statement 2 of 2: SELECT")))
     checked should include("loses 1 statement(s)")
     checked should include("statement 2 of 2: SELECT")
-    checked should include("re-creates the pool")
+    checked should include("pool/setInitSql")
   }
 
   // Part B: the spawn scripts write `-- qod:untrusted-begin` / `-end` around a tenant's section and
