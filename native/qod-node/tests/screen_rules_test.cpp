@@ -640,7 +640,15 @@ int main() {
 	Refused("SELECT lake.main.my_macro(1)", "QoD: function my_macro is not classified", "a qualified macro");
 	Refused("SELECT my_window() OVER () FROM t", "QoD: function my_window is not classified",
 	        "an unclassified window function");
-	for (auto known : {"SELECT generate_subscripts([1, 2], 1)", "SELECT pg_get_viewdef(1)", "SELECT upper(v) FROM t",
+	Refused("SELECT 'running'.stem('porter')", "QoD: function stem is not classified", "method-call syntax");
+	Refused("SELECT list_transform([1, 2], x -> my_fn(x))", "QoD: function my_fn is not classified",
+	        "inside a lambda");
+	Refused("SELECT system.main.stem('running', 'porter')", "QoD: function stem is not classified",
+	        "qualified with the system catalog");
+	for (auto known : {"SELECT 'Ab'.upper()", "SELECT list_transform([1, 2], x -> x + 1)",
+	                   "SELECT system.main.upper('a')", "USE lake.main",
+	                   "CALL ducklake_set_commit_message('lake', 'alice', 'a message')",
+	                   "SELECT generate_subscripts([1, 2], 1)", "SELECT pg_get_viewdef(1)", "SELECT upper(v) FROM t",
 	                   "SELECT count(*) FROM range(3)", "SELECT row_number() OVER () FROM t"}) {
 		Admitted(known, 0, known);
 	}
