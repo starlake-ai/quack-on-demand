@@ -161,6 +161,66 @@ int main() {
 	} catch (std::invalid_argument &) {
 	}
 
+	// ---- host names: resolved once, reused for the lifetime, again once forgotten (hand-off T7-M5)
+	int64_t now = 1000;
+	int resolved = 0;
+	auto fail_next = false;
+	qod::ResolvedAddresses known(
+	    [&](const std::string &host, const std::string &port) {
+		    resolved++;
+		    if (fail_next) {
+			    throw std::runtime_error("cannot resolve " + host);
+		    }
+		    return std::vector<qod::ResolvedAddress> {{2, host + "/" + port + "/" + std::to_string(resolved)}};
+	    },
+	    [&] { return now; }, 30000);
+	auto fresh = false;
+	auto first = known.Get("manager", "20900", fresh);
+	Expect(fresh && resolved == 1, "a name is resolved the first time");
+	now += 29999;
+	Expect(known.Get("manager", "20900", fresh) == first && !fresh && resolved == 1,
+	       "and reused within its lifetime");
+	known.Get("manager", "20901", fresh);
+	Expect(fresh && resolved == 2, "another port is another entry");
+	now += 1;
+	Expect(!(known.Get("manager", "20900", fresh) == first) && fresh && resolved == 3,
+	       "a name past its lifetime is resolved again");
+	known.Forget("manager", "20900");
+	known.Get("manager", "20900", fresh);
+	Expect(fresh && resolved == 4, "a forgotten name is resolved again");
+	known.Forget("other", "1");
+	fail_next = true;
+	try {
+		known.Get("missing", "1", fresh);
+		Expect(false, "a name that resolves to nothing throws");
+	} catch (std::runtime_error &error) {
+		Expect(std::string(error.what()) == "cannot resolve missing", "naming the host");
+	}
+	fail_next = false;
+	known.Get("missing", "1", fresh);
+	Expect(fresh && resolved == 6, "a failed resolution is not kept");
+	qod::ResolvedAddresses empty([](const std::string &, const std::string &) { return std::vector<qod::ResolvedAddress> {}; },
+	                             [] { return int64_t(0); }, 30000);
+	try {
+		empty.Get("nothing", "1", fresh);
+		Expect(false, "a name with no address throws");
+	} catch (std::runtime_error &) {
+	}
+	// HttpPost reaches a server by name twice: the second call takes the kept addresses.
+	answer = qod_test::HttpAnswer {};
+	answer.body = "by name";
+	auto by_name = qod::ParseHttpUrl("http://localhost:" + qod::ParseHttpUrl(server.Url()).port);
+	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 2000).body == "by name", "a replica named localhost");
+	qod::HostAddresses().Get(by_name.host, by_name.port, fresh);
+	Expect(!fresh, "its addresses are kept");
+	Expect(qod::HttpPost(by_name, "/x", {}, "{}", 2000).body == "by name", "and used again");
+	// Kept addresses that stop answering are forgotten, so the next call resolves the name again.
+	auto gone = qod::ParseHttpUrl("http://localhost:" + std::to_string(qod_test::UnusedPort()));
+	Expect(PostFailure("http://" + gone.authority, 2000).find("cannot connect") != std::string::npos,
+	       "nothing listening on a named replica");
+	qod::HostAddresses().Get(gone.host, gone.port, fresh);
+	Expect(fresh, "a named replica that did not answer is resolved again");
+
 	if (failures == 0) {
 		std::cout << "http_post_test: all passed" << std::endl;
 	}

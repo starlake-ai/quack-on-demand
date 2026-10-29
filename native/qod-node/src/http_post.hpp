@@ -2,6 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <map>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,10 +35,60 @@ struct HttpReply {
 //! The largest response body HttpPost reads.
 constexpr size_t kMaxHttpReply = 1024 * 1024;
 
+//! One address a host name resolved to: its family (AF_INET, AF_INET6) and its sockaddr's bytes, so
+//! this header names no socket type (it is included next to DuckDB's headers).
+struct ResolvedAddress {
+	int family = 0;
+	std::string sockaddr;
+
+	bool operator==(const ResolvedAddress &other) const {
+		return family == other.family && sockaddr == other.sockaddr;
+	}
+};
+
+//! How long a resolved host name is reused before it is resolved again.
+constexpr int64_t kResolvedLifetimeMs = 30 * 1000;
+
+//! The addresses of each host and port the node calls, resolved once and reused for `lifetime_ms`, so
+//! a decide call does not resolve its replica's name every time (Task 14, hand-off T7-M5: resolving
+//! runs outside the call's deadline). Thread safe; the lock is never held while resolving, so a slow
+//! resolution delays only the calls that wait for that name.
+class ResolvedAddresses {
+public:
+	//! The addresses `host`:`port` resolves to, in the resolver's order; throws std::runtime_error when
+	//! it resolves to none.
+	using Resolver = std::function<std::vector<ResolvedAddress>(const std::string &host, const std::string &port)>;
+
+	ResolvedAddresses(Resolver resolver, std::function<int64_t()> clock, int64_t lifetime_ms);
+
+	//! The addresses of `host`:`port`: the kept ones while younger than the lifetime, else resolved now
+	//! and kept. `fresh` tells which. A failed resolution is not kept. Throws what the resolver throws.
+	std::vector<ResolvedAddress> Get(const std::string &host, const std::string &port, bool &fresh);
+
+	//! Drops what is kept for `host`:`port`: none of its addresses answered.
+	void Forget(const std::string &host, const std::string &port);
+
+private:
+	struct Entry {
+		std::vector<ResolvedAddress> addresses;
+		int64_t resolved_at = 0;
+	};
+
+	Resolver resolver_;
+	std::function<int64_t()> clock_;
+	int64_t lifetime_ms_;
+	std::mutex lock_;
+	std::map<std::string, Entry> entries_;
+};
+
+//! What HttpPost resolves host names with: getaddrinfo, kept kResolvedLifetimeMs.
+ResolvedAddresses &HostAddresses();
+
 //! POSTs `body` to `path` on `url`'s host over one fresh connection (Connection: close), with `headers`
 //! and a Content-Length, and returns the status and body (Content-Length, chunked or close-delimited).
 //! Connecting, sending and receiving share one deadline `timeout_ms` from now; resolving the host name
-//! does not count against it. Throws std::invalid_argument for a header that holds CR or LF, and
+//! (HostAddresses: once per kResolvedLifetimeMs, and again at once when none of the kept addresses
+//! answers) does not count against it. Throws std::invalid_argument for a header that holds CR or LF, and
 //! std::runtime_error on any transport failure, a timeout, a body over kMaxHttpReply or a response that
 //! is not HTTP/1.x.
 HttpReply HttpPost(const HttpUrl &url, const std::string &path,

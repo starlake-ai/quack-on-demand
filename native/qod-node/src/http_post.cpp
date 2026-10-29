@@ -3,6 +3,7 @@
 #include "socket_compat.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 namespace qod {
@@ -43,23 +44,40 @@ struct SocketGuard {
 	}
 };
 
-SocketHandle Connect(const HttpUrl &url, int64_t deadline) {
+std::vector<ResolvedAddress> Resolve(const std::string &host, const std::string &port) {
 	addrinfo hints {};
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_NUMERICSERV;
 	addrinfo *found = nullptr;
-	if (getaddrinfo(url.host.c_str(), url.port.c_str(), &hints, &found) != 0 || !found) {
-		throw std::runtime_error("cannot resolve " + url.host);
+	if (getaddrinfo(host.c_str(), port.c_str(), &hints, &found) != 0 || !found) {
+		throw std::runtime_error("cannot resolve " + host);
 	}
-	std::string failure = "cannot connect to " + url.authority;
-	SocketHandle connected = kNoSocket;
-	for (auto *address = found; address && connected == kNoSocket; address = address->ai_next) {
-		auto handle = OpenStreamSocket(address->ai_family);
+	std::vector<ResolvedAddress> addresses;
+	for (auto *address = found; address; address = address->ai_next) {
+		addresses.push_back(ResolvedAddress {
+		    address->ai_family,
+		    std::string(reinterpret_cast<const char *>(address->ai_addr), static_cast<size_t>(address->ai_addrlen))});
+	}
+	freeaddrinfo(found);
+	return addresses;
+}
+
+//! The first of `addresses` that accepts a connection before `deadline`, else kNoSocket with `failure`
+//! saying why.
+SocketHandle ConnectAny(const HttpUrl &url, const std::vector<ResolvedAddress> &addresses, int64_t deadline,
+                        std::string &failure) {
+	failure = "cannot connect to " + url.authority;
+	for (auto &address : addresses) {
+		auto handle = OpenStreamSocket(address.family);
 		if (handle == kNoSocket) {
 			continue;
 		}
-		auto ok = connect(handle, address->ai_addr, static_cast<socklen_t>(address->ai_addrlen)) == 0;
+		// Copied out of the string, whose bytes need not be aligned for a sockaddr.
+		sockaddr_storage target {};
+		auto length = std::min(address.sockaddr.size(), sizeof(target));
+		std::memcpy(&target, address.sockaddr.data(), length);
+		auto ok = connect(handle, reinterpret_cast<const sockaddr *>(&target), static_cast<socklen_t>(length)) == 0;
 		if (!ok && WouldBlock()) {
 			auto ready = WaitSocket(handle, true, deadline);
 			if (ready == 0) {
@@ -68,12 +86,32 @@ SocketHandle Connect(const HttpUrl &url, int64_t deadline) {
 			ok = ready == 1 && ConnectResult(handle) == 0;
 		}
 		if (ok) {
-			connected = handle;
-		} else {
-			CloseSocket(handle);
+			return handle;
+		}
+		CloseSocket(handle);
+	}
+	return kNoSocket;
+}
+
+SocketHandle Connect(const HttpUrl &url, int64_t deadline) {
+	auto &known = HostAddresses();
+	auto fresh = false;
+	auto addresses = known.Get(url.host, url.port, fresh);
+	std::string failure;
+	auto connected = ConnectAny(url, addresses, deadline, failure);
+	if (connected == kNoSocket) {
+		known.Forget(url.host, url.port);
+		// Kept addresses that no longer answer (a replica that moved): the name once more, now.
+		if (!fresh && MonotonicMs() < deadline) {
+			auto renewed = known.Get(url.host, url.port, fresh);
+			if (!(renewed == addresses)) {
+				connected = ConnectAny(url, renewed, deadline, failure);
+				if (connected == kNoSocket) {
+					known.Forget(url.host, url.port);
+				}
+			}
 		}
 	}
-	freeaddrinfo(found);
 	if (connected == kNoSocket) {
 		throw std::runtime_error(failure);
 	}
@@ -339,6 +377,43 @@ HttpUrl ParseHttpUrl(const std::string &url) {
 		result.path.pop_back();
 	}
 	return result;
+}
+
+ResolvedAddresses::ResolvedAddresses(Resolver resolver, std::function<int64_t()> clock, int64_t lifetime_ms)
+    : resolver_(std::move(resolver)), clock_(std::move(clock)), lifetime_ms_(lifetime_ms) {
+}
+
+std::vector<ResolvedAddress> ResolvedAddresses::Get(const std::string &host, const std::string &port, bool &fresh) {
+	// host:port is unambiguous: a port holds no ':', and every ':' of an IPv6 host comes before it.
+	auto key = host + ":" + port;
+	{
+		std::lock_guard<std::mutex> guard(lock_);
+		auto found = entries_.find(key);
+		if (found != entries_.end() && clock_() - found->second.resolved_at < lifetime_ms_) {
+			fresh = false;
+			return found->second.addresses;
+		}
+	}
+	auto addresses = resolver_(host, port);
+	if (addresses.empty()) {
+		throw std::runtime_error("cannot resolve " + host);
+	}
+	{
+		std::lock_guard<std::mutex> guard(lock_);
+		entries_[key] = Entry {addresses, clock_()};
+	}
+	fresh = true;
+	return addresses;
+}
+
+void ResolvedAddresses::Forget(const std::string &host, const std::string &port) {
+	std::lock_guard<std::mutex> guard(lock_);
+	entries_.erase(host + ":" + port);
+}
+
+ResolvedAddresses &HostAddresses() {
+	static ResolvedAddresses addresses(Resolve, MonotonicMs, kResolvedLifetimeMs);
+	return addresses;
 }
 
 bool DecodeChunked(const std::string &raw, std::string &body) {
