@@ -129,10 +129,13 @@ int Serve(const NodeOptions &options) {
 	RunStrict(con, "SET secret_directory = " + QuoteLiteral(options.secret_directory), "setting the secret directory");
 	RunStrict(con, "SELECT count(*) FROM duckdb_secrets()", "starting the secret manager");
 
-	RunInitFiles(con, options, secrets.init_nonce);
-
+	// Before the init SQL: a lockdown pool's ends by disabling the local file system
+	// (NodeLockdown.sql), and quack's extension file is local.
 	RunStrict(con, "INSTALL quack", "installing quack");
 	RunStrict(con, "LOAD quack", "loading quack");
+
+	RunInitFiles(con, options, secrets.init_nonce);
+
 	// After the init SQL, so nothing it ran can replace the screen.
 	RunStrict(con, std::string("SET GLOBAL quack_authorization_function = ") + QuoteLiteral(kScreenFunction),
 	          "installing the parse screen");

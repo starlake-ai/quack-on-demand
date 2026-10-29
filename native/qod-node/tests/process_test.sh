@@ -333,6 +333,24 @@ else
   cat "$work/term.out"
 fi
 
+# --- serve: node lockdown last in the init SQL ----------------------------------------------------
+# A lockdown pool on an object-store data path ends its init SQL by disabling the local file system
+# (NodeLockdown.sql): quack, whose extension file is local, is loaded before the init SQL runs. Such a
+# node's init SQL loads httpfs first (its data path is remote), which quack_serve needs.
+{ nonce_line; printf "INSTALL httpfs;\nLOAD httpfs;\nSET disabled_filesystems = 'LocalFileSystem';\n"; } |
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-lockdown)" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/lockdown.out" 2>&1 &
+lockdown_node=$!
+pids+=("$lockdown_node")
+if wait_for '\[qod-node\] ready' "$work/lockdown.out"; then
+  grep -q '3 of 3 statement(s) ran' "$work/lockdown.out" || fail "lockdown: the init SQL did not run"
+  kill -TERM "$lockdown_node"
+  wait_exit "$lockdown_node" || fail "lockdown: the node did not stop"
+else
+  fail "lockdown: the node never became ready with the local file system disabled"
+  cat "$work/lockdown.out"
+fi
+
 # --- serve: the extension settings are fixed before the database opens ----------------------------
 # Off unless a flag turns one on (decision 17). The init SQL tries to turn both allow_* settings on:
 # DuckDB refuses while the database runs, so neither can a pool's or a database's initSql. The node
