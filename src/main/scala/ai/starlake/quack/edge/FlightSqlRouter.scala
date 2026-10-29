@@ -1589,7 +1589,7 @@ final class FlightSqlRouter(
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $message"
-    if message.contains(FlightSqlRouter.NodeAuthzUnavailable) then RouterFailure.Unavailable(full)
+    if FlightSqlRouter.isNodeAuthzUnavailable(message) then RouterFailure.Unavailable(full)
     else if notFound then RouterFailure.NotFound(full)
     else RouterFailure.BadRequest(full)
 
@@ -1599,6 +1599,19 @@ object FlightSqlRouter:
     * replica unreachable, slow or answering 503): retryable, unlike every other node refusal.
     */
   val NodeAuthzUnavailable: String = "QoD: authorization unavailable, retry"
+
+  /** Whether a node's error `message` is that refusal, in the exact shapes the node raises it: a
+    * statement's (DuckDB's PermissionException) or the parse screen's (quack's authorization
+    * callback wrapping it). A user's own text that quotes the marker (error('...'), an identifier
+    * echoed in a catalog error) stays a permanent failure.
+    */
+  def isNodeAuthzUnavailable(message: String): Boolean =
+    NodeAuthzUnavailablePrefixes.exists(message.startsWith)
+
+  private val NodeAuthzUnavailablePrefixes: List[String] = List(
+    s"Permission Error: $NodeAuthzUnavailable",
+    s"Invalid Input Error: Authorization callback failed: Permission Error: $NodeAuthzUnavailable"
+  )
 
   /** The target of the USE prelude [[wrapWithDefaultSchema]] sends before a pool's statements,
     * `<alias>.<schema>`, or None when it sends none (no catalog alias). Every session handle for

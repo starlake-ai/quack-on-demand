@@ -501,6 +501,26 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .swap
       .toOption
       .get shouldBe a[RouterFailure.BadRequest]
+    // The parse screen's form of the same refusal is retryable too; a user's own text quoting the
+    // marker is not.
+    FlightSqlRouter.isNodeAuthzUnavailable(
+      "Invalid Input Error: Authorization callback failed: Permission Error: " +
+        "QoD: authorization unavailable, retry: timed out"
+    ) shouldBe true
+    List(
+      "Invalid Input Error: QoD: authorization unavailable, retry",
+      "Catalog Error: Table with name QoD: authorization unavailable, retry does not exist!",
+      "Binder Error: Permission Error: QoD: authorization unavailable, retry"
+    ).foreach(m => FlightSqlRouter.isNodeAuthzUnavailable(m) shouldBe false)
+    val user =
+      QuackError.Permanent("Invalid Input Error: QoD: authorization unavailable, retry")
+    val (mine, _, _) = setup(stub = () => QuackResponse.Failed(user, 1L))
+    mine
+      .execute("c-user", "alice", poolKey, "SELECT error('QoD: authorization unavailable, retry')")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.BadRequest]
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
