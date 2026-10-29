@@ -56,8 +56,8 @@ abstract class AuthzEndToEndCases(
   protected def nodeOnly: Boolean
 
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
-  private val Acme   = s"acme_$run"
-  private val Globex = s"globex_$run"
+  private val Acme   = s"acme_${stackName}_$run"
+  private val Globex = s"globex_${stackName}_$run"
   private val Bucket = s"qod-authz-$run"
   private val Alias  = s"e2e_alias_$run"
 
@@ -107,7 +107,7 @@ abstract class AuthzEndToEndCases(
   private var roleId: String        = ""
   private var s3Ready: Boolean      = false
   private var icebergReady: Boolean = false
-  private val pgDb                  = s"qod_authz_pg_$run"
+  private val pgDb                  = s"qod_pg_${stackName}_$run"
   private val iceNs                 = s"qod_authz_$run"
 
   private val s3Store = Map(
@@ -134,7 +134,10 @@ abstract class AuthzEndToEndCases(
         maxNodePort,
         aclEnabled = !nodeOnly,
         filesRoot = root,
-        userS3Endpoints = s"$Rustfs,${fake.endpoint}"
+        userS3Endpoints = s"$Rustfs,${fake.endpoint}",
+        // Tenant catalogs and the Postgres source database of an earlier run of this stack.
+        stackPrefixes =
+          List(s"acme_${stackName}_", s"globex_${stackName}_", s"qod_pg_${stackName}_")
       )
       stack.boot()
       provisionFiles()
@@ -555,7 +558,9 @@ abstract class AuthzEndToEndCases(
       withClue(s"[$d] $user: $sql -> ") {
         as(d, user, pool, sql) match
           case Left(err) =>
-            if (nodeOnly && !gatewayFirst) || alwaysNode then err should include(node)
+            if (nodeOnly && !gatewayFirst) || alwaysNode then
+              err should include("QoD: ")
+              err should include(node)
           case Right(r) => fail(s"expected a refusal, got rows $r")
       }
     }
@@ -1042,6 +1047,38 @@ abstract class AuthzEndToEndCases(
     )
   }
 
+  "a catalog macro shadowing a built-in" should "make the built-in's name unclassified for users" in {
+    ready()
+    // Addendum 4 item 30a: a macro in the pool's DuckLake catalog (on Postgres, where DuckDB folds
+    // constant calls before post_bind) bearing a classified name would run its body unjudged; the
+    // screen refuses the name for users, however the call reaches it, unless it names the system
+    // catalog. Planted by the superuser, removed after.
+    admin("lake", s"CREATE MACRO $lake.main.levenshtein(a, b) AS 42")
+    try
+      refused(
+        "alice",
+        "lake",
+        "SELECT levenshtein('kitten', 'sitting')",
+        node = "function levenshtein is not classified: a catalog entry outside the system catalog",
+        alwaysNode = true
+      )
+      refused(
+        "alice",
+        "lake",
+        s"SELECT $lake.main.levenshtein('kitten', 'sitting')",
+        node = "function levenshtein is not classified",
+        alwaysNode = true
+      )
+      allowed(
+        "alice",
+        "lake",
+        "SELECT system.main.levenshtein('kitten', 'sitting')",
+        Some(List("3"))
+      )
+    finally admin("lake", s"DROP MACRO $lake.main.levenshtein")
+    allowed("alice", "lake", "SELECT levenshtein('kitten', 'sitting')", Some(List("3")))
+  }
+
   // ---------- catalogs: memory, a custom alias, federated, lake ----------
 
   "a memory database" should "be its pool's catalog, and only its pool's" in {
@@ -1230,9 +1267,18 @@ abstract class AuthzEndToEndCases(
     val sql         = s"SELECT x FROM $lake.main.v_secret"
     val secretGrant = grant(lake, "main", "secret", "RO")
     allowed("alice", "lake", sql, Some(List("42")))
+    // The same plan again: the node answers from its verdict cache, asking the replica nothing.
+    val cached = stack.relay.decideCalls
     allowed("alice", "lake", sql, Some(List("42")))
+    withClue("decision calls for a plan the node had cached: ") {
+      stack.relay.decideCalls shouldBe cached
+    }
     stack.post("/api/role/permission/revoke", obj("id" -> s(secretGrant)))
+    val revoked = stack.relay.decideCalls
     refused("alice", "lake", sql, alwaysNode = true)
+    withClue("decision calls after the revoke (a new policy version): ") {
+      stack.relay.decideCalls should be > revoked
+    }
     // A plain table: on the node-only stack only the node's policy version stands between the revoke
     // and the allow it cached for this plan; on the layered stack the gateway refuses it as well.
     stack.post("/api/role/permission/revoke", obj("id" -> s(ordersGrant)))
@@ -1248,13 +1294,17 @@ abstract class AuthzEndToEndCases(
     val sql = s"SELECT max(abs(id)), min(reverse(v)) FROM $lake.main.orders"
     stack.relay.stop()
     try
-      doors.foreach { d =>
-        withClue(s"[$d] ") {
-          as(d, "alice", "lake", sql) match
-            case Left(err) => err should include("authorization unavailable")
-            case Right(r)  => fail(s"expected a refusal while the replica is down, got $r")
-        }
-      }
+      // FlightSQL: UNAVAILABLE, the status a client retries; the front door relays the node's own
+      // answer, which says to retry.
+      stack.flightCall(sql, "alice", AlicePw, Acme, "lake") match
+        case Left(e) =>
+          e.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.UNAVAILABLE
+          e.getMessage should include("QoD: authorization unavailable, retry")
+        case Right(r) => fail(s"expected a refusal while the replica is down, got $r")
+      if AuthzStack.cliPresent then
+        stack.door(sql, "alice", AlicePw, Acme, "lake") match
+          case Left(err) => err should include("QoD: authorization unavailable, retry")
+          case Right(r)  => fail(s"expected a refusal while the replica is down, got $r")
     finally stack.relay.start()
     allowed("alice", "lake", sql)
   }

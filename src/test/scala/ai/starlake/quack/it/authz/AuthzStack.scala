@@ -54,7 +54,11 @@ final class AuthzStack(
     filesRoot: Path,
     relayed: Boolean = true,
     /** `quack-on-demand.userS3.allowedEndpoints`: the endpoints users' S3 credentials may name. */
-    userS3Endpoints: String = ""
+    userS3Endpoints: String = "",
+    /** What this stack's tenants and source databases are named with, before a run's hex: the
+      * databases [[boot]] drops when an earlier run of this stack left them.
+      */
+    stackPrefixes: List[String] = Nil
 ):
   import Main.given
 
@@ -73,6 +77,7 @@ final class AuthzStack(
 
   def boot(): Unit =
     TestPostgres.dropStrayTestDatabases(s"qod_$name")
+    dropStrayCatalogs()
     if relayed then relay.start()
     val replicaPort = if relayed then relayPort else restPort
     val script      = Paths.get("scripts/spawn-quack-node.sh").toAbsolutePath
@@ -153,6 +158,28 @@ final class AuthzStack(
       Option.when(r.statusCode() == 200)(())
     }
     session = login(None, "admin", "admin")
+
+  /** The databases of earlier runs of this stack that a killed run left on the test Postgres: the
+    * tenant catalogs and the Postgres source database its world names with `stackPrefixes` (each
+    * followed by the run's hex and `_` or the end), never anyone else's.
+    */
+  private def dropStrayCatalogs(): Unit =
+    val patterns =
+      stackPrefixes.map(p => s"^${java.util.regex.Pattern.quote(p)}[0-9a-f]+(_.*)?$$".r)
+    val names = scala.util.Using.resource(
+      java.sql.DriverManager
+        .getConnection(TestPostgres.adminUrl, TestPostgres.pgUser, TestPostgres.pgPass)
+    ) { c =>
+      scala.util.Using.resource(c.createStatement()) { st =>
+        val rs  = st.executeQuery("SELECT datname FROM pg_database")
+        val out = ListBuffer.empty[String]
+        while rs.next() do out += rs.getString(1)
+        out.toList
+      }
+    }
+    names
+      .filter(n => patterns.exists(_.matches(n)))
+      .foreach(n => Try(TestPostgres.dropDatabase(n)))
 
   /** The manager fiber first (its reconcile loop cannot respawn a node stopped below), then this
     * manager's nodes by their marker, then the databases; each stage guarded.
@@ -255,6 +282,17 @@ final class AuthzStack(
       pool: String,
       superuser: Boolean = false
   ): Either[String, List[String]] =
+    flightCall(sql, user, password, tenant, pool, superuser).left.map(_.getMessage)
+
+  /** As [[flight]], the failure as the client got it: its Flight status code and description. */
+  def flightCall(
+      sql: String,
+      user: String,
+      password: String,
+      tenant: String,
+      pool: String,
+      superuser: Boolean = false
+  ): Either[FlightRuntimeException, List[String]] =
     val allocator = new RootAllocator()
     val raw       =
       FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", flightPort)).build()
@@ -282,7 +320,7 @@ final class AuthzStack(
                 .mkString(",")
           Right(out.toList)
         finally stream.close()
-      catch case e: FlightRuntimeException => Left(e.getMessage)
+      catch case e: FlightRuntimeException => Left(e)
     finally
       raw.close()
       allocator.close()
@@ -387,12 +425,18 @@ object AuthzStack:
 
 /** A TCP relay from 127.0.0.1:`listenPort` to 127.0.0.1:`targetPort`: the decision replica the
   * nodes see. [[stop]] closes the listener and every relayed connection (a dead replica); [[start]]
-  * listens again on the same port.
+  * listens again on the same port. [[decideCalls]] counts the decision requests the nodes sent
+  * through it (request lines `POST /api/internal/authz/decide`), so a spec can tell a verdict the
+  * node took from its cache from one it asked for.
   */
 final class TcpRelay(listenPort: Int, targetPort: Int):
 
   @volatile private var server: Option[ServerSocket] = None
   private val open                                   = ListBuffer.empty[Socket]
+  private val decides                                = new java.util.concurrent.atomic.AtomicLong(0)
+
+  /** Decision requests relayed so far. */
+  def decideCalls: Long = decides.get()
 
   def start(): Unit = synchronized {
     val s = new ServerSocket()
@@ -425,15 +469,42 @@ final class TcpRelay(listenPort: Int, targetPort: Int):
                 open += client
                 open += upstream
               }
-              pipe(client.getInputStream, upstream.getOutputStream, client, upstream)
-              pipe(upstream.getInputStream, client.getOutputStream, client, upstream)
+              pipe(client.getInputStream, upstream.getOutputStream, client, upstream, count = true)
+              pipe(upstream.getInputStream, client.getOutputStream, client, upstream, count = false)
 
-  private def pipe(in: InputStream, out: OutputStream, a: Socket, b: Socket): Unit =
+  private def pipe(
+      in: InputStream,
+      out: OutputStream,
+      a: Socket,
+      b: Socket,
+      count: Boolean
+  ): Unit =
     val t = new Thread(() => {
-      Try(in.transferTo(out))
+      Try(if count then countingCopy(in, out) else in.transferTo(out))
       Try(a.close())
       Try(b.close())
       ()
     })
     t.setDaemon(true)
     t.start()
+
+  /** Copies `in` to `out`, counting decision request lines, also across reads. */
+  private def countingCopy(in: InputStream, out: OutputStream): Unit =
+    val needle = TcpRelay.DecideLine
+    val buffer = new Array[Byte](8192)
+    var tail   = Array.emptyByteArray
+    var n      = in.read(buffer)
+    while n >= 0 do
+      out.write(buffer, 0, n)
+      out.flush()
+      val seen = tail ++ buffer.take(n)
+      var at   = seen.indexOfSlice(needle)
+      while at >= 0 do
+        decides.incrementAndGet()
+        at = seen.indexOfSlice(needle, at + needle.length)
+      tail = seen.takeRight(needle.length - 1)
+      n = in.read(buffer)
+
+object TcpRelay:
+  private val DecideLine: Array[Byte] =
+    "POST /api/internal/authz/decide ".getBytes(StandardCharsets.US_ASCII)
