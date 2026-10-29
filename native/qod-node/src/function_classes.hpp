@@ -21,4 +21,11 @@ std::optional<FunctionClass> FunctionClassOf(const std::string &name, const std:
 //! lists is classed superuser under one type and something else under another.
 bool IsSuperuserFunction(const std::string &name);
 
+//! Whether function-classes.tsv classifies `name` (lower case) under any type, or it names a built-in
+//! macro (builtin_macros.inc, from macros.json: one the table does not class is judged by its
+//! expansion). A name neither lists (a function an extension loaded at runtime, a macro a superuser
+//! created) is refused to users wherever they call it (CONTRACT Addendum 4 item 30): DuckDB may fold
+//! such a call away before the plan reaches the describer.
+bool IsClassifiedFunction(const std::string &name);
+
 } // namespace qod

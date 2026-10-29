@@ -123,6 +123,20 @@ int main() {
 	con.Query("DETACH lake");
 	fs::remove_all(scratch);
 
+	// ---- a scalar function an extension loaded at runtime is described by its catalog name, so the
+	// manager can refuse it as not classified (fts is not among the functions --list-functions sees)
+	if (Load(con, "fts")) {
+		capture.principal = qod_test::Alice();
+		capture.on = true;
+		con.Query("SELECT stem('running', 'porter')");
+		capture.on = false;
+		Expect("an extension scalar function", capture.canonical,
+		       "{\"args\":[],\"catalog\":\"system\",\"name\":\"stem\",\"schema\":\"main\",\"type\":\"scalar\"");
+		capture.principal = qod_test::Root();
+	} else {
+		std::cout << "describer_extension_test: fts unavailable, the extension scalar case skipped" << std::endl;
+	}
+
 	if (failures == 0) {
 		std::cout << "describer_extension_test: all passed" << std::endl;
 	}

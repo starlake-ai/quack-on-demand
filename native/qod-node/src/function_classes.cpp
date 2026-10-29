@@ -21,6 +21,12 @@ const Entry kEntries[] = {
 #undef QOD_FUNCTION_CLASS
 };
 
+const char *const kBuiltinMacros[] = {
+#define QOD_BUILTIN_MACRO(name) name,
+#include "builtin_macros.inc"
+#undef QOD_BUILTIN_MACRO
+};
+
 FunctionClass ParseClass(const std::string &cls) {
 	if (cls == "allowed") {
 		return FunctionClass::Allowed;
@@ -41,6 +47,7 @@ FunctionClass ParseClass(const std::string &cls) {
 struct Classes {
 	std::map<std::pair<std::string, std::string>, FunctionClass> by_name_and_type;
 	std::set<std::string> superuser;
+	std::set<std::string> names;
 };
 
 const Classes &AllClasses() {
@@ -49,9 +56,13 @@ const Classes &AllClasses() {
 		for (auto &entry : kEntries) {
 			auto cls = ParseClass(entry.cls);
 			result.by_name_and_type[{entry.name, entry.type}] = cls;
+			result.names.insert(entry.name);
 			if (cls == FunctionClass::Superuser) {
 				result.superuser.insert(entry.name);
 			}
+		}
+		for (auto name : kBuiltinMacros) {
+			result.names.insert(name);
 		}
 		return result;
 	}();
@@ -71,6 +82,10 @@ std::optional<FunctionClass> FunctionClassOf(const std::string &name, const std:
 
 bool IsSuperuserFunction(const std::string &name) {
 	return AllClasses().superuser.count(name) != 0;
+}
+
+bool IsClassifiedFunction(const std::string &name) {
+	return AllClasses().names.count(name) != 0;
 }
 
 } // namespace qod

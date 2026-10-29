@@ -490,6 +490,16 @@ private:
 		}
 	}
 
+	//! A function name the walk reaches, wherever it is, that no classification lists, nor a built-in
+	//! macro: refused (Addendum 4 item 30), whatever qualifies it. DuckDB may fold such a call on
+	//! constants away before the describer sees the plan, so the manager could never class it. After
+	//! SlotCall, which names the slot of a call inside one.
+	static void UnclassifiedCall(const std::string &name) {
+		if (!IsClassifiedFunction(name)) {
+			Refuse("function " + name + " is not classified");
+		}
+	}
+
 	//! A type expression (a CAST target, a column's type): its parameters are folded while binding
 	//! (Binder::BindLogicalType, bind_type_expression.cpp:76-104).
 	void TypeSlot(const LogicalType &type) {
@@ -1015,6 +1025,7 @@ private:
 			auto name = StringUtil::Lower(window.GetQualifiedName().Name().GetIdentifierName());
 			SuperuserCall(name);
 			SlotCall(window.GetQualifiedName(), name, {"window", "aggregate"});
+			UnclassifiedCall(name);
 			break;
 		}
 		case ExpressionClass::SUBQUERY: {
@@ -1062,6 +1073,7 @@ private:
 		} else {
 			SlotCall(call.GetQualifiedName(), name, {"scalar", "aggregate", "macro"});
 		}
+		UnclassifiedCall(name);
 		if (!IsJudgedCall(name)) {
 			return;
 		}

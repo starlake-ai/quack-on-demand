@@ -628,6 +628,22 @@ int main() {
 	Refused("SELECT 1 LIMIT memory.main.nullif(5, 0)", "nullif is not allowed in LIMIT and OFFSET",
 	        "a macro of another catalog");
 	Admitted("SELECT get_block_size", 0, "a column spelled like a superuser-class macro is no call");
+
+	// ---- Addendum 4 item 30: a name no classification lists is refused anywhere, since DuckDB may fold a
+	// call on constants away before the describer sees the plan; a built-in macro the table does not
+	// class is judged by its expansion outside the slots
+	Refused("SELECT stem('running', 'porter')", "QoD: function stem is not classified",
+	        "an extension function loaded at runtime, on constants");
+	Refused("SELECT upper(my_fn(v)) FROM t", "QoD: function my_fn is not classified", "nested, on a column");
+	Refused("SELECT * FROM my_table_fn(1)", "QoD: table function my_table_fn is not available",
+	        "an unclassified table function (the table-position rule refuses it first)");
+	Refused("SELECT lake.main.my_macro(1)", "QoD: function my_macro is not classified", "a qualified macro");
+	Refused("SELECT my_window() OVER () FROM t", "QoD: function my_window is not classified",
+	        "an unclassified window function");
+	for (auto known : {"SELECT generate_subscripts([1, 2], 1)", "SELECT pg_get_viewdef(1)", "SELECT upper(v) FROM t",
+	                   "SELECT count(*) FROM range(3)", "SELECT row_number() OVER () FROM t"}) {
+		Admitted(known, 0, known);
+	}
 	Admitted("SELECT * FROM read_csv('s3://acme-etl/x.csv', header = true, sample_size = 10 * 10)", 1,
 	         "a reader's literal and computed allowed arguments");
 

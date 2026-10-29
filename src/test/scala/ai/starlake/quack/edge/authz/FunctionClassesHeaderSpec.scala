@@ -71,7 +71,30 @@ class FunctionClassesHeaderSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "classify the functions the review's reproductions call" in {
+  "the parse screen's built-in macros" should "be exactly macros.json's names, sorted" in {
+    // CONTRACT Addendum 4 item 30: the screen refuses a call to a name neither header lists.
+    val Macro  = """QOD_BUILTIN_MACRO\("((?:[^"\\]|\\.)*)"\)""".r
+    val listed = Files
+      .readAllLines(Paths.get("native/qod-node/src/builtin_macros.inc"), StandardCharsets.UTF_8)
+      .asScala
+      .toList
+      .filterNot(l => l.isEmpty || l.startsWith("//"))
+      .map {
+        case Macro(name) => unescape(name)
+        case other       => fail(s"unexpected line in builtin_macros.inc: $other. $Regenerate")
+      }
+    val json = io.circe.parser
+      .parse(Files.readString(Paths.get("native/qod-node/macros.json")))
+      .flatMap(_.as[List[io.circe.Json]])
+      .fold(e => fail(e.getMessage), identity)
+      .map(_.hcursor.get[String]("name").fold(e => fail(e.getMessage), _.toLowerCase(Locale.ROOT)))
+    withClue(s"$Regenerate. ") {
+      listed shouldBe json.distinct.sorted
+      listed should contain("generate_subscripts")
+    }
+  }
+
+  "the parse screen's function classes" should "classify the functions the review's reproductions call" in {
     val byName = entries.groupBy(_._1).view.mapValues(_.map(_._4).toSet).toMap
     byName("setval") shouldBe Set("superuser")
     byName("current_setting") shouldBe Set("superuser")
