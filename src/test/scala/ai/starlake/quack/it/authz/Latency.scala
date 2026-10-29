@@ -19,7 +19,25 @@ object Latency:
       f"p50=${percentile(arm, 50) - percentile(base, 50)}%.3f ms " +
       f"p99=${percentile(arm, 99) - percentile(base, 99)}%.3f ms"
 
-  /** The width of [[Wide]]: every statement reads [[Picked]] of its columns. */
+  /** The most rounds a spec may run: every round of the node-level spec takes two fresh subsets
+    * (its two miss arms), warm-up included, and the last subset is the fixed statement's.
+    */
+  val MaxRounds = 9000
+
+  /** The rounds `asked` names (`QOD_AUTHZ_LATENCY_ROUNDS`), 2,000 when absent; anything but a
+    * number from 1 to [[MaxRounds]] is refused.
+    */
+  def rounds(asked: Option[String]): Int =
+    asked.fold(2000) { text =>
+      text.trim.toIntOption match
+        case Some(n) if n >= 1 && n <= MaxRounds => n
+        case _                                   =>
+          throw new IllegalArgumentException(
+            s"QOD_AUTHZ_LATENCY_ROUNDS must be a number from 1 to $MaxRounds"
+          )
+    }
+
+  /** The width of the wide table: every statement reads [[Picked]] of its columns. */
   val Columns = 18
   val Picked  = 6
 

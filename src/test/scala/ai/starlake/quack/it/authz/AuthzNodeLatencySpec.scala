@@ -31,9 +31,9 @@ class AuthzNodeLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAfter
   private given IORuntime = IORuntime.global
 
   private val enabled = sys.env.get("QOD_AUTHZ_LATENCY").contains("1")
-  // QOD_AUTHZ_LATENCY_ROUNDS shortens a trial run; the numbers of record use the default.
-  private val Rounds =
-    sys.env.get("QOD_AUTHZ_LATENCY_ROUNDS").flatMap(_.toIntOption).getOrElse(2000)
+  // QOD_AUTHZ_LATENCY_ROUNDS shortens a trial run (1 to Latency.MaxRounds); the numbers of record use
+  // the default.
+  private val Rounds = Latency.rounds(sys.env.get("QOD_AUTHZ_LATENCY_ROUNDS"))
   private val Warmup = math.min(200, Rounds)
   private val User   =
     NodePrincipal("u-lat", "lat", Some("acme"), superuser = false, system = false)

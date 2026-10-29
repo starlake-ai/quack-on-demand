@@ -39,8 +39,9 @@ import scala.util.Try
   * runtime, the real spawn script and the qod-node build (`QOD_NODE_BIN`), the FlightSQL edge
   * (plain gRPC), the native Quack front door, MCP, and a throwaway control-plane database. With
   * `relayed`, nodes call the decision endpoint through [[relay]] (the handles' replica URL), which
-  * a spec stops to play a dead replica; without it they call the REST port directly (the latency
-  * spec, Task 14). REST calls ride a login session of the seeded admin (admin / admin).
+  * a spec stops to play a dead replica or reads to count decisions (the latency spec, Task 14);
+  * without it they call the REST port directly. REST calls ride a login session of the seeded admin
+  * (admin / admin).
   */
 final class AuthzStack(
     name: String,

@@ -26,15 +26,17 @@ import scala.util.Try
   * host, on a DuckLake-on-Postgres pool (the managed shape), its verdict cached on the node (warm)
   * or decided by the real pipeline on the real endpoint (cold: a plan the node never saw). The
   * difference is the manager round trip with everything the decision does. Manager on 20955 (REST)
-  * / 31355 (FlightSQL) / 29498 (front door), nodes 23240-23249, decisions straight to the REST port
-  * (no relay). Opt-in: `QOD_AUTHZ_LATENCY=1`.
+  * / 31355 (FlightSQL) / 29498 (front door), nodes 23240-23249. Decisions go through the stack's
+  * loopback relay on 20965, which counts them, so the spec checks that every cold statement was
+  * decided and every warm one hit (the relay's hop is in the cold arm: the miss measured is an
+  * upper bound). Opt-in: `QOD_AUTHZ_LATENCY=1`.
   */
 class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val enabled = sys.env.get("QOD_AUTHZ_LATENCY").contains("1")
-  // QOD_AUTHZ_LATENCY_ROUNDS shortens a trial run; the numbers of record use the default.
-  private val Rounds =
-    sys.env.get("QOD_AUTHZ_LATENCY_ROUNDS").flatMap(_.toIntOption).getOrElse(2000)
+  // QOD_AUTHZ_LATENCY_ROUNDS shortens a trial run (1 to Latency.MaxRounds); the numbers of record use
+  // the default.
+  private val Rounds = Latency.rounds(sys.env.get("QOD_AUTHZ_LATENCY_ROUNDS"))
   private val Warmup = math.min(200, Rounds)
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
   private val Tenant = s"lat_authz_latency_$run"
@@ -60,7 +62,6 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
         23249,
         aclEnabled = true,
         filesRoot = Files.createDirectories(root.resolve("files")),
-        relayed = false,
         stackPrefixes = List("lat_authz_latency_")
       )
       stack.boot()
@@ -145,11 +146,14 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
         try while stream.next() do ()
         finally stream.close()
       exec("SELECT 1", new HeaderCallOption(hdrs))
-      val session                  = bearer.getCredentialCallOption
-      def timed(sql: String): Long =
-        val t0 = System.nanoTime()
+      val session = bearer.getCredentialCallOption
+      // Nanoseconds, and the decisions the node asked meanwhile (the relay counts a request before
+      // forwarding it, and the statement completes only after its answer).
+      def timed(sql: String): (Long, Long) =
+        val before = stack.relay.decideCalls
+        val t0     = System.nanoTime()
         exec(sql, session)
-        System.nanoTime() - t0
+        (System.nanoTime() - t0, stack.relay.decideCalls - before)
       // Both arms change the text every round (a projected constant, which no description carries:
       // the gateway parses a new statement either way); only the cold arm reads a column subset the
       // node never saw, so only its plan is new.
@@ -158,17 +162,52 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
       def cold(i: Int) = Latency.counting("w", i, head = s"$i AS k, ")
       val w            = new Array[Long](Rounds)
       val c            = new Array[Long](Rounds)
+      // A cold statement is two new plans: the edge's schema probe at GetFlightInfo
+      // (PrepareStrategy.ProbeWrap: `SELECT * FROM (<sql>) AS _qod_probe LIMIT 0`) and the statement
+      // at DoGet, each decided once.
+      val ColdDecisions = 2
+      var undecided     = 0  // a cold statement asked fewer than its two decisions
+      var warmAsked     = 0L // decisions for warm statements: first sight and expired verdicts only
+      // How many statements asked how many decisions, per arm.
+      val warmSeen              = scala.collection.mutable.TreeMap.empty[Long, Int]
+      val coldSeen              = scala.collection.mutable.TreeMap.empty[Long, Int]
+      def warmRun(i: Int): Long =
+        val (t, calls) = timed(warm(i))
+        warmSeen(calls) = warmSeen.getOrElse(calls, 0) + 1
+        warmAsked += calls
+        t
+      def coldRun(i: Int): Long =
+        val (t, calls) = timed(cold(i))
+        coldSeen(calls) = coldSeen.getOrElse(calls, 0) + 1
+        if calls < ColdDecisions then undecided += 1
+        // Beyond its own two plans, a cold statement may refresh the USE prelude's expired verdict.
+        warmAsked += calls - ColdDecisions
+        t
+      val started = System.currentTimeMillis()
       (0 until Warmup).foreach { i =>
-        timed(warm(i))
-        timed(cold(Rounds + i))
+        warmRun(i)
+        coldRun(Rounds + i)
       }
       (0 until Rounds).foreach { i =>
-        w(i) = timed(warm(Warmup + i))
-        c(i) = timed(cold(i))
+        w(i) = warmRun(Warmup + i)
+        c(i) = coldRun(i)
       }
+      val elapsedMs = System.currentTimeMillis() - started
       println(Latency.line("e2e warm (hit)", w))
       println(Latency.line("e2e cold (miss)", c))
       println(Latency.added("e2e manager round trip", c, w))
+      // The statements whose verdicts are cached across rounds: the warm plan and the USE prelude,
+      // each asked at first sight and again whenever its 60 s verdict expires.
+      val ceiling = 2 * (elapsedMs / 60000 + 1)
+      println(
+        f"[authz-latency] e2e: ${elapsedMs / 1000.0}%.1f s, $warmAsked decision(s) beyond two per " +
+          s"cold statement (ceiling $ceiling), $undecided cold statement(s) not decided; " +
+          s"statements by decisions asked: warm ${warmSeen.mkString(" ")}, cold ${coldSeen.mkString(" ")}"
+      )
+      withClue("every cold statement's probe and statement are decided: ")(undecided shouldBe 0)
+      withClue("warm statements hit, past first sight and expiry: ")(
+        warmAsked should be <= ceiling
+      )
       (Latency.percentile(c, 99) - Latency.percentile(w, 99)) should be < 5.0
     finally
       raw.close()
