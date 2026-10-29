@@ -742,6 +742,33 @@ int main() {
 	// ---- what the parser cannot read is refused
 	Refused("SELEC 1", "QoD: the statement does not parse", "a syntax error");
 
+	// ---- review m1: unlist is DuckDB's binder alias of unnest
+	Admitted("SELECT unlist([1, 2])", 0, "unlist, like unnest");
+
+	// ---- Addendum 4 item 30a: a catalog macro bearing a classified built-in name makes the name
+	// unclassified for users, however the call reaches it, unless the call names the system catalog
+	Admitted("SELECT lower('A')", 0, "a built-in no catalog shadows");
+	auto planted = con.Query("ATTACH ':memory:' AS lk");
+	Expect(!planted->HasError(), "attach a catalog for the shadowing macros");
+	planted = con.Query("CREATE MACRO lk.main.lower(x) AS 'shadowed'");
+	Expect(!planted->HasError(), "a macro shadowing lower");
+	planted = con.Query("CREATE MACRO lk.main.generate_series(n) AS TABLE SELECT 1 AS x");
+	Expect(!planted->HasError(), "a table macro shadowing generate_series");
+	for (auto shadowed : {"SELECT lower('A')", "SELECT 'A'.lower()", "SELECT lk.main.lower('A')",
+	                      "SELECT main.lower('A')", "SELECT upper(lower(v)) FROM t",
+	                      "SELECT list_transform(['A'], x -> lower(x))"}) {
+		Refused(shadowed, "QoD: function lower is not classified: a catalog entry outside the system catalog",
+		        shadowed);
+	}
+	Refused("SELECT * FROM generate_series(1, 3)", "QoD: function generate_series is not classified",
+	        "a table macro shadowing a built-in table function");
+	for (auto known : {"SELECT system.main.lower('A')", "SELECT upper('A')",
+	                   "SELECT * FROM system.main.generate_series(1, 3)"}) {
+		Admitted(known, 0, known);
+	}
+	con.Query("DETACH lk");
+	Admitted("SELECT lower('A')", 0, "the built-in again once the shadowing catalog is gone");
+
 	if (failures == 0) {
 		std::cout << "screen_rules_test: all passed" << std::endl;
 	}
