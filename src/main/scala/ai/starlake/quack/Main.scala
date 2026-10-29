@@ -353,10 +353,17 @@ object Main extends IOApp with LazyLogging:
 
     // The URL nodes call back for verdicts must be reachable from the runtime's nodes: on
     // Kubernetes this pod's address (the chart sets QOD_POD_IP), in fleet mode the address the
-    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight.
-    BootPreflight.checkInternalUrl(mgrCfg0.runtimeType, mgrCfg0.nodeAuthz, mgrCfg0.port) match
+    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight. The line
+    // is printed, not logged, as the session secret's source is: the logger's default ERROR root
+    // level would swallow it, and operators need to see which URL their nodes call.
+    BootPreflight.checkInternalUrl(
+      mgrCfg0.runtimeType,
+      mgrCfg0.nodeAuthz,
+      mgrCfg0.host,
+      mgrCfg0.port
+    ) match
       case Left(msg)  => sys.error(msg)
-      case Right(url) => logger.info(s"node decide URL: $url")
+      case Right(url) => println(BootPreflight.decideUrlLine(url))
 
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
@@ -509,7 +516,7 @@ object Main extends IOApp with LazyLogging:
         case Right(secret) =>
           new ai.starlake.quack.edge.authz.NodeKeys(
             secret,
-            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.port),
+            mgrCfg.nodeAuthz.replicaUrl(mgrCfg.host, mgrCfg.port),
             versions = policyVersions,
             creds = servedUserS3,
             issued = Some(issuedHandles),
@@ -1468,7 +1475,7 @@ object Main extends IOApp with LazyLogging:
         // The node resolves a local path before its location is judged: the manager can do the
         // same only when nodes run on its host (BootFactories.locationRules' sameHost).
         resolveLocalPath =
-          if mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local" then
+          if RuntimeType.isLocal(mgrCfg.runtimeType) then
             path => ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
           else Some(_)
       )

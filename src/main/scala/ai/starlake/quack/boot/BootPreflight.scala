@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
-import ai.starlake.quack.{FleetConfig, ManagementAuthConfig, ManagerConfig, NodeAuthzConfig}
+import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig, NodeAuthzConfig, RuntimeType}
 import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
 import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
@@ -247,69 +247,162 @@ object BootPreflight extends LazyLogging:
       "a host and no user info, query or fragment: nodes call this replica's decision endpoint " +
       "on it, and qod-node speaks plain HTTP only"
 
+  /** The format refusal when QOD_INTERNAL_URL is unset and the URL came from QOD_POD_IP. */
+  val InternalUrlPodIpFormatMessage: String =
+    "QOD_POD_IP (quack-on-demand.nodeAuthz.podIp) does not make a plain http:// URL with a host: " +
+      "with QOD_INTERNAL_URL unset, nodes call this replica's decision endpoint on " +
+      "http://<pod IP>:<manager port>. Set QOD_POD_IP to this pod's IP (the downward API's " +
+      "status.podIP, as the Helm chart does), or set QOD_INTERNAL_URL"
+
+  /** The format refusal when neither is set and the URL came from the bind address. */
+  val InternalUrlBindHostFormatMessage: String =
+    "QOD_ON_DEMAND_HOST (quack-on-demand.host) does not make a plain http:// URL with a host: " +
+      "with QOD_INTERNAL_URL and QOD_POD_IP unset, nodes call this replica's decision endpoint " +
+      "on http://<bind address>:<manager port>. Set QOD_INTERNAL_URL"
+
   def internalUrlKubernetesMessage(url: String): String =
     s"the node decide URL is $url, a loopback address no node pod can reach on the kubernetes " +
       "runtime: leave QOD_INTERNAL_URL unset and set QOD_POD_IP from the downward API (the Helm " +
       "chart does), or set QOD_INTERNAL_URL to this replica's own pod address"
 
   val InternalUrlFleetMessage: String =
-    "fleet mode requires QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl): the address " +
-      "fleet servers reach this replica on, typically the one they heartbeat to (QOD_MANAGER_URL " +
-      "of qod fleet join); every node calls it for its statements' verdicts"
+    "fleet mode requires QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl): this " +
+      "replica's own plain http:// address on the private network the fleet servers share, one " +
+      "per replica (never a load balancer or an address several replicas share, which would " +
+      "send a node's verdict calls to a replica that did not mint its handle); every node calls " +
+      "it for its statements' verdicts"
+
+  /** The boot line naming the URL nodes call (never a secret: user info and queries are refused).
+    */
+  def decideUrlLine(url: String): String = s"node decide URL: $url"
 
   /** Pure gate on the decide URL (`NodeAuthzConfig.replicaUrl`): every node calls it for its
     * statements' verdicts, so a boot whose nodes could not reach it would answer every user
-    * statement "authorization unavailable". Plain http with a host (and a port qod-node accepts) on
-    * every runtime; on Kubernetes never a loopback or unspecified host (the default included: the
-    * chart sets QOD_POD_IP); in fleet mode set explicitly (a loopback one is fine on a single-host
-    * fleet). Right carries the URL; the format refusal never echoes it, since it could carry
-    * credentials. Reads configuration only: no name is ever looked up.
+    * statement "authorization unavailable". In fleet mode set explicitly (a loopback one is fine on
+    * a single-host fleet); on every runtime a URL qod-node accepts ([[nodeUrlHost]]); on Kubernetes
+    * never a loopback or unspecified host (the default included: the chart sets QOD_POD_IP). Right
+    * carries the URL; a format refusal never echoes it, since it could carry credentials, and names
+    * the setting it came from. Reads configuration only: no name is ever looked up.
     */
   def checkInternalUrl(
       runtimeType: String,
       nodeAuthz: NodeAuthzConfig,
+      bindHost: String,
       restPort: Int
   ): Either[String, String] =
-    val url     = nodeAuthz.replicaUrl(restPort)
-    val runtime = runtimeType.toLowerCase(Locale.ROOT)
-    val uri     =
-      try Some(new java.net.URI(url))
-      catch case _: java.net.URISyntaxException => None
-    uri.filter(u =>
-      u.getScheme == "http" && Option(u.getHost).exists(_.nonEmpty) && u.getRawUserInfo == null &&
-        u.getRawQuery == null && u.getRawFragment == null && validPort(u)
-    ) match
-      case None => Left(InternalUrlFormatMessage)
-      case Some(_) if FleetConfig.isFleet(runtime) && nodeAuthz.internalUrl.trim.isEmpty =>
-        Left(InternalUrlFleetMessage)
-      case Some(u) if runtime == "kubernetes" && unreachableHost(u.getHost) =>
-        Left(internalUrlKubernetesMessage(url))
-      case Some(_) => Right(url)
+    val url = nodeAuthz.replicaUrl(bindHost, restPort)
+    if RuntimeType.isFleet(runtimeType) && nodeAuthz.internalUrl.trim.isEmpty then
+      Left(InternalUrlFleetMessage)
+    else
+      nodeUrlHost(url) match
+        case None =>
+          Left(
+            if nodeAuthz.internalUrl.trim.nonEmpty then InternalUrlFormatMessage
+            else if nodeAuthz.podIp.trim.nonEmpty then InternalUrlPodIpFormatMessage
+            else InternalUrlBindHostFormatMessage
+          )
+        case Some(host) if RuntimeType.isKubernetes(runtimeType) && unreachableHost(host) =>
+          Left(internalUrlKubernetesMessage(url))
+        case Some(_) => Right(url)
 
-  /** No port (qod-node then dials 80), or one in 1-65535; `host:` with an empty port is refused, as
-    * qod-node refuses it.
+  private val HttpScheme = "http://"
+
+  /** The host of `url` when qod-node's URL parser (`ParseHttpUrl`, native/qod-node/src/
+    * http_post.cpp) accepts it and the host can name a machine: `http://` in lower case, an
+    * authority with no user info, a port of 1 to 5 digits in 1-65535 when one is given, no query or
+    * fragment, no space or control character in the path. The host is a bracketed IPv6 literal, or
+    * a name or IPv4 address of letters, digits, `.`, `-` and `_` (a Compose service such as
+    * `qod_manager` included).
     */
-  private def validPort(u: java.net.URI): Boolean =
-    if u.getPort == -1 then !u.getRawAuthority.endsWith(":")
-    else u.getPort >= 1 && u.getPort <= 65535
+  private[boot] def nodeUrlHost(url: String): Option[String] =
+    Option.when(url.startsWith(HttpScheme))(url.substring(HttpScheme.length)).flatMap { rest =>
+      val (authority, path) = rest.span(_ != '/')
+      val pathOk            = path.forall(c => c > ' ' && c != '\u007f' && c != '?' && c != '#')
+      if authority.isEmpty || authority.contains('@') || !pathOk then None
+      else
+        splitAuthority(authority)
+          .filter((host, port) => validHost(host) && port.forall(validPort))
+          .map(_._1)
+    }
 
-  /** A host no other machine reaches: a loopback or unspecified literal, or a `localhost` name.
-    * IPv4 literals are read by hand and IPv6 ones (always bracketed, so never a name) by
-    * `InetAddress`, which looks nothing up for a literal.
+  /** host (brackets kept for IPv6) and the port text after its colon, as qod-node splits them. */
+  private def splitAuthority(authority: String): Option[(String, Option[String])] =
+    if authority.startsWith("[") then
+      val close = authority.indexOf(']')
+      if close < 0 then None
+      else
+        val after = authority.substring(close + 1)
+        if after.isEmpty then Some((authority.substring(0, close + 1), None))
+        else if after.head == ':' then Some((authority.substring(0, close + 1), Some(after.tail)))
+        else None
+    else
+      val colon = authority.lastIndexOf(':')
+      if colon < 0 then Some((authority, None))
+      else Some((authority.substring(0, colon), Some(authority.substring(colon + 1))))
+
+  private def asciiDigit(c: Char): Boolean = c >= '0' && c <= '9'
+
+  /** qod-node's rule: digits only, at most 5 of them, 1-65535 (`08080` is 8080, `020900` too long).
+    */
+  private def validPort(port: String): Boolean =
+    port.nonEmpty && port.length <= 5 && port.forall(asciiDigit) &&
+      port.toInt >= 1 && port.toInt <= 65535
+
+  private def validHost(host: String): Boolean =
+    if host.startsWith("[") then ipv6Literal(host).isDefined
+    else
+      host.nonEmpty && host.forall(c =>
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || asciiDigit(c) || c == '.' || c == '-' ||
+          c == '_'
+      )
+
+  /** A bracketed IPv6 literal's address. `InetAddress` takes a bracketed string as a literal only,
+    * so it never looks a name up: anything else throws.
+    */
+  private def ipv6Literal(bracketed: String): Option[java.net.InetAddress] =
+    if !bracketed.contains(':') then None
+    else
+      try Some(java.net.InetAddress.getByName(bracketed))
+      catch case _: java.net.UnknownHostException => None
+
+  /** A host no other machine reaches: a `localhost` name, or a loopback or unspecified address in
+    * any form qod-node's resolver (getaddrinfo, with inet_aton's IPv4 forms) reads as one:
+    * `127.0.0.1`, `127.1`, `2130706433`, `0x7f.1`, `0177.0.0.1`, `0`, `[::1]`, `[::]`.
     */
   private def unreachableHost(host: String): Boolean =
-    val h = host.stripPrefix("[").stripSuffix("]").stripSuffix(".").toLowerCase(Locale.ROOT)
-    if h == "localhost" || h.endsWith(".localhost") then true
-    else if host.startsWith("[") then
-      try
-        val a = java.net.InetAddress.getByName(h)
-        a.isLoopbackAddress || a.isAnyLocalAddress
-      catch case _: java.net.UnknownHostException => true
+    if host.startsWith("[") then
+      ipv6Literal(host).forall(a => a.isLoopbackAddress || a.isAnyLocalAddress)
     else
-      h.split('.').toList.map(_.toIntOption) match
-        case octets @ List(Some(a), Some(_), Some(_), Some(_)) =>
-          a == 127 || octets.forall(_.contains(0))
-        case _ => false
+      val h = host.stripSuffix(".").toLowerCase(Locale.ROOT)
+      h == "localhost" || h.endsWith(".localhost") ||
+      inetAton(h).exists(a => (a >>> 24) == 127L || a == 0L)
+
+  /** inet_aton's reading of an IPv4 address: one to four parts, each decimal, octal (leading `0`)
+    * or hex (`0x`); the last part fills the bits the others leave. None when `host` is not one.
+    */
+  private[boot] def inetAton(host: String): Option[Long] =
+    val parts = host.split("\\.", -1).toList
+    if parts.length > 4 then None
+    else
+      val numbers = parts.map(atonPart)
+      if numbers.exists(_.isEmpty) then None
+      else
+        val ns       = numbers.flatten
+        val lastBits = 8 * (5 - ns.length)
+        if ns.init.exists(_ > 255) || ns.last >= (1L << lastBits) then None
+        else Some((ns.init.foldLeft(0L)((acc, n) => (acc << 8) | n) << lastBits) | ns.last)
+
+  private def atonPart(part: String): Option[Long] =
+    val lower           = part.toLowerCase(Locale.ROOT)
+    val (digits, radix) =
+      if lower.startsWith("0x") then (lower.drop(2), 16)
+      else if lower.length > 1 && lower.startsWith("0") then (lower.drop(1), 8)
+      else (lower, 10)
+    val legal = (c: Char) => Character.digit(c, radix) >= 0 && c.isLetterOrDigit && c < 128
+    if part.isEmpty || !digits.forall(legal) then None
+    else
+      val value = if digits.isEmpty then BigInt(0) else BigInt(digits, radix)
+      Option.when(value <= BigInt(0xffffffffL))(value.toLong)
 
   /** Bootstrap admin users at startup so the DB auth backend has at least one credential. Seeds
     * each name in QOD_ADMIN_USERNAME (comma-separated) ONLY when its superuser row is missing: an

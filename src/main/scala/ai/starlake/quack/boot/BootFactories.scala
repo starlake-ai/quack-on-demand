@@ -1,8 +1,7 @@
 package ai.starlake.quack.boot
 
 import java.nio.file.Path
-import java.util.Locale
-import ai.starlake.quack.{FleetConfig, ManagerConfig}
+import ai.starlake.quack.{ManagerConfig, RuntimeType}
 import ai.starlake.quack.edge.authz.AuthzDecider
 import ai.starlake.quack.edge.authz.location.LocationRulesSource
 import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
@@ -38,8 +37,8 @@ object BootFactories extends LazyLogging:
     * QOD_FLEET_EPHEMERAL=local for its maintenance and branch-merge nodes.
     */
   def runsLocalNodes(mgrCfg: ManagerConfig): Boolean =
-    mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local" ||
-      (FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal)
+    RuntimeType.isLocal(mgrCfg.runtimeType) ||
+      (RuntimeType.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal)
 
   /** @param nodeBin
     *   the qod-node local nodes run; Main resolves it whenever [[runsLocalNodes]].
@@ -56,8 +55,8 @@ object BootFactories extends LazyLogging:
       nodeBin: Option[Path],
       nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
   ): QuackBackend =
-    mgrCfg.runtimeType.toLowerCase(Locale.ROOT) match
-      case "local" =>
+    mgrCfg.runtimeType match
+      case rt if RuntimeType.isLocal(rt) =>
         new LocalQuackBackend(
           mgrCfg.minPort,
           mgrCfg.maxPort,
@@ -70,7 +69,7 @@ object BootFactories extends LazyLogging:
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions
         )
-      case "kubernetes" | "k8s" =>
+      case rt if RuntimeType.isKubernetes(rt) =>
         val k8s = new io.fabric8.kubernetes.client.KubernetesClientBuilder().build()
         new KubernetesQuackBackend(
           k8s,
@@ -87,7 +86,7 @@ object BootFactories extends LazyLogging:
           nodeKeys = nodeKeys,
           nodeExtensions = mgrCfg.nodeExtensions
         )
-      case "fleet" =>
+      case rt if RuntimeType.isFleet(rt) =>
         val proxies =
           val p = mgrCfg.fleet.trustedProxyCidrs
           if p.isEmpty then "none" else p.mkString(",")
@@ -118,7 +117,7 @@ object BootFactories extends LazyLogging:
       nodeBin: Option[Path],
       nodeKeys: ai.starlake.quack.edge.authz.NodeKeys
   ): QuackBackend =
-    if FleetConfig.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
+    if RuntimeType.isFleet(mgrCfg.runtimeType) && mgrCfg.fleet.ephemeralLocal then
       logger.info(
         "fleet: ephemeral maintenance/merge nodes run on the manager host (local backend)"
       )
@@ -267,7 +266,7 @@ object BootFactories extends LazyLogging:
       tenantLocations = sup.tenantLocations,
       userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
-      sameHost = mgrCfg.runtimeType.toLowerCase(Locale.ROOT) == "local"
+      sameHost = RuntimeType.isLocal(mgrCfg.runtimeType)
     )
 
   /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog

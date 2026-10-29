@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.ha
 
-import java.util.Locale
+import ai.starlake.quack.RuntimeType
 
 /** Config-load-time gates for HA mode. HA requires a multi-manager-capable backend (Kubernetes or
   * fleet; the local backend's port allocator and child processes are per-JVM) and an external
@@ -8,8 +8,6 @@ import java.util.Locale
   * gate: with none configured, every replica reads the one the control plane stores.
   */
 object HaPreconditions:
-
-  private val multiManagerRuntimes = Set("kubernetes", "k8s", "fleet")
 
   def validate(
       haEnabled: Boolean,
@@ -23,8 +21,7 @@ object HaPreconditions:
           "process cannot be the shared control plane for multiple replicas. Point the replicas " +
           "at an external Postgres instead"
       )
-    else if !HaPreconditions.multiManagerRuntimes.contains(runtimeType.toLowerCase(Locale.ROOT))
-    then
+    else if !RuntimeType.isMultiManager(runtimeType) then
       Left(
         s"ha.enabled=true requires runtimeType=kubernetes or fleet, got '$runtimeType': " +
           "the local backend cannot run multi-manager (in-JVM port allocator, child processes)"

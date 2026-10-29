@@ -56,13 +56,14 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   "replicaUrl" should "be the internal URL, trimmed" in {
-    NodeAuthzConfig(internalUrl = " http://10.0.0.5:20900 ").replicaUrl(1) shouldBe
+    NodeAuthzConfig(internalUrl = " http://10.0.0.5:20900 ").replicaUrl("0.0.0.0", 1) shouldBe
       "http://10.0.0.5:20900"
   }
 
   it should "fall back to this host's loopback URL on the manager port when blank" in {
-    NodeAuthzConfig().replicaUrl(20900) shouldBe "http://127.0.0.1:20900"
-    NodeAuthzConfig(internalUrl = "   ").replicaUrl(20901) shouldBe "http://127.0.0.1:20901"
+    NodeAuthzConfig().replicaUrl("0.0.0.0", 20900) shouldBe "http://127.0.0.1:20900"
+    NodeAuthzConfig(internalUrl = "   ")
+      .replicaUrl("0.0.0.0", 20901) shouldBe "http://127.0.0.1:20901"
   }
 
   "NodeAuthzConfig" should "take QOD_POD_IP" in {
@@ -74,12 +75,49 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
   }
 
   "replicaUrl" should "be this pod's address on the manager port when only the pod IP is set" in {
-    NodeAuthzConfig(podIp = "10.1.2.3").replicaUrl(20900) shouldBe "http://10.1.2.3:20900"
-    NodeAuthzConfig(podIp = " fd00::7 ").replicaUrl(20900) shouldBe "http://[fd00::7]:20900"
-    NodeAuthzConfig(podIp = "[fd00::7]").replicaUrl(20900) shouldBe "http://[fd00::7]:20900"
+    NodeAuthzConfig(podIp = "10.1.2.3")
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://10.1.2.3:20900"
+    NodeAuthzConfig(podIp = " fd00::7 ")
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20900"
+    NodeAuthzConfig(podIp = "[fd00::7]")
+      .replicaUrl("0.0.0.0", 20900) shouldBe "http://[fd00::7]:20900"
   }
 
   it should "prefer the internal URL to the pod IP" in {
-    NodeAuthzConfig(internalUrl = "http://m:1", podIp = "10.1.2.3").replicaUrl(20900) shouldBe
+    NodeAuthzConfig(internalUrl = "http://m:1", podIp = "10.1.2.3")
+      .replicaUrl("0.0.0.0", 20900) shouldBe
       "http://m:1"
+  }
+
+  it should "be the bind address when the manager listens on one specific address" in {
+    NodeAuthzConfig().replicaUrl("192.168.1.5", 20900) shouldBe "http://192.168.1.5:20900"
+    NodeAuthzConfig().replicaUrl(" fd00::5 ", 20900) shouldBe "http://[fd00::5]:20900"
+    NodeAuthzConfig().replicaUrl("[fd00::5]", 20900) shouldBe "http://[fd00::5]:20900"
+    NodeAuthzConfig().replicaUrl("mgr.internal", 20900) shouldBe "http://mgr.internal:20900"
+    // A loopback address other than 127.0.0.1 is not reached by the loopback default either.
+    NodeAuthzConfig().replicaUrl("::1", 20900) shouldBe "http://[::1]:20900"
+    // The pod IP and the internal URL still win.
+    NodeAuthzConfig(podIp = "10.1.2.3").replicaUrl("192.168.1.5", 20900) shouldBe
+      "http://10.1.2.3:20900"
+    NodeAuthzConfig(internalUrl = "http://m:1").replicaUrl("192.168.1.5", 20900) shouldBe
+      "http://m:1"
+  }
+
+  it should "keep the loopback default for a wildcard or loopback bind address" in {
+    for bind <- List(
+        "",
+        " ",
+        "0.0.0.0",
+        "::",
+        "[::]",
+        "0:0:0:0:0:0:0:0",
+        "*",
+        "localhost",
+        "LOCALHOST",
+        "127.0.0.1"
+      )
+    do
+      withClue(s"'$bind'")(
+        NodeAuthzConfig().replicaUrl(bind, 20900) shouldBe "http://127.0.0.1:20900"
+      )
   }

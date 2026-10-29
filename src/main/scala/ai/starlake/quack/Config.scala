@@ -686,8 +686,10 @@ final case class NodeAuthzConfig(
       description =
         "URL nodes reach this replica on, carried in every session handle: nodes call " +
           "it for their statements' verdicts (plain http). Default http://<QOD_POD_IP>:<manager " +
-          "port> when the pod IP is set, else http://127.0.0.1:<manager port>. Required in fleet " +
-          "mode; never a loopback URL on Kubernetes."
+          "port> when the pod IP is set, else http://<QOD_ON_DEMAND_HOST>:<manager port> when " +
+          "the manager listens on one specific address, else http://127.0.0.1:<manager port>. " +
+          "Required in fleet mode (this replica's own address, one per replica, never a load " +
+          "balancer); never a loopback URL on Kubernetes."
     )
     internalUrl: String = "",
     @field @ConfigField(
@@ -698,16 +700,28 @@ final case class NodeAuthzConfig(
     )
     podIp: String = ""
 ):
-  /** [[internalUrl]]; else this pod's address on `restPort` (an IPv6 pod IP in brackets); else this
-    * host's loopback URL on `restPort`.
+  /** [[internalUrl]]; else this pod's address on `restPort`; else, when the manager listens on one
+    * specific address (`bindHost`, QOD_ON_DEMAND_HOST, neither a wildcard nor `localhost` /
+    * `127.0.0.1`), that address; else this host's loopback URL on `restPort`. An IPv6 address goes
+    * in brackets.
     */
-  def replicaUrl(restPort: Int): String =
-    val pod = podIp.trim
+  def replicaUrl(bindHost: String, restPort: Int): String =
+    val pod  = podIp.trim
+    val bind = bindHost.trim
     if internalUrl.trim.nonEmpty then internalUrl.trim
-    else if pod.nonEmpty then
-      val host = if pod.contains(':') && !pod.startsWith("[") then s"[$pod]" else pod
-      s"http://$host:$restPort"
+    else if pod.nonEmpty then s"http://${urlHost(pod)}:$restPort"
+    else if specificBindHost(bind) then s"http://${urlHost(bind)}:$restPort"
     else s"http://127.0.0.1:$restPort"
+
+  private def urlHost(host: String): String =
+    if host.contains(':') && !host.startsWith("[") then s"[$host]" else host
+
+  /** A bind address the loopback default does not reach: not blank, not a wildcard, not `localhost`
+    * or `127.0.0.1`.
+    */
+  private def specificBindHost(host: String): Boolean =
+    !Set("", "*", "0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0", "localhost", "127.0.0.1")
+      .contains(host.toLowerCase(java.util.Locale.ROOT))
 
 /** The three extension settings qod-node fixes in a node's database config before it opens (spec
   * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on
@@ -1012,9 +1026,26 @@ final case class FleetConfig(
       Left("QOD_FLEET_JOIN_TOKEN must be set when runtimeType=fleet")
     else Right(())
 
+/** The names `runtimeType` (QOD_RUNTIME_TYPE) accepts, in any case: one predicate per backend,
+  * which every site that tests the name goes through, so an alias (`k8s`) reaches every check.
+  */
+object RuntimeType:
+  private def name(runtimeType: String): String = runtimeType.toLowerCase(java.util.Locale.ROOT)
+
+  def isLocal(runtimeType: String): Boolean = name(runtimeType) == "local"
+
+  def isKubernetes(runtimeType: String): Boolean =
+    val n = name(runtimeType)
+    n == "kubernetes" || n == "k8s"
+
+  def isFleet(runtimeType: String): Boolean = name(runtimeType) == "fleet"
+
+  /** The backends several managers can share (HA): Kubernetes and fleet. */
+  def isMultiManager(runtimeType: String): Boolean =
+    isKubernetes(runtimeType) || isFleet(runtimeType)
+
 object FleetConfig:
-  def isFleet(runtimeType: String): Boolean =
-    runtimeType.toLowerCase(java.util.Locale.ROOT) == "fleet"
+  def isFleet(runtimeType: String): Boolean = RuntimeType.isFleet(runtimeType)
 
   def parseCidrs(env: String, raw: String): Either[String, List[Cidr]] =
     Cidr.parseList(raw).left.map(e => s"$env: $e")
