@@ -14,11 +14,13 @@
 #include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/trigger_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb/common/enums/trigger_type.hpp"
 #include "duckdb/common/enums/view_security_type.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -32,6 +34,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/parser/constraints/check_constraint.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
@@ -50,7 +53,9 @@
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/execute_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/prepare_statement.hpp"
+#include "duckdb/parser/statement/update_statement.hpp"
 #include "duckdb/parser/expression/list.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/query_node/list.hpp"
@@ -684,11 +689,20 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 //! (CatalogEntryRetriever::SetSearchPath drops the system catalog), so a user catalog's macro can shadow a
 //! name inside it, even when the call names system.main; there only the entry each name resolves to is
 //! judged. query() and query_table() in a body are walked too: the literal SQL as a query, the literal
-//! names as relations (a computed one is refused). Inside a secure view's boundary current_setting() and
-//! getvariable() are refused by name as the plan rule refuses them, since a folded call leaves no plan.
+//! names as relations (a computed one is refused). Inside a secure view's boundary current_setting() is
+//! refused by name as the plan rule refuses it, since a folded call leaves no plan, built-in macro bodies
+//! included (whoami calls it); getvariable() needs no such rule, Walker::CheckSession refuses every
+//! boundary while the session holds a variable (item 32a).
+//! Item 32a: the expressions a table stores are bound in the statement too, so they are walked like a
+//! body: the generated columns of every table read or written (bound on the statement's path,
+//! TableBinding::ExpandGeneratedColumn), and for a table written its column defaults (on the table's own
+//! path, Binder::BindDefaultValues and CreateBinderWithSearchPath, bind_create_table.cpp:333-340; not
+//! for a DELETE), its CHECK constraints (on the statement's path, Binder::BindConstraints) and the
+//! actions of the triggers the write fires (bound in the writing statement's binder,
+//! bind_trigger_expansion.cpp), whose own writes are walked the same way.
 //! The statement's own names come from the parse screen's walk (ReachedNames); a body's from the
 //! definition walk below, which follows the shapes a view's query takes (a SELECT, a set operation,
-//! CTEs).
+//! CTEs) and a trigger action's (an INSERT, UPDATE or DELETE).
 class CallNames {
 public:
 	explicit CallNames(ClientContext &context) : context_(context) {
@@ -709,16 +723,16 @@ public:
 	void Statement(SQLStatement &statement) {
 		CatalogEntryRetriever session(context_);
 		for (auto &reached : ReachedNames(context_, statement)) {
-			switch (reached.kind) {
-			case ReachedName::Kind::RELATION:
-				Relation(reached.name, session, Rules::PLAIN);
-				break;
-			case ReachedName::Kind::TABLE_CALL:
-				Resolution(reached.name, CatalogType::TABLE_FUNCTION_ENTRY, session);
-				break;
-			default:
-				Resolution(reached.name, CatalogType::SCALAR_FUNCTION_ENTRY, session);
-				break;
+			Reached(reached, session);
+			if (!reached.scoped) {
+				continue;
+			}
+			// An UPDATE's SET, on its table's own path as well (see ReachedName).
+			auto table = Lookup(session, CatalogType::TABLE_ENTRY, reached.scope);
+			if (table && table->type == CatalogType::TABLE_ENTRY) {
+				CatalogEntryRetriever own(context_);
+				TablePath(table->Cast<TableCatalogEntry>(), own);
+				Reached(reached, own);
 			}
 		}
 	}
@@ -727,9 +741,54 @@ private:
 	//! Views nested deeper than this are refused (fail closed).
 	static constexpr idx_t kMaxViewDepth = 16;
 
-	//! How a body's names are judged: a plain view's (PLAIN), inside a secure view's boundary (SECURE,
-	//! the owner's rights), or inside a built-in macro's body (BUILTIN: only what each name resolves to).
-	enum class Rules { PLAIN, SECURE, BUILTIN };
+	//! How a body's names are judged. A plain view's or a table's stored expressions: every rule. `secure`:
+	//! inside a secure view's boundary, with the owner's rights (item 20). `builtin`: inside a built-in
+	//! macro's body, where only the entry each name resolves to is judged (and, inside a boundary, the
+	//! by-name rule).
+	struct Rules {
+		bool secure = false;
+		bool builtin = false;
+	};
+
+	//! A write: what a written table's stored expressions are bound for.
+	enum class Write { INSERT, UPDATE, DELETE, MERGE };
+
+	void Reached(const ReachedName &reached, CatalogEntryRetriever &retriever) {
+		switch (reached.kind) {
+		case ReachedName::Kind::RELATION:
+			Relation(reached.name, retriever, Rules {});
+			break;
+		case ReachedName::Kind::INSERT_TARGET:
+			Written(reached.name, retriever, Write::INSERT);
+			break;
+		case ReachedName::Kind::UPDATE_TARGET:
+			Written(reached.name, retriever, Write::UPDATE);
+			break;
+		case ReachedName::Kind::DELETE_TARGET:
+			Written(reached.name, retriever, Write::DELETE);
+			break;
+		case ReachedName::Kind::MERGE_TARGET:
+			Written(reached.name, retriever, Write::MERGE);
+			break;
+		case ReachedName::Kind::TABLE_CALL:
+			Resolution(reached.name, CatalogType::TABLE_FUNCTION_ENTRY, retriever);
+			break;
+		default:
+			Resolution(reached.name, CatalogType::SCALAR_FUNCTION_ENTRY, retriever);
+			break;
+		}
+	}
+
+	//! A table's own search path, the one DuckDB binds its defaults with
+	//! (Binder::CreateBinderWithSearchPath, binder.cpp:640-651), the client's set paths behind it.
+	void TablePath(TableCatalogEntry &table, CatalogEntryRetriever &retriever) {
+		vector<CatalogSearchEntry> search;
+		search.emplace_back(table.ParentCatalog().GetName(), table.ParentSchema().name);
+		if (table.ParentSchema().name != Identifier::DefaultSchema()) {
+			search.emplace_back(table.ParentCatalog().GetName(), Identifier::DefaultSchema());
+		}
+		retriever.SetSearchPath(std::move(search));
+	}
 
 	optional_ptr<CatalogEntry> Lookup(CatalogEntryRetriever &retriever, CatalogType type, const QualifiedName &name) {
 		return retriever.GetEntry(EntryLookupInfo(type, Binder::BindTableName(retriever, name)),
@@ -769,15 +828,16 @@ private:
 			NotOwn(lower, *entry);
 		}
 		if (entry) {
-			BuiltInBody(*entry, retriever);
+			BuiltInBody(*entry, retriever, false);
 		}
 	}
 
-	//! A built-in macro or table macro: its body, at the call site (review I2-R1).
-	void BuiltInBody(CatalogEntry &entry, CatalogEntryRetriever &retriever) {
+	//! A built-in macro or table macro: its body, at the call site (review I2-R1), inside the boundary the
+	//! call is in (review m-R9).
+	void BuiltInBody(CatalogEntry &entry, CatalogEntryRetriever &retriever, bool secure) {
 		if ((entry.type == CatalogType::MACRO_ENTRY || entry.type == CatalogType::TABLE_MACRO_ENTRY) &&
 		    BuiltIn(entry)) {
-			Macro(entry, retriever, Rules::BUILTIN);
+			Macro(entry, retriever, Rules {secure, true});
 		}
 	}
 
@@ -786,24 +846,24 @@ private:
 	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, Rules rules) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
 		auto entry = Resolved(name, type, retriever);
-		if (rules == Rules::BUILTIN) {
+		if (rules.secure && lower == "current_setting") {
+			// The plan rule (Walker::AddFunction), for a call DuckDB folded away (reviews m-R7, m-R9).
+			Unsupported(lower + "() inside a secure view");
+		}
+		if (rules.builtin) {
 			if (entry && !BuiltIn(*entry)) {
 				NotOwn(lower, *entry);
 			}
 			if (entry) {
-				BuiltInBody(*entry, retriever);
+				BuiltInBody(*entry, retriever, rules.secure);
 			}
 			return;
 		}
-		if (rules == Rules::SECURE && (lower == "current_setting" || lower == "getvariable")) {
-			// The plan rule (Walker::AddFunction), for a call DuckDB folded away (review m-R7).
-			Unsupported(lower + "() inside a secure view");
-		}
-		if (entry && !BuiltIn(*entry) && rules == Rules::SECURE &&
+		if (entry && !BuiltIn(*entry) && rules.secure &&
 		    (entry->type == CatalogType::MACRO_ENTRY || entry->type == CatalogType::TABLE_MACRO_ENTRY)) {
 			// Inside a secure view's boundary a superuser's macro runs with the owner's rights (item 20):
 			// its body's names are judged as the boundary's.
-			Macro(*entry, retriever, Rules::SECURE);
+			Macro(*entry, retriever, Rules {true, false});
 			return;
 		}
 		if (entry && !BuiltIn(*entry)) {
@@ -812,11 +872,11 @@ private:
 		if (!IsClassifiedFunction(lower) && lower != "unlist") {
 			throw PermissionException("QoD: function " + lower + " is not classified");
 		}
-		if (rules == Rules::PLAIN && IsSuperuserFunction(lower)) {
+		if (!rules.secure && IsSuperuserFunction(lower)) {
 			throw PermissionException("QoD: function " + lower + " is superuser-only");
 		}
 		if (entry) {
-			BuiltInBody(*entry, retriever);
+			BuiltInBody(*entry, retriever, rules.secure);
 		}
 	}
 
@@ -853,6 +913,10 @@ private:
 
 	void Relation(const QualifiedName &name, CatalogEntryRetriever &retriever, Rules rules) {
 		auto entry = Lookup(retriever, CatalogType::TABLE_ENTRY, name);
+		if (entry && entry->type == CatalogType::TABLE_ENTRY) {
+			Generated(entry->Cast<TableCatalogEntry>(), retriever, Rules {rules.secure, false});
+			return;
+		}
 		if (!entry || entry->type != CatalogType::VIEW_ENTRY || BuiltIn(*entry)) {
 			return;
 		}
@@ -869,9 +933,76 @@ private:
 		search.emplace_back(view.ParentCatalog().GetName(), view.ParentSchema().name);
 		search.emplace_back(view.ParentCatalog().GetName(), Identifier::InvalidSchema(), true);
 		body.SetSearchPath(std::move(search));
-		auto inside = rules == Rules::SECURE || view.security_type == ViewSecurityType::SECURE_VIEW ? Rules::SECURE
-		                                                                                              : Rules::PLAIN;
-		Query(*view.GetQuery().node, body, inside);
+		Query(*view.GetQuery().node, body,
+		      Rules {rules.secure || view.security_type == ViewSecurityType::SECURE_VIEW, false});
+		path_.erase(entry.get());
+	}
+
+	// ---- a table's stored expressions (item 32a)
+
+	//! Its generated columns, which a statement reading or writing it binds on its own path.
+	void Generated(TableCatalogEntry &table, CatalogEntryRetriever &retriever, Rules rules) {
+		for (auto &column : table.GetColumns().Logical()) {
+			if (column.Generated()) {
+				Expr(column.GeneratedExpression(), retriever, rules);
+			}
+		}
+	}
+
+	//! A table the statement (or a trigger action) writes: its generated columns, CHECK constraints and
+	//! defaults, and the actions of the triggers the write fires. DuckDB expands a table's triggers once
+	//! per chain (Binder::TryExpandTriggers, trigger_expanded_tables), so a table already on the walk's
+	//! path is not walked again.
+	void Written(const QualifiedName &name, CatalogEntryRetriever &retriever, Write write) {
+		auto entry = Lookup(retriever, CatalogType::TABLE_ENTRY, name);
+		if (!entry || entry->type != CatalogType::TABLE_ENTRY || path_.count(entry.get()) != 0) {
+			return;
+		}
+		if (path_.size() >= kMaxViewDepth) {
+			Unsupported("views, macros and triggers nested deeper than " + std::to_string(kMaxViewDepth));
+		}
+		auto &table = entry->Cast<TableCatalogEntry>();
+		path_.insert(entry.get());
+		Generated(table, retriever, Rules {});
+		for (auto &constraint : table.GetConstraints()) {
+			if (constraint->type == ConstraintType::CHECK) {
+				Expr(*constraint->Cast<CheckConstraint>().expression, retriever, Rules {});
+			}
+		}
+		if (write != Write::DELETE) {
+			CatalogEntryRetriever own(context_);
+			TablePath(table, own);
+			for (auto &column : table.GetColumns().Physical()) {
+				if (column.HasDefaultValue()) {
+					Expr(column.DefaultValue(), own, Rules {});
+				}
+			}
+		}
+		std::vector<TriggerEventType> events;
+		switch (write) {
+		case Write::INSERT:
+			events = {TriggerEventType::INSERT_EVENT};
+			break;
+		case Write::UPDATE:
+			events = {TriggerEventType::UPDATE_EVENT};
+			break;
+		case Write::DELETE:
+			events = {TriggerEventType::DELETE_EVENT};
+			break;
+		case Write::MERGE:
+			events = {TriggerEventType::INSERT_EVENT, TriggerEventType::UPDATE_EVENT, TriggerEventType::DELETE_EVENT};
+			break;
+		}
+		auto transaction = table.ParentCatalog().GetCatalogTransaction(context_);
+		for (auto event : events) {
+			for (auto each : {TriggerForEach::STATEMENT, TriggerForEach::ROW}) {
+				for (auto &trigger : table.GetTriggersForEvent(transaction, event, each)) {
+					if (trigger.get().trigger_action) {
+						Query(*trigger.get().trigger_action, retriever, Rules {});
+					}
+				}
+			}
+		}
 		path_.erase(entry.get());
 	}
 
@@ -931,6 +1062,78 @@ private:
 			}
 			if (cte.child) {
 				Query(*cte.child, retriever, rules);
+			}
+			break;
+		}
+		case QueryNodeType::INSERT_QUERY_NODE: {
+			// A trigger action (item 32a), as the parse screen walks the statement's own.
+			auto &insert = node.Cast<InsertQueryNode>();
+			if (insert.select_statement && insert.select_statement->node) {
+				Query(*insert.select_statement->node, retriever, rules);
+			}
+			if (insert.table_ref) {
+				Ref(*insert.table_ref, retriever, rules);
+			}
+			Written(insert.qualified_name, retriever, Write::INSERT);
+			for (auto &expr : insert.returning_list) {
+				Expr(*expr, retriever, rules);
+			}
+			if (insert.on_conflict_info) {
+				auto &conflict = *insert.on_conflict_info;
+				if (conflict.set_info) {
+					for (auto &expr : conflict.set_info->expressions) {
+						Expr(*expr, retriever, rules);
+					}
+					if (conflict.set_info->condition) {
+						Expr(*conflict.set_info->condition, retriever, rules);
+					}
+				}
+				if (conflict.condition) {
+					Expr(*conflict.condition, retriever, rules);
+				}
+			}
+			break;
+		}
+		case QueryNodeType::UPDATE_QUERY_NODE: {
+			auto &update = node.Cast<UpdateQueryNode>();
+			if (update.table) {
+				Ref(*update.table, retriever, rules);
+			}
+			if (update.from_table) {
+				Ref(*update.from_table, retriever, rules);
+			}
+			if (update.set_info) {
+				for (auto &expr : update.set_info->expressions) {
+					Expr(*expr, retriever, rules);
+				}
+				if (update.set_info->condition) {
+					Expr(*update.set_info->condition, retriever, rules);
+				}
+			}
+			if (update.table && update.table->type == TableReferenceType::BASE_TABLE) {
+				Written(update.table->Cast<BaseTableRef>().GetQualifiedName(), retriever, Write::UPDATE);
+			}
+			for (auto &expr : update.returning_list) {
+				Expr(*expr, retriever, rules);
+			}
+			break;
+		}
+		case QueryNodeType::DELETE_QUERY_NODE: {
+			auto &del = node.Cast<DeleteQueryNode>();
+			if (del.table) {
+				Ref(*del.table, retriever, rules);
+			}
+			for (auto &clause : del.using_clauses) {
+				Ref(*clause, retriever, rules);
+			}
+			if (del.condition) {
+				Expr(*del.condition, retriever, rules);
+			}
+			if (del.table && del.table->type == TableReferenceType::BASE_TABLE) {
+				Written(del.table->Cast<BaseTableRef>().GetQualifiedName(), retriever, Write::DELETE);
+			}
+			for (auto &expr : del.returning_list) {
+				Expr(*expr, retriever, rules);
 			}
 			break;
 		}
@@ -1033,7 +1236,7 @@ private:
 	//! computed argument, which no walk can read, is refused.
 	void QueryCall(const FunctionExpression &call, CatalogEntryRetriever &retriever, Rules rules) {
 		auto name = StringUtil::Lower(Text(call.GetQualifiedName().Name()));
-		auto relations = rules == Rules::SECURE ? Rules::SECURE : Rules::PLAIN;
+		auto relations = Rules {rules.secure, false};
 		if (name == "query") {
 			auto literal = QueryLiteral(call);
 			if (!literal) {

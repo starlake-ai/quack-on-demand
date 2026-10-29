@@ -1003,21 +1003,14 @@ abstract class AuthzEndToEndCases(
       alwaysNode = true
     )
     // getvariable() folds to a constant at bind, so the describer refuses any boundary while the
-    // session holds a user variable, and refuses the call by name in the body even without one
-    // (review m-R7: a folded call leaves no plan for the plan rule).
+    // session holds a user variable; without one the body's getvariable('h') is NULL.
     refused(
       "alice",
       "files",
       s"SET VARIABLE h = 7; SELECT * FROM $files.main.sv_var",
       alwaysNode = true
     )
-    refused(
-      "alice",
-      "files",
-      s"SELECT count(*) FROM $files.main.sv_var",
-      node = "getvariable() inside a secure view",
-      alwaysNode = true
-    )
+    allowed("alice", "files", s"SELECT count(*) FROM $files.main.sv_var", Some(List("0")))
   }
 
   "temp tables" should "work for every principal" in {
@@ -1144,6 +1137,42 @@ abstract class AuthzEndToEndCases(
       )
     finally admin("lake", s"DROP MACRO $lake.main.list_append")
     allowed("alice", "lake", "SELECT len(array_append([1], 2))", Some(List("2")))
+  }
+
+  "a table's stored expressions" should "be judged where DuckDB binds them" in {
+    ready()
+    // Review I3-R1 (item 32a): an INSERT binds the target's column defaults on the table's own path,
+    // so a macro planted in the pool's DuckLake catalog shadows lower inside one.
+    admin("lake", s"CREATE TABLE $lake.main.dflt (a INTEGER, b VARCHAR DEFAULT upper(lower('Ab')))")
+    grant(lake, "main", "dflt", "RW")
+    allowed("alice", "lake", s"INSERT INTO $lake.main.dflt (a) VALUES (1)")
+    admin("lake", s"CREATE MACRO $lake.main.lower(x) AS 'shadowed'")
+    try
+      refused(
+        "alice",
+        "lake",
+        s"INSERT INTO $lake.main.dflt (a) VALUES (2)",
+        node = s"function lower is not classified: it resolves to $lake.main.lower",
+        alwaysNode = true
+      )
+    finally admin("lake", s"DROP MACRO $lake.main.lower")
+    // A read binds a table's generated columns. DuckLake has none (it refuses them, as it does CHECK
+    // constraints and triggers), so this one lives in the duckdb-file database.
+    admin("files", s"CREATE TABLE $files.main.gen (a INTEGER, g VARCHAR AS (upper(lower('Ab'))))")
+    admin("files", s"INSERT INTO $files.main.gen (a) VALUES (1)")
+    grant(files, "main", "gen", "RO")
+    allowed("alice", "files", s"SELECT g FROM $files.main.gen", Some(List("AB")))
+    admin("files", s"CREATE MACRO $files.main.lower(x) AS 'shadowed'")
+    try
+      refused(
+        "alice",
+        "files",
+        s"SELECT g FROM $files.main.gen",
+        node = s"function lower is not classified: it resolves to $files.main.lower",
+        alwaysNode = true
+      )
+    finally admin("files", s"DROP MACRO $files.main.lower")
+    allowed("alice", "files", s"SELECT g FROM $files.main.gen", Some(List("AB")))
   }
 
   "a query() in a view's body" should "be walked like the body" in {

@@ -766,6 +766,27 @@ int main() {
 			Expect(seen.find(needle) != std::string::npos, std::string("ReachedNames lacks ") + needle + ": " + seen);
 		}
 	}
+	// review I3-R1 (item 32a): the tables a statement writes, and the names an ADD COLUMN ... DEFAULT binds
+	// on its table's own path
+	for (auto write : std::vector<std::pair<const char *, const char *>> {
+	         {"INSERT INTO s.a (x) VALUES (1)", "4:s.a"},
+	         {"UPDATE s.b SET x = 1", "5:s.b"},
+	         {"DELETE FROM s.c", "6:s.c"},
+	         {"MERGE INTO s.d USING u ON true WHEN MATCHED THEN DELETE", "7:s.d"},
+	         {"COPY s.e FROM 'x.csv'", "4:s.e"},
+	         {"ALTER TABLE s.f ADD COLUMN y VARCHAR DEFAULT lower('A')", "0:lower@s.f"}}) {
+		duckdb::Parser parser(*context);
+		parser.ParseQuery(write.first);
+		std::string seen;
+		for (auto &statement : parser.statements) {
+			for (auto &name : qod::ReachedNames(*context, *statement)) {
+				seen += std::to_string(static_cast<int>(name.kind)) + ":" + name.name.ToString() +
+				        (name.scoped ? "@" + name.scope.ToString() : "") + " ";
+			}
+		}
+		Expect(seen.find(write.second) != std::string::npos,
+		       std::string("ReachedNames lacks ") + write.second + " in " + write.first + ": " + seen);
+	}
 	con.Query("DETACH lk");
 
 	if (failures == 0) {

@@ -54,12 +54,21 @@ bool IsReadOnlyPragma(const std::string &name);
 bool IsPlainExtensionName(const std::string &name);
 
 //! A name the screen's walk reaches in a statement, qualified as written: a call (a scalar or aggregate
-//! function or macro, a table function in table position, a window function), or a relation it reads
-//! by name (a table or view in FROM or JOIN, the table of COPY ... TO, query_table's names).
+//! function or macro, a table function in table position, a window function), a relation it reads by
+//! name (a table or view in FROM or JOIN, the table of COPY ... TO, query_table's names), or a table it
+//! writes (the target of an INSERT or COPY ... FROM, an UPDATE, a DELETE, a MERGE). A name an UPDATE's
+//! SET reaches carries the UPDATE's table as its scope: DuckDB binds the SET of the UPDATE that DuckDB 2.0
+//! rewrites ALTER TABLE ... ADD COLUMN ... DEFAULT into on that table's own search path
+//! (UpdateQueryNode::prioritize_table_when_binding, bind_update.cpp:31-36), and that UPDATE runs as a
+//! query of its own whose text is its ToString, which no longer says so.
 struct ReachedName {
-	enum class Kind { CALL, TABLE_CALL, WINDOW_CALL, RELATION };
+	enum class Kind { CALL, TABLE_CALL, WINDOW_CALL, RELATION, INSERT_TARGET, UPDATE_TARGET, DELETE_TARGET,
+		              MERGE_TARGET };
 	Kind kind;
 	duckdb::QualifiedName name;
+	//! Whether `scope` is set: a table on whose search path DuckDB may bind this name too.
+	bool scoped = false;
+	duckdb::QualifiedName scope;
 };
 
 //! Every name the screen's walk reaches in `statement` and the query() literals it holds, for the

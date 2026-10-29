@@ -519,7 +519,17 @@ private:
 	//! Records a name the walk reached, when a caller collects them (ReachedNames).
 	void Reach(ReachedName::Kind kind, const QualifiedName &name) {
 		if (reached_) {
-			reached_->push_back(ReachedName {kind, name});
+			reached_->push_back(ReachedName {kind, name, scope_ != nullptr, scope_ ? *scope_ : QualifiedName()});
+		}
+	}
+
+	//! A table on whose search path the names reached now may bind too.
+	const QualifiedName *scope_ = nullptr;
+
+	//! The table a write statement names as a base table, recorded as its target.
+	void WriteTarget(ReachedName::Kind kind, const unique_ptr<TableRef> &table) {
+		if (table && table->type == TableReferenceType::BASE_TABLE) {
+			Reach(kind, table->Cast<BaseTableRef>().GetQualifiedName());
 		}
 	}
 
@@ -798,6 +808,7 @@ private:
 			}
 			// INSERT INTO t (a) / INSERT INTO t (SELECT ...): the target before a parenthesis.
 			Target(insert.qualified_name.Name());
+			Reach(ReachedName::Kind::INSERT_TARGET, insert.qualified_name);
 			if (insert.table_ref) {
 				Ref(*insert.table_ref);
 			}
@@ -821,13 +832,24 @@ private:
 			if (update.table) {
 				Ref(*update.table);
 			}
+			WriteTarget(ReachedName::Kind::UPDATE_TARGET, update.table);
 			if (update.from_table) {
 				Ref(*update.from_table);
 			}
 			if (update.set_info) {
+				// The UPDATE DuckDB 2.0 writes for ALTER TABLE ... ADD COLUMN ... DEFAULT binds its SET on the
+				// table's own search path (bind_update.cpp:31-36). Its text, the query DuckDB runs, is a plain
+				// UPDATE's, so every UPDATE's SET is judged on both paths.
+				auto outer = scope_;
+				QualifiedName table_name;
+				if (update.table && update.table->type == TableReferenceType::BASE_TABLE) {
+					table_name = update.table->Cast<BaseTableRef>().GetQualifiedName();
+					scope_ = &table_name;
+				}
 				for (auto &expression : update.set_info->expressions) {
 					Walk(expression);
 				}
+				scope_ = outer;
 				Walk(update.set_info->condition);
 			}
 			for (auto &expression : update.returning_list) {
@@ -840,6 +862,7 @@ private:
 			if (del.table) {
 				Ref(*del.table);
 			}
+			WriteTarget(ReachedName::Kind::DELETE_TARGET, del.table);
 			for (auto &clause : del.using_clauses) {
 				Ref(*clause);
 			}
@@ -854,6 +877,7 @@ private:
 			if (merge.target) {
 				Ref(*merge.target);
 			}
+			WriteTarget(ReachedName::Kind::MERGE_TARGET, merge.target);
 			if (merge.source) {
 				Ref(*merge.source);
 			}
@@ -1324,6 +1348,9 @@ private:
 		} else if (!info.is_from) {
 			// COPY <table or view> TO reads it.
 			Reach(ReachedName::Kind::RELATION, info.GetQualifiedName());
+		} else {
+			// COPY <table> FROM binds an INSERT into it (bind_copy.cpp, BindCopyFrom).
+			Reach(ReachedName::Kind::INSERT_TARGET, info.GetQualifiedName());
 		}
 		CopyOptions(info);
 		if (!info.select_list.empty()) {

@@ -638,9 +638,33 @@ void CheckCallNames() {
 	qod::RunStrict(con, "CREATE SECURE VIEW sv_set AS SELECT upper(current_setting('TimeZone')) AS z", "secure");
 	read("SELECT * FROM main.sv_set",
 	     "QoD: statement uses current_setting() inside a secure view, which QoD does not support");
+	// review m-R8: getvariable() is not refused by name; a boundary is refused while the session holds a
+	// variable (Walker::CheckSession), and without one the call is NULL
 	qod::RunStrict(con, "CREATE SECURE VIEW sv_var AS SELECT 1 AS one WHERE getvariable('h') IS NULL", "secure");
-	read("SELECT * FROM main.sv_var",
-	     "QoD: statement uses getvariable() inside a secure view, which QoD does not support");
+	read("SELECT * FROM main.sv_var", "");
+	qod::RunStrict(con, "SET VARIABLE h = 7", "a session variable");
+	read("SELECT * FROM main.sv_var", "QoD: statement uses a secure view while the session holds variables");
+	qod::RunStrict(con, "RESET VARIABLE h", "no session variable");
+	// review m-R9: the by-name rule reaches a built-in macro's body inside the boundary (whoami calls
+	// current_setting under an argument DuckDB folds), judged here by the call-name walk alone
+	qod::RunStrict(con, "CREATE SECURE VIEW sv_who AS SELECT name FROM whoami()", "secure");
+	auto judged = [&](const std::string &sql) {
+		duckdb::Parser parsed(*con.context);
+		parsed.ParseQuery(sql);
+		std::string message;
+		con.BeginTransaction();
+		try {
+			qod::JudgeFailedStatement(*con.context, *parsed.statements[0]);
+		} catch (duckdb::PermissionException &error) {
+			message = duckdb::ErrorData(error).RawMessage();
+		}
+		con.Rollback();
+		return message;
+	};
+	if (judged("SELECT * FROM main.sv_who").find("QoD: statement uses current_setting() inside a secure view") ==
+	    std::string::npos) {
+		Fail("whoami() inside a secure view: got \"" + judged("SELECT * FROM main.sv_who") + "\"");
+	}
 
 	// ---- review m-R6: an EXECUTE whose own bind fails is judged with its prepared statement too
 	qod::RunStrict(con, "PREPARE p_setting AS SELECT * FROM main.v_setting", "prepare");
@@ -657,6 +681,42 @@ void CheckCallNames() {
 	if (refused.find("QoD: function current_setting is superuser-only") == std::string::npos) {
 		Fail("an EXECUTE's prepared statement in JudgeFailedStatement: got \"" + refused + "\"");
 	}
+
+	// ---- review I3-R1 (item 32a): the expressions a table stores, bound by the statement that reads or
+	// writes it: generated columns and CHECK constraints and trigger actions on the statement's path,
+	// defaults (and the SET of the UPDATE an ADD COLUMN ... DEFAULT becomes) on the table's own path
+	for (auto sql : {"CREATE SCHEMA s2", "CREATE TABLE s2.d (a INTEGER)", "INSERT INTO s2.d VALUES (1)",
+	                 "CREATE TABLE s2.f (a INTEGER, b VARCHAR DEFAULT upper(lower('Ab')))",
+	                 "CREATE TABLE main.g (a INTEGER, g VARCHAR AS (upper(lower('Ab'))))",
+	                 "INSERT INTO main.g (a) VALUES (1)", "CREATE TABLE main.c (a VARCHAR CHECK (upper(lower(a)) <> ''))",
+	                 "CREATE TABLE main.t (a INTEGER)", "CREATE TABLE main.log (s VARCHAR)",
+	                 "CREATE TRIGGER trg AFTER INSERT ON main.t FOR EACH STATEMENT INSERT INTO main.log SELECT "
+	                 "upper(lower('Ab'))",
+	                 "CREATE TABLE main.gs (a INTEGER, z VARCHAR AS (upper(current_setting('TimeZone'))))"}) {
+		qod::RunStrict(con, sql, "stored expressions");
+	}
+	read("INSERT INTO s2.f (a) VALUES (1)", "");
+	read("SELECT g FROM main.g", "");
+	read("INSERT INTO main.c VALUES ('x')", "");
+	read("INSERT INTO main.t VALUES (1)", "");
+	// a planted generated column: its folded value would come back as data
+	read("SELECT a FROM main.gs", "QoD: function current_setting is superuser-only");
+	qod::RunStrict(con, "CREATE MACRO s2.lower(x) AS 'shadowed'", "a shadow on the table's own path");
+	const std::string own = "QoD: function lower is not classified: it resolves to memory.s2.lower";
+	read("INSERT INTO s2.f (a) VALUES (2)", own);
+	read("UPDATE s2.f SET a = 3", own);
+	read("ALTER TABLE s2.d ADD COLUMN e VARCHAR DEFAULT upper(lower('Cd'))", own);
+	read("DELETE FROM s2.f WHERE a = 1", "");
+	read("SELECT g FROM main.g", "");
+	qod::RunStrict(con, "CREATE MACRO main.lower(x) AS 'shadowed'", "a shadow on the statement's path");
+	const std::string statement = "QoD: function lower is not classified: it resolves to memory.main.lower";
+	read("SELECT g FROM main.g", statement);
+	read("INSERT INTO main.c VALUES ('y')", statement);
+	read("INSERT INTO main.t VALUES (2)", statement);
+	qod::RunStrict(con, "DROP MACRO main.lower", "drop the shadow");
+	qod::RunStrict(con, "DROP MACRO s2.lower", "drop the shadow");
+	read("INSERT INTO s2.f (a) VALUES (4)", "");
+	read("INSERT INTO main.t VALUES (3)", "");
 }
 
 int main(int argc, char **argv) {
