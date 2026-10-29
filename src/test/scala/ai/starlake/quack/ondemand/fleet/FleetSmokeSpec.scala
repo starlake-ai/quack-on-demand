@@ -307,6 +307,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
          |  host = "127.0.0.1"
          |  port = $RestPort
          |  runtimeType = "fleet"
+         |  nodeAuthz.internalUrl = "http://127.0.0.1:$RestPort"
          |  reconcileIntervalSec = 2
          |  ha.enabled = false
          |  embeddedPostgres.enabled = false

@@ -683,14 +683,31 @@ final case class NodeAuthzConfig(
     keySecret: String = "",
     @field @ConfigField(
       envVar = "QOD_INTERNAL_URL",
-      description = "URL nodes reach this replica on, carried in every session handle. Default " +
-        "http://127.0.0.1:<manager port>."
+      description =
+        "URL nodes reach this replica on, carried in every session handle: nodes call " +
+          "it for their statements' verdicts (plain http). Default http://<QOD_POD_IP>:<manager " +
+          "port> when the pod IP is set, else http://127.0.0.1:<manager port>. Required in fleet " +
+          "mode; never a loopback URL on Kubernetes."
     )
-    internalUrl: String = ""
+    internalUrl: String = "",
+    @field @ConfigField(
+      envVar = "QOD_POD_IP",
+      description = "This replica's pod IP; the Helm chart sets it from the downward API. With " +
+        "QOD_INTERNAL_URL unset, nodes reach this replica on http://<pod IP>:<manager port>, so " +
+        "the replica that minted a handle, not the Service, answers its node."
+    )
+    podIp: String = ""
 ):
-  /** [[internalUrl]], or this host's loopback URL on `restPort`. */
+  /** [[internalUrl]]; else this pod's address on `restPort` (an IPv6 pod IP in brackets); else this
+    * host's loopback URL on `restPort`.
+    */
   def replicaUrl(restPort: Int): String =
-    if internalUrl.trim.nonEmpty then internalUrl.trim else s"http://127.0.0.1:$restPort"
+    val pod = podIp.trim
+    if internalUrl.trim.nonEmpty then internalUrl.trim
+    else if pod.nonEmpty then
+      val host = if pod.contains(':') && !pod.startsWith("[") then s"[$pod]" else pod
+      s"http://$host:$restPort"
+    else s"http://127.0.0.1:$restPort"
 
 /** The three extension settings qod-node fixes in a node's database config before it opens (spec
   * decision 17). Off unless turned on here: DuckDB refuses to turn either `allow_*` setting on

@@ -64,3 +64,22 @@ class NodeAuthzConfigSpec extends AnyFlatSpec with Matchers:
     NodeAuthzConfig().replicaUrl(20900) shouldBe "http://127.0.0.1:20900"
     NodeAuthzConfig(internalUrl = "   ").replicaUrl(20901) shouldBe "http://127.0.0.1:20901"
   }
+
+  "NodeAuthzConfig" should "take QOD_POD_IP" in {
+    load(Map("QOD_POD_IP" -> "10.1.2.3")).nodeAuthz shouldBe NodeAuthzConfig(podIp = "10.1.2.3")
+    ConfigRegistry
+      .collect(List("quack-on-demand" -> classOf[ManagerConfig]))
+      .find(_.path == "quack-on-demand.nodeAuthz.podIp")
+      .map(e => (e.envVar, e.sensitive)) shouldBe Some(("QOD_POD_IP", false))
+  }
+
+  "replicaUrl" should "be this pod's address on the manager port when only the pod IP is set" in {
+    NodeAuthzConfig(podIp = "10.1.2.3").replicaUrl(20900) shouldBe "http://10.1.2.3:20900"
+    NodeAuthzConfig(podIp = " fd00::7 ").replicaUrl(20900) shouldBe "http://[fd00::7]:20900"
+    NodeAuthzConfig(podIp = "[fd00::7]").replicaUrl(20900) shouldBe "http://[fd00::7]:20900"
+  }
+
+  it should "prefer the internal URL to the pod IP" in {
+    NodeAuthzConfig(internalUrl = "http://m:1", podIp = "10.1.2.3").replicaUrl(20900) shouldBe
+      "http://m:1"
+  }

@@ -351,6 +351,13 @@ object Main extends IOApp with LazyLogging:
       else "account lockout: disabled"
     )
 
+    // The URL nodes call back for verdicts must be reachable from the runtime's nodes: on
+    // Kubernetes this pod's address (the chart sets QOD_POD_IP), in fleet mode the address the
+    // servers heartbeat to. Configuration only, so it runs before the Postgres preflight.
+    BootPreflight.checkInternalUrl(mgrCfg0.runtimeType, mgrCfg0.nodeAuthz, mgrCfg0.port) match
+      case Left(msg)  => sys.error(msg)
+      case Right(url) => logger.info(s"node decide URL: $url")
+
     // Refuse to start when the control-plane Postgres is unreachable, with a clear
     // message instead of a raw JDBC stack trace from the Liquibase apply below.
     Banner.postgresPreflight(mgrCfg0.defaultMetastore.asMap) match

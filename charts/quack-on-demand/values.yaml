@@ -155,7 +155,8 @@ networkPolicy:
     cidrs: []
   # Peers allowed to reach the manager's REST/UI (20900) and FlightSQL
   # (31338) ports. Empty = allow from anywhere (e.g. behind an Ingress /
-  # LoadBalancer already restricting access upstream).
+  # LoadBalancer already restricting access upstream). Node pods always reach
+  # 20900 for their verdict calls, whatever this says.
   ingressFrom: []
   # Outbound SMTP for the hosted signup/notification flow. Off by default.
   smtp:

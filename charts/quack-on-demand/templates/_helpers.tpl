@@ -161,4 +161,7 @@ Refusals checked on every render (deployment.yaml includes this first):
 {{- end }}
 {{- end }}
 {{- $_ := required "admin.password or admin.existingSecret is required: it seeds the admin on first boot, and nobody can log in without one" (or .Values.admin.existingSecret .Values.admin.password) }}
+{{- if and (gt (.Values.replicaCount | int) 1) (hasKey (.Values.env | default dict) "QOD_INTERNAL_URL") }}
+{{- fail "env.QOD_INTERNAL_URL must stay unset when replicaCount > 1: each replica's decide URL comes from its own pod IP (QOD_POD_IP), and one shared URL would send every node's verdict calls to a single replica" }}
+{{- end }}
 {{- end -}}

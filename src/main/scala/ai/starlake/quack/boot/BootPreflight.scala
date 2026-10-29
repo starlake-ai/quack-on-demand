@@ -2,7 +2,7 @@ package ai.starlake.quack.boot
 
 import java.util.Locale
 import ai.starlake.quack.AdminConfig
-import ai.starlake.quack.{ManagementAuthConfig, ManagerConfig}
+import ai.starlake.quack.{FleetConfig, ManagementAuthConfig, ManagerConfig, NodeAuthzConfig}
 import ai.starlake.quack.edge.auth.{AuthQueryPreconditions, AuthenticationService}
 import ai.starlake.quack.edge.config.{AuthenticationConfig, DatabaseAuthConfig}
 import ai.starlake.quack.model.{FederatedAlias, Names}
@@ -241,6 +241,75 @@ object BootPreflight extends LazyLogging:
           "QOD_SMTP_PASSWORD as needed) or set QOD_AUTH_LOCKOUT_ENABLED=false."
       )
     else Right(())
+
+  val InternalUrlFormatMessage: String =
+    "QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl) is not a plain http:// URL with " +
+      "a host and no user info, query or fragment: nodes call this replica's decision endpoint " +
+      "on it, and qod-node speaks plain HTTP only"
+
+  def internalUrlKubernetesMessage(url: String): String =
+    s"the node decide URL is $url, a loopback address no node pod can reach on the kubernetes " +
+      "runtime: leave QOD_INTERNAL_URL unset and set QOD_POD_IP from the downward API (the Helm " +
+      "chart does), or set QOD_INTERNAL_URL to this replica's own pod address"
+
+  val InternalUrlFleetMessage: String =
+    "fleet mode requires QOD_INTERNAL_URL (quack-on-demand.nodeAuthz.internalUrl): the address " +
+      "fleet servers reach this replica on, typically the one they heartbeat to (QOD_MANAGER_URL " +
+      "of qod fleet join); every node calls it for its statements' verdicts"
+
+  /** Pure gate on the decide URL (`NodeAuthzConfig.replicaUrl`): every node calls it for its
+    * statements' verdicts, so a boot whose nodes could not reach it would answer every user
+    * statement "authorization unavailable". Plain http with a host (and a port qod-node accepts) on
+    * every runtime; on Kubernetes never a loopback or unspecified host (the default included: the
+    * chart sets QOD_POD_IP); in fleet mode set explicitly (a loopback one is fine on a single-host
+    * fleet). Right carries the URL; the format refusal never echoes it, since it could carry
+    * credentials. Reads configuration only: no name is ever looked up.
+    */
+  def checkInternalUrl(
+      runtimeType: String,
+      nodeAuthz: NodeAuthzConfig,
+      restPort: Int
+  ): Either[String, String] =
+    val url     = nodeAuthz.replicaUrl(restPort)
+    val runtime = runtimeType.toLowerCase(Locale.ROOT)
+    val uri     =
+      try Some(new java.net.URI(url))
+      catch case _: java.net.URISyntaxException => None
+    uri.filter(u =>
+      u.getScheme == "http" && Option(u.getHost).exists(_.nonEmpty) && u.getRawUserInfo == null &&
+        u.getRawQuery == null && u.getRawFragment == null && validPort(u)
+    ) match
+      case None => Left(InternalUrlFormatMessage)
+      case Some(_) if FleetConfig.isFleet(runtime) && nodeAuthz.internalUrl.trim.isEmpty =>
+        Left(InternalUrlFleetMessage)
+      case Some(u) if runtime == "kubernetes" && unreachableHost(u.getHost) =>
+        Left(internalUrlKubernetesMessage(url))
+      case Some(_) => Right(url)
+
+  /** No port (qod-node then dials 80), or one in 1-65535; `host:` with an empty port is refused, as
+    * qod-node refuses it.
+    */
+  private def validPort(u: java.net.URI): Boolean =
+    if u.getPort == -1 then !u.getRawAuthority.endsWith(":")
+    else u.getPort >= 1 && u.getPort <= 65535
+
+  /** A host no other machine reaches: a loopback or unspecified literal, or a `localhost` name.
+    * IPv4 literals are read by hand and IPv6 ones (always bracketed, so never a name) by
+    * `InetAddress`, which looks nothing up for a literal.
+    */
+  private def unreachableHost(host: String): Boolean =
+    val h = host.stripPrefix("[").stripSuffix("]").stripSuffix(".").toLowerCase(Locale.ROOT)
+    if h == "localhost" || h.endsWith(".localhost") then true
+    else if host.startsWith("[") then
+      try
+        val a = java.net.InetAddress.getByName(h)
+        a.isLoopbackAddress || a.isAnyLocalAddress
+      catch case _: java.net.UnknownHostException => true
+    else
+      h.split('.').toList.map(_.toIntOption) match
+        case octets @ List(Some(a), Some(_), Some(_), Some(_)) =>
+          a == 127 || octets.forall(_.contains(0))
+        case _ => false
 
   /** Bootstrap admin users at startup so the DB auth backend has at least one credential. Seeds
     * each name in QOD_ADMIN_USERNAME (comma-separated) ONLY when its superuser row is missing: an

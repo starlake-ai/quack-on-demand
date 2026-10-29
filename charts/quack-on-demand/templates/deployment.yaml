@@ -99,6 +99,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # This replica's own address: with QOD_INTERNAL_URL unset the manager tells its nodes to
+            # call http://<pod IP>:20900 for verdicts (IPv6 in brackets), so the replica that minted
+            # a handle, not the Service, answers.
+            - name: QOD_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- if and .Values.auth.keycloak.enabled .Values.auth.keycloak.existingSecret }}
             - name: QOD_AUTH_KEYCLOAK_CLIENT_SECRET
               valueFrom:

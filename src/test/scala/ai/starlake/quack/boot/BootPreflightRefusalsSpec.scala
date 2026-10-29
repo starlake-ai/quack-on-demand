@@ -286,3 +286,26 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       finally svc.close()
     AuthenticationService.configuresPasswordProvider(databaseAuth) shouldBe true
   }
+
+  /** A boot that gets past the lockout check reaches the decide-URL check before it probes
+    * Postgres: Kubernetes with neither QOD_INTERNAL_URL nor QOD_POD_IP stops there, and so does
+    * fleet mode without QOD_INTERNAL_URL.
+    */
+  "Main.bootManager" should "refuse a decide URL the runtime's nodes cannot reach, before reaching Postgres" in {
+    val urls = "nodeAuthz { internalUrl = \"\", podIp = \"\" }, auth.lockout.enabled = false"
+    val k8s  = intercept[RuntimeException](
+      boot(
+        noEnv,
+        s"quack-on-demand { runtimeType = kubernetes, embeddedPostgres.enabled = false, $urls }"
+      )
+    )
+    k8s.getMessage should startWith("the node decide URL is http://127.0.0.1:")
+    val fleet = intercept[RuntimeException](
+      boot(
+        noEnv,
+        "quack-on-demand { runtimeType = fleet, fleet.joinToken = \"x\", " +
+          s"embeddedPostgres.enabled = false, $urls }"
+      )
+    )
+    fleet.getMessage shouldBe BootPreflight.InternalUrlFleetMessage
+  }
