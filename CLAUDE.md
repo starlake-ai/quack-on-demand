@@ -251,7 +251,9 @@ to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to 
 covered: an attached Iceberg catalog's raw warehouse files (decision 21). An Iceberg catalog that
 neither vends credentials nor has `awsCredentials` reads its table data with each reading user's own
 keys, and writes to such a table fail (duckdb-iceberg commits manifests without the
-connection's secrets), so it is read-only for users. A change of the default metastore's `dataPath`
+connection's secrets), so it is read-only for users. An Iceberg source's `awsCredentials` carry no
+S3 endpoint, so an S3-compatible (non-AWS) warehouse is read only with users' own keys or vended
+credentials. A change of the default metastore's `dataPath`
 in the configuration bumps no policy version: restart the nodes after one.
 
 **Node S3 hardening (decision 23).** Every node opens with `enable_external_file_cache` and
@@ -322,7 +324,10 @@ refuses `current_setting()` by name; `ADD COLUMN ... DEFAULT <expr>` runs as Duc
 UPDATE part needs an update grant besides `alter`); DESCRIBE answers `key` (and `PRAGMA table_info`
 `pk`) as NULL; an OPA tenant's DESCRIBE and SHOW TABLES come back empty and SUMMARIZE is refused (the
 metadata filter narrows by QoD grants); a wildcard grant (`*.*.*`) never covers a federated catalog
-(grant it by alias). Residuals: foldable constant arguments are evaluated during bind before a
+(grant it by alias); with the gateway ACL on, a wildcard grant does not cover a `memory`
+catalog or a custom `catalogAlias` at the gateway either (Phase D removes that check); with the ACL
+on and filtered metadata off, SHOW TABLES is refused at the gateway. Residuals: `pg_sleep` /
+`sleep_ms` are allowed, in bind-time slots too; foldable constant arguments are evaluated during bind before a
 refusal (no value reaches the client); SQL stored by others (view bodies, defaults) runs its bind-time
 slots as the reader; an optimizer extension loaded after qod-node is not re-described; statements an
 extension runs on its own untagged connections (DuckLake metadata, Iceberg commits) are admitted as

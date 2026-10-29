@@ -659,7 +659,9 @@ The raw files of an attached Iceberg catalog's warehouse are not data folders Qo
 warehouse bucket let their holder read its files directly. A catalog that neither vends credentials
 nor has AWS credentials of its own reads its tables with the reading user's keys, and writing to it
 fails with an HTTP 403 at commit (DuckDB's Iceberg extension commits without the user's keys): such
-Iceberg tables are read-only for tenant users in this release.
+Iceberg tables are read-only for tenant users in this release. An Iceberg source's AWS credentials
+name no S3 endpoint, so a warehouse on an S3-compatible store (not AWS) is read only with the users'
+own keys (an endpoint the operator allowed) or credentials the catalog vends.
 
 ## RBAC grants
 

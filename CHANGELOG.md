@@ -373,7 +373,9 @@
   one (or a NULL or non-text value) aborts the transaction as DuckDB would. Under the FlightSQL
   prepare probe a computed location and a SUMMARIZE are evaluated twice. `ALTER TABLE ... ADD
   COLUMN ... DEFAULT <expr>` is judged as DuckDB's own ADD COLUMN and UPDATE, so it needs an update
-  grant on the table as well as `alter`.
+  grant on the table as well as `alter`. With the ACL on and `QOD_ACL_FILTERED_METADATA` off,
+  SHOW TABLES is now refused at the gateway (it used to list every table of the session schema
+  unfiltered); SUMMARIZE over a row-filtered table, refused before, now runs through the filter.
 
 - **Security: BREAKING: files by path only where the user may reach, with S3 keys of the user's
   own.** A tenant user (`*.*.* ALL` included, the ACL on or off) reads or writes a file by path only
@@ -461,7 +463,8 @@
   placeholder only when its value is a plain token (letters, digits, `_`, `.`, `-`) that no quote or
   letter touches, such as a port; otherwise that source is left out of the node's setup with a WARN,
   and boot lists each such template. Operator action: quote the placeholders of those templates
-  and save them again as a superuser.
+  and save them again as a superuser. A database's `objectStore` values and an Iceberg REST
+  source's fields now refuse line breaks when they are written.
 
 - **BREAKING for fleet mode and hand-written Kubernetes manifests: nodes call the manager back.**
   Every handle carries the URL of the replica that minted it (`QOD_INTERNAL_URL`,
