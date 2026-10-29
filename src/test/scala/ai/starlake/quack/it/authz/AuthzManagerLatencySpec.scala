@@ -196,9 +196,10 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
       println(Latency.line("e2e warm (hit)", w))
       println(Latency.line("e2e cold (miss)", c))
       println(Latency.added("e2e manager round trip", c, w))
-      // The statements whose verdicts are cached across rounds: the warm plan and the USE prelude,
-      // each asked at first sight and again whenever its 60 s verdict expires.
-      val ceiling = 2 * (elapsedMs / 60000 + 1)
+      // The plans whose verdicts are cached across rounds: the warm query's GetFlightInfo schema
+      // probe, the warm statement itself and the USE prelude, each asked at first sight and again
+      // whenever its 60 s verdict expires.
+      val ceiling = 3 * (elapsedMs / 60000 + 1)
       println(
         f"[authz-latency] e2e: ${elapsedMs / 1000.0}%.1f s, $warmAsked decision(s) beyond two per " +
           s"cold statement (ceiling $ceiling), $undecided cold statement(s) not decided; " +
