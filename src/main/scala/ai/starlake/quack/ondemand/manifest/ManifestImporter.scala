@@ -1,6 +1,7 @@
 // src/main/scala/ai/starlake/quack/ondemand/manifest/ManifestImporter.scala
 package ai.starlake.quack.ondemand.manifest
 
+import ai.starlake.quack.ondemand.initsql.InitSqlTrust
 import ai.starlake.quack.model.{
   AutoscaleBand,
   FederatedSecret,
@@ -560,8 +561,13 @@ object ManifestImporter extends LazyLogging:
                   defaultDatabase = mtd.defaultDatabase,
                   defaultSchema = mtd.defaultSchema,
                   initSql = mtd.initSql,
-                  // Only a superuser imports a manifest (and the boot hook, as the manager).
-                  initSqlTrusted = true,
+                  // Only a superuser imports a manifest (and the boot hook, as the manager); an
+                  // exported row says who wrote its SQL, so an export and import trusts nothing.
+                  initSqlTrusted = InitSqlTrust.onImport(
+                    mtd.initSql,
+                    mtd.initSqlTrusted,
+                    existing.map(e => (e.initSql, e.initSqlTrusted))
+                  ),
                   encrypted = mtd.encrypted
                 )
                 // Injection-safety only: a manifest tenant-db legitimately omits the pg*/dbName/
@@ -639,8 +645,12 @@ object ManifestImporter extends LazyLogging:
               suspended = mp.suspended,
               cohorts = cohorts,
               initSql = mp.initSql,
-              // Only a superuser imports a manifest (and the boot hook, as the manager).
-              initSqlTrusted = true,
+              // See the tenant-db's: the manifest's flag, else trusted unless unchanged.
+              initSqlTrusted = InitSqlTrust.onImport(
+                mp.initSql,
+                mp.initSqlTrusted,
+                existing.map(e => (e.initSql, e.initSqlTrusted))
+              ),
               cpu = mp.cpu,
               memory = mp.memory,
               podTemplateYaml = mp.podTemplateYaml,
@@ -1231,7 +1241,13 @@ object ManifestImporter extends LazyLogging:
             // the loss of the edge screen.
             sourceType = FederatedSourceType.fromWireOrSql(msrc.sourceType),
             config = msrc.config,
-            readOnly = msrc.readOnly
+            readOnly = msrc.readOnly,
+            // Who wrote the setupSql, by the same rule as a tenant-db's initSql.
+            setupSqlTrusted = InitSqlTrust.onImport(
+              msrc.setupSql,
+              msrc.setupSqlTrusted,
+              sourceByAlias.get(fold(alias)).map(e => (e.setupSql, e.setupSqlTrusted))
+            )
           )
 
           val reserved =

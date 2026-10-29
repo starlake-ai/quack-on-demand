@@ -59,7 +59,7 @@ class FederatedSourceStore(
   // column missed in only one of the three previously would fail at runtime on that path alone.
   private val SourceColumns =
     "id, tenant_db_id, alias, setup_sql, description, disabled, created_at, " +
-      "source_type, config, read_only"
+      "source_type, config, read_only, setup_sql_trusted"
 
   // Single source of truth for the six `FederatedSecret` columns: getSecret and listSecrets each
   // SELECT this exact list, and readSecret reads them back by label.
@@ -80,8 +80,8 @@ class FederatedSourceStore(
     val ps = c.prepareStatement(
       """INSERT INTO qodstate_federated_source
         |  (id, tenant_db_id, alias, setup_sql, description, disabled,
-        |   source_type, config, read_only)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        |   source_type, config, read_only, setup_sql_trusted)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_db_id = EXCLUDED.tenant_db_id,
         |  alias        = EXCLUDED.alias,
@@ -90,7 +90,8 @@ class FederatedSourceStore(
         |  disabled     = EXCLUDED.disabled,
         |  source_type  = EXCLUDED.source_type,
         |  config       = EXCLUDED.config,
-        |  read_only    = EXCLUDED.read_only""".stripMargin
+        |  read_only    = EXCLUDED.read_only,
+        |  setup_sql_trusted = EXCLUDED.setup_sql_trusted""".stripMargin
     )
     try
       ps.setString(1, s.id)
@@ -102,6 +103,7 @@ class FederatedSourceStore(
       ps.setString(7, s.sourceType.wire)
       ps.setString(8, s.config.orNull)
       ps.setBoolean(9, s.readOnly)
+      ps.setBoolean(10, s.setupSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -247,7 +249,8 @@ class FederatedSourceStore(
       createdAt = Option(rs.getTimestamp("created_at")).map(_.toInstant),
       sourceType = FederatedSourceType.fromWireOrSql(rs.getString("source_type")),
       config = Option(rs.getString("config")),
-      readOnly = rs.getBoolean("read_only")
+      readOnly = rs.getBoolean("read_only"),
+      setupSqlTrusted = rs.getBoolean("setup_sql_trusted")
     )
 
   private def readSecret(rs: ResultSet): FederatedSecret =

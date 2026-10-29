@@ -90,7 +90,11 @@ final case class FederatedSource(
     createdAt: Option[Instant] = None,
     sourceType: FederatedSourceType = FederatedSourceType.Sql,
     config: Option[String] = None,
-    readOnly: Boolean = false
+    readOnly: Boolean = false,
+    // Whether a superuser (or the manager) wrote this source. Only superusers may write a `sql`
+    // source (CONTRACT Addendum 4 item 26); one stored before that rule has no known author, and
+    // boot warns about it. Liquibase 0053.
+    setupSqlTrusted: Boolean = false
 ):
 
   /** Empty list when the shape invariant holds. Format-specific validation of `config` lives in the

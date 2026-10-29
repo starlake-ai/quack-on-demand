@@ -49,7 +49,8 @@ class InitSqlTrustMigrationSpec extends AnyFlatSpec with Matchers:
           List(
             db("td-1", "acme_empty", ""),
             db("td-2", "acme_admin", "SET threads = 2;"),
-            db("td-3", "acme_served", "CREATE VIEW v AS SELECT 1;")
+            db("td-3", "acme_served", "CREATE VIEW v AS SELECT 1;"),
+            db("td-4", "acme_served_then_edited", "CREATE VIEW v AS SELECT 2;")
           ).foreach(td => store.upsertTenantDb(td.copy(initSqlTrusted = true)))
           def pool(id: String, name: String, sql: String) =
             Pool(id, "acme", "td-1", name, 1, RoleDistribution(0, 0, 1), initSql = sql)
@@ -63,21 +64,36 @@ class InitSqlTrustMigrationSpec extends AnyFlatSpec with Matchers:
             "INSERT INTO qodstate_audit (ts, family, actor, actor_realm, tenant, action, target, " +
               "outcome, origin, detail) VALUES (now(), 'control-plane', 'alice', 'acme', " +
               "'acme', 'database.create', 'acme_admin', 'ok', 'rest', '{}')",
+            // qod serve made it, then a tenant admin changed it (review M2): not the manager's text.
+            "INSERT INTO qodstate_audit (ts, family, actor, actor_realm, tenant, action, target, " +
+              "outcome, origin, detail) VALUES (now() - interval '1 hour', 'control-plane', " +
+              "'system', 'system', 'acme', 'database.create', 'acme_served_then_edited', 'ok', " +
+              "'rest', '{}')",
+            "INSERT INTO qodstate_audit (ts, family, actor, actor_realm, tenant, action, target, " +
+              "outcome, origin, detail) VALUES (now(), 'control-plane', 'alice', 'acme', 'acme', " +
+              "'database.update', 'acme_served_then_edited', 'ok', 'rest', '{}')",
             // Back to the state before 0053, then let Liquibase apply it: the upgrade path.
             "ALTER TABLE qodstate_tenant_db DROP COLUMN init_sql_trusted",
             "ALTER TABLE qodstate_pool DROP COLUMN init_sql_trusted",
-            "DELETE FROM databasechangelog WHERE id = '0053-init-sql-trust'"
+            "ALTER TABLE qodstate_federated_source DROP COLUMN setup_sql_trusted",
+            "DELETE FROM databasechangelog WHERE id LIKE '0053-%'"
           )
           new LiquibaseRunner(url, TestPostgres.pgUser, TestPostgres.pgPass).run()
           flags(c, "qodstate_tenant_db") shouldBe Map(
-            "acme_empty"  -> true,
-            "acme_admin"  -> false,
-            "acme_served" -> true
+            "acme_empty"              -> true,
+            "acme_admin"              -> false,
+            "acme_served"             -> true,
+            "acme_served_then_edited" -> false
           )
           flags(c, "qodstate_pool") shouldBe Map("bi_empty" -> true, "bi_admin" -> false)
           // And the store reads the flag back.
           store.listTenantDbs("acme").map(td => td.name -> td.initSqlTrusted).toMap shouldBe
-            Map("acme_empty" -> true, "acme_admin" -> false, "acme_served" -> true)
+            Map(
+              "acme_empty"              -> true,
+              "acme_admin"              -> false,
+              "acme_served"             -> true,
+              "acme_served_then_edited" -> false
+            )
         finally c.close()
       finally store.close()
     finally Try(TestPostgres.dropDatabase(dbName))

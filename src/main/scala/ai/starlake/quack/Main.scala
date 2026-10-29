@@ -630,6 +630,17 @@ object Main extends IOApp with LazyLogging:
     // cannot check), with how a superuser vouches for it. In the background: one check per row.
     locally {
       val snap = store.snapshot()
+      manifestFedStore.foreach { fs =>
+        scala.util
+          .Try(
+            ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
+              .federationLines(snap.tenantDbs.flatMap(td => fs.listSources(td.id).map(td -> _)))
+          )
+          .fold(
+            e => logger.warn(s"federated source boot report: ${e.getClass.getSimpleName}"),
+            _.foreach(l => logger.warn(l))
+          )
+      }
       ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
         .report(snap.tenantDbs, snap.pools, initSqlChecker)
         .handleError(e => logger.warn(s"initSql boot report: ${e.getClass.getSimpleName}"))

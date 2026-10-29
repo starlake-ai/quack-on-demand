@@ -131,6 +131,7 @@ object ManifestExporter extends LazyLogging:
               sourceType = src.sourceType.wire,
               config = src.config,
               readOnly = src.readOnly,
+              setupSqlTrusted = Some(src.setupSqlTrusted),
               secrets = fs.listSecrets(src.id).map { sec =>
                 ManifestFederatedSecret(
                   name = sec.name,
@@ -168,7 +169,8 @@ object ManifestExporter extends LazyLogging:
           defaultSchema = d.defaultSchema,
           initSql = d.initSql,
           federatedSources = fedSources,
-          encrypted = d.encrypted
+          encrypted = d.encrypted,
+          initSqlTrusted = Some(d.initSqlTrusted)
         )
       }
 
@@ -206,7 +208,8 @@ object ManifestExporter extends LazyLogging:
           podTemplateYaml = p.podTemplateYaml,
           lockdown = LockdownTriState.render(p.lockdown),
           minNodes = p.minNodes,
-          maxNodes = p.maxNodes
+          maxNodes = p.maxNodes,
+          initSqlTrusted = Some(p.initSqlTrusted)
         )
       }
 

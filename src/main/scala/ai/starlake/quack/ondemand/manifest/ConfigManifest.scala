@@ -74,7 +74,12 @@ final case class ManifestFederatedSource(
     // matters: losing a `true` here would attach the catalog WRITABLE at the next node spawn
     // (the flag is threaded onto the rendered Iceberg ATTACH as READ_ONLY), so the exporter
     // always writes the stored value and the importer always applies it.
-    readOnly: Boolean = false
+    readOnly: Boolean = false,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    setupSqlTrusted: Option[Boolean] = None
 )
 
 final case class ManifestTenantDb(
@@ -90,7 +95,12 @@ final case class ManifestTenantDb(
     // Round-tripped verbatim from TenantDb.encrypted. Not a live toggle: the underlying
     // database is never re-encrypted by an import, this only keeps the stored row's flag in
     // sync with the manifest (matching how every other field here is applied).
-    encrypted: Boolean = false
+    encrypted: Boolean = false,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    initSqlTrusted: Option[Boolean] = None
 )
 
 final case class ManifestPool(
@@ -131,7 +141,12 @@ final case class ManifestPool(
     // pool, so pre-autoscale YAMLs decode unchanged. Set together or not at
     // all; AutoscaleBand.validate enforces that on import.
     minNodes: Option[Int] = None,
-    maxNodes: Option[Int] = None
+    maxNodes: Option[Int] = None,
+    // Round-tripped from the row's trust flag (who wrote the SQL: a superuser or the manager, or a
+    // tenant admin). Absent in a hand-written manifest, a superuser's own text: imported trusted,
+    // except that a row whose SQL the manifest leaves unchanged keeps its stored flag
+    // (InitSqlTrust.onImport).
+    initSqlTrusted: Option[Boolean] = None
 )
 
 /** Round-tripped from [[ai.starlake.quack.model.TenantAcl]]. `opaToken` is exported redacted

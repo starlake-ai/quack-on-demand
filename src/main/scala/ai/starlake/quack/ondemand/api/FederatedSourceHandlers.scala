@@ -180,7 +180,10 @@ final class FederatedSourceHandlers(
               // An external catalog is one QoD does not own, so a new typed source is read-only
               // until an operator says otherwise. A sql source keeps today's behaviour, where
               // writes are governed by the ACL graph alone.
-              readOnly = req.readOnly.getOrElse(sourceType.rendered)
+              readOnly = req.readOnly.getOrElse(sourceType.rendered),
+              // Only a superuser reaches here with a `sql` source (createSource); a typed one is
+              // rendered by the manager.
+              setupSqlTrusted = true
             )
 
             val fieldErrors =
@@ -264,6 +267,12 @@ final class FederatedSourceHandlers(
 
   // ---- FederatedSource CRUD -----------------------------------------------
 
+  /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
+  private def writesSqlSource(req: FederatedSourceCreateRequest): Boolean =
+    req.sourceType.map(_.trim).filter(_.nonEmpty) match
+      case None     => true
+      case Some(wr) => FederatedSourceType.fromWire(wr).contains(FederatedSourceType.Sql)
+
   def createSource(
       tenantName: String,
       tenantDbName: String,
@@ -273,7 +282,28 @@ final class FederatedSourceHandlers(
     IO.blocking {
       TenantScopeCheck.reject(apiKey, tenantName)(scopeOf) match
         case Some(e) => Left(e)
-        case None    =>
+        // A `sql` source's setupSql runs unrestricted on every node of the database (it is the
+        // manager's federation SQL to the node), so only a superuser writes one, create or change
+        // (CONTRACT Addendum 4 item 26). Typed sources are rendered by the manager from checked
+        // fields and stay open to tenant admins.
+        case None if writesSqlSource(req) && superuserDenied(apiKey) =>
+          audit.rest(
+            apiKey,
+            "control-plane",
+            AuditActions.FederationSourceUpsert,
+            "denied",
+            tenant = tenantIdResolver(tenantName),
+            target = Some(req.alias)
+          )
+          Left(
+            StatusCode.Forbidden -> ErrorResponse(
+              "superuser_required",
+              "a federated source of sourceType 'sql' runs its setupSql unrestricted on every " +
+                "node, so only a superuser may create or change one; tenant admins use a typed " +
+                "source (postgres, mysql, iceberg_rest)"
+            )
+          )
+        case None =>
           resolveTenantDbId(tenantName, tenantDbName) match
             case Left(e)           => Left(e)
             case Right(tenantDbId) =>

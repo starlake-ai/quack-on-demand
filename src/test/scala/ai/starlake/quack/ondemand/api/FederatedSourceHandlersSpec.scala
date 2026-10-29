@@ -215,7 +215,8 @@ class FederatedSourceHandlersSpec
       "acme",
       "acme_prod",
       FederatedSourceCreateRequest(alias = "fedpg", setupSql = Some("INSTALL postgres;")),
-      Some(AdminTok)
+      // A sql source is a superuser's to write (CONTRACT Addendum 4 item 26).
+      Some(SuperTok)
     ).unsafeRunSync()
       .isRight shouldBe true
     h
@@ -1058,3 +1059,74 @@ class FederatedSourceHandlersSpec
     h.createSource("acme", "acme_prod", req, None).unsafeRunSync().left.value._2.message should
       include("reserved for QoD's typed sources")
   }
+
+  // CONTRACT Addendum 4 item 26 (Task 20 review C1): a sql source's setupSql runs unrestricted on
+  // every node, so only a superuser creates or changes one; a typed source stays a tenant admin's.
+  "a sql federated source" should "be refused to a tenant admin on create and on change (403)" in
+    withEnv { (fs, resolver, tdId) =>
+      val h =
+        new FederatedSourceHandlers(fs, resolver, scopeOf = scopes, catalogAliasOf = _ => None)
+      val sql = FederatedSourceCreateRequest(
+        alias = "leak",
+        setupSql = Some("CREATE SECURE VIEW v AS SELECT * FROM read_text('/etc/passwd');")
+      )
+      val created = h.createSource("acme", "acme_prod", sql, Some(AdminTok)).unsafeRunSync()
+      created.left.value._1 shouldBe StatusCode.Forbidden
+      created.left.value._2.error shouldBe "superuser_required"
+      // An explicit sourceType 'sql' is the same.
+      h.createSource("acme", "acme_prod", sql.copy(sourceType = Some(" SQL ")), Some(AdminTok))
+        .unsafeRunSync()
+        .left
+        .value
+        ._2
+        .error shouldBe "superuser_required"
+      fs.getSource(tdId, "leak") shouldBe None
+      // A superuser's is stored, with a known author; a tenant admin's change of it is refused.
+      h.createSource(
+        "acme",
+        "acme_prod",
+        sql.copy(setupSql = Some("INSTALL postgres;")),
+        Some(SuperTok)
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      fs.getSource(tdId, "leak").value.setupSqlTrusted shouldBe true
+      h.createSource("acme", "acme_prod", sql.copy(disabled = true), Some(AdminTok))
+        .unsafeRunSync()
+        .left
+        .value
+        ._2
+        .error shouldBe "superuser_required"
+      fs.getSource(tdId, "leak").value.setupSql shouldBe "INSTALL postgres;"
+      // A typed source is still a tenant admin's to write.
+      h.createSource("acme", "acme_prod", pgReq(), Some(AdminTok)).unsafeRunSync().isRight shouldBe
+        true
+    }
+
+  "the boot report" should "name each sql source with no known author, never its SQL" in
+    withEnv { (fs, _, tdId) =>
+      fs.upsertSource(
+        FederatedSource(
+          id = "fs-old",
+          tenantDbId = tdId,
+          alias = "legacy",
+          setupSql = "ATTACH 'host=h password=AKIAQODFEDMARKER' AS legacy (TYPE postgres);"
+        )
+      )
+      fs.upsertSource(
+        FederatedSource(id = "fs-new", tenantDbId = tdId, alias = "vouched", setupSql = "SELECT 1;")
+          .copy(setupSqlTrusted = true)
+      )
+      val td = TenantDb(
+        id = tdId,
+        tenantId = "acme",
+        name = "acme_prod",
+        kind = TenantDbKind.InMemory,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+      val lines = ai.starlake.quack.ondemand.initsql.InitSqlTrustReport
+        .federationLines(fs.listSources(tdId).map(td -> _))
+      lines should have size 1
+      lines.head should include("tenant 'acme' database 'acme_prod' federated source 'legacy'")
+      lines.head should not include "AKIAQODFEDMARKER"
+    }

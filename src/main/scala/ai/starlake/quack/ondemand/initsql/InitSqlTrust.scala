@@ -32,6 +32,24 @@ object InitSqlTrust:
       case Some(sql) if sql == stored && !writerTrusted => storedTrusted
       case Some(_)                                      => writerTrusted
 
+  /** The trust flag of a row a manifest import writes (only superusers import): the manifest's own
+    * flag when it carries one (an exported row says who wrote it, so export then import trusts
+    * nothing new); without one (a hand-written manifest, the superuser's own text) trusted, except
+    * that an existing row whose SQL the manifest leaves unchanged keeps its stored flag. `existing`
+    * is the stored row's (sql, flag).
+    */
+  def onImport(
+      sql: String,
+      declared: Option[Boolean],
+      existing: Option[(String, Boolean)]
+  ): Boolean =
+    declared match
+      case Some(flag) => flag
+      case None       =>
+        existing match
+          case Some((stored, flag)) if stored == sql => flag
+          case _                                     => true
+
   /** The trust flag of a newly created row. */
   def onCreate(sql: String, writerTrusted: Boolean): Boolean =
     afterWrite("", storedTrusted = true, Some(sql), writerTrusted)

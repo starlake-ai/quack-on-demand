@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.initsql
 
-import ai.starlake.quack.model.{Pool, TenantDb}
+import ai.starlake.quack.model.{FederatedSource, FederatedSourceType, Pool, TenantDb}
 import com.typesafe.scalalogging.LazyLogging
 
 /** The boot report of untrusted `initSql`: one WARN per database or pool whose `initSql` a tenant
@@ -55,6 +55,20 @@ object InitSqlTrustReport extends LazyLogging:
     case InitSqlVerdict.Checked(n, refused) =>
       Some(line(row, Some(refused.map(r => s"statement ${r.statement} of $n: ${r.reason}"))))
     case InitSqlVerdict.Unchecked(_) => Some(line(row, None))
+
+  /** The WARN line of every `sql` federated source with no known author (CONTRACT Addendum 4 item
+    * 26: only superusers write one now; a row stored before has no recorded author). Such a source
+    * keeps running its setupSql unrestricted on every node. `sources` pairs each with its database.
+    */
+  def federationLines(sources: List[(TenantDb, FederatedSource)]): List[String] =
+    sources.collect {
+      case (td, s) if s.sourceType == FederatedSourceType.Sql && !s.setupSqlTrusted =>
+        s"tenant '${td.tenantId}' database '${td.name}' federated source '${s.alias}' (sourceType " +
+          "sql): no superuser is known to have written it, and every node of the database runs " +
+          "its setupSql unrestricted. Only superusers may create or change a sql source: review " +
+          "it, then have a superuser re-save it unchanged (federation create with the same " +
+          "body) or delete it."
+    }.sorted
 
   /** Logs [[lineAfter]] for every untrusted row, each checked with `checker` (one qod-node run per
     * row on a manager that has one), one row after the other.

@@ -2,6 +2,9 @@ databaseChangeLog:
   - changeSet:
       id: 0053-init-sql-trust
       author: qod
+      # Changed before release (Task 20 review M2): a development control plane that ran the first
+      # version keeps its flags.
+      validCheckSum: ANY
       changes:
         # Whether a database's or a pool's initSql was written by a superuser (or by the manager
         # itself), which nodes run as written, or by a tenant admin, which nodes run only under the
@@ -31,5 +34,26 @@ databaseChangeLog:
             sql: UPDATE qodstate_tenant_db SET init_sql_trusted = true WHERE init_sql = ''
         - sql:
             sql: UPDATE qodstate_pool SET init_sql_trusted = true WHERE init_sql IS NULL OR init_sql = ''
+        # Only while no tenant-db create or update by anyone else is newer for that tenant and name:
+        # a database qod serve made and a tenant admin changed (or deleted and made again) since.
         - sql:
-            sql: UPDATE qodstate_tenant_db td SET init_sql_trusted = true WHERE EXISTS (SELECT 1 FROM qodstate_audit a WHERE a.actor = 'system' AND a.actor_realm = 'system' AND a.action = 'database.create' AND a.outcome = 'ok' AND a.tenant = td.tenant_id AND a.target = td.name)
+            sql: UPDATE qodstate_tenant_db td SET init_sql_trusted = true WHERE EXISTS (SELECT 1 FROM qodstate_audit a WHERE a.actor = 'system' AND a.actor_realm = 'system' AND a.action = 'database.create' AND a.outcome = 'ok' AND a.tenant = td.tenant_id AND a.target = td.name AND NOT EXISTS (SELECT 1 FROM qodstate_audit b WHERE b.action IN ('database.create', 'database.update') AND b.outcome = 'ok' AND b.tenant = a.tenant AND b.target = a.target AND b.ts > a.ts AND NOT (b.actor = 'system' AND b.actor_realm = 'system')))
+  - changeSet:
+      id: 0053-federated-sql-author
+      author: qod
+      changes:
+        # Whether a superuser (or the manager) wrote a federated source. A `sql` source runs its
+        # setupSql unrestricted on every node, so only superusers may write one from now on
+        # (CONTRACT Addendum 4 item 26); every row stored before has no known author and stays
+        # false, which boot reports once per row. Typed sources are rendered by the manager.
+        - addColumn:
+            tableName: qodstate_federated_source
+            columns:
+              - column:
+                  name: setup_sql_trusted
+                  type: boolean
+                  defaultValueBoolean: false
+                  constraints:
+                    nullable: false
+        - sql:
+            sql: UPDATE qodstate_federated_source SET setup_sql_trusted = true WHERE source_type <> 'sql'

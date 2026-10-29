@@ -521,6 +521,23 @@ class McpPlatformToolsSpec extends AnyFlatSpec with Matchers:
       out.swap.toOption.get should include("superuser_required")
     }
 
+  // CONTRACT Addendum 4 item 26: the tool goes through the REST handler, so a tenant admin's sql
+  // source is refused there too.
+  "upsert_federated_source" should "refuse a sql source to a tenant-scoped admin PAT" in
+    withTools(withFederation = true) { (tools, _) =>
+      val out = call(
+        tools,
+        "upsert_federated_source",
+        tenantPat,
+        "tenant"    -> Json.fromString(Tenant0),
+        "database"  -> Json.fromString(TenantDb),
+        "alias"     -> Json.fromString("fedpg"),
+        "setup_sql" -> Json.fromString("INSTALL postgres;")
+      )
+      withClue(out)(out.isLeft shouldBe true)
+      out.swap.toOption.get should include("superuser_required")
+    }
+
   "upsert_federated_source" should
     "reject a tenant-A-scoped admin PAT addressing tenant B with tenant_forbidden" in
     withTools(withFederation = true) { (tools, _) =>

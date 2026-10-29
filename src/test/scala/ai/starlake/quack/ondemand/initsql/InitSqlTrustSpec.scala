@@ -267,3 +267,32 @@ class InitSqlTrustSpec extends AnyFlatSpec with Matchers:
       include("qod:untrusted-")
     fresh.listTenantDbs("acme") shouldBe empty
   }
+
+  // Task 20 review I3: an export says who wrote each initSql, and an import honours it, so an
+  // export then import launders nothing.
+  it should "honour the exported flag, and keep a stored one when the manifest has none" in {
+    import ai.starlake.quack.ondemand.manifest.*
+    val f = new Fixture
+    f.createDb(Sql, TenantAdmin) shouldBe false
+    val exported = ManifestExporter
+      .build(f.store, java.time.Instant.EPOCH, "0.2.0", "test")
+      .fold(e => fail(e.toString), identity)
+    exported.tenants.flatMap(_.tenantDbs).find(_.name == "acme_prod").get.initSqlTrusted shouldBe
+      Some(false)
+    ManifestImporter.apply(exported, f.store, requireEncryption = false) shouldBe Right(())
+    f.store.listTenantDbs("acme").find(_.name == "acme_prod").get.initSqlTrusted shouldBe false
+    // A hand-written manifest (no flag) leaving the text unchanged keeps the stored flag ...
+    val handWritten = exported.copy(tenants =
+      exported.tenants.map(t => t.copy(tenantDbs = t.tenantDbs.map(_.copy(initSqlTrusted = None))))
+    )
+    ManifestImporter.apply(handWritten, f.store, requireEncryption = false) shouldBe Right(())
+    f.store.listTenantDbs("acme").find(_.name == "acme_prod").get.initSqlTrusted shouldBe false
+    // ... and one changing it is the superuser's own text.
+    val changed = handWritten.copy(tenants =
+      handWritten.tenants.map(t =>
+        t.copy(tenantDbs = t.tenantDbs.map(_.copy(initSql = "SET threads = 4;")))
+      )
+    )
+    ManifestImporter.apply(changed, f.store, requireEncryption = false) shouldBe Right(())
+    f.store.listTenantDbs("acme").find(_.name == "acme_prod").get.initSqlTrusted shouldBe true
+  }
