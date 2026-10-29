@@ -596,6 +596,9 @@ function Format-TenantInitSql([string]$Label, [string]$Sql, [bool]$Trusted) {
 }
 
 $sb = [System.Text.StringBuilder]::new()
+# The first line: this spawn's nonce, which qod-node compares with the one it reads itself and, on a
+# mismatch (or without this line), refuses to run the init SQL at all. Mirrors spawn-quack-node.sh.
+if ($initNonce -cmatch '^[0-9a-f]{32,128}$') { [void]$sb.AppendLine("-- qod:init-nonce $initNonce") }
 if (-not [string]::IsNullOrEmpty($proxySql))  { [void]$sb.AppendLine($proxySql) }
 # Before the tenant-db's initSql, so an operator's own SET still wins.
 [void]$sb.AppendLine("SET temp_directory = '$($spillDir.Replace("'", "''"))';")

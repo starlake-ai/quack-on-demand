@@ -37,10 +37,13 @@ namespace {
 
 using namespace qod;
 
-//! Runs every init file; `nonce` marks a tenant's sections (empty: none, the --list-* modes).
+//! Runs every init file; `nonce` marks a tenant's sections (empty: none, the --list-* modes). A
+//! serving node's init file must open with the nonce line (RequireInitNonceLine): a stream whose
+//! script read another nonce is refused whole, never run with its tenant sections trusted.
 void RunInitFiles(duckdb::Connection &con, const NodeOptions &options, const std::string &nonce = "") {
 	for (auto &file : options.init_files) {
-		RunInit(con, ReadAll(file), nonce);
+		auto sql = ReadAll(file);
+		RunInit(con, nonce.empty() ? sql : RequireInitNonceLine(sql, nonce), nonce);
 	}
 }
 

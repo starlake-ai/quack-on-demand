@@ -129,6 +129,13 @@ class SpawnScriptTenantInitSpec extends AnyFlatSpec with Matchers with SpawnScri
     trusted.exists(_.toLowerCase.contains("qod:untrusted-")) shouldBe false
   }
 
+  // Review N1: the stream opens with the nonce the script read, which qod-node compares with its
+  // own and refuses the whole stream on a mismatch.
+  "the init SQL" should "open with this spawn's nonce line" in {
+    initSql(Untrusted).head shouldBe s"-- qod:init-nonce $Nonce"
+    initSql(Map.empty).head shouldBe s"-- qod:init-nonce $Nonce"
+  }
+
   "an empty initSql" should "leave no section" in {
     initSql(Map.empty).exists(_.contains("qod:untrusted-")) shouldBe false
   }

@@ -596,6 +596,11 @@ append_tenant_init_sql() {
 # directory (SECRET_PATH, see above: DuckDB then refuses to change it from any session) and before
 # loading quack and serving.
 INIT_SQL=""
+# The first line: this spawn's nonce, which qod-node compares with the one it reads itself and, on a
+# mismatch (or without this line), refuses to run the init SQL at all.
+if [[ "$INIT_NONCE" =~ ^[0-9a-f]{32,128}$ ]]; then
+  INIT_SQL+="-- qod:init-nonce $INIT_NONCE"$'\n'
+fi
 INIT_SQL+="$PROXY_SQL"$'\n'
 # Cgroup-derived memory_limit / temp_directory / threads (see above) and a fleet assignment's pool
 # cpu/memory SETs (resourceSql, the manager's) run right after the proxy settings and before the

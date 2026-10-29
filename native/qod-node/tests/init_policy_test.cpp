@@ -11,6 +11,7 @@
 #include "screen_rules.hpp"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -210,6 +211,26 @@ int main() {
 		Expect(forged_end.size() == 1 && !forged_end[0].trusted, "nor can a tenant's text end its own section");
 		auto no_nonce = qod::SplitInitSections(b + "\nSELECT 1;\n" + e + "\n", "");
 		Expect(no_nonce.size() == 1 && no_nonce[0].trusted, "an empty nonce recognizes no marker");
+	}
+
+	// ---- the nonce line (review N1): the stream must open with this node's own nonce
+	{
+		const std::string n = "0123456789abcdef0123456789abcdef";
+		Expect(qod::RequireInitNonceLine("-- qod:init-nonce " + n + "\r\nSET a = 1;\n", n) == "SET a = 1;\n",
+		       "the nonce line is stripped");
+		auto refused = [&](const std::string &sql, const std::string &nonce) {
+			try {
+				qod::RequireInitNonceLine(sql, nonce);
+				return false;
+			} catch (std::runtime_error &error) {
+				return std::string(error.what()).find(n) == std::string::npos;
+			}
+		};
+		Expect(refused("SET a = 1;\n", n), "a stream without the line is refused");
+		Expect(refused("-- qod:init-nonce ffffffffffffffffffffffffffffffff\nSET a = 1;\n", n),
+		       "a stream with another nonce is refused, naming neither");
+		Expect(refused("SET a = 1;\n-- qod:init-nonce " + n + "\n", n), "the line must come first");
+		Expect(refused("-- qod:init-nonce " + n + "\n", ""), "an empty nonce matches nothing");
 	}
 
 	// ---- --check-init's verdict

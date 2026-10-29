@@ -98,7 +98,9 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
       )
     withClue(err)(rc shouldBe 0)
     val lines = out.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
-    lines.head should startWith("SET temp_directory = '")
+    // The first line names this spawn's init nonce (review N1), then the spill directory.
+    lines.head shouldBe s"-- qod:init-nonce $Nonce"
+    lines(1) should startWith("SET temp_directory = '")
     lines should contain("SELECT 'db-init';")
     lines should contain("INSTALL httpfs;")
     lines should contain("INSTALL avro;")

@@ -16,6 +16,7 @@
 #include "sql_script.hpp"
 
 #include <iostream>
+#include <stdexcept>
 
 namespace qod {
 namespace {
@@ -150,6 +151,15 @@ std::string TooLarge(size_t bytes) {
 }
 
 } // namespace
+
+std::string RequireInitNonceLine(const std::string &sql, const std::string &nonce) {
+	auto end = sql.find('\n');
+	auto first = TrimLine(sql.substr(0, end == std::string::npos ? sql.size() : end));
+	if (nonce.empty() || first != std::string(kInitNonceLine) + " " + nonce) {
+		throw std::runtime_error("the init SQL does not open with this node's init nonce line: refusing to run it");
+	}
+	return end == std::string::npos ? std::string() : sql.substr(end + 1);
+}
 
 std::vector<InitSection> SplitInitSections(const std::string &sql, const std::string &nonce) {
 	std::vector<InitSection> sections;

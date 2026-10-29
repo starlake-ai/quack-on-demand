@@ -68,6 +68,11 @@ wait_exit() {
   return 1
 }
 
+# The line every serving node's init SQL opens with (the spawn script writes it).
+nonce_line() {
+  printf -- '-- qod:init-nonce %s\n' "${1-$init_nonce}"
+}
+
 port() {
   echo $((30000 + RANDOM % 20000))
 }
@@ -233,7 +238,7 @@ secrets="$(new_secrets "$token")"
 # The last three statements try to replace the parse screen with another authorization function
 # (INSTALL and LOAD first: the setting belongs to quack). The refusal check below only passes because
 # the node installs its own screen after the init SQL.
-cat > "$work/init.sql" <<'SQL'
+{ nonce_line; cat <<'SQL'
 CREATE TABLE answers AS SELECT 42 AS v;
 SELEC broken;
 CREATE TABLE more AS SELECT 'a;b' AS w;
@@ -242,6 +247,7 @@ INSTALL quack;
 LOAD quack;
 SET GLOBAL quack_authorization_function = 'system.main.no_such_function';
 SQL
+} > "$work/init.sql"
 serve_port="$(port)"
 sleep 300 &
 parent=$!
@@ -308,7 +314,7 @@ else
 fi
 
 # --- serve: init SQL on stdin, SIGTERM stops the node ---------------------------------------------
-printf 'CREATE TABLE piped AS SELECT 7 AS v;\nSELECT * FROM piped;' |
+{ nonce_line; printf 'CREATE TABLE piped AS SELECT 7 AS v;\nSELECT * FROM piped;'; } |
   "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-one)" \
     --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/term.out" 2>&1 &
 term_node=$!
@@ -334,7 +340,7 @@ fi
 ext_settings() {
   local label="$1" expected="$2"
   shift 2
-  printf "SET allow_community_extensions = true;\nSET allow_unsigned_extensions = true;\nCOPY (SELECT current_setting('allow_community_extensions') AS c, current_setting('allow_unsigned_extensions') AS u, current_setting('autoinstall_known_extensions') AS a) TO '%s' (HEADER false);\n" "$work/ext-$label.csv" |
+  { nonce_line; printf "SET allow_community_extensions = true;\nSET allow_unsigned_extensions = true;\nCOPY (SELECT current_setting('allow_community_extensions') AS c, current_setting('allow_unsigned_extensions') AS u, current_setting('autoinstall_known_extensions') AS a) TO '%s' (HEADER false);\n" "$work/ext-$label.csv"; } |
     "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-ext-$label")" \
       --secret-directory "$work/secret-dir" --node-id "$node_id" --init - "$@" > "$work/ext-$label.out" 2>&1 &
   local ext_node=$!
@@ -361,6 +367,7 @@ ext_settings all "true,true,true" --allow-community-extensions --allow-unsigned-
 # position, never by its text), the node still serves, and the trusted SQL after the section runs the
 # same kind of statement unrestricted. The COPY at the end records what the init did.
 cat > "$work/tenant-init.sql" <<SQL
+-- qod:init-nonce $init_nonce
 CREATE TABLE trusted_made AS SELECT 1 AS v;
 -- qod:untrusted-begin $init_nonce pool
 SET memory_limit = '1GB';
@@ -396,6 +403,25 @@ else
   fail "tenant initSql: the node never became ready"
   cat "$work/tenant.out"
 fi
+
+# --- the init stream must open with this node's nonce line (review N1) -----------------------------
+# A script that read another nonce would mark the tenant's sections with lines this node ignores:
+# the node refuses the whole stream instead of running them as trusted, never naming either nonce.
+refuses_stream() {
+  local label="$1" first="$2" status
+  { [[ -n "$first" ]] && printf '%s\n' "$first"; printf 'CREATE TABLE never AS SELECT 1;\n'; } |
+    "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets "token-stream-$label")" \
+      --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/stream-$label.out" 2>&1
+  status=$?
+  [[ $status -eq 1 ]] || fail "init stream $label: exit $status, expected 1"
+  grep -q "does not open with this node's init nonce line" "$work/stream-$label.out" ||
+    fail "init stream $label: no refusal"
+  if grep -q -e "$init_nonce" -e "ffffffffffffffff" "$work/stream-$label.out"; then
+    fail "init stream $label: a nonce reached the output"
+  fi
+}
+refuses_stream "missing" ""
+refuses_stream "other" "-- qod:init-nonce ffffffffffffffffffffffffffffffff"
 
 # --- --check-init: the same verdict, as JSON, for the manager's write-time check -----------------
 # The untrusted section of the init above, judged without running: the positions the node skipped.

@@ -31,6 +31,16 @@ struct InitSection {
 	std::string sql;
 };
 
+//! The first line every init stream a serving node runs must hold: `-- qod:init-nonce <nonce>`,
+//! written by the spawn script from the nonce file qod-node reads too.
+constexpr const char *kInitNonceLine = "-- qod:init-nonce";
+
+//! `sql` without its first line, when that line (spaces, tabs and a trailing CR trimmed) is
+//! kInitNonceLine followed by one space and `nonce`. Throws std::runtime_error otherwise, never
+//! naming either nonce: a script that saw another nonce than this process's would mark the tenant's
+//! sections with lines this process ignores, and run them as trusted.
+std::string RequireInitNonceLine(const std::string &sql, const std::string &nonce);
+
 //! Splits `sql` on its marker lines carrying `nonce` (a line equal to a marker once spaces, tabs and a
 //! trailing CR are trimmed), before any tokenizing, so nothing inside one section (an unterminated
 //! string or comment included) can reach into the next. Fails closed: a section opened and never

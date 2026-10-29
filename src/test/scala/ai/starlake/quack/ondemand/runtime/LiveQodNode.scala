@@ -117,11 +117,12 @@ object LiveQodNode:
       token: String = "tok-live-qod-node"
   ): LiveQodNode =
     val bin     = QodNodeTestBinary.path.getOrElse(throw new IllegalStateException("no qod-node"))
+    val nonce   = NodeSecretFiles.newInitNonce()
     val secrets = NodeSecretFiles.writePrivateDir(
       Map(
         NodeSecretFiles.TokenKey     -> token,
         NodeSecretFiles.AuthzKey     -> keys.keyHex(nodeId),
-        NodeSecretFiles.InitNonceKey -> NodeSecretFiles.newInitNonce()
+        NodeSecretFiles.InitNonceKey -> nonce
       ),
       Some(dir)
     )
@@ -153,7 +154,8 @@ object LiveQodNode:
     // with its log below.
     Try {
       val stdin = p.getOutputStream
-      try stdin.write(init.getBytes(StandardCharsets.UTF_8))
+      // The first line names this start's nonce, as the spawn scripts write it.
+      try stdin.write(s"-- qod:init-nonce $nonce\n$init".getBytes(StandardCharsets.UTF_8))
       finally stdin.close()
     }
     val deadline = System.currentTimeMillis() + 60000
