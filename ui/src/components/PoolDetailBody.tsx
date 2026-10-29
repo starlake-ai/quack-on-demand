@@ -8,6 +8,7 @@ import { CpuLimitSlider, MemLimitSlider } from './LimitSlider';
 import { Modal } from './Modal';
 import Tabs from './Tabs';
 import { dashboardPath, poolsPath } from '../nav/links';
+import { initSqlToSend } from '../api/initSql';
 
 
 /** Header (title + Back button) + the four-tab body for one pool. No
@@ -66,6 +67,12 @@ export default function PoolDetailBody({
   const [scaleForce, setScaleForce] = useState(false);
   const [scaleErr, setScaleErr]     = useState<string | null>(null);
   const [lockdownErr, setLockdownErr] = useState<string | null>(null);
+
+  // Pool init SQL edit (pool/setInitSql). null = untouched: nothing is sent, so a save never
+  // vouches for (or demotes) a text nobody edited.
+  const [initSqlDraft, setInitSqlDraft]   = useState<string | null>(null);
+  const [initSqlSaving, setInitSqlSaving] = useState(false);
+  const [initSqlNote, setInitSqlNote]     = useState<string | null>(null);
 
   // Pool resource edit state (Nodes tab). Checkbox enables; slider sets the value.
   const [resCpuEnabled, setResCpuEnabled] = useState(false);
@@ -161,6 +168,25 @@ export default function PoolDetailBody({
       setActionErr(errorMessage(e));
     } finally {
       setResSaving(false);
+    }
+  }
+
+  async function saveInitSql() {
+    if (data == null) return;
+    const toSend = initSqlToSend(data.initSql, initSqlDraft ?? '', initSqlDraft != null);
+    if (toSend === undefined) return;
+    setInitSqlSaving(true);
+    setActionErr(null);
+    setInitSqlNote(null);
+    try {
+      const r = await api.setPoolInitSql({ tenant, tenantDb, pool, initSql: toSend });
+      setData(r);
+      setInitSqlDraft(null);
+      if (r.initSqlWarning) setInitSqlNote(`Init SQL not checked: ${r.initSqlWarning}`);
+    } catch (e) {
+      setActionErr(errorMessage(e));
+    } finally {
+      setInitSqlSaving(false);
     }
   }
 
@@ -430,6 +456,34 @@ export default function PoolDetailBody({
         <p className="subtle" style={{ fontSize: '0.85em', marginTop: '0.4rem', marginBottom: 0 }}>
           Restart nodes to apply resource changes (Kubernetes only).
         </p>
+      </div>
+      <div style={{ marginBottom: '0.75rem' }}>
+        <label>Init SQL
+          <p className="subtle" style={{ marginBottom: 4 }}>
+            Runs at node boot after the catalog attach and before the federation SQL; edits take
+            effect on the next node spawn. A tenant admin&rsquo;s init SQL runs only{' '}
+            <code>SET</code>/<code>RESET</code> of allowlisted settings to a literal, read-only{' '}
+            <code>PRAGMA</code>s and <code>INSTALL</code>/<code>LOAD</code> of allowlisted
+            extensions; a superuser&rsquo;s runs as written.
+            {data.initSql ? (data.initSqlTrusted
+              ? ' Stored: written by a superuser, runs as written.'
+              : ' Stored: written by a tenant admin, runs under the allowlist.') : ''}
+          </p>
+          <textarea
+            rows={4}
+            value={initSqlDraft ?? data.initSql ?? ''}
+            onChange={ev => setInitSqlDraft(ev.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={initSqlSaving ||
+            initSqlToSend(data.initSql, initSqlDraft ?? '', initSqlDraft != null) === undefined}
+          onClick={() => void saveInitSql()}
+        >
+          {initSqlSaving ? 'Saving...' : 'Save init SQL'}
+        </button>
+        {initSqlNote && <div className="subtle" role="status">{initSqlNote}</div>}
       </div>
       {actionErr && <div className="login-err">{actionErr}</div>}
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>

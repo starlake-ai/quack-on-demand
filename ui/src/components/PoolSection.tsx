@@ -140,7 +140,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
     if (!tenantDb) { setError('pick a tenant database'); return; }
     const wireCohorts = useCohorts ? cohorts.map(cohortDraftToWire) : undefined;
     try {
-      await api.createPool({
+      const created = await api.createPool({
         tenant, tenantDb, pool: poolName, size,
         roleDistribution: {
           writeonly: effective.wo,
@@ -154,6 +154,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
         ...(cpuEnabled ? { cpu: String(cpuSlider) } : {}),
         ...(memEnabled ? { memory: `${memSlider}Gi` } : {}),
       });
+      if (created.initSqlWarning) window.alert(`Init SQL not checked: ${created.initSqlWarning}`);
       const justCreated = { tenantDb, pool: poolName };
       setAdding(false);
       resetForm();

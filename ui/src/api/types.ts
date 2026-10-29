@@ -92,6 +92,14 @@ export interface PoolResponse {
   pendingReason?: string | null;
   // The sentence behind pendingReason: servers by state and the next command.
   pendingDetail?: string | null;
+  // Operator-authored init SQL of the pool; empty when none.
+  initSql?: string;
+  /** Whether initSql was written by a superuser or the manager (nodes run it as written) rather
+    * than a tenant admin (nodes run only its allowlisted statements). Read-only. */
+  initSqlTrusted?: boolean;
+  /** Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    * the nodes still run only its allowlisted statements. */
+  initSqlWarning?: string | null;
 }
 
 // ----- Fleet backend: bare-metal / VM servers (QOD_RUNTIME_TYPE=fleet) -----
@@ -187,6 +195,14 @@ export interface DeletePoolRequest {
   tenantDb: string;
   pool: string;
   force?: boolean;
+}
+
+/** POST /api/pool/setInitSql: replace a pool's init SQL (next node spawn). */
+export interface SetPoolInitSqlRequest {
+  tenant: string;
+  tenantDb: string;
+  pool: string;
+  initSql: string;
 }
 
 export interface SetPoolResourcesRequest {
@@ -491,6 +507,12 @@ export interface TenantDbResponse {
     * (memory kind, duckdb-file without a live pool, etc.). */
   tableCount: number | null;
   encrypted: boolean;
+  /** Whether initSql was written by a superuser or the manager (nodes run it as written) rather
+    * than a tenant admin (nodes run only its allowlisted statements). Read-only. */
+  initSqlTrusted?: boolean;
+  /** Set on a write whose tenant-admin initSql this manager could not check (no local qod-node):
+    * the nodes still run only its allowlisted statements. */
+  initSqlWarning?: string | null;
 }
 
 export interface TenantDbListResponse {
