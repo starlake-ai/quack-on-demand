@@ -495,14 +495,16 @@ final class TcpRelay(listenPort: Int, targetPort: Int):
     var tail   = Array.emptyByteArray
     var n      = in.read(buffer)
     while n >= 0 do
-      out.write(buffer, 0, n)
-      out.flush()
+      // Counted before it is forwarded: the answer travels on the other pipe, so a statement could
+      // complete before a count taken after the write.
       val seen = tail ++ buffer.take(n)
       var at   = seen.indexOfSlice(needle)
       while at >= 0 do
         decides.incrementAndGet()
         at = seen.indexOfSlice(needle, at + needle.length)
       tail = seen.takeRight(needle.length - 1)
+      out.write(buffer, 0, n)
+      out.flush()
       n = in.read(buffer)
 
 object TcpRelay:

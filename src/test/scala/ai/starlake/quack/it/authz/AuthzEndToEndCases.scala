@@ -1047,26 +1047,63 @@ abstract class AuthzEndToEndCases(
     )
   }
 
+  "the calls of a statement" should "reach the node's description on a DuckLake-on-Postgres pool" in {
+    ready()
+    // Addendum 4 item 32 A: with remote_pushdown disabled, DuckDB no longer folds a constant call
+    // before the binder, so two statements that differ only by the function they call are two plans
+    // the node decides, not one cached constant projection.
+    // A description carries no constant: each door calls functions of its own, so neither reuses the
+    // other's verdict.
+    val calls =
+      Map(Door.Flight -> ("ltrim(' a')", "rtrim('a ')"), Door.Native -> ("ascii('a')", "chr(65)"))
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        val (one, two) = calls(d)
+        val before     = stack.relay.decideCalls
+        as(d, "alice", "lake", s"SELECT $one") shouldBe a[Right[?, ?]]
+        val first = stack.relay.decideCalls
+        as(d, "alice", "lake", s"SELECT $two") shouldBe a[Right[?, ?]]
+        withClue(s"decision calls for $one then $two: ") {
+          first should be > before
+          stack.relay.decideCalls should be > first
+        }
+      }
+    }
+  }
+
   "a catalog macro shadowing a built-in" should "make the built-in's name unclassified for users" in {
     ready()
-    // Addendum 4 item 30a: a macro in the pool's DuckLake catalog (on Postgres, where DuckDB folds
-    // constant calls before post_bind) bearing a classified name would run its body unjudged; the
-    // screen refuses the name for users, however the call reaches it, unless it names the system
-    // catalog. Planted by the superuser, removed after.
+    // Addendum 4 item 32 B: a macro in the pool's DuckLake catalog (on Postgres) bearing a classified
+    // name is what DuckDB binds an unqualified call to, in the statement and in a view's body read
+    // later, so the node judges the entry the name resolves to, on the client's own context. Planted by
+    // the superuser, removed after.
+    admin("lake", s"CREATE VIEW $lake.main.v_lev AS SELECT levenshtein('kitten', 'sitting') AS d")
+    grant(lake, "main", "v_lev", "RO")
+    allowed("alice", "lake", s"SELECT d FROM $lake.main.v_lev", Some(List("3")))
     admin("lake", s"CREATE MACRO $lake.main.levenshtein(a, b) AS 42")
     try
+      val shadowed =
+        s"function levenshtein is not classified: it resolves to $lake.main.levenshtein"
       refused(
         "alice",
         "lake",
         "SELECT levenshtein('kitten', 'sitting')",
-        node = "function levenshtein is not classified: a catalog entry outside the system catalog",
+        node = shadowed,
         alwaysNode = true
       )
       refused(
         "alice",
         "lake",
         s"SELECT $lake.main.levenshtein('kitten', 'sitting')",
-        node = "function levenshtein is not classified",
+        node = shadowed,
+        alwaysNode = true
+      )
+      // The view the gateway admits on its own grant: its body binds to the macro now.
+      refused(
+        "alice",
+        "lake",
+        s"SELECT d FROM $lake.main.v_lev",
+        node = shadowed,
         alwaysNode = true
       )
       allowed(
@@ -1077,6 +1114,38 @@ abstract class AuthzEndToEndCases(
       )
     finally admin("lake", s"DROP MACRO $lake.main.levenshtein")
     allowed("alice", "lake", "SELECT levenshtein('kitten', 'sitting')", Some(List("3")))
+    allowed("alice", "lake", s"SELECT d FROM $lake.main.v_lev", Some(List("3")))
+  }
+
+  "a view's body" should "be judged by the calls it makes, folded or not" in {
+    ready()
+    // Item 32 B: DuckDB folds a call on constants that is another call's argument while binding, so
+    // the plan of a view that nests one shows only the outer call; the node reads the body itself.
+    admin(
+      "lake",
+      s"CREATE VIEW $lake.main.v_set AS SELECT upper(current_setting('TimeZone')) AS z"
+    )
+    grant(lake, "main", "v_set", "RO")
+    refused(
+      "alice",
+      "lake",
+      s"SELECT z FROM $lake.main.v_set",
+      node = "function current_setting is superuser-only",
+      alwaysNode = true
+    )
+    // An extension function loaded at runtime, which no classification lists (fts, as the unclassified
+    // function case loads it).
+    val loaded = stack.flight("LOAD fts", "admin", "admin", Acme, "lake", superuser = true).isRight
+    assume(loaded, "the node could not load the fts extension (no network access?)")
+    admin("lake", s"CREATE VIEW $lake.main.v_stem AS SELECT upper(stem('running', 'porter')) AS s")
+    grant(lake, "main", "v_stem", "RO")
+    refused(
+      "alice",
+      "lake",
+      s"SELECT s FROM $lake.main.v_stem",
+      node = "function stem is not classified",
+      alwaysNode = true
+    )
   }
 
   // ---------- catalogs: memory, a custom alias, federated, lake ----------
