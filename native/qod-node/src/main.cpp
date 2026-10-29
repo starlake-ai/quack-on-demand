@@ -117,6 +117,8 @@ int Serve(const NodeOptions &options) {
 	// statement on. httpfs is installed at init and autoloaded on first use (a user's first credential
 	// secret included): the guard fires on that autoload too.
 	ApplyCachePolicy(config);
+	// Item 32 A: no constant subtree folded before the binder, so the describer reads every call.
+	ApplyOptimizerPolicy(config);
 	RegisterS3EnvironmentGuard(config);
 	duckdb::DuckDB db(nullptr, &config);
 	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
@@ -149,6 +151,18 @@ int Serve(const NodeOptions &options) {
 		}
 	});
 	load_quack();
+
+	// A trusted init statement may have set disabled_optimizers: remote_pushdown stays in it.
+	auto optimizers = RunStrict(con, "SELECT current_setting('disabled_optimizers')", "reading disabled_optimizers");
+	auto optimizers_chunk = optimizers->Fetch();
+	auto current =
+	    optimizers_chunk && optimizers_chunk->size() > 0 ? optimizers_chunk->GetValue(0, 0).ToString() : std::string();
+	auto restored = WithDisabledOptimizer(current);
+	if (!restored.empty()) {
+		RunStrict(con, "SET GLOBAL disabled_optimizers = " + QuoteLiteral(restored), "disabling remote_pushdown");
+		std::cerr << "[qod-node] the init SQL dropped " << kDisabledOptimizer
+		          << " from disabled_optimizers: disabled again" << std::endl;
+	}
 
 	// After the init SQL, so nothing it ran can replace the screen.
 	RunStrict(con, std::string("SET GLOBAL quack_authorization_function = ") + QuoteLiteral(kScreenFunction),

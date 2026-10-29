@@ -351,6 +351,22 @@ else
   cat "$work/lockdown.out"
 fi
 
+# --- serve: remote_pushdown stays disabled whatever the init SQL sets (item 32 A) -----------------
+{ nonce_line; printf "SET disabled_optimizers = 'filter_pushdown';\n"; } |
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-optimizers)" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/optimizers.out" 2>&1 &
+optimizers_node=$!
+pids+=("$optimizers_node")
+if wait_for '\[qod-node\] ready' "$work/optimizers.out"; then
+  grep -q 'dropped remote_pushdown from disabled_optimizers: disabled again' "$work/optimizers.out" ||
+    fail "optimizers: the init SQL's disabled_optimizers was not given remote_pushdown back"
+  kill -TERM "$optimizers_node"
+  wait_exit "$optimizers_node" || fail "optimizers: the node did not stop"
+else
+  fail "optimizers: the node never became ready"
+  cat "$work/optimizers.out"
+fi
+
 # --- serve: quack installs where the trusted init SQL says extensions come from -------------------
 # A trusted init statement that points the extension directory and repository elsewhere applies to the
 # quack install (an air-gapped mirror): here an empty directory and a repository no one serves, so

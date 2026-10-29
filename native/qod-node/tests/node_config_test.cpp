@@ -155,6 +155,21 @@ int main() {
 		Expect(Setting(cached_con, "enable_http_metadata_cache") == "false", "the HTTP metadata cache at open");
 	}
 
+	// Item 32 A: the remote pushdown optimizer, which folds constant subtrees before the binder, is off
+	// at open; a disabled_optimizers value without it gets it back, one with it is left alone.
+	{
+		duckdb::DBConfig optimized;
+		qod::ApplyOptimizerPolicy(optimized);
+		duckdb::DuckDB optimized_db(nullptr, &optimized);
+		duckdb::Connection optimized_con(optimized_db);
+		Expect(Setting(optimized_con, "disabled_optimizers") == "remote_pushdown",
+		       "disabled_optimizers at open: " + Setting(optimized_con, "disabled_optimizers"));
+	}
+	Expect(qod::WithDisabledOptimizer("") == "remote_pushdown", "an empty disabled_optimizers");
+	Expect(qod::WithDisabledOptimizer("filter_pushdown") == "filter_pushdown,remote_pushdown",
+	       "one without remote_pushdown");
+	Expect(qod::WithDisabledOptimizer("filter_pushdown, remote_pushdown").empty(), "one with it");
+
 	if (failures == 0) {
 		std::cout << "node_config_test: all passed" << std::endl;
 	}

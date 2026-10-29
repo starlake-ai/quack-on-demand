@@ -34,6 +34,21 @@ void ApplyCachePolicy(duckdb::DBConfig &config) {
 	config.SetOptionByName("enable_http_metadata_cache", duckdb::Value::BOOLEAN(false));
 }
 
+void ApplyOptimizerPolicy(duckdb::DBConfig &config) {
+	config.SetOptionByName("disabled_optimizers", duckdb::Value(kDisabledOptimizer));
+}
+
+std::string WithDisabledOptimizer(const std::string &current) {
+	for (auto &name : duckdb::StringUtil::Split(current, ',')) {
+		if (duckdb::StringUtil::Lower(duckdb::StringUtil::Replace(name, " ", "")) == kDisabledOptimizer) {
+			return "";
+		}
+	}
+	auto trimmed = current;
+	duckdb::StringUtil::Trim(trimmed);
+	return trimmed.empty() ? kDisabledOptimizer : trimmed + "," + kDisabledOptimizer;
+}
+
 void ResetS3EnvironmentDefaults(duckdb::DatabaseInstance &db) {
 	auto &config = duckdb::DBConfig::GetConfig(db);
 	for (auto name = kS3EnvironmentSettings; *name; name++) {

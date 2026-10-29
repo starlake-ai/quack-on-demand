@@ -17,6 +17,20 @@ void ApplyExtensionPolicy(duckdb::DBConfig &config, const ExtensionPolicy &polic
 //! bytes another user's keys fetched. Call it before the database opens.
 void ApplyCachePolicy(duckdb::DBConfig &config);
 
+//! The optimizer every node runs without (CONTRACT Addendum 4 item 32 A).
+constexpr const char *kDisabledOptimizer = "remote_pushdown";
+
+//! Writes disabled_optimizers = remote_pushdown into `config`. With a remote catalog attached (a
+//! Postgres one, or a DuckLake catalog's metadata on Postgres), DuckDB's RemotePushdownOptimizer folds
+//! every constant subtree of a statement to its value before the binder runs
+//! (Optimizer::OptimizeStatement, optimizer.cpp:216-227), so the calls it evaluates reach no plan the
+//! describer reads. Call it before the database opens.
+void ApplyOptimizerPolicy(duckdb::DBConfig &config);
+
+//! `current` (a disabled_optimizers value, comma separated) with kDisabledOptimizer added when it is
+//! missing; empty when it is there already.
+std::string WithDisabledOptimizer(const std::string &current);
+
 //! The settings httpfs fills from the environment (AWS_*, DUCKDB_S3_*) when it loads, null-terminated.
 extern const char *const kS3EnvironmentSettings[];
 
