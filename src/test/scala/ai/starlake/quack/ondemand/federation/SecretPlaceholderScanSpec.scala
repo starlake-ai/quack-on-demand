@@ -7,10 +7,10 @@ import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** CONTRACT Addendum 4 item 29 (amended): every `{{secret.NAME}}` of a `sql` source's template must
-  * sit inside a single-quoted literal. The scan against templates that try to look quoted while
-  * DuckDB would read the placeholder outside a literal, and the render-time rule for templates
-  * stored before the rule.
+/** CONTRACT Addendum 4 items 29 (amended) and 29c: every `{{secret.NAME}}` of a `sql` source's
+  * template must sit inside a single-quoted literal. The scan against templates that try to look
+  * quoted while DuckDB would read the placeholder outside a literal, and the render-time rule for
+  * templates stored before the rule.
   */
 class SecretPlaceholderScanSpec extends AnyFlatSpec with Matchers with OptionValues:
   import SecretPlaceholderScan.unquoted
@@ -109,6 +109,70 @@ class SecretPlaceholderScanSpec extends AnyFlatSpec with Matchers with OptionVal
     lines.exists(l => l.contains("'legacy'") && l.contains("{{secret.PORT}}")) shouldBe true
     lines.exists(_.contains("AKIAQODSCANMARKER")) shouldBe false
   }
+
+  // ---- item 29c: what a plain token may still do around an unquoted placeholder
+  import SecretPlaceholderScan.{plainValue, refusedAtRender}
+
+  "an unquoted placeholder's value" should "be refused when it could open a comment" in {
+    plainValue("5432") shouldBe true
+    plainValue("db-1.internal_2") shouldBe true
+    // `5432--` comments out the rest of the template line.
+    plainValue("5432--") shouldBe false
+    plainValue("a--b") shouldBe false
+    // Against a template `-` either end makes `--`.
+    plainValue("-x") shouldBe false
+    plainValue("x-") shouldBe false
+    plainValue("-") shouldBe false
+    plainValue("") shouldBe false
+    refusedAtRender("ATTACH 'h' AS a (PORT {{secret.P}});", List("P" -> "5432--")) shouldBe
+      Some("P")
+    refusedAtRender("ATTACH 'h' AS a (PORT {{secret.P}});", List("P" -> "-x")) shouldBe Some("P")
+  }
+
+  "an unquoted placeholder" should "be substituted when nothing of the template touches it" in {
+    refusedAtRender("ATTACH 'h' AS a (PORT {{secret.X}});", List("X" -> "5432")) shouldBe None
+    refusedAtRender("PORT {{secret.X}}", List("X" -> "5432")) shouldBe None
+    refusedAtRender("SET threads = {{secret.X}};\n", List("X" -> "4")) shouldBe None
+    refusedAtRender("SELECT {{secret.A}}.{{secret.B}}", List("A" -> "s", "B" -> "t")) shouldBe None
+  }
+
+  it should "be refused when a quote, -, /, *, $, letter or digit touches it" in {
+    // A value `E` right before a quote makes the next literal an escape string.
+    refusedAtRender("SELECT {{secret.E}}'a\\', 'b';", List("E" -> "E")) shouldBe Some("E")
+    refusedAtRender("SELECT 'a'{{secret.P}};", List("P" -> "x")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}\"c\";", List("P" -> "x")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}`c`;", List("P" -> "x")) shouldBe Some("P")
+    refusedAtRender("SELECT 1-{{secret.P}};", List("P" -> "1")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}-1;", List("P" -> "1")) shouldBe Some("P")
+    refusedAtRender("SELECT 4/{{secret.P}};", List("P" -> "2")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}*2;", List("P" -> "2")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}$1;", List("P" -> "x")) shouldBe Some("P")
+    refusedAtRender("SELECT x{{secret.P}};", List("P" -> "y")) shouldBe Some("P")
+    refusedAtRender("SELECT {{secret.P}}9;", List("P" -> "1")) shouldBe Some("P")
+    // One badly placed occurrence refuses the placeholder everywhere.
+    refusedAtRender("SELECT {{secret.P}}, {{secret.P}}e;", List("P" -> "1")) shouldBe Some("P")
+  }
+
+  it should "leave a placeholder inside a literal to the quote doubling, whatever its value" in {
+    refusedAtRender("SELECT 'x{{secret.P}}y';", List("P" -> "a--b'; SELECT 2; --")) shouldBe None
+    refusedAtRender("SELECT 'x', {{secret.Q}};", List("P" -> "a--b", "Q" -> "1")) shouldBe None
+  }
+
+  "a stored template" should "leave out its block when a value E sits right before a quote" in {
+    val legacy = Legacy.copy(setupSql = "ATTACH {{secret.E}}'h\\' AS {{alias}} (TYPE x);")
+    val blob   =
+      builder(List(legacy, Sibling), Map("E" -> "E")).build("td-1").unsafeRunSync().value
+    blob should include("-- BEGIN federation: ok")
+    blob should not include "legacy"
+  }
+
+  it should "leave out its block for a value 5432-- or -x" in
+    List("5432--", "-x").foreach { v =>
+      val blob =
+        builder(List(Legacy, Sibling), Map("PORT" -> v)).build("td-1").unsafeRunSync().value
+      blob should include("-- BEGIN federation: ok")
+      blob should not include "legacy"
+    }
 
   it should "be named by the boot report, never with its value or SQL" in {
     val td = ai.starlake.quack.model.TenantDb(

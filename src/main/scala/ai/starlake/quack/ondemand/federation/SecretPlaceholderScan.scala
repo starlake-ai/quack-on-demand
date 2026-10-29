@@ -20,22 +20,55 @@ object SecretPlaceholderScan:
 
   private val Placeholder = """\{\{secret\.([A-Za-z0-9_]+)\}\}""".r
 
-  /** A value that may stand outside a literal in a template stored before the rule: a plain token
-    * (`PORT {{secret.X}}` with `5432`).
+  private val PlainToken = "[A-Za-z0-9_.-]+".r
+
+  /** Whether `value` may stand outside a literal in a template stored before the rule (item 29c): a
+    * plain token (`PORT {{secret.X}}` with `5432`) holding no `--` and neither starting nor ending
+    * with `-`, so that neither the value alone nor the value against a `-` of the template opens a
+    * comment.
     */
-  val PlainToken: scala.util.matching.Regex = "[A-Za-z0-9_.-]+".r
+  def plainValue(value: String): Boolean =
+    PlainToken.matches(value) && !value.contains("--") && !value.startsWith("-") &&
+      !value.endsWith("-")
+
+  /** A template character that may not touch an unquoted placeholder (item 29c): a quote (a value
+    * `E` before `'` makes an escape string), `-`, `/`, `*` (a comment), `$`, or a letter or digit
+    * (the value would join the token beside it).
+    */
+  private def glues(c: Char): Boolean = "'\"`-/*$".indexOf(c) >= 0 || c.isLetterOrDigit
 
   /** The distinct names of the placeholders of `template` that do not sit inside a closed
     * single-quoted literal, in order of first appearance; empty when every one does.
     */
   def unquoted(template: String): List[String] =
+    unquotedMatches(template).map(_.group(1)).distinct
+
+  /** The first of `values` (name, resolved value) that the stored `template` may not have
+    * substituted (item 29c): an unquoted placeholder whose value is not [[plainValue]], or one that
+    * some occurrence of it outside a literal has a gluing character right before or after. None
+    * when every value may be substituted; a placeholder inside a literal is always substituted,
+    * quoted.
+    */
+  def refusedAtRender(template: String, values: List[(String, String)]): Option[String] =
+    val outside   = unquotedMatches(template)
+    val misplaced = outside
+      .filter(m =>
+        (m.start > 0 && glues(template.charAt(m.start - 1))) ||
+          (m.end < template.length && glues(template.charAt(m.end)))
+      )
+      .map(_.group(1))
+      .toSet
+    val names = outside.map(_.group(1)).toSet
+    values.collectFirst {
+      case (name, value) if names(name) && (misplaced(name) || !plainValue(value)) => name
+    }
+
+  private def unquotedMatches(template: String): List[scala.util.matching.Regex.Match] =
     val inLiteral = literalSpans(template)
     Placeholder
       .findAllMatchIn(template)
       .filterNot(m => inLiteral.exists { case (s, e) => m.start > s && m.end <= e })
-      .map(_.group(1))
       .toList
-      .distinct
 
   /** The half-open spans `[open quote, closing quote)` of the closed plain single-quoted literals
     * of `template`, or none at all when the template holds a construct the scan does not judge (see

@@ -73,9 +73,10 @@ object InitSqlTrustReport extends LazyLogging:
     }.sorted
 
   /** The WARN line of every `sql` federated source whose stored template holds a secret placeholder
-    * outside a single-quoted literal (CONTRACT Addendum 4 item 29, amended): a save of it is now
-    * refused, and at render such a placeholder is substituted only for a plain-token value, else
-    * the source is left out of the node's init. Names the placeholders, never a value or the SQL.
+    * outside a single-quoted literal (CONTRACT Addendum 4 items 29 amended and 29c): a save of it
+    * is now refused, and at render such a placeholder is substituted only for a plain-token value
+    * that nothing of the template touches, else the source is left out of the node's init. Names
+    * the placeholders, never a value or the SQL.
     */
   def unquotedSecretLines(sources: List[(TenantDb, FederatedSource)]): List[String] =
     sources
@@ -88,8 +89,10 @@ object InitSqlTrustReport extends LazyLogging:
                 s"tenant '${td.tenantId}' database '${td.name}' federated source '${s.alias}' " +
                   s"(sourceType sql): ${names.map(n => s"{{secret.$n}}").mkString(", ")} sits " +
                   "outside a single-quoted literal. Nodes substitute such a placeholder only when " +
-                  "its value is a plain token ([A-Za-z0-9_.-]+) and otherwise leave the source " +
-                  "out; a save of the template is refused until each placeholder sits inside " +
+                  "its value is a plain token ([A-Za-z0-9_.-]+, no '--', no '-' at either end) " +
+                  "and no quote, '-', '/', '*', '$', letter or digit touches it, and otherwise " +
+                  "leave the source out; a save of the template is refused until each " +
+                  "placeholder sits inside " +
                   "'...' (a superuser re-saves it, quoted)."
               )
       }

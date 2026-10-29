@@ -12,14 +12,17 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.typesafe.scalalogging.LazyLogging
 
-/** A `sql` source block refused at render (CONTRACT Addendum 4 item 29, amended): its template,
-  * stored before the rule, holds `{{secret.<name>}}` outside a single-quoted literal and the value
-  * is not a plain token. Names the source and the placeholder, never the value.
+/** A `sql` source block refused at render (CONTRACT Addendum 4 item 29c): its template, stored
+  * before the rule, holds `{{secret.<name>}}` outside a single-quoted literal, and either the value
+  * is not a plain token or the template touches the placeholder. Names the source and the
+  * placeholder, never the value.
   */
 final class UnquotedSecretRefused(val alias: String, val name: String)
     extends RuntimeException(
-      s"federated source '$alias': {{secret.$name}} sits outside a single-quoted literal and its " +
-        "value is not a plain token ([A-Za-z0-9_.-]+); the source is left out of the node's init"
+      s"federated source '$alias': {{secret.$name}} sits outside a single-quoted literal, and " +
+        "either its value is not a plain token ([A-Za-z0-9_.-]+ with no '--' and no '-' at " +
+        "either end) or a quote, '-', '/', '*', '$' or a letter or digit touches the placeholder; " +
+        "the source is left out of the node's init"
     )
 
 /** One source's resolved setup SQL, plus the plaintext secret VALUES that were substituted into it.
@@ -331,18 +334,17 @@ final class FederationBlobBuilder(
         }
 
     // 3b. A `sql` template stored before secret placeholders had to sit inside a literal: an
-    //     unquoted one is substituted only when its value is a plain token (CONTRACT Addendum 4
-    //     item 29, amended). The value is matched, never quoted in the refusal.
-    val unquoted =
-      if src.sourceType == FederatedSourceType.Sql && !redactSecrets then
-        SecretPlaceholderScan.unquoted(step1).toSet
-      else Set.empty[String]
+    //     unquoted one is substituted only when its value is a plain token and nothing of the
+    //     template touches it (CONTRACT Addendum 4 item 29c). The value is matched, never quoted
+    //     in the refusal.
     def plainCheck(pairs: List[(String, String)]): IO[Unit] =
-      pairs.find((name, value) =>
-        unquoted.contains(name) && !SecretPlaceholderScan.PlainToken.matches(value)
-      ) match
-        case Some((name, _)) => IO.raiseError(new UnquotedSecretRefused(src.alias, name))
-        case None            => IO.unit
+      val refused =
+        if src.sourceType == FederatedSourceType.Sql && !redactSecrets then
+          SecretPlaceholderScan.refusedAtRender(step1, pairs)
+        else None
+      refused match
+        case Some(name) => IO.raiseError(new UnquotedSecretRefused(src.alias, name))
+        case None       => IO.unit
 
     for {
       _     <- strayCheck
