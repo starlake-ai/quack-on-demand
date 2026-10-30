@@ -3,7 +3,13 @@ package ai.starlake.quack.it
 import ai.starlake.quack.QuackNativeConfig
 import ai.starlake.quack.edge.*
 import ai.starlake.quack.edge.adapter.*
-import ai.starlake.quack.edge.authz.{AuthzDecider, DecideRoute, MintedHandles, NodeKeys}
+import ai.starlake.quack.edge.authz.{
+  AuthzDecider,
+  DecideRoute,
+  MintedHandles,
+  NodeKeys,
+  ReadOnlyCatalogs
+}
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
@@ -127,7 +133,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         s"http://127.0.0.1:${decide.getAddress.getPort}",
         minted = Some(minted),
         paths = key =>
-          Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse("")
+          Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse(""),
+        readOnlyCatalogs = ReadOnlyCatalogs.none
       )
       val init =
         s"""ATTACH '$dir/acme.duckdb' AS acme_db;

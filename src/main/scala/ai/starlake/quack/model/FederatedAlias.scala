@@ -25,9 +25,11 @@ object FederatedAlias:
   /** Locale-independent lowercase fold of one alias. */
   def fold(alias: String): String = alias.toLowerCase(Locale.ROOT)
 
-  /** The read-only catalog set `ai.starlake.quack.edge.sql.CatalogWriteScreen` screens against,
-    * derived from a tenant-db's federated sources. Lives here rather than inline at the one call
-    * site in `Main` so the fold that decides whether a denial matches is testable on its own.
+  /** The read-only catalog set every session handle carries (`ReadOnlyCatalogs`, decision 24: the
+    * node refuses every principal's write into it) and
+    * `ai.starlake.quack.edge.sql.CatalogWriteScreen` screens against, derived from a tenant-db's
+    * federated sources. Lives here so the fold that decides whether a denial matches is testable on
+    * its own.
     *
     * DISABLED sources are deliberately included: a disabled source's alias stays ATTACHed on
     * running nodes until the pool recycles, so its read-only flag must keep applying until then.

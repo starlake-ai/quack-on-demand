@@ -30,7 +30,7 @@ _MARKER = re.compile(r"qod-node-build-info:protocol=(\d+);duckdb=v([0-9.]+);duck
 
 #: The node protocol this qod speaks, the manager's of the same release (QOD_NODE_PROTOCOL in
 #: native/qod-node/CMakeLists.txt; tests/test_qod_node_bundle.py pins the two).
-NODE_PROTOCOL = 4
+NODE_PROTOCOL = 5
 
 
 class WrongProtocol(RuntimeError):

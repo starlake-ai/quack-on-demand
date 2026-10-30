@@ -34,9 +34,12 @@ using PlanDecider = std::function<DecideResult(const DecideCall &call)>;
 //!    callback connections, DuckLake's metadata queries) are the node's own and pass;
 //!  - a pre_optimize hook: the plan is described again and decided again when it changed since
 //!    post_bind (an extension's post_bind registered later may change it);
+//!  - before any verdict, in both hooks: a plan writing into, or attaching or detaching, a catalog the
+//!    handle names read-only is refused, whoever the principal (decision 24, ReadOnlyRefusal);
 //!  - the connection state's backstops: OnFinalizePrepare refuses a statement that reached prepare
 //!    finalization without a verdict, OnRebindPreparedStatement rebinds a prepared statement whose
-//!    verdict was taken for another principal, policy version or context, or expired.
+//!    verdict was taken for another principal, policy version, context or set of read-only
+//!    catalogs, or expired.
 //! A null `decider` is this node's DecideClient.
 void RegisterNodeAuthz(duckdb::DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz,
                        PlanDecider decider = nullptr);

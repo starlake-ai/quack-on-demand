@@ -6,7 +6,8 @@ import ai.starlake.quack.edge.authz.{
   DecideRoute,
   MintedHandles,
   NodeKeys,
-  NodePrincipal
+  NodePrincipal,
+  ReadOnlyCatalogs
 }
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
 import ai.starlake.quack.edge.config.OpaConfig
@@ -122,7 +123,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         secret,
         s"http://127.0.0.1:${server.getAddress.getPort}",
         minted = Some(minted),
-        paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse("")
+        paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
+        readOnlyCatalogs = ReadOnlyCatalogs.none
       )
       val app = new DecideRoute(keys, minted, decider).routes.orNotFound
       server.createContext(

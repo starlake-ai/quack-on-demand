@@ -35,7 +35,13 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
     def digest(userId: String) = if userId == "u-1" then Creds else ""
 
   private def mint(p: NodePrincipal = Alice): String =
-    new NodeKeys(Secret, "http://10.0.0.1:20900", () => Now, creds = digests).handle(Node, p)
+    new NodeKeys(
+      Secret,
+      "http://10.0.0.1:20900",
+      () => Now,
+      creds = digests,
+      readOnlyCatalogs = _ => Set("erp_pg", "crm")
+    ).handle(Node, p)
 
   /** A payload this spec writes itself, MACed with the node key: shapes the minting code never
     * produces.
@@ -46,7 +52,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       NodeHandles.hex(NodeHandles.hmac(Key, bytes))
 
   private val Payload = Json.obj(
-    "v"         -> Json.fromInt(2),
+    "v"         -> Json.fromInt(3),
     "node"      -> Json.fromString(Node.nodeId),
     "replica"   -> Json.fromString("http://10.0.0.1:20900"),
     "principal" -> Json.obj(
@@ -60,6 +66,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
     "policyVersion" -> Json.fromLong(7L),
     "ctx"           -> Json.fromString("0" * 64),
     "creds"         -> Json.fromString(""),
+    "readOnly"      -> Json.arr(),
     "nonce"         -> Json.fromString("0123456789abcdef0123456789abcdef"),
     "exp"           -> Json.fromLong(Now + 60_000L)
   )
@@ -73,6 +80,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
     h.policyVersion shouldBe 0L
     h.ctx shouldBe NodeHandles.EmptyContextDigest
     h.creds shouldBe Creds
+    h.readOnly shouldBe List("crm", "erp_pg")
     h.nonce should fullyMatch regex "[0-9a-f]{32}"
     h.exp shouldBe Now + NodeHandles.LifetimeMs
   }
@@ -82,6 +90,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
     val h    = NodeHandles.verify(mint(root), Key, Node.nodeId, Now).toOption.get
     h.principal shouldBe root
     h.creds shouldBe ""
+    h.readOnly shouldBe List("crm", "erp_pg")
     NodeHandles.verify(forged(Payload), Key, Node.nodeId, Now).map(_.policyVersion) shouldBe Right(
       7L
     )
@@ -113,11 +122,16 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
 
   it should "refuse a MACed payload of another version or shape" in {
     def verified(p: Json) = NodeHandles.verify(forged(p), Key, Node.nodeId, Now)
-    verified(Payload.mapObject(_.add("v", Json.fromInt(3)))) shouldBe
+    verified(Payload.mapObject(_.add("v", Json.fromInt(4)))) shouldBe
       Left("unsupported handle version")
-    // Version 1 is node protocol 2's handle: its nodes enforce nothing in the engine.
+    // Version 2 is node protocols 3 and 4's handle (no readOnly); version 1 node protocol 2's.
+    verified(Payload.mapObject(_.add("v", Json.fromInt(2)))) shouldBe
+      Left("unsupported handle version")
     verified(Payload.mapObject(_.add("v", Json.fromInt(1)))) shouldBe
       Left("unsupported handle version")
+    verified(Payload.mapObject(_.add("readOnly", Json.arr(Json.fromString("crm"))))).map(
+      _.readOnly
+    ) shouldBe Right(List("crm"))
     List(
       Payload.mapObject(_.remove("ctx")),
       Payload.mapObject(_.add("ctx", Json.fromString("XYZ"))),
@@ -125,6 +139,17 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       Payload.mapObject(_.add("creds", Json.fromString("D" * 64))),
       Payload.mapObject(_.add("creds", Json.fromString("d" * 63))),
       Payload.mapObject(_.remove("principal")),
+      Payload.mapObject(_.remove("readOnly")),
+      Payload.mapObject(_.add("readOnly", Json.fromString("crm"))),
+      Payload.mapObject(_.add("readOnly", Json.arr(Json.fromInt(7)))),
+      Payload.mapObject(_.add("readOnly", Json.arr(Json.fromString("CRM")))),
+      Payload.mapObject(_.add("readOnly", Json.arr(Json.fromString("crm-x")))),
+      Payload.mapObject(
+        _.add("readOnly", Json.arr(Json.fromString("erp"), Json.fromString("crm")))
+      ),
+      Payload.mapObject(
+        _.add("readOnly", Json.arr(Json.fromString("crm"), Json.fromString("crm")))
+      ),
       Json.arr()
     ).foreach(p => withClue(p.noSpaces)(verified(p) shouldBe Left("malformed handle payload")))
   }

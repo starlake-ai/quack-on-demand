@@ -88,7 +88,11 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   // them (the gateway's own ACL gate still runs in front of it).
   private val secret = ai.starlake.quack.edge.authz.NodeKeys.randomSecret()
   private val decide = ai.starlake.quack.ondemand.runtime.StubDecideServer.start(secret)
-  private val keys   = new ai.starlake.quack.edge.authz.NodeKeys(secret, decide.url)
+  private val keys   = new ai.starlake.quack.edge.authz.NodeKeys(
+    secret,
+    decide.url,
+    readOnlyCatalogs = ai.starlake.quack.edge.authz.ReadOnlyCatalogs.none
+  )
 
   private var dir: Path                    = null
   private var live: LiveQodNode            = null

@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.edge.adapter.*
-import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, NodePrincipal}
+import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, NodePrincipal, ReadOnlyCatalogs}
 import cats.effect.unsafe.IORuntime
 import cats.effect.unsafe.implicits.global
 import org.apache.arrow.memory.RootAllocator
@@ -30,7 +30,7 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   // stand-in signing with the keys the node was given.
   private val secret = NodeKeys.randomSecret()
   private val decide = StubDecideServer.start(secret)
-  private val keys   = new NodeKeys(secret, decide.url)
+  private val keys   = new NodeKeys(secret, decide.url, readOnlyCatalogs = ReadOnlyCatalogs.none)
 
   override def beforeAll(): Unit =
     if QodNodeTestBinary.path.nonEmpty then
@@ -315,7 +315,12 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   "a secure view" should "be read under the path the handle carries, never one a statement set" in {
     assume(lakeAttached, "the ducklake extension is not installed on this host")
     // The keys of a pool whose USE prelude targets lake.main: every handle carries that path.
-    val onLake = new NodeKeys(secret, decide.url, paths = _ => "lake.main")
+    val onLake = new NodeKeys(
+      secret,
+      decide.url,
+      paths = _ => "lake.main",
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
     withConnection { conn =>
       def as(sql: String): Either[String, String] =
         first(conn, onLake.prelude(node.node, Alice)) shouldBe Right("true")

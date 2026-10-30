@@ -101,7 +101,8 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       "http://127.0.0.1:20900",
       () => clock.get(),
       creds = served,
-      issued = Some(issued)
+      issued = Some(issued),
+      readOnlyCatalogs = ReadOnlyCatalogs.none
     )
     val route = new CredentialsRoute(keys, issued, served, () => clock.get())
 
@@ -188,7 +189,12 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
   it should "refuse a handle this replica did not mint, retryably, as an expired context" in {
     val f       = new Fixture
     val foreign =
-      new NodeKeys(Secret, "http://10.0.0.9:20900", () => f.clock.get()).handle(Node, Alice)
+      new NodeKeys(
+        Secret,
+        "http://10.0.0.9:20900",
+        () => f.clock.get(),
+        readOnlyCatalogs = ReadOnlyCatalogs.none
+      ).handle(Node, Alice)
     f.call(body(foreign)) shouldBe
       (Status.ServiceUnavailable, CredentialsRoute.ContextExpired, Some(MediaType.text.plain))
   }
@@ -208,6 +214,7 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
         NodeHandles.EmptyContextDigest,
         "",
         "",
+        Set.empty,
         f.clock.get(),
         nonce = nonce
       )

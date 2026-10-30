@@ -36,11 +36,11 @@ int main(int argc, char **argv) {
 		nonce_bytes += char(random() & 0xff);
 	}
 	auto nonce = qod::Hex(reinterpret_cast<const uint8_t *>(nonce_bytes.data()), nonce_bytes.size());
-	auto payload = "{\"v\":2,\"node\":\"" + node + "\",\"replica\":\"http://127.0.0.1:0\",\"principal\":{\"id\":\"" +
+	auto payload = "{\"v\":3,\"node\":\"" + node + "\",\"replica\":\"http://127.0.0.1:0\",\"principal\":{\"id\":\"" +
 	               principal + "\",\"name\":\"" + principal +
 	               "\",\"tenant\":null,\"superuser\":false,\"system\":false},\"pool\":\"test/test_db/test\"," +
 	               "\"policyVersion\":0,\"ctx\":\"" + std::string(64, '0') +
-	               "\",\"creds\":\"\",\"path\":\"\",\"nonce\":\"" + nonce +
+	               "\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(now + lifetime) + "}";
 	std::cout << qod::ToBase64Url(payload) << "." << qod::Hex(qod::HmacSha256(key, payload)) << std::endl;
 	return 0;

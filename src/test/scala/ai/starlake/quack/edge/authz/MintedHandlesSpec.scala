@@ -39,7 +39,12 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
 
   "NodeKeys.handle" should "register the context of a principal that carries one, by nonce" in {
     val m    = new MintedHandles()
-    val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", minted = Some(m))
+    val keys = new NodeKeys(
+      "k" * 32,
+      "http://127.0.0.1:20900",
+      minted = Some(m),
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
     val node =
       RunningNode(
         "quack-acme-lake-bi-1",

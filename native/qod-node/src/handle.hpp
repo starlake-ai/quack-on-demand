@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace qod {
 
@@ -28,10 +29,10 @@ struct Principal {
 
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
-//! {"v":2,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
-//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"nonce":..,"exp":..}, every member
-//! required ("ctx", "creds" and "path" since node protocol 3). The MAC covers the payload bytes as
-//! sent, so no canonical form has to agree between the two sides.
+//! {"v":3,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
+//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"readOnly":[..],"nonce":..,"exp":..},
+//! every member required ("ctx", "creds" and "path" since node protocol 3, "readOnly" since 5). The MAC
+//! covers the payload bytes as sent, so no canonical form has to agree between the two sides.
 struct Handle {
 	std::string node;
 	//! The manager replica that minted it, which decides this statement's verdicts.
@@ -51,17 +52,22 @@ struct Handle {
 	//! target of the USE prelude the router sends before the pool's statements, empty when it sends
 	//! none. Required, as a string, since node protocol 3 (CONTRACT Addendum 4 item 22).
 	std::string path;
+	//! The pool's read-only federated catalogs (decision 24): lowercased aliases of 1 to 128 characters
+	//! of [a-z0-9_], sorted ascending, none repeated, empty for none. Every principal's write, DDL,
+	//! ATTACH and DETACH into one is refused, the system's included. Required since node protocol 5.
+	std::vector<std::string> read_only;
 	std::string nonce;
 	//! Epoch milliseconds.
 	int64_t exp = 0;
 };
 
-//! The handle version this node reads, and the only one. Version 1 is the handle of node protocol 2,
-//! whose nodes enforce nothing in the engine and read only the members they name: since a node of
-//! that protocol refuses every handle whose "v" is not 1, the probe's included, bumping it keeps such
-//! a node unhealthy and never routed to on every backend. Bump it with the manager's
-//! NodeHandles.Version whenever a node that ignores a new member must not serve.
-constexpr int64_t kHandleVersion = 2;
+//! The handle version this node reads, and the only one. A node reads exactly one version and refuses
+//! every other, the probe's handle included: version 1 is node protocol 2's (no enforcement in the
+//! engine), version 2 is protocols 3 and 4's (no readOnly, so a superuser could write into a
+//! read-only catalog there). Bumping it keeps such a node unhealthy and never routed to on every
+//! backend. Bump it with the manager's NodeHandles.Version whenever a node that ignores a new member
+//! must not serve.
+constexpr int64_t kHandleVersion = 3;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

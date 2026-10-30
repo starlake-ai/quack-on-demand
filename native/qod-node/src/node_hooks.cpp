@@ -95,8 +95,8 @@ public:
 		if (!authz.Consume(handle)) {
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
-		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce,
-		                      handle.ctx,       text,                  handle.replica,    handle.path};
+		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
+		                      text,             handle.replica,        handle.path, handle.read_only};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -226,7 +226,8 @@ public:
 	//! The manager's prelude: the handle's own install step.
 	void AdmitPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
-		pending_ = Admitted {"", current_.principal.id, current_.policy_version, current_.ctx, kNeverExpires};
+		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
+		                     current_.ctx, kNeverExpires,         current_.read_only};
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -604,8 +605,8 @@ std::string RefusalMessage(const DecideResult &decided) {
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
 //! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
-	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version, installed.ctx,
-	                   kNeverExpires};
+	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
+	                   installed.ctx,         kNeverExpires,          installed.read_only};
 	if (installed.principal.superuser || installed.principal.system) {
 		return admitted;
 	}
@@ -647,6 +648,12 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		                          "cannot be judged, which QoD does not support");
 	}
 	auto described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
+	// Decision 24: a read-only catalog refuses every principal's writes, superusers and the manager
+	// itself included, before the verdict the statement holds, the node's verdict cache or the replica.
+	auto read_only = ReadOnlyRefusal(described.written_catalogs, installed.read_only);
+	if (!read_only.empty()) {
+		throw PermissionException(read_only);
+	}
 	if (!installed.principal.superuser && !installed.principal.system) {
 		RefuseForeignCopyFunction(context, plan);
 	}

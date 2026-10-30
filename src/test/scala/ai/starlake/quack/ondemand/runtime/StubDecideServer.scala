@@ -108,7 +108,8 @@ object StubDecideServer:
   private final case class Asked(kind: String, description: Json, principal: String)
 
   /** Started on a free loopback port; give nodes keys whose replica is its
-    * [[StubDecideServer.url]]: `new NodeKeys(secret, stub.url)`.
+    * [[StubDecideServer.url]]:
+    * `new NodeKeys(secret, stub.url, readOnlyCatalogs = ReadOnlyCatalogs.none)`.
     */
   def start(secret: String): StubDecideServer =
     val server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0)

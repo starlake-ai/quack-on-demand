@@ -22,12 +22,12 @@ inline std::string MintFrom(const std::string &replica, const std::string &princ
 	char nonce[33];
 	std::snprintf(nonce, sizeof(nonce), "%032x", ++counter);
 	auto tenant = superuser ? std::string("null") : std::string("\"acme\"");
-	auto payload = std::string("{\"v\":2,\"node\":\"") + kNode + "\",\"replica\":\"" + replica +
+	auto payload = std::string("{\"v\":3,\"node\":\"") + kNode + "\",\"replica\":\"" + replica +
 	               "\",\"principal\":{\"id\":\"" + principal_id + "\",\"name\":\"" + principal_id +
 	               "\",\"tenant\":" + tenant + ",\"superuser\":" + (superuser ? "true" : "false") +
 	               ",\"system\":" + (system ? "true" : "false") +
 	               "},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":1,\"ctx\":\"" + std::string(64, 'c') +
-	               "\",\"creds\":\"" + creds + "\",\"path\":\"\",\"nonce\":\"" + nonce +
+	               "\",\"creds\":\"" + creds + "\",\"path\":\"\",\"readOnly\":[],\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }

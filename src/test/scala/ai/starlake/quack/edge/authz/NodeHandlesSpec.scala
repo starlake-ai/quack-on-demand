@@ -28,7 +28,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   private def golden(key: String): String =
     Files
-      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v2.txt"))
+      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v3.txt"))
       .asScala
       .collectFirst { case l if l.startsWith(s"$key=") => l.drop(key.length + 1) }
       .get
@@ -57,24 +57,61 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       ctx = golden("ctx"),
       creds = golden("creds"),
       path = golden("path"),
+      readOnly = Set("erp_pg", "crm"),
       nowMs = 1761200000000L,
       nonce = "0123456789abcdef0123456789abcdef"
     )
     minted.text shouldBe golden("handle")
     minted.nonce shouldBe "0123456789abcdef0123456789abcdef"
     minted.expiresAt shouldBe 1761200060000L
+    golden("readOnly") shouldBe "crm,erp_pg"
   }
 
-  it should "write handle version 2, which a node of protocol 2 refuses" in {
-    // A protocol-2 node reads only the members it names and enforces nothing in the engine, but it
-    // refuses every handle whose v is not 1, the probe's included: so it stays unroutable.
-    val minted = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
-    HandleInspector.payload(minted.text).hcursor.get[Int]("v") shouldBe Right(2)
+  it should "write handle version 3, which a node of protocol 4 refuses" in {
+    // A protocol-4 node does not read readOnly, so a superuser could write into a read-only catalog
+    // there; it refuses every handle whose v is not 2, the probe's included: so it stays unroutable.
+    val minted =
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
+    HandleInspector.payload(minted.text).hcursor.get[Int]("v") shouldBe Right(3)
   }
+
+  it should "carry the read-only catalogs sorted, and an empty array for none" in {
+    val minted =
+      NodeHandles.mint(
+        "s" * 32,
+        "n",
+        "r",
+        Alice,
+        "p",
+        0L,
+        Ctx0,
+        "",
+        "",
+        Set("b_2", "a", "a1"),
+        1000L
+      )
+    HandleInspector.payload(minted.text).hcursor.get[List[String]]("readOnly") shouldBe
+      Right(List("a", "a1", "b_2"))
+    val none = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
+    HandleInspector.payload(none.text).hcursor.get[List[String]]("readOnly") shouldBe Right(Nil)
+    val longest =
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set("a" * 128), 1000L)
+    HandleInspector.payload(longest.text).hcursor.get[List[String]]("readOnly") shouldBe
+      Right(List("a" * 128))
+  }
+
+  it should "refuse a read-only alias that is not 1 to 128 of [a-z0-9_], as qod-node does" in
+    List("", "CRM", "crm-x", "crım", "a" * 129).foreach { bad =>
+      withClue(s"alias '$bad': ") {
+        intercept[IllegalArgumentException](
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set(bad), 1000L)
+        ).getMessage should include("read-only catalog alias")
+      }
+    }
 
   it should "expire the handle LifetimeMs after minting and use a fresh nonce each time" in {
-    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
-    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
+    val a  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
+    val b  = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
     val pa = HandleInspector.payload(a.text)
     pa.hcursor.get[Long]("exp") shouldBe Right(1000L + NodeHandles.LifetimeMs)
     pa.hcursor.get[String]("nonce") shouldBe Right(a.nonce)
@@ -85,18 +122,35 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   it should "carry the session default path, empty for none" in {
     val withPath =
-      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "acme_db.tpch1", 1000L)
+      NodeHandles.mint(
+        "s" * 32,
+        "n",
+        "r",
+        Alice,
+        "p",
+        0L,
+        Ctx0,
+        "",
+        "acme_db.tpch1",
+        Set.empty,
+        1000L
+      )
     HandleInspector.payload(withPath.text).hcursor.get[String]("path") shouldBe Right(
       "acme_db.tpch1"
     )
-    val none = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
+    val none = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
     HandleInspector.payload(none.text).hcursor.get[String]("path") shouldBe Right("")
   }
 
   "NodeKeys" should "stamp each pool's USE prelude target into its handles" in {
-    val pool  = PoolKey("acme", "acme_db", "bi")
-    val node  = RunningNode("n-1", pool, Role.Dual, "127.0.0.1", 1, "t", None, None, Instant.EPOCH)
-    val keys  = new NodeKeys("s" * 32, "r", paths = k => if k == pool then "acme_db.tpch1" else "")
+    val pool = PoolKey("acme", "acme_db", "bi")
+    val node = RunningNode("n-1", pool, Role.Dual, "127.0.0.1", 1, "t", None, None, Instant.EPOCH)
+    val keys = new NodeKeys(
+      "s" * 32,
+      "r",
+      paths = k => if k == pool then "acme_db.tpch1" else "",
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
     val other = node.copy(poolKey = PoolKey("acme", "other_db", "bi"))
     HandleInspector.payload(keys.handle(node, Alice)).hcursor.get[String]("path") shouldBe
       Right("acme_db.tpch1")
@@ -107,7 +161,19 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   "mint" should "refuse to vouch for no principal" in {
     val e = intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", NodePrincipal.Unbound, "p", 0L, Ctx0, "", "", 1000L)
+      NodeHandles.mint(
+        "s" * 32,
+        "n",
+        "r",
+        NodePrincipal.Unbound,
+        "p",
+        0L,
+        Ctx0,
+        "",
+        "",
+        Set.empty,
+        1000L
+      )
     )
     e.getMessage should include("no principal is bound to this statement")
   }
@@ -116,12 +182,12 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 63, "A" * 64, "g" * 64, Ctx0 + "0").foreach { bad =>
       withClue(s"ctx '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, "", "", 1000L)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, bad, "", "", Set.empty, 1000L)
         ).getMessage should include("ctx")
       }
     }
     intercept[IllegalArgumentException](
-      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, "", "", 1000L)
+      NodeHandles.mint("s" * 32, "n", "r", Alice, "p", -1L, Ctx0, "", "", Set.empty, 1000L)
     ).getMessage should include("policy version")
   }
 
@@ -129,7 +195,20 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("", "a" * 31, "a" * 33, "A" * 32, "g" * 32).foreach { bad =>
       withClue(s"nonce '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L, nonce = bad)
+          NodeHandles.mint(
+            "s" * 32,
+            "n",
+            "r",
+            Alice,
+            "p",
+            0L,
+            Ctx0,
+            "",
+            "",
+            Set.empty,
+            1000L,
+            nonce = bad
+          )
         ).getMessage should include("nonce")
       }
     }
@@ -138,7 +217,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     List("a" * 63, "A" * 64, "g" * 64, "a" * 65).foreach { bad =>
       withClue(s"creds '$bad': ") {
         intercept[IllegalArgumentException](
-          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, bad, "", 1000L)
+          NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, bad, "", Set.empty, 1000L)
         ).getMessage should include("creds")
       }
     }
@@ -278,8 +357,13 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   )
 
   "NodeKeys" should "mint for the node's own id and pool, at its clock" in {
-    val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L)
-    val p    = HandleInspector.payload(keys.prelude(Node2, Alice))
+    val keys = new NodeKeys(
+      "k" * 32,
+      "http://127.0.0.1:20900",
+      () => 5000L,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
+    val p = HandleInspector.payload(keys.prelude(Node2, Alice))
     p.hcursor.get[String]("node") shouldBe Right("quack-acme-db-bi-2")
     p.hcursor.get[String]("pool") shouldBe Right("acme/acme_db/bi")
     p.hcursor.get[String]("replica") shouldBe Right("http://127.0.0.1:20900")
@@ -291,7 +375,13 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   it should "carry the node's tenant's current policy version and the principal's ctx" in {
     var acme                     = 7L
     val versions: PolicyVersions = t => if t == "acme" then acme else 99L
-    val keys        = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L, versions)
+    val keys                     = new NodeKeys(
+      "k" * 32,
+      "http://127.0.0.1:20900",
+      () => 5000L,
+      versions,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
     val withContext = Alice.copy(context = Some(GoldenContext))
     val p1          = HandleInspector.payload(keys.handle(Node2, withContext))
     p1.hcursor.get[Long]("policyVersion") shouldBe Right(7L)
@@ -307,7 +397,12 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "carry policy version 0 without a version source" in {
-    val keys = new NodeKeys("k" * 32, "http://127.0.0.1:20900", () => 5000L)
+    val keys = new NodeKeys(
+      "k" * 32,
+      "http://127.0.0.1:20900",
+      () => 5000L,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
     HandleInspector.payload(keys.handle(Node2, Alice)).hcursor.get[Long]("policyVersion") shouldBe
       Right(0L)
   }
@@ -322,7 +417,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "http://127.0.0.1:20900",
       () => 5000L,
       creds = digests,
-      issued = Some(issued)
+      issued = Some(issued),
+      readOnlyCatalogs = ReadOnlyCatalogs.none
     )
     val p = HandleInspector.payload(keys.handle(Node2, Alice))
     p.hcursor.get[String]("creds") shouldBe Right("d" * 64)

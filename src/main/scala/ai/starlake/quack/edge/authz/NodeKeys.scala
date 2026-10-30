@@ -16,7 +16,10 @@ import java.util.Base64
   * default path (`FlightSqlRouter.usePath`, empty when the router sends no USE prelude), carried in
   * every handle so the node judges secure views against it. The default, empty for every pool,
   * makes the node hold every connection to the session default, so a secure view read after a USE
-  * prelude is refused, never admitted.
+  * prelude is refused, never admitted. `readOnlyCatalogs`, each pool's read-only federated catalogs
+  * (decision 24), carried in every handle but the system principal's: the node refuses any
+  * principal's write into them. It has no default, since none is safe: an empty set would let every
+  * principal, superusers included, write into a read-only catalog.
   */
 final class NodeKeys(
     secret: String,
@@ -26,7 +29,8 @@ final class NodeKeys(
     creds: UserS3Credentials = UserS3Credentials.none,
     issued: Option[IssuedHandles] = None,
     minted: Option[MintedHandles] = None,
-    paths: PoolKey => String = _ => ""
+    paths: PoolKey => String = _ => "",
+    readOnlyCatalogs: ReadOnlyCatalogs
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
@@ -39,7 +43,8 @@ final class NodeKeys(
   def key(nodeId: String): Array[Byte] = NodeHandles.nodeKey(secret, nodeId)
 
   /** A fresh handle for one statement of `principal` on `node`: the node's tenant's current policy
-    * version and the digest of the principal's session context and of its S3 credentials.
+    * version, the digest of the principal's session context and of its S3 credentials, and the
+    * pool's read-only catalogs (none for the system principal: the manager's own statements).
     */
   def handle(node: RunningNode, principal: NodePrincipal): String =
     val ctx = NodeHandles.contextDigest(principal.context)
@@ -53,6 +58,7 @@ final class NodeKeys(
       ctx = ctx,
       creds = if principal.system then "" else creds.digest(principal.id),
       path = paths(node.poolKey),
+      readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock()
     )
     // The credentials endpoint serves a principal's keys only for a handle this replica minted.
@@ -81,4 +87,5 @@ object NodeKeys:
   /** Keys from a random secret, for components a test builds without a control plane. A node
     * started with other keys refuses every handle they mint.
     */
-  def ephemeral(): NodeKeys = new NodeKeys(randomSecret(), "http://127.0.0.1:0")
+  def ephemeral(): NodeKeys =
+    new NodeKeys(randomSecret(), "http://127.0.0.1:0", readOnlyCatalogs = ReadOnlyCatalogs.none)

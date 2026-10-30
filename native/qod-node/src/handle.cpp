@@ -8,6 +8,23 @@
 #include <stdexcept>
 
 namespace qod {
+namespace {
+
+//! A read-only catalog alias as the manager writes it (FederatedAlias.fold of a valid alias): 1 to 128
+//! characters of [a-z0-9_].
+bool IsCatalogAlias(const std::string &alias) {
+	if (alias.empty() || alias.size() > 128) {
+		return false;
+	}
+	for (auto c : alias) {
+		if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
 
 Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id,
                     int64_t now_ms) {
@@ -45,6 +62,12 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 		handle.ctx = json.Get("ctx", JsonValue::Kind::STRING).string;
 		handle.creds = json.Get("creds", JsonValue::Kind::STRING).string;
 		handle.path = json.Get("path", JsonValue::Kind::STRING).string;
+		for (auto &alias : json.Get("readOnly", JsonValue::Kind::ARRAY).array) {
+			if (alias.kind != JsonValue::Kind::STRING) {
+				throw std::invalid_argument("\"readOnly\" holds a value that is not a string");
+			}
+			handle.read_only.push_back(alias.string);
+		}
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;
@@ -65,6 +88,12 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 	}
 	if (!handle.creds.empty() && (handle.creds.size() != 64 || !IsLowerHex(handle.creds))) {
 		throw std::invalid_argument("malformed handle: bad creds");
+	}
+	for (size_t i = 0; i < handle.read_only.size(); i++) {
+		// Sorted ascending and none repeated, as the manager writes them: one spelling per set.
+		if (!IsCatalogAlias(handle.read_only[i]) || (i > 0 && !(handle.read_only[i - 1] < handle.read_only[i]))) {
+			throw std::invalid_argument("malformed handle: bad readOnly");
+		}
 	}
 	if (handle.node != node_id) {
 		throw std::invalid_argument("handle is for another node");

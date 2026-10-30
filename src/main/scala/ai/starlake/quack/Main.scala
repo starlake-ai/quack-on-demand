@@ -500,6 +500,10 @@ object Main extends IOApp with LazyLogging:
     // The authorization context of every handle this replica mints, by nonce: the decision
     // endpoint judges a node's statement with the context its handle was minted for.
     val mintedHandles = new ai.starlake.quack.edge.authz.MintedHandles()
+    // Each pool's read-only federated catalogs (decision 24), carried in every handle but the
+    // system's: the node refuses any principal's write into them, superusers included. Its source
+    // lookup is wired once the supervisor exists; until then no user handle is minted.
+    val readOnlyCatalogs = new ai.starlake.quack.edge.authz.FederatedReadOnlyCatalogs()
     // Each pool's session default path, the target of the router's USE prelude, carried in every
     // handle (CONTRACT Addendum 4 item 22). Read from the supervisor, built after the keys: until it
     // is set every handle carries none, and the node admits no secure view read after a USE.
@@ -521,7 +525,8 @@ object Main extends IOApp with LazyLogging:
             creds = servedUserS3,
             issued = Some(issuedHandles),
             minted = Some(mintedHandles),
-            paths = key => usePaths.get()(key)
+            paths = key => usePaths.get()(key),
+            readOnlyCatalogs = readOnlyCatalogs
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -703,6 +708,11 @@ object Main extends IOApp with LazyLogging:
     )
     supRef.set(sup)
     usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
+    readOnlyCatalogs.wire(key =>
+      (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
+        case (Some(td), Some(fedStore)) => fedStore.listSources(td.id)
+        case _                          => Nil
+    )
     // The tenants' local folders, the users' S3 scopes and every database data folder, read live
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
@@ -1374,30 +1384,8 @@ object Main extends IOApp with LazyLogging:
           result
         }
 
-      // Per-pool read-only catalog lookup, cached 60s like attachedCatalogsOf. Disabled sources
-      // are included for the same reason: a disabled source's alias stays ATTACHed on running
-      // nodes until the pool recycles, so its read-only flag must keep applying until then.
-      val readOnlyCatalogsCache =
-        new java.util.concurrent.ConcurrentHashMap[
-          ai.starlake.quack.model.PoolKey,
-          (Long, Set[String])
-        ]()
-      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = key =>
-        val now    = System.currentTimeMillis()
-        val cached = Option(readOnlyCatalogsCache.get(key)).collect {
-          case (at, set) if now - at < 60000L => set
-        }
-        cached.getOrElse {
-          val result = (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
-            case (Some(td), Some(fedStore)) =>
-              // Through `FederatedAlias.readOnlySet`, not an inline map: this set is matched by
-              // `CatalogWriteScreen` against refs the ACL parser lowercased with `Locale.ROOT`,
-              // by exact equality, so a default-locale fold here fails OPEN on a `tr`/`az` JVM.
-              ai.starlake.quack.model.FederatedAlias.readOnlySet(fedStore.listSources(td.id))
-            case _ => Set.empty[String]
-          readOnlyCatalogsCache.put(key, (now, result))
-          result
-        }
+      // The router's CatalogWriteScreen reads the set the handles carry (one cache, decision 24).
+      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = readOnlyCatalogs.of
 
       // Mirrors attachedCatalogsOf's metastore resolution so the ACL SQL parser
       // resolves unqualified table refs the same way the validator does.

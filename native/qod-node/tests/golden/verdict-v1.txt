@@ -1,6 +1,6 @@
 # Verdicts VerdictsSpec (Scala) signs from fixed inputs; qod-node's verdict test (Task 7) verifies them, so
 # the two sides agree on the verdict format byte for byte. Regenerate both sides together if it changes.
-# key: NodeHandles.nodeKeyHex("qod-golden-node-key-secret-0123456789", "quack-acme-db-bi-1") (handle-v2.txt's).
+# key: NodeHandles.nodeKeyHex("qod-golden-node-key-secret-0123456789", "quack-acme-db-bi-1") (handle-v3.txt's).
 # ctx: SHA-256 of "{}". Both verdicts: kind plan, principal u-1, policyVersion 42, expiresAt 1761200060000.
 key=bafdaeb38095c6be835ce8d4b771938bc7fe634c2f4a6e5ca0ea80a617340c70
 description={"control":[],"functions":[],"objects":[],"settings":[],"statement":"PROJECTION","v":1}

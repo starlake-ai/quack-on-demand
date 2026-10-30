@@ -24,7 +24,8 @@ final case class VerifiedHandle(
     nonce: String,
     exp: Long,
     ctx: String,
-    creds: String
+    creds: String,
+    readOnly: List[String]
 )
 
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
@@ -33,10 +34,10 @@ final case class VerifiedHandle(
   * The manager sends one as [[prelude]], its own PREPARE right before every statement on a node
   * connection; qod-node verifies it and installs the principal on that connection. A handle is
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
-  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `nonce`, `exp`):
-  * the MAC covers the bytes as sent, so the two sides never have to agree on a canonical form.
-  * native/qod-node/src/handle.cpp reads it; a nonce makes it single-use and `exp` bounds it to
-  * [[LifetimeMs]].
+  * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `path`,
+  * `readOnly`, `nonce`, `exp`): the MAC covers the bytes as sent, so the two sides never have to
+  * agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes it single-use
+  * and `exp` bounds it to [[LifetimeMs]].
   *
   * Each node has its own key, derived from the manager's node-key secret and the node id
   * ([[nodeKey]]), so a handle minted for one node never verifies on another. The key reaches the
@@ -47,13 +48,14 @@ object NodeHandles:
   /** How long a handle is valid after minting. */
   val LifetimeMs: Long = 60_000L
 
-  /** The handle version this manager writes and reads (qod-node's kHandleVersion). Version 1 is the
-    * handle of node protocol 2, whose nodes enforce nothing in the engine and read only the members
-    * they name; such a node refuses every handle whose `v` is not 1, the health probe's included,
-    * so writing 2 keeps it unhealthy and never routed to on every backend (Kubernetes pods and
-    * fleet servers are not checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
+  /** The handle version this manager writes and reads (qod-node's kHandleVersion). A node reads
+    * exactly one version and refuses every other, the health probe's handle included: version 1 is
+    * node protocol 2's (no enforcement in the engine), version 2 is protocols 3 and 4's (no
+    * `readOnly`, so a superuser could write into a read-only catalog there). Writing 3 keeps such a
+    * node unhealthy and never routed to on every backend (Kubernetes pods and fleet servers are not
+    * checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
     */
-  val Version: Int = 2
+  val Version: Int = 3
 
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
@@ -118,12 +120,19 @@ object NodeHandles:
   private val CredsPattern         = "([0-9a-f]{64})?".r
   private val NoncePattern         = "[0-9a-f]{32}".r
 
+  /** A read-only catalog alias as a handle carries it, and qod-node reads it: 1 to 128 of
+    * `[a-z0-9_]` (`FederatedAlias.fold` of a valid alias).
+    */
+  private val ReadOnlyAliasPattern = "[a-z0-9_]{1,128}".r
+
   /** The handle for one statement on `nodeId`, minted by `replica` (the URL nodes call back for
     * verdicts) for `principal` on `pool` at `nowMs`, carrying the tenant's `policyVersion`, the
     * session's `ctx` ([[contextDigest]]), the principal's S3 credential digest `creds`
-    * (`UserS3Credentials.digestOf`, empty for none) and the session default `path` the node expects
+    * (`UserS3Credentials.digestOf`, empty for none), the session default `path` the node expects
     * (`FlightSqlRouter.usePath`, the target of the pool's USE prelude; empty when the router sends
-    * none). Refuses [[NodePrincipal.Unbound]]: there is no one to vouch for.
+    * none) and the pool's read-only catalogs `readOnly` ([[ReadOnlyCatalogs]], decision 24: the
+    * node refuses every principal's write into them), written sorted. Refuses
+    * [[NodePrincipal.Unbound]]: there is no one to vouch for.
     */
   def mint(
       secret: String,
@@ -135,6 +144,7 @@ object NodeHandles:
       ctx: String,
       creds: String,
       path: String,
+      readOnly: Set[String],
       nowMs: Long,
       nonce: String = newNonce()
   ): MintedHandle =
@@ -143,6 +153,10 @@ object NodeHandles:
     require(ContextDigestPattern.matches(ctx), "ctx must be 64 lowercase hex digits")
     require(CredsPattern.matches(creds), "creds must be empty or 64 lowercase hex digits")
     require(NoncePattern.matches(nonce), "a nonce is 32 lowercase hex digits")
+    require(
+      readOnly.forall(ReadOnlyAliasPattern.matches),
+      "a read-only catalog alias is 1 to 128 of [a-z0-9_]"
+    )
     val exp     = nowMs + LifetimeMs
     val payload = Json
       .obj(
@@ -161,6 +175,7 @@ object NodeHandles:
         "ctx"           -> Json.fromString(ctx),
         "creds"         -> Json.fromString(creds),
         "path"          -> Json.fromString(path),
+        "readOnly"      -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
         "nonce"         -> Json.fromString(nonce),
         "exp"           -> Json.fromLong(exp)
       )
@@ -185,10 +200,10 @@ object NodeHandles:
 
   /** `text`, a handle a node presents to this replica, read back: the MAC under `nodeKey`
     * (constant-time, over the payload bytes as sent), then `v`, the node, `exp` (with
-    * [[DecideGraceMs]] of grace) and the payload's shape (`ctx` 64 hex digits, `creds` empty or
-    * 64). The nonce is not checked against use here: it is single-use on the node, and each
-    * endpoint resolves it in its own registry. Left names the first failed check and never echoes
-    * the handle.
+    * [[DecideGraceMs]] of grace) and the payload's shape (`ctx` 64 hex digits, `creds` empty or 64,
+    * `readOnly` sorted aliases, none twice). The nonce is not checked against use here: it is
+    * single-use on the node, and each endpoint resolves it in its own registry. Left names the
+    * first failed check and never echoes the handle.
     */
   def verify(
       text: String,
@@ -236,14 +251,16 @@ object NodeHandles:
               _       <- Either.cond(NoncePattern.matches(nonce), (), "malformed handle payload")
               ctx     <- field[String](c, "ctx")
               _ <- Either.cond(ContextDigestPattern.matches(ctx), (), "malformed handle payload")
-              creds  <- field[String](c, "creds")
-              _      <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
-              p      <- c.downField("principal").success.toRight("malformed handle payload")
-              id     <- field[String](p, "id")
-              name   <- field[String](p, "name")
-              tenant <- field[Option[String]](p, "tenant")
-              su     <- field[Boolean](p, "superuser")
-              system <- field[Boolean](p, "system")
+              creds    <- field[String](c, "creds")
+              _        <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
+              readOnly <- field[List[String]](c, "readOnly")
+              _        <- Either.cond(wellFormedReadOnly(readOnly), (), "malformed handle payload")
+              p        <- c.downField("principal").success.toRight("malformed handle payload")
+              id       <- field[String](p, "id")
+              name     <- field[String](p, "name")
+              tenant   <- field[Option[String]](p, "tenant")
+              su       <- field[Boolean](p, "superuser")
+              system   <- field[Boolean](p, "system")
             yield VerifiedHandle(
               node,
               replica,
@@ -253,9 +270,14 @@ object NodeHandles:
               nonce,
               exp,
               ctx,
-              creds
+              creds,
+              readOnly
             )
         }
+
+  /** `aliases` as a handle carries them: each a read-only catalog alias, sorted, none twice. */
+  private def wellFormedReadOnly(aliases: List[String]): Boolean =
+    aliases.forall(ReadOnlyAliasPattern.matches) && aliases == aliases.distinct.sorted
 
   private[authz] def hmac(key: Array[Byte], data: Array[Byte]): Array[Byte] =
     val mac = Mac.getInstance("HmacSHA256")

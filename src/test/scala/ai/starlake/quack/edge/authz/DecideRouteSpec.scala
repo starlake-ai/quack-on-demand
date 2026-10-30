@@ -108,7 +108,13 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val clock  = new AtomicLong(1_761_200_000_000L)
     val minted = new MintedHandles(clock = () => clock.get())
     val keys   =
-      new NodeKeys(Secret, "http://127.0.0.1:20900", () => clock.get(), minted = Some(minted))
+      new NodeKeys(
+        Secret,
+        "http://127.0.0.1:20900",
+        () => clock.get(),
+        minted = Some(minted),
+        readOnlyCatalogs = ReadOnlyCatalogs.none
+      )
     val decider = new AuthzDecider(
       tenantOf = t =>
         if throwTenants then throw new IllegalStateException("control plane down")

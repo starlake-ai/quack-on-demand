@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -45,15 +46,22 @@ const std::string kNonce = "0123456789abcdef0123456789abcdef";
 
 const std::string kCtx(64, 'c');
 
-//! A handle payload; `members` goes right before "nonce". Node protocol 3: every handle carries ctx,
-//! creds and path.
+//! A handle payload; `members` goes right before `read_only` (raw JSON members, none: ""), which goes
+//! right before "nonce". Node protocol 5: every handle carries ctx, creds, path and readOnly.
 std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000,
                     const std::string &tenant = "\"acme\"",
-                    const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"") {
-	return std::string("{\"v\":2,\"node\":\"") + node +
+                    const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"",
+                    const std::string &read_only = ",\"readOnly\":[]") {
+	return std::string("{\"v\":3,\"node\":\"") + node +
 	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
 	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
-	       members + ",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
+	       members + read_only + ",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
+}
+
+//! A handle with a valid ctx, an empty creds and path, and the given readOnly members (raw JSON).
+std::string PayloadWithReadOnly(const std::string &read_only) {
+	return Payload(kNode, kNow + 60000, "\"acme\"", ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"",
+	               read_only);
 }
 
 std::string Sign(const std::string &payload, const std::string &key = kKey) {
@@ -85,9 +93,11 @@ void VerifyGolden(const std::string &path) {
 		failures++;
 		return;
 	}
-	std::string line, key_hex, text, prelude, ctx, creds, use_path;
+	std::string line, key_hex, text, prelude, ctx, creds, use_path, read_only;
 	while (std::getline(in, line)) {
-		if (line.rfind("key=", 0) == 0) {
+		if (line.rfind("readOnly=", 0) == 0) {
+			read_only = line.substr(9);
+		} else if (line.rfind("key=", 0) == 0) {
 			key_hex = line.substr(4);
 		} else if (line.rfind("handle=", 0) == 0) {
 			text = line.substr(7);
@@ -115,6 +125,11 @@ void VerifyGolden(const std::string &path) {
 		Expect(!ctx.empty() && handle.ctx == ctx, "golden ctx");
 		Expect(!creds.empty() && handle.creds == creds, "golden creds");
 		Expect(!use_path.empty() && handle.path == use_path, "golden path");
+		std::string joined;
+		for (auto &alias : handle.read_only) {
+			joined += (joined.empty() ? "" : ",") + alias;
+		}
+		Expect(!read_only.empty() && joined == read_only, "golden readOnly");
 	} catch (std::invalid_argument &error) {
 		std::cerr << "FAIL: the golden handle does not verify: " << error.what() << std::endl;
 		failures++;
@@ -169,19 +184,22 @@ int main(int argc, char **argv) {
 	              "bad hex");
 	ExpectRefused([&] { qod::VerifyHandle("!!" + good.substr(good.find('.')), kKey, kNode, kNow); }, "payload",
 	              "bad base64");
-	auto no_principal = std::string("{\"v\":2,\"node\":\"") + kNode +
+	auto no_principal = std::string("{\"v\":3,\"node\":\"") + kNode +
 	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
-	                    "\",\"creds\":\"\",\"path\":\"\",\"nonce\":\"" + kNonce +
+	                    "\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"nonce\":\"" + kNonce +
 	                    "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
-	auto v3 = Payload();
-	v3.replace(v3.find("\"v\":2"), 5, "\"v\":3");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(v3), kKey, kNode, kNow); }, "version", "version 3");
-	// Version 1 is the handle of node protocol 2, whose nodes enforce nothing in the engine: a node of
-	// this build refuses it, and a node of that protocol refuses a version 2 handle, the probe's
-	// included, so it stays unroutable.
+	auto v4 = Payload();
+	v4.replace(v4.find("\"v\":3"), 5, "\"v\":4");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(v4), kKey, kNode, kNow); }, "version", "version 4");
+	// Version 2 is the handle of node protocols 3 and 4, which do not read readOnly: a node of this build
+	// refuses it, and a node of those protocols refuses a version 3 handle, the probe's included, so it
+	// stays unroutable. Version 1 is node protocol 2's, whose nodes enforce nothing in the engine.
+	auto v2 = Payload();
+	v2.replace(v2.find("\"v\":3"), 5, "\"v\":2");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(v2), kKey, kNode, kNow); }, "version", "version 2");
 	auto v1 = Payload();
-	v1.replace(v1.find("\"v\":2"), 5, "\"v\":1");
+	v1.replace(v1.find("\"v\":3"), 5, "\"v\":1");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v1), kKey, kNode, kNow); }, "version", "version 1");
 
 	// ---- the session context digest
@@ -229,17 +247,17 @@ int main(int argc, char **argv) {
 
 	// Run without the golden file, the cross-language checks would be skipped and the run still pass.
 	if (argc < 2) {
-		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v2.txt" << std::endl;
+		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v3.txt" << std::endl;
 		failures++;
 	} else {
 		VerifyGolden(argv[1]);
 	}
 
 	// ---- node protocol 3: every handle carries the session's authorization context digest
-	auto without_ctx = std::string("{\"v\":2,\"node\":\"") + kNode +
+	auto without_ctx = std::string("{\"v\":3,\"node\":\"") + kNode +
 	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
 	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
-	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"nonce\":\"" +
+	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"nonce\":\"" +
 	                   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(without_ctx), kKey, kNode, kNow); }, "ctx", "a handle without ctx");
 	auto null_ctx = without_ctx;
@@ -275,6 +293,37 @@ int main(int argc, char **argv) {
 	           "acme_db.main",
 	       "the handle's path");
 	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).path.empty(), "an empty path: no USE prelude");
+
+	// ---- node protocol 5: and the pool's read-only catalogs (decision 24)
+	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).read_only.empty(), "an empty readOnly: none");
+	Expect(qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"crm\",\"erp_pg\",\"x9\"]")), kKey, kNode,
+	                         kNow)
+	               .read_only == std::vector<std::string> {"crm", "erp_pg", "x9"},
+	       "the handle's readOnly");
+	auto longest = std::string(128, 'a');
+	Expect(qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"" + longest + "\"]")), kKey, kNode, kNow)
+	               .read_only == std::vector<std::string> {longest},
+	       "a 128-character alias");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithReadOnly("")), kKey, kNode, kNow); }, "readOnly",
+	              "a handle without readOnly");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":null")), kKey, kNode, kNow); },
+	              "readOnly", "a null readOnly");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":\"crm\"")), kKey, kNode, kNow); },
+	              "readOnly", "a readOnly that is no array");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[7]")), kKey, kNode, kNow); },
+	              "readOnly", "a readOnly entry that is no string");
+	for (auto bad : {"[\"CRM\"]", "[\"\"]", "[\"crm-x\"]", "[\"cr\\u0131m\"]", "[\"erp\",\"crm\"]",
+	                 "[\"crm\",\"crm\"]"}) {
+		ExpectRefused(
+		    [&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(std::string(",\"readOnly\":") + bad)), kKey, kNode, kNow); },
+		    "bad readOnly", std::string("readOnly ") + bad);
+	}
+	ExpectRefused(
+	    [&] {
+		    qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"" + std::string(129, 'a') + "\"]")), kKey, kNode,
+		                      kNow);
+	    },
+	    "bad readOnly", "an alias longer than 128 characters");
 
 	if (failures == 0) {
 		std::cout << "handle_test: all passed" << std::endl;
