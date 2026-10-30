@@ -4,12 +4,9 @@ package ai.starlake.sql
   * characters, `--` line comments and (nested) `/* ... */` block comments -- so none of it can hide
   * the statement's real first token from a keyword-based check.
   *
-  * Extracted from `ai.starlake.quack.edge.sql.LockdownScreen`, which lives under `quack.edge.sql`
-  * and originally kept this scanner `private[sql]` for `CatalogWriteScreen`'s reuse. Moved here, to
-  * the shared `ai.starlake.sql` package that already hosts `SqlCommentStripper`, so
-  * `ai.starlake.quack.route.StatementClassifier` -- a different package tree entirely -- can reuse
-  * the exact same scanner instead of growing a sibling hand-rolled one that would inevitably drift
-  * from it. `LockdownScreen` and `CatalogWriteScreen` now call this object directly.
+  * Lives in the shared `ai.starlake.sql` package beside `SqlCommentStripper` so
+  * `ai.starlake.quack.route.StatementClassifier` and the gateway's statement splitter reuse the
+  * exact same scanner instead of growing sibling hand-rolled ones that would drift from it.
   */
 object SqlTrivia:
 

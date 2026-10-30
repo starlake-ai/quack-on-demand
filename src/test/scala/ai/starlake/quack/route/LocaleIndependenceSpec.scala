@@ -12,7 +12,7 @@ import java.util.Locale
   * `"İNSTALL"` and `"INSTALL".toLowerCase` is `"ınstall"`, neither of which equals the ASCII
   * keyword the screens compare against. A deployment whose JVM default locale is `tr` or `az`
   * therefore misses keyword matches silently, with no error and no log line, which turns a
-  * classification into a routing decision and a lockdown denial into an allow.
+  * classification into a wrong routing decision and a keyword refusal into an allow.
   *
   * These tests force the default locale rather than relying on the CI machine's, and restore it
   * afterwards, so they fail on an ASCII-assuming implementation regardless of where they run.

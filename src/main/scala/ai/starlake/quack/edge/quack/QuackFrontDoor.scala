@@ -26,9 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean
   *
   * Identity comes from the token string ([[QuackCredentials]]) through the same handshake as the
   * FlightSQL edge; every statement runs through `FlightSqlRouter.executeWith`, so the ACL, column
-  * and row policies, metadata filter, lockdown, routing, stamping, history, audit and kill apply
-  * unchanged. The node call is a per-statement [[QuackNodeLink]] and the node's response bytes go
-  * back to the client verbatim. See the design note for the message table (section 4.6).
+  * and row policies, metadata filter, routing, stamping, history, audit and kill apply unchanged.
+  * The node call is a per-statement [[QuackNodeLink]] and the node's response bytes go back to the
+  * client verbatim. See the design note for the message table (section 4.6).
   */
 final class QuackFrontDoor(
     router: FlightSqlRouter,

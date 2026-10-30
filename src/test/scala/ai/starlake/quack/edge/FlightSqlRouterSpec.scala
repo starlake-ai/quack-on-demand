@@ -2657,8 +2657,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   //
   // The NBSP characters exercised by the two I1 regression tests above must stay literal `\u00A0`
   // escapes, never a raw invisible byte pasted into the source -- see the identical (whole-file)
-  // guard in `StatementClassifierSpec`, `LockdownScreenSpec`, `CatalogWriteScreenSpec`,
-  // `PrepareStrategySpec` and `SqlTriviaSpec` for why this matters: an editor or an "helpful"
+  // guard in `StatementClassifierSpec`, `PrepareStrategySpec` and `SqlTriviaSpec` for why this
+  // matters: an editor or an "helpful"
   // formatting pass can silently decode the escape back into a raw invisible character, at which
   // point the file still compiles and every assertion above still passes, with no way for the
   // next reader to tell. Scoped to a substring search rather than a whole-file scan (the pattern

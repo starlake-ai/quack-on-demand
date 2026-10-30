@@ -3,11 +3,11 @@ package ai.starlake.sql
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** Direct tests for the shared trivia-scanning primitive. Before this file, `SqlTrivia` had three
-  * production consumers (`StatementClassifier`, `LockdownScreen`, `CatalogWriteScreen`) and zero
-  * tests of its own -- every assertion about it was indirect, through a gate that also has its own
-  * screening logic to test. Raised as M2/m1 in two prior reviews of the Unicode-trivia hardening
-  * arc, unaddressed until now.
+/** Direct tests for the shared trivia-scanning primitive. Before this file, `SqlTrivia` had several
+  * production consumers (`StatementClassifier` and the gateway's statement screens of the time) and
+  * zero tests of its own -- every assertion about it was indirect, through a gate that also has its
+  * own screening logic to test. Raised as M2/m1 in two prior reviews of the Unicode-trivia
+  * hardening arc, unaddressed until now.
   */
 class SqlTriviaSpec extends AnyFlatSpec with Matchers:
 
@@ -39,10 +39,9 @@ class SqlTriviaSpec extends AnyFlatSpec with Matchers:
       offenders shouldBe empty
     }
 
-  // Witnesses from outside every existing gate's test list (StatementClassifierSpec names 5,
-  // LockdownScreenSpec 6, CatalogWriteScreenSpec 5 -- none of the three names either of these two),
-  // so a regression to the union of those three lists would still pass every existing test but
-  // fail here.
+  // Witnesses from outside every gate's test list (StatementClassifierSpec names 5, and neither
+  // of these two), so a regression to the union of those lists would still pass every other test
+  // but fail here.
   it should "accept U+205F (medium mathematical space), untested by any gate's own suite" in:
     SqlTrivia.isTriviaSpace('\u205F') shouldBe true
 
@@ -150,7 +149,7 @@ class SqlTriviaSpec extends AnyFlatSpec with Matchers:
   //
   // Every trivia character exercised above is written as a literal `\uXXXX` escape, never as a
   // raw invisible byte pasted into the source -- see the identical guard in
-  // `StatementClassifierSpec`, `LockdownScreenSpec` and `CatalogWriteScreenSpec` for why this
+  // `StatementClassifierSpec` for why this
   // matters: an editor or an "helpful" formatting pass can silently decode the escape back into a
   // raw invisible character, at which point the file still compiles and every assertion above
   // still passes, with no way for the next reader to tell.

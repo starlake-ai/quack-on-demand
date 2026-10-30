@@ -315,10 +315,10 @@ final class StatementClassifier(
   /** The word tokens of `sql` (the ORIGINAL statement, comments and trivia intact), uppercased,
     * each with its paren depth and whether the next token past whitespace and comments is `(`.
     * Every boundary comes from `ai.starlake.sql.SqlLexer`, the one reader shared with
-    * `SqlCommentStripper` and `LockdownScreen.splitStatements` and ported from DuckDB 2.0's own
-    * front end; this class keeps no quote rules or character classes of its own, because a sibling
-    * reader with its own is how a literal one reader honours and another does not hides a verb.
-    * Literals, quoted identifiers, comments and numbers are not words.
+    * `SqlCommentStripper` and `ai.starlake.quack.edge.sql.StatementHead.split` and ported from
+    * DuckDB 2.0's own front end; this class keeps no quote rules or character classes of its own,
+    * because a sibling reader with its own is how a literal one reader honours and another does not
+    * hides a verb. Literals, quoted identifiers, comments and numbers are not words.
     */
   private def wordTokens(sql: String): Vector[StatementClassifier.WordToken] =
     val toks  = SqlLexer.tokens(sql)

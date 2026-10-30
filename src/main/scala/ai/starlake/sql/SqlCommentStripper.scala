@@ -24,7 +24,7 @@ package ai.starlake.sql
   *      text between the inner and the outer close in the stream, which is not merely "less
   *      stripped": it puts a non-keyword where the next keyword should be (`EXPLAIN /* a /* b */ c
   *      */ ANALYZE INSERT ...` reads as plain EXPLAIN, and DuckDB writes the row) and it breaks the
-  *      keyword-argument adjacency the lockdown screen's regexes key on (`FROM/* a /* b */ c
+  *      keyword-argument adjacency a keyword screen keys on (`FROM/* a /* b */ c
   *      */'/etc/passwd.parquet'` reads the file). So the block arm tracks depth.
   *   3. A comment opener inside a QUOTED region is not a comment. DuckDB 2.0 has five quoting
   *      forms, all of which accept a block-comment opener and `--` verbatim: plain strings `'...'`,
@@ -52,7 +52,7 @@ object SqlCommentStripper:
     else
       val result = new StringBuilder()
       // Every boundary decision comes from `SqlLexer`, the one reader shared with
-      // `statementSpans`, `LockdownScreen.splitStatements` and `StatementClassifier`, so this
+      // `statementSpans`, `StatementHead.split` and `StatementClassifier`, so this
       // stripper can never disagree with them (or with DuckDB 2.0) on where a literal or a comment
       // ends.
       SqlLexer.tokens(sql).foreach { t =>

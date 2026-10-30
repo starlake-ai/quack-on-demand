@@ -73,9 +73,9 @@ private[quack] object StatementHead:
     * `EXPLAIN (ANALYZE) <stmt>` and `EXPLAIN ANALYZE (FORMAT json) <stmt>` all EXECUTE the
     * statement on 2.0 (SET, PRAGMA, RESET, COPY and LOAD verified), and `PREPARE p AS <stmt>` +
     * `EXECUTE p` executes `<stmt>` (only SELECT / INSERT / UPDATE / DELETE / COPY are preparable on
-    * 2.0, so `PREPARE p AS COPY (...) TO '<local>'` is the write carrier the lockdown first-token
-    * rules must see through). The EXPLAIN run is wider than the grammar (any order, repeated) so an
-    * unusual prefix only ever moves the head further in.
+    * 2.0, so `PREPARE p AS COPY (...) TO '<local>'` is the write carrier a first-token rule must
+    * see through). The EXPLAIN run is wider than the grammar (any order, repeated) so an unusual
+    * prefix only ever moves the head further in.
     */
   final case class Head(view: String, toks: Vector[SqlLexer.Token], start: Int):
 
