@@ -107,7 +107,8 @@ object LiveQodNode:
 
   /** Start a node in `dir` and wait (60 s) for it to serve; throws with the node's log when it does
     * not. Callers `assume(QodNodeTestBinary.path.nonEmpty, ...)` first. `home`, when given, is the
-    * node's HOME (a [[LiveExtensionCache.seed]]ed one shares the run's extension downloads).
+    * node's HOME (a [[LiveExtensionCache.seed]]ed one shares the run's extension downloads). `bin`,
+    * when given, is the executable to start instead of [[QodNodeTestBinary]] (an earlier build).
     */
   def start(
       dir: Path,
@@ -116,9 +117,12 @@ object LiveQodNode:
       keys: NodeKeys = NodeKeys.ephemeral(),
       port: Int = freePort(),
       token: String = "tok-live-qod-node",
-      home: Option[Path] = None
+      home: Option[Path] = None,
+      bin: Option[Path] = None
   ): LiveQodNode =
-    val bin     = QodNodeTestBinary.path.getOrElse(throw new IllegalStateException("no qod-node"))
+    val exe = bin
+      .orElse(QodNodeTestBinary.path)
+      .getOrElse(throw new IllegalStateException("no qod-node"))
     val nonce   = NodeSecretFiles.newInitNonce()
     val secrets = NodeSecretFiles.writePrivateDir(
       Map(
@@ -130,7 +134,7 @@ object LiveQodNode:
     )
     val logFile = dir.resolve(s"node-$port.log")
     val builder = new java.lang.ProcessBuilder(
-      bin.toString,
+      exe.toString,
       "--port",
       port.toString,
       "--bind",

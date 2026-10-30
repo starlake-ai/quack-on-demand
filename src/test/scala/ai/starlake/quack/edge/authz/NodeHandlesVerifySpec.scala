@@ -46,7 +46,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       NodeHandles.hex(NodeHandles.hmac(Key, bytes))
 
   private val Payload = Json.obj(
-    "v"         -> Json.fromInt(1),
+    "v"         -> Json.fromInt(2),
     "node"      -> Json.fromString(Node.nodeId),
     "replica"   -> Json.fromString("http://10.0.0.1:20900"),
     "principal" -> Json.obj(
@@ -113,7 +113,10 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
 
   it should "refuse a MACed payload of another version or shape" in {
     def verified(p: Json) = NodeHandles.verify(forged(p), Key, Node.nodeId, Now)
-    verified(Payload.mapObject(_.add("v", Json.fromInt(2)))) shouldBe
+    verified(Payload.mapObject(_.add("v", Json.fromInt(3)))) shouldBe
+      Left("unsupported handle version")
+    // Version 1 is node protocol 2's handle: its nodes enforce nothing in the engine.
+    verified(Payload.mapObject(_.add("v", Json.fromInt(1)))) shouldBe
       Left("unsupported handle version")
     List(
       Payload.mapObject(_.remove("ctx")),

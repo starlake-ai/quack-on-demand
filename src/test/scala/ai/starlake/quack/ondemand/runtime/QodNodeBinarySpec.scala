@@ -56,6 +56,15 @@ class QodNodeBinarySpec extends AnyFlatSpec with Matchers with BeforeAndAfterEac
     cmake should include(s"set(QOD_NODE_PROTOCOL ${QodNodeBinary.Protocol})")
   }
 
+  it should "be the protocol the node image refuses to build without" in {
+    // Kubernetes pods never pass through QodNodeBinary: the image build is their protocol check.
+    val dockerfile = Files.readString(Paths.get("docker/quack-node/Dockerfile"))
+    dockerfile should include(s"ARG QOD_NODE_PROTOCOL=${QodNodeBinary.Protocol}\n")
+    dockerfile should include(
+      "grep -q \"qod-node-build-info:protocol=${QOD_NODE_PROTOCOL};duckdb=v${DUCKDB_VERSION};\""
+    )
+  }
+
   it should "expect the pinned DuckDB release" in {
     QodNodeBinary.expectedDuckdb shouldBe
       "v" + BuildVersions.duckdb.split('.').take(3).mkString(".")

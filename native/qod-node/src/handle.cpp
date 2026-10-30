@@ -34,7 +34,7 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 	Handle handle;
 	try {
 		json = ParseJson(payload);
-		if (json.Get("v", JsonValue::Kind::INTEGER).integer != 1) {
+		if (json.Get("v", JsonValue::Kind::INTEGER).integer != kHandleVersion) {
 			throw std::invalid_argument("unsupported handle version");
 		}
 		handle.node = json.Get("node", JsonValue::Kind::STRING).string;

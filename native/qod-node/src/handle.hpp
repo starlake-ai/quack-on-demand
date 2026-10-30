@@ -28,7 +28,7 @@ struct Principal {
 
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
-//! {"v":1,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
+//! {"v":2,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
 //!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"nonce":..,"exp":..}, every member
 //! required ("ctx", "creds" and "path" since node protocol 3). The MAC covers the payload bytes as
 //! sent, so no canonical form has to agree between the two sides.
@@ -55,6 +55,13 @@ struct Handle {
 	//! Epoch milliseconds.
 	int64_t exp = 0;
 };
+
+//! The handle version this node reads, and the only one. Version 1 is the handle of node protocol 2,
+//! whose nodes enforce nothing in the engine and read only the members they name: since a node of
+//! that protocol refuses every handle whose "v" is not 1, the probe's included, bumping it keeps such
+//! a node unhealthy and never routed to on every backend. Bump it with the manager's
+//! NodeHandles.Version whenever a node that ignores a new member must not serve.
+constexpr int64_t kHandleVersion = 2;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

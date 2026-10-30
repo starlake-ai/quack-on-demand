@@ -50,7 +50,7 @@ const std::string kCtx(64, 'c');
 std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000,
                     const std::string &tenant = "\"acme\"",
                     const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"") {
-	return std::string("{\"v\":1,\"node\":\"") + node +
+	return std::string("{\"v\":2,\"node\":\"") + node +
 	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
 	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
 	       members + ",\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
@@ -169,14 +169,20 @@ int main(int argc, char **argv) {
 	              "bad hex");
 	ExpectRefused([&] { qod::VerifyHandle("!!" + good.substr(good.find('.')), kKey, kNode, kNow); }, "payload",
 	              "bad base64");
-	auto no_principal = std::string("{\"v\":1,\"node\":\"") + kNode +
+	auto no_principal = std::string("{\"v\":2,\"node\":\"") + kNode +
 	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
 	                    "\",\"creds\":\"\",\"path\":\"\",\"nonce\":\"" + kNonce +
 	                    "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
-	auto v2 = Payload();
-	v2.replace(v2.find("\"v\":1"), 5, "\"v\":2");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(v2), kKey, kNode, kNow); }, "version", "version 2");
+	auto v3 = Payload();
+	v3.replace(v3.find("\"v\":2"), 5, "\"v\":3");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(v3), kKey, kNode, kNow); }, "version", "version 3");
+	// Version 1 is the handle of node protocol 2, whose nodes enforce nothing in the engine: a node of
+	// this build refuses it, and a node of that protocol refuses a version 2 handle, the probe's
+	// included, so it stays unroutable.
+	auto v1 = Payload();
+	v1.replace(v1.find("\"v\":2"), 5, "\"v\":1");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(v1), kKey, kNode, kNow); }, "version", "version 1");
 
 	// ---- the session context digest
 	Expect(qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx + "\"")), kKey, kNode, kNow).ctx == kCtx,
@@ -223,14 +229,14 @@ int main(int argc, char **argv) {
 
 	// Run without the golden file, the cross-language checks would be skipped and the run still pass.
 	if (argc < 2) {
-		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v1.txt" << std::endl;
+		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v2.txt" << std::endl;
 		failures++;
 	} else {
 		VerifyGolden(argv[1]);
 	}
 
 	// ---- node protocol 3: every handle carries the session's authorization context digest
-	auto without_ctx = std::string("{\"v\":1,\"node\":\"") + kNode +
+	auto without_ctx = std::string("{\"v\":2,\"node\":\"") + kNode +
 	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
 	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
 	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"nonce\":\"" +

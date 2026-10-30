@@ -111,6 +111,35 @@ def test_fleet_join_reads_its_options_from_the_environment(monkeypatch, tmp_path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="qod fleet join is POSIX-only")
+def test_fleet_join_refuses_a_qod_node_of_another_protocol(monkeypatch, tmp_path):
+    # A node of another protocol never runs here: an earlier one enforces nothing in the engine.
+    import qod_cli.commands.fleet as fleet_cmd
+    started = []
+
+    class FakeMember:
+        def __init__(self, manager, token, **kw):
+            started.append(kw)
+        def run_forever(self):
+            pass
+
+    def wrong(binary):
+        raise fleet_cmd.qod_node.WrongProtocol(f"{binary} speaks node protocol 2; this qod speaks 4")
+
+    monkeypatch.setattr(fleet_cmd, "FleetMember", FakeMember)
+    monkeypatch.setattr(fleet_cmd.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(fleet_cmd.launcher, "default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(fleet_cmd.launcher, "materialize_spawn_scripts",
+                        lambda d: (tmp_path / "spawn.sh", tmp_path / "spawn.ps1"))
+    monkeypatch.setattr(fleet_cmd.qod_node, "probe_version", wrong)
+    env = {"QOD_MANAGER_URL": "http://mgr:20900", "QOD_FLEET_JOIN_TOKEN": "tok",
+           "QOD_FLEET_ADVERTISE_HOST": "10.0.0.5"}
+    out = runner.invoke(app, ["fleet", "join", "--insecure", "--qod-node-bin", str(tmp_path / "qod-node")], env=env)
+    assert out.exit_code == 2, out.output
+    assert "node protocol 2" in out.output
+    assert started == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="qod fleet join is POSIX-only")
 def test_fleet_join_runs_the_bundled_qod_node_and_reports_its_probed_version(monkeypatch, tmp_path):
     # The bundled qod-node is installed beside the pinned libduckdb; the fleet listing shows what
     # that binary says, not the pin, so a stale engine shows up as such.

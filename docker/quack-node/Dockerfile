@@ -23,6 +23,10 @@ FROM debian:bookworm-slim AS duckdb
 
 ARG TARGETARCH
 ARG DUCKDB_VERSION=2.0.0
+# The node protocol of this build (QOD_NODE_PROTOCOL in native/qod-node/CMakeLists.txt, which
+# QodNodeBinarySpec pins): a vendored qod-node of another protocol fails the build. Pods never pass
+# through the manager's QodNodeBinary check, so this is theirs.
+ARG QOD_NODE_PROTOCOL=4
 
 RUN <<EOF
 set -eu
@@ -52,9 +56,10 @@ cp /tmp/libs/libduckdb.so /opt/qod-node/lib/
 test -f "/tmp/qod-node-binaries/$PLATFORM/qod-node" \
   || { echo "no vendored qod-node for $PLATFORM: run scripts/release/refresh-qod-node-binaries.sh" >&2; exit 1; }
 install -m 0755 "/tmp/qod-node-binaries/$PLATFORM/qod-node" /opt/qod-node/bin/qod-node
-# The binary must start against this libduckdb, and be built for it.
+# The binary must start against this libduckdb, and be built for it and for this node protocol.
 /opt/qod-node/bin/qod-node --build-info
-/opt/qod-node/bin/qod-node --build-info | grep -q "duckdb=v${DUCKDB_VERSION};"
+/opt/qod-node/bin/qod-node --build-info | grep -q "qod-node-build-info:protocol=${QOD_NODE_PROTOCOL};duckdb=v${DUCKDB_VERSION};" \
+  || { echo "the vendored qod-node is not node protocol ${QOD_NODE_PROTOCOL}: run scripts/release/refresh-qod-node-binaries.sh" >&2; exit 1; }
 # Pre-install the runtime extensions so the pod needs no outbound internet on first ATTACH.
 mkdir -p /opt/duckdb-extensions
 HOME=/opt/duckdb-extensions duckdb -c "INSTALL ducklake; INSTALL postgres; INSTALL quack; INSTALL httpfs; INSTALL aws;"

@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 VENDORED = REPO / "native" / "qod-node" / "binaries"
 BUNDLED = REPO / "cli" / "src" / "qod_cli" / "qod-node"
 
-MARKER = "qod-node-build-info:protocol=1;duckdb=v2.0.0;duckdb_source=d54cbbe3df"
+MARKER = f"qod-node-build-info:protocol={qod_node.NODE_PROTOCOL};duckdb=v2.0.0;duckdb_source=d54cbbe3df"
 
 
 def test_the_bundle_is_a_copy_of_the_vendored_binaries():
@@ -100,3 +100,17 @@ def test_probe_version_is_none_when_the_binary_does_not_start(tmp_path):
         raise subprocess.TimeoutExpired("q", 10)
 
     assert qod_node.probe_version(Path("q"), run=slow) is None
+
+
+def test_the_node_protocol_is_the_one_qod_node_compiles_in():
+    cmake = (REPO / "native" / "qod-node" / "CMakeLists.txt").read_text()
+    assert f"set(QOD_NODE_PROTOCOL {qod_node.NODE_PROTOCOL})" in cmake
+
+
+def test_probe_version_refuses_a_qod_node_of_another_protocol():
+    # A node one protocol behind enforces nothing in the engine; the manager's handles keep it
+    # unroutable, and the join refuses to start it at all.
+    for other in (qod_node.NODE_PROTOCOL - 1, qod_node.NODE_PROTOCOL + 1, 14):
+        out = MARKER.replace(f"protocol={qod_node.NODE_PROTOCOL};", f"protocol={other};")
+        with pytest.raises(qod_node.WrongProtocol, match=f"node protocol {other}"):
+            qod_node.probe_version(Path("q"), run=lambda *a, **kw: _Done(out + "\n"))

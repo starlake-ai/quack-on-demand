@@ -47,6 +47,14 @@ object NodeHandles:
   /** How long a handle is valid after minting. */
   val LifetimeMs: Long = 60_000L
 
+  /** The handle version this manager writes and reads (qod-node's kHandleVersion). Version 1 is the
+    * handle of node protocol 2, whose nodes enforce nothing in the engine and read only the members
+    * they name; such a node refuses every handle whose `v` is not 1, the health probe's included,
+    * so writing 2 keeps it unhealthy and never routed to on every backend (Kubernetes pods and
+    * fleet servers are not checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
+    */
+  val Version: Int = 2
+
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
     */
@@ -138,7 +146,7 @@ object NodeHandles:
     val exp     = nowMs + LifetimeMs
     val payload = Json
       .obj(
-        "v"         -> Json.fromInt(1),
+        "v"         -> Json.fromInt(Version),
         "node"      -> Json.fromString(nodeId),
         "replica"   -> Json.fromString(replica),
         "principal" -> Json.obj(
@@ -214,7 +222,7 @@ object NodeHandles:
         def field[A: Decoder](cur: HCursor, name: String): Either[String, A] =
           cur.get[A](name).left.map(_ => "malformed handle payload")
         field[Int](c, "v").flatMap { v =>
-          if v != 1 then Left("unsupported handle version")
+          if v != Version then Left("unsupported handle version")
           else
             for
               node    <- field[String](c, "node")

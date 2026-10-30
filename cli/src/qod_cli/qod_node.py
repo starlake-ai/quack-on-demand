@@ -28,6 +28,15 @@ _PLATFORMS = {
 
 _MARKER = re.compile(r"qod-node-build-info:protocol=(\d+);duckdb=v([0-9.]+);duckdb_source=([0-9a-f]+)")
 
+#: The node protocol this qod speaks, the manager's of the same release (QOD_NODE_PROTOCOL in
+#: native/qod-node/CMakeLists.txt; tests/test_qod_node_bundle.py pins the two).
+NODE_PROTOCOL = 4
+
+
+class WrongProtocol(RuntimeError):
+    """A qod-node of another node protocol: the manager's handles do not reach it, and one of an
+    earlier protocol enforces nothing in the engine, so the join refuses to run it."""
+
 
 def platform_dir(os_name: str = sys.platform, arch: str | None = None) -> str | None:
     """The bundle's platform directory for this machine (`linux-x86_64`...), None for one with no
@@ -78,10 +87,19 @@ def install(cache_dir: Path, lib_dir: Path, os_name: str = sys.platform, arch: s
 
 def probe_version(binary: Path, run=subprocess.run) -> str | None:
     """The DuckDB release a qod-node is built against, from its `--build-info` ("2.0.0"); None when
-    it does not start here (it checks the libduckdb it loads) or prints no marker."""
+    it does not start here (it checks the libduckdb it loads) or prints no marker. Raises
+    WrongProtocol when it speaks another node protocol than NODE_PROTOCOL, as the manager's
+    QodNodeBinary refuses one."""
     try:
         out = run([str(binary), "--build-info"], capture_output=True, text=True, errors="replace", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     m = _MARKER.search(out.stdout or "")
-    return m.group(2) if out.returncode == 0 and m else None
+    if out.returncode != 0 or not m:
+        return None
+    if int(m.group(1)) != NODE_PROTOCOL:
+        raise WrongProtocol(
+            f"{binary} speaks node protocol {m.group(1)}; this qod speaks {NODE_PROTOCOL}. Use the qod-node "
+            "of this release: the one this qod bundles, or pass --qod-node-bin with a build of it."
+        )
+    return m.group(2)

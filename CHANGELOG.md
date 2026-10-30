@@ -329,12 +329,16 @@
     `RESET` of `disabled_optimizers`, `enable_optimizer`, `debug_disable_optimizer`,
     `quack_authentication_function` and `quack_authorization_function`, refused to every principal:
     `QoD: <name> cannot be changed`).
-  - Operator action: restart every node after upgrading (a node an earlier release started is
-    never routed to). Release note: the vendored qod-node binaries (`native/qod-node/binaries/`,
-    the qod wheel's bundled copies for `qod fleet join`, the Windows downloads and the Kubernetes
-    node image) move to node protocol 4 with this release; a manager that starts nodes on its host
-    refuses to boot on a binary of another protocol, and protocol 4 nodes refuse an init stream
-    without this release's nonce line.
+  - Operator action: restart every node after upgrading. A node started by an earlier release, or
+    running a qod-node of an earlier node protocol (a Kubernetes pod kept across the upgrade, a
+    fleet server on an earlier wheel, an image built from stale binaries), is never routed to on
+    any backend: session handles are now version 2, and such a node refuses every one, the health
+    probe's included, so it stays unhealthy. Release note: the vendored qod-node binaries
+    (`native/qod-node/binaries/`, the qod wheel's bundled copies for `qod fleet join`, the Windows
+    downloads and the Kubernetes node image) move to node protocol 4 with this release; a manager
+    that starts nodes on its host refuses to boot on a binary of another protocol, `qod fleet join`
+    refuses to run one (exit 2), the node image build fails on one, and protocol 4 nodes refuse an
+    init stream without this release's nonce line.
 
 - **BREAKING: statements tenant users can no longer run.** To keep the node's decision sound, a
   user who is not a superuser is refused:

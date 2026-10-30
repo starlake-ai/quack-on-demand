@@ -28,7 +28,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   private def golden(key: String): String =
     Files
-      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v1.txt"))
+      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v2.txt"))
       .asScala
       .collectFirst { case l if l.startsWith(s"$key=") => l.drop(key.length + 1) }
       .get
@@ -63,6 +63,13 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     minted.text shouldBe golden("handle")
     minted.nonce shouldBe "0123456789abcdef0123456789abcdef"
     minted.expiresAt shouldBe 1761200060000L
+  }
+
+  it should "write handle version 2, which a node of protocol 2 refuses" in {
+    // A protocol-2 node reads only the members it names and enforces nothing in the engine, but it
+    // refuses every handle whose v is not 1, the probe's included: so it stays unroutable.
+    val minted = NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", 1000L)
+    HandleInspector.payload(minted.text).hcursor.get[Int]("v") shouldBe Right(2)
   }
 
   it should "expire the handle LifetimeMs after minting and use a fresh nonce each time" in {

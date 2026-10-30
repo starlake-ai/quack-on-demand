@@ -1,0 +1,16 @@
+# A session handle NodeHandlesSpec (Scala) mints from fixed inputs, and the prelude statement that
+# carries it (NodeHandles.prelude); handle_test.cpp verifies the handle and reads it back out of the
+# prelude (qod::PreludeHandle), so the two sides agree on both byte for byte. `context` is the
+# canonical session context NodeHandlesSpec builds (DecideContext.json) and `ctx` its SHA-256, the
+# handle's ctx; `credentials` is the canonical [id, updatedAt] array of the user's S3 credentials
+# (UserS3Credentials.digestJson) and `creds` its SHA-256, the handle's creds; `path` is the session
+# default path the handle carries (the pool's USE prelude target). qod-node only compares ctx, creds
+# and path. Regenerate both sides together if either format changes.
+key=bafdaeb38095c6be835ce8d4b771938bc7fe634c2f4a6e5ca0ea80a617340c70
+context={"claims":{},"columnPolicies":[],"groups":["g-1"],"permissions":[{"catalog":"acme_db","schema":"main","table":"*","verb":"RO"}],"pool":"acme/acme_db/bi","restriction":null,"roles":["r-1"],"rowPolicies":[],"user":"u-1","verbCeiling":null}
+ctx=adb8d82ce78c4c903829f0ba0b875bf1a859b3ad4f6feec627750c8ac5ee1b93
+credentials=[["0123456789abcdef0123456789abcdef",1761100000000]]
+creds=47704f89f0e8ec522fa737b3918c984890d673214b120afe91f24e4d53bc52e4
+path=acme_db.main
+handle=eyJ2IjoyLCJub2RlIjoicXVhY2stYWNtZS1kYi1iaS0xIiwicmVwbGljYSI6Imh0dHA6Ly8xMC4wLjAuMToyMDkwMCIsInByaW5jaXBhbCI6eyJpZCI6InUtMSIsIm5hbWUiOiJhbGljZSIsInRlbmFudCI6ImFjbWUiLCJzdXBlcnVzZXIiOmZhbHNlLCJzeXN0ZW0iOmZhbHNlfSwicG9vbCI6ImFjbWUvYWNtZV9kYi9iaSIsInBvbGljeVZlcnNpb24iOjQyLCJjdHgiOiJhZGI4ZDgyY2U3OGM0YzkwMzgyOWYwYmEwYjg3NWJmMWE4NTliM2FkNGY2ZmVlYzYyNzc1MGM4YWM1ZWUxYjkzIiwiY3JlZHMiOiI0NzcwNGY4OWYwZThlYzUyMmZhNzM3YjM5MThjOTg0ODkwZDY3MzIxNGIxMjBhZmU5MWYyNGU0ZDUzYmM1MmU0IiwicGF0aCI6ImFjbWVfZGIubWFpbiIsIm5vbmNlIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJleHAiOjE3NjEyMDAwNjAwMDB9.210eb26cc8f0407ed70adcdf730cbab17973ce94fc698f23cccb8e76c9d64d21
+prelude=CALL system.main.qod_session('eyJ2IjoyLCJub2RlIjoicXVhY2stYWNtZS1kYi1iaS0xIiwicmVwbGljYSI6Imh0dHA6Ly8xMC4wLjAuMToyMDkwMCIsInByaW5jaXBhbCI6eyJpZCI6InUtMSIsIm5hbWUiOiJhbGljZSIsInRlbmFudCI6ImFjbWUiLCJzdXBlcnVzZXIiOmZhbHNlLCJzeXN0ZW0iOmZhbHNlfSwicG9vbCI6ImFjbWUvYWNtZV9kYi9iaSIsInBvbGljeVZlcnNpb24iOjQyLCJjdHgiOiJhZGI4ZDgyY2U3OGM0YzkwMzgyOWYwYmEwYjg3NWJmMWE4NTliM2FkNGY2ZmVlYzYyNzc1MGM4YWM1ZWUxYjkzIiwiY3JlZHMiOiI0NzcwNGY4OWYwZThlYzUyMmZhNzM3YjM5MThjOTg0ODkwZDY3MzIxNGIxMjBhZmU5MWYyNGU0ZDUzYmM1MmU0IiwicGF0aCI6ImFjbWVfZGIubWFpbiIsIm5vbmNlIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJleHAiOjE3NjEyMDAwNjAwMDB9.210eb26cc8f0407ed70adcdf730cbab17973ce94fc698f23cccb8e76c9d64d21')

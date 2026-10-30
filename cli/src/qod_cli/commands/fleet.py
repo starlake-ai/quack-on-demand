@@ -38,7 +38,11 @@ def join(
     exe = qod_node_bin or qod_node.install(cache, launcher.ensure_libduckdb(cache))
     # Report what the binary that runs the node says, bundled or caller-supplied, not the pin: the
     # fleet listing is how an operator spots a stale engine. None when it cannot start here.
-    version = qod_node.probe_version(exe)
+    try:
+        version = qod_node.probe_version(exe)
+    except qod_node.WrongProtocol as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2)
     adv = advertise_host or default_advertise_host()
     # The default state dir keeps its pre-rename name ("agent") so an upgraded server still
     # finds, and reaps, a node orphaned by the previous version's pidfile.

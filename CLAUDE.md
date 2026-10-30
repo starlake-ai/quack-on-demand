@@ -135,7 +135,10 @@ and in `qod_session`'s bind (nonce, one principal per connection), and a `post_b
 every statement on a quack connection without one. A refused handle drops the connection unsent
 (retryable). The health probe's canary runs a handle-less `SELECT 1`: a node that answers it is
 unhealthy and never routed to. A node started before session handles does not know `qod_session` and
-is never routed to either: restart every node after upgrading. What a principal may do is decided on
+is never routed to either. Nor is a node of node protocol 2 (session handles, no in-engine
+enforcement), on any backend: the handle's `v` is 2 (`NodeHandles.Version` = qod-node's
+`kHandleVersion`), and such a node refuses every handle whose `v` is not 1, the probe's included.
+Restart every node after upgrading. What a principal may do is decided on
 the node (below).
 
 **Node-side authorization (Phase C, node protocol 4).** A non-superuser statement is decided on what
@@ -353,7 +356,10 @@ binary the jar bundles for its platform, installed as `<root>/<sha12>/bin/qod-no
 `../lib`). Either way it must answer `--build-info` with this build's node protocol
 (`QOD_NODE_PROTOCOL` in native/qod-node/CMakeLists.txt = `QodNodeBinary.Protocol`) and DuckDB
 release; `--build-info` also checks the libduckdb it loaded. `LocalQuackBackend` hands it to every
-spawn as `QOD_NODE_BIN`.
+spawn as `QOD_NODE_BIN`. Where no manager starts the node, the same protocol check runs elsewhere:
+`qod fleet join` refuses (exit 2) a qod-node whose marker names another protocol than its
+`qod_node.NODE_PROTOCOL`, and the node image build fails on one other than its `ARG
+QOD_NODE_PROTOCOL` (both pinned to `QOD_NODE_PROTOCOL`).
 
 Vendoring follows libquackwire: `native/qod-node/binaries/<platform>/qod-node` for linux-x86_64,
 linux-aarch64, osx-x86_64 and osx-aarch64, with `.sha256` companions and a `VERSION` stamp,
