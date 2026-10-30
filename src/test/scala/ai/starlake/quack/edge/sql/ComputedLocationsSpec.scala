@@ -78,6 +78,31 @@ class ComputedLocationsSpec extends AnyFlatSpec with Matchers:
     ComputedLocations.find(many) shouldBe Nil
   }
 
+  "a statement that stores its text to run later" should "never have its location computed" in
+    // Evaluated once at submission, the value would be frozen into the stored definition (Phase C
+    // review D-m3): the statement is left as written, and the node refuses it.
+    List(
+      s"CREATE VIEW v AS SELECT * FROM read_csv($Dated)",
+      s"create or replace view v as select * from read_csv($Dated)",
+      s"CREATE TABLE t AS SELECT * FROM read_csv($Dated)",
+      s"CREATE MACRO m() AS TABLE SELECT * FROM read_csv($Dated)",
+      s"PREPARE p AS SELECT * FROM read_csv($Dated)",
+      s"EXPLAIN SELECT * FROM read_csv($Dated)",
+      s"(CREATE VIEW v AS SELECT * FROM read_csv($Dated))"
+    ).foreach(sql => withClue(sql)(ComputedLocations.find(sql) shouldBe Nil))
+
+  "a statement that runs once" should "have its location computed" in
+    List(
+      s"SELECT * FROM read_csv($Dated)",
+      s"((SELECT * FROM read_csv($Dated)))",
+      s"WITH x AS (SELECT * FROM read_csv($Dated)) SELECT * FROM x",
+      s"FROM read_csv($Dated)",
+      s"INSERT INTO t SELECT * FROM read_csv($Dated)",
+      s"insert into t by name from read_csv($Dated)",
+      s"COPY (SELECT 1) TO ($Dated)",
+      s"COPY t FROM ($Dated)"
+    ).foreach(sql => withClue(sql)(expressions(sql) shouldBe List(Dated)))
+
   "a COPY's parenthesized location" should "be found with its parentheses, in both directions" in {
     val to = s"COPY t TO ($Dated) (FORMAT csv)"
     ComputedLocations.find(to).map(l => (l.expression, l.list)) shouldBe List((Dated, false))

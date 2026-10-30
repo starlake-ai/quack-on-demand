@@ -22,11 +22,12 @@ import java.util.Locale
   * statement that runs names a literal location that every gateway screen and the node's full
   * screen judge exactly as if the client had typed it. Nothing else in the statement is touched.
   *
-  * Recognized only when the statement is one statement and the expression holds no subquery and no
-  * parameter (a statement evaluated alone could not read one); anything else, and any failure (the
-  * evaluation refused or failing, a NULL, a value that is not one non-empty VARCHAR, or a LIST of
-  * them for a reader, more than [[MaxBytes]]), leaves the statement as the client wrote it, so the
-  * node refuses it as before.
+  * Recognized only when the statement is one statement that runs once (a query, a COPY, an INSERT:
+  * [[RunOnceWords]]; a stored definition would keep the value of its creation forever) and the
+  * expression holds no subquery and no parameter (a statement evaluated alone could not read one);
+  * anything else, and any failure (the evaluation refused or failing, a NULL, a value that is not
+  * one non-empty VARCHAR, or a LIST of them for a reader, more than [[MaxBytes]]), leaves the
+  * statement as the client wrote it, so the node refuses it as before.
   */
 private[quack] object ComputedLocations:
 
@@ -62,6 +63,13 @@ private[quack] object ComputedLocations:
       "show"
     )
 
+  /** The words a statement that runs once begins with, past any opening parentheses: a query (its
+    * FROM-first and CTE forms included), a COPY in either direction, an INSERT. A statement that
+    * stores its text to run later (CREATE VIEW, CREATE TABLE AS, CREATE MACRO, PREPARE) or does not
+    * run it at all (EXPLAIN) is not one: its location would be computed once, at submission.
+    */
+  private val RunOnceWords = Set("select", "with", "from", "copy", "insert")
+
   /** The computed locations of `sql`, in text order, or Nil when it holds none this reader takes,
     * or more than [[MaxLocations]].
     */
@@ -69,11 +77,23 @@ private[quack] object ComputedLocations:
     val view = SqlLexer.engineView(Option(sql).getOrElse(""))
     val all  = SqlLexer.tokens(view).filterNot(_.isTrivia)
     val toks = if all.nonEmpty && text(view, all.last) == ";" then all.dropRight(1) else all
-    if toks.isEmpty || toks.exists(t => text(view, t) == ";") then Nil
+    if toks.isEmpty || toks.exists(t => text(view, t) == ";") || !runsOnce(view, toks) then Nil
     else
       val r     = Reader(sql, view, toks)
       val found = r.copyLocation.toList ++ r.callLocations
       if found.length > MaxLocations then Nil else found.sortBy(_.from)
+
+  /** Whether the statement of `toks` begins, past any opening parentheses, with a word of
+    * [[RunOnceWords]].
+    */
+  private def runsOnce(view: String, toks: Seq[SqlLexer.Token]): Boolean =
+    toks
+      .dropWhile(t => t.kind == SqlLexer.Kind.Punct && view.charAt(t.start) == '(')
+      .headOption
+      .exists(t =>
+        t.kind == SqlLexer.Kind.Word &&
+          RunOnceWords.contains(text(view, t).toLowerCase(Locale.ROOT))
+      )
 
   /** The statement the node evaluates for `location`, as the principal. */
   def evaluation(location: Location): String = s"SELECT (${location.expression}) AS location"
