@@ -1585,7 +1585,7 @@ final class FlightSqlRouter(
                     case NodeOutcome.Transient(m, _) =>
                       Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                     case NodeOutcome.Permanent(m, _) =>
-                      Left(classifyPermanent(s"retry failed: $m"))
+                      Left(classifyPermanent(m, context = "retry failed: "))
                   }
               case None =>
                 IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
@@ -1595,13 +1595,15 @@ final class FlightSqlRouter(
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
     * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
     * Unavailable, which the client may retry; missing-object errors become NotFound; the rest
-    * BadRequest. The "permanent failure:" prefix is preserved for operators.
+    * BadRequest. The "permanent failure:" prefix is preserved for operators. `context` (the retry's
+    * "retry failed: ") goes into the reason after it, never into the node's message the checks
+    * read: the unavailable check matches that message's start.
     */
-  private def classifyPermanent(message: String): RouterFailure =
+  private def classifyPermanent(message: String, context: String = ""): RouterFailure =
     val lower    = message.toLowerCase(Locale.ROOT)
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
-    val full = s"permanent failure: $message"
+    val full = s"permanent failure: $context$message"
     if FlightSqlRouter.isNodeAuthzUnavailable(message) then RouterFailure.Unavailable(full)
     else if notFound then RouterFailure.NotFound(full)
     else RouterFailure.BadRequest(full)

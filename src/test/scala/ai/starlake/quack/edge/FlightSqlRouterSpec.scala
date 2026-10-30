@@ -2453,6 +2453,64 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // After close the entry must be gone.
     registry2.list() shouldBe Nil
 
+  it should "keep the retry node's authorization-unavailable answer retryable" in:
+    // The first node fails transiently; the fallback answers that it could get no verdict, which
+    // a client may retry: the "retry failed" context must not make it a bad request.
+    val callCount                 = new java.util.concurrent.atomic.AtomicInteger(0)
+    val stub: () => QuackResponse = () =>
+      if callCount.getAndIncrement() == 0 then
+        QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
+      else
+        QuackResponse.Failed(
+          QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry"),
+          1L
+        )
+    val bknd = new QuackBackend:
+      private val n          = TrieMap.empty[String, RunningNode]
+      def start(s: NodeSpec) = IO {
+        val r = RunningNode(
+          s.nodeId,
+          s.poolKey,
+          s.role,
+          "127.0.0.1",
+          26100 + n.size,
+          "tok",
+          Some(1L),
+          None,
+          Instant.EPOCH,
+          maxConcurrent = s.maxConcurrent
+        )
+        n.put(s.nodeId, r); r
+      }
+      def stop(key: PoolKey, id: String) = IO { n.remove(id); () }
+      def isAlive(id: String)            = n.contains(id)
+      def discoverExisting()             = IO.pure(n.values.toList)
+      def cleanup()                      = IO(n.clear())
+    val tkr  = new NodeLoadTracker
+    val sup2 = new PoolSupervisor(bknd, tkr, new InMemoryControlPlaneStore())
+    val pk2  = PoolKey("acme", "acme_default", "sales")
+    sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
+    sup2
+      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "")
+      .unsafeRunSync()
+    sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
+    val client2 =
+      new QuackHttpClient(TestArrow.sharedAllocator):
+        override def query(
+            endpoint: String,
+            token: String,
+            sql: String,
+            session: Option[String],
+            authorize: () => String
+        ) =
+          IO.pure(stub())
+    val router2 =
+      new FlightSqlRouter(sup2, new SessionRegistry, tkr, new QuackHttpAdapter(client2, tkr))
+    router2.execute("retry-authz", "alice", pk2, "SELECT 1").unsafeRunSync() match
+      case Left(f: RouterFailure.Unavailable) => f.reason should include("retry failed")
+      case other                              => fail(s"expected Unavailable, got $other")
+    callCount.get() shouldBe 2
+
   // ---------- EPIC P1: author stamping ----------
 
   /** Like setup() but the pool is DuckLake-kind (kindWire "ducklake" + metastore dbName), the
