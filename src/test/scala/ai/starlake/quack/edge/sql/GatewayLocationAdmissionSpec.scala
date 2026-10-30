@@ -186,32 +186,6 @@ class GatewayLocationAdmissionSpec extends AnyFlatSpec with Matchers:
       .get should include("lakebucket")
   }
 
-  "ProtectedWriteGuard" should "not refuse a policy holder's authorized read as file access" in {
-    val guard = new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map(("lake", "main", "customer") -> List("c_id"))),
-      clsEnabled = true,
-      rlsEnabled = true
-    )
-    val withRows = alice.copy(rowPolicies =
-      List(RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_id = 1"))
-    )
-    val ctx = SchemaContext(Some("lake"), Some("main"), Set.empty)
-    val sql = "SELECT * FROM read_parquet('s3://acme-etl/in/x.parquet')"
-    guard.check(sql, StatementKind.Select, withRows, ctx, admission = admission) shouldBe
-      GuardOutcome.Allow
-    guard.check(sql, StatementKind.Select, withRows, ctx) match
-      case GuardOutcome.Deny(reason) => reason should include("tenant-scoped")
-      case other                     => fail(s"expected Deny, got $other")
-    // a COPY cannot be parsed by the guard: still refused to a policy holder
-    guard.check(
-      "COPY (SELECT * FROM customer) TO 's3://acme-etl/out/c.parquet'",
-      StatementKind.Dml,
-      withRows,
-      ctx,
-      admission = admission
-    ) shouldBe a[GuardOutcome.Deny]
-  }
-
   "fileAdmissionFor" should "give the principal's own rules, and nothing else" in {
     // Alice holds an S3 credential for s3://acme-etl/in/ (decision 23); her tenant authorizes a folder.
     val rules = LocationRules(
@@ -315,8 +289,7 @@ class GatewayLocationAdmissionSpec extends AnyFlatSpec with Matchers:
           sql,
           StatementKind.Dml,
           withRows,
-          SchemaContext(Some("lake"), Some("main"), Set.empty),
-          admission = admission
+          SchemaContext(Some("lake"), Some("main"), Set.empty)
         ) shouldBe a[GuardOutcome.Deny]
       )
     }

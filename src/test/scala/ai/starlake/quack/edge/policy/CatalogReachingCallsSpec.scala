@@ -61,3 +61,32 @@ class CatalogReachingCallsSpec extends AnyFlatSpec with Matchers:
       "SELECT * FROM duckdb_settings()",
       "SELECT current_setting('threads')"
     ).foreach(sql => withClue(sql)(CatalogReachingCalls.find(sql) shouldBe None))
+
+  "ReadingTableMacros" should "be every DuckDB 2.0 table macro that reads a table, directly or not" in {
+    // native/qod-node/macros.json lists each built-in macro with its body's calls and whether it
+    // reads a table itself; the set is closed over table calls of another such macro
+    val entries = io.circe.parser
+      .parse(
+        java.nio.file.Files.readString(java.nio.file.Paths.get("native/qod-node/macros.json"))
+      )
+      .fold(e => fail(s"macros.json: ${e.getMessage}"), identity)
+      .asArray
+      .getOrElse(fail("macros.json is not an array"))
+      .map(_.hcursor)
+      .filter(_.get[String]("type").contains("table_macro"))
+    def name(c: io.circe.HCursor): String =
+      c.get[String]("name").fold(e => fail(e.toString), identity)
+    def readsItself(c: io.circe.HCursor): Boolean = c.get[Boolean]("readsTables").getOrElse(false)
+    def tableCalls(c: io.circe.HCursor): Set[String] =
+      c.get[List[List[String]]]("calls")
+        .getOrElse(Nil)
+        .collect { case "table" :: _ :: _ :: n :: Nil => n }
+        .toSet
+    var reading = entries.filter(readsItself).map(name).toSet
+    var grew    = true
+    while grew do
+      val next = reading ++ entries.filter(c => tableCalls(c).exists(reading)).map(name)
+      grew = next.size > reading.size
+      reading = next
+    reading shouldBe CatalogReachingCalls.ReadingTableMacros
+  }

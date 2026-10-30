@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.policy
 
+import ai.starlake.acl.parser.{StatementResult, TableExtractor}
 import ai.starlake.quack.edge.sql.{FunctionCalls, StatementHead}
 
 /** Calls the ACL cannot authorize table by table, denied to a tenant-scoped principal whenever the
@@ -160,6 +161,44 @@ object CatalogReachingCalls:
   def settingDenyReason(name: String): String =
     s"setting $name runs SQL the gateway cannot authorize; " +
       "not available to tenant-scoped principals (deny, fail-closed)"
+
+  /** DuckDB 2.0's table macros whose body reads the table or file a string argument names:
+    * `histogram_values(source, col)` runs `query_table(source)`, and `histogram` runs
+    * `histogram_values` (native/qod-node/macros.json; CatalogReachingCallsSpec pins the list
+    * against it). The rewriters see a table function, never the table its string names.
+    */
+  val ReadingTableMacros: Set[String] = Set("histogram", "histogram_values")
+
+  /** The refusal of a [[ReadingTableMacros]] macro `sql` calls in a table position, read from
+    * `statements` (the parse of `sql`) when it is complete (the aggregate `histogram(expr)` in a
+    * select list shares the name and is a value), else from any call of that name, lexically.
+    */
+  def readingTableMacro(sql: String, statements: List[StatementResult]): Option[String] =
+    val names =
+      if incomplete(statements) then FunctionCalls.scan(sql).calls.map(_.name)
+      else
+        statements
+          .collect { case StatementResult.Extracted(_, _, _, _, markers) => markers }
+          .flatten
+          .flatMap(TableExtractor.tableFunctionName)
+          .map(RewriteScope.callName)
+    names
+      .find(ReadingTableMacros)
+      .map(m =>
+        s"$m reads the table its string argument names, which column and row policies cannot " +
+          "see; not available to principals with column or row policies (deny, fail-closed)"
+      )
+
+  /** The parse did not read the whole batch: a parse error, or a node it could not follow. */
+  private def incomplete(statements: List[StatementResult]): Boolean =
+    statements.exists {
+      case _: StatementResult.ParseError                  => true
+      case StatementResult.Extracted(_, _, _, _, markers) =>
+        markers.exists(m =>
+          List("unrecognized ", "unwalked ", "unreadable ", "data-modifying ").exists(m.startsWith)
+        )
+      case _ => false
+    }
 
   /** The names refused for every caller under lockdown too;
     * [[ai.starlake.quack.edge.sql.LockdownScreen]] reads this so the lockdown and ACL-validates

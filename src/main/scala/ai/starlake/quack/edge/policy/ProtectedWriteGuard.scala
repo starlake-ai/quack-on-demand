@@ -2,7 +2,6 @@ package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, Verb}
-import ai.starlake.quack.edge.sql.{FileAccessScreen, FileAdmission}
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
   ColumnPolicyRewriter,
@@ -31,14 +30,17 @@ enum GuardOutcome:
   * non-SELECT statement, or any batch of more than one statement, from a principal with enforced
   * policies, denies when the read side exposes a protected table: any read of an RLS table, or a
   * CLS table whose masked columns actually appear in the read. Any read it cannot isolate denies
-  * fail-closed. Never rewrites; only allows or denies. On EVERY statement kind, a plain SELECT
-  * included, it also denies a
-  * [[ai.starlake.quack.edge.sql.CatalogReachingCalls CatalogReachingCalls]] call
-  * (`query_table('t')`, `query('...')`): the rewriters cannot see a table named in a string, so
-  * that read would bypass them entirely. Likewise on every kind it denies a two-part name headed by
-  * an attached catalog (`acme_tpch.customer`), which DuckDB binds catalog-first while the rewriters
-  * and this guard's policy match read it schema-first (audit F20, F22): the ACL gate refuses it
-  * when it runs, and this keeps the refusal for a policy holder when the ACL is off.
+  * fail-closed. Never rewrites; only allows or denies.
+  *
+  * On EVERY statement kind, a plain SELECT included, it also denies what the rewriters cannot read
+  * as DuckDB does (spec decision 27): a quoted name holding a dot ([[DottedIdentifierScreen]]), a
+  * call whose target is a string ([[CatalogReachingCalls]]: `query_table('t')`, `query('...')`, a
+  * reading table macro such as `histogram('t', c)`), a SQL-valued setting, a batch that moves the
+  * schema or search path ([[SessionScopeScreen]]: every bare name after it resolves past the policy
+  * keyed on the default schema), and a two-part name headed by an attached catalog
+  * (`acme_tpch.customer`), which DuckDB binds catalog-first while the rewriters and this guard's
+  * policy match read it schema-first (audit F20, F22). A principal without policies is judged by
+  * the node alone.
   *
   * The guard owns its CLS detection oracle: it builds a `ColumnPolicyRewriter` internally in
   * `UnresolvedMode.Deny`, so a table whose columns the catalog cannot enumerate denies rather than
@@ -58,21 +60,15 @@ final class ProtectedWriteGuard(
     new ColumnPolicyRewriter(catalog, unresolvedMode = UnresolvedMode.Deny, enabled = true)
 
   /** `clientDataScans`: the statement came through the native Quack front door, so a DuckDB 2.0
-    * client's scan_data_from_quack_client source is set aside like AccessGate does
-    * ([[ai.starlake.quack.edge.sql.ValidationContext.clientDataScans]]). False denies it as an
-    * incomplete extraction.
-    *
-    * `admission`: the locations the principal's tenant authorized,
-    * [[ai.starlake.quack.edge.sql.FileAdmission]]. A COPY it admits still cannot be parsed here, so
-    * a policy holder's COPY stays refused as an incomplete extraction.
+    * client's scan_data_from_quack_client source is set aside (TableExtractor.gatedUnsupported).
+    * False denies it as an incomplete extraction.
     */
   def check(
       sql: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext,
-      clientDataScans: Boolean = false,
-      admission: FileAdmission = FileAdmission.Closed
+      clientDataScans: Boolean = false
   ): GuardOutcome =
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
@@ -82,17 +78,21 @@ final class ProtectedWriteGuard(
       // Every kind, a plain SELECT included: a table named in a string is invisible to the
       // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
       // dot is matched by the rewriters as a qualified name, not as the one table DuckDB reads
-      // (DottedIdentifierScreen).
+      // (DottedIdentifierScreen). A SQL-valued setting runs SQL nobody reads, and a batch that
+      // moves the schema or search path resolves its bare names past the policies.
       DottedIdentifierScreen
         .find(sql)
         .orElse(CatalogReachingCalls.find(sql).map(CatalogReachingCalls.denyReason))
-        .orElse(FileAccessScreen.find(sql, admission)) match
+        .orElse(
+          CatalogReachingCalls.sqlValuedSetting(sql).map(CatalogReachingCalls.settingDenyReason)
+        )
+        .orElse(SessionScopeScreen.find(sql)) match
         case Some(reason) => Deny(s"access denied: $reason")
         case None         =>
           val config =
             Config.forDuckDB(ctx.defaultDatabase, ctx.defaultSchema, ctx.attachedCatalogs)
           val results = SqlParser.extract(sql, config).statements
-          ambiguousName(results) match
+          ambiguousName(results).orElse(CatalogReachingCalls.readingTableMacro(sql, results)) match
             case Some(reason) => Deny(s"access denied: $reason")
             case None if kind == StatementKind.Select && !isBatch(sql) => Allow
             case None                                                  =>

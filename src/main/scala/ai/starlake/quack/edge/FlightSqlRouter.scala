@@ -1197,7 +1197,7 @@ final class FlightSqlRouter(
       case Some(eff) =>
         val g0      = System.nanoTime()
         val outcome =
-          protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans, fileAdmission)
+          protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans)
         val elapsedMs = (System.nanoTime() - g0) / 1_000_000L
         stmtInstruments.recordProtectedWriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match

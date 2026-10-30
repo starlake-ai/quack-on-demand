@@ -1,11 +1,8 @@
 package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.Config
-import ai.starlake.quack.edge.cls.{ColumnCatalog, SchemaContext}
-import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard}
-import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacUser, RolePermission, RoleRowPolicy}
+import ai.starlake.quack.ondemand.state.{RbacUser, RolePermission}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -196,22 +193,3 @@ class FileAccessScreenSpec extends AnyFlatSpec with Matchers:
 
   it should "be denied to a tenant principal holding *.*.* ALL" in
     stringPrepares.foreach(sql => withClue(sql)(validate(sql, tenantAll) shouldBe a[Denied]))
-
-  "ProtectedWriteGuard" should "deny it to a principal with a row policy" in {
-    val guard = new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map(("lake", "main", "customer") -> List("c_id"))),
-      clsEnabled = true,
-      rlsEnabled = true
-    )
-    val withRows = tenantAll.copy(rowPolicies =
-      List(RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_id = 1"))
-    )
-    val ctx = SchemaContext(Some("lake"), Some("main"), Set.empty)
-    List("SELECT * FROM read_parquet('x.parquet')", "SELECT * FROM 'x.csv'").foreach { sql =>
-      withClue(sql) {
-        guard.check(sql, StatementKind.Select, withRows, ctx) match
-          case GuardOutcome.Deny(reason) => reason should include("tenant-scoped")
-          case other                     => fail(s"expected Deny, got $other")
-      }
-    }
-  }
