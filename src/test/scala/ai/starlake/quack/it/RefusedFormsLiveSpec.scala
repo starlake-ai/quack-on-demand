@@ -45,9 +45,10 @@ import scala.sys.process.{Process, ProcessLogger}
   * alice reads `t` and the secure view `sv` (over `secret`, which she cannot read), bob reads only
   * `other`.
   *
-  * Two routers serve the same node: `gated` mounts the metadata filter, `open` does not; the node
-  * decides every refusal through the manager's decision route. Cancelled without a qod-node build;
-  * the native front door cases also without a DuckDB 2.0 CLI on PATH.
+  * Two routers serve the same node: `gated` mounts the metadata filter, as `Main` always does;
+  * `open` does not, so its cases show the node's own refusals with nothing narrowed in front of
+  * them. The node decides every refusal through the manager's decision route. Cancelled without a
+  * qod-node build; the native front door cases also without a DuckDB 2.0 CLI on PATH.
   */
 class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
@@ -747,7 +748,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     flight(gated, "root", dated) shouldBe Right(List("1,2"))
   }
 
-  "the gateway's posture (ACL and filter on)" should "admit a pure built-in macro in a slot (M9)" in {
+  "the manager's posture (filter mounted)" should "admit a pure built-in macro in a slot (M9)" in {
     flight(
       gated,
       "alice",

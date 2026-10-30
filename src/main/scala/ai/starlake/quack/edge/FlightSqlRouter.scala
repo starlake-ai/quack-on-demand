@@ -77,8 +77,8 @@ final class FlightSqlRouter(
       new ai.starlake.quack.route.PlacementDirectory(),
     val cacheAwareRouting: Boolean = true,
     val loadCapFactor: Double = 2.0,
-    /** System-catalog filter, mounted from `BootFactories.metadataFilterMounted`. Disabled by
-      * default, so a construction site that does not wire it narrows nothing. Appended at the TAIL
+    /** System-catalog filter, always mounted by `Main` (Phase D decision 31). Disabled by default,
+      * so a test construction site that does not wire it narrows nothing. Appended at the TAIL
       * deliberately: `Main` passes the leading arguments positionally, so a mid-list insertion
       * would silently shift `registry` / `journal`.
       */

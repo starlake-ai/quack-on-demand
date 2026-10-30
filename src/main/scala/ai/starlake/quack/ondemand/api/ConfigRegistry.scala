@@ -33,7 +33,6 @@ object ConfigRegistry:
       managerCls: Class[?],
       flightCls: Class[?],
       authCls: Class[?],
-      aclCls: Class[?],
       validationCls: Class[?],
       metricsCls: Class[?],
       quackCls: Class[?] = classOf[ai.starlake.quack.QuackNativeConfig],
@@ -44,7 +43,6 @@ object ConfigRegistry:
     "quack-flightsql"            -> flightCls,
     "quack-flightsql.auth"       -> authCls,
     "quack-flightsql.validation" -> validationCls,
-    "quack-flightsql.acl"        -> aclCls,
     "quack-flightsql.opa"        -> opaCls,
     "quack-native"               -> quackCls
   )

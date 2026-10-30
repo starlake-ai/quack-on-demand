@@ -45,6 +45,53 @@ object BootPreflight extends LazyLogging:
     val inConfig = raw.hasPath(path) && raw.getValue(path).unwrapped().toString.trim.nonEmpty
     if inEnv || inConfig then Left(RemovedApiKeyMessage) else Right(())
 
+  /** The refusal for the removed SQL ACL switch, verbatim in the boot error. */
+  val RemovedAclEnabledMessage: String =
+    "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
+      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
+      "off. Unset QOD_ACL_ENABLED."
+
+  /** The refusal for the removed metadata filter switch, verbatim in the boot error. */
+  val RemovedAclFilteredMetadataMessage: String =
+    "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
+      "user's catalog listings are always narrowed to the objects the user is granted, and " +
+      "nothing switches that off. Unset QOD_ACL_FILTERED_METADATA."
+
+  /** The refusal for the removed parser dialect knob, verbatim in the boot error. */
+  val RemovedAclDialectMessage: String =
+    "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
+      "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
+
+  /** A removed enforcement switch: its environment variable, its configuration path, the refusal.
+    */
+  private final case class RemovedSwitch(envVar: String, path: String, message: String)
+
+  private val RemovedSwitches: List[RemovedSwitch] = List(
+    RemovedSwitch("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", RemovedAclEnabledMessage),
+    RemovedSwitch(
+      "QOD_ACL_FILTERED_METADATA",
+      "quack-flightsql.acl.filteredMetadata",
+      RemovedAclFilteredMetadataMessage
+    ),
+    RemovedSwitch("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", RemovedAclDialectMessage)
+  )
+
+  /** Pure gate (Phase D decisions 28 and 31): the switches the node made obsolete. Refuses when the
+    * environment holds one's variable at all, whatever its value, the empty string included, or
+    * when the loaded configuration holds its path (an operator's own config file, or a `-D` system
+    * property): with the `quack-flightsql.acl` block gone, pureconfig would ignore either silently,
+    * and an operator who turned enforcement or the listing filter off would believe it still off.
+    * The first switch found wins. `Main.bootManager` runs it right after [[checkRemovedApiKey]],
+    * before any I/O.
+    */
+  def checkRemovedSwitches(
+      env: String => Option[String],
+      raw: com.typesafe.config.Config
+  ): Either[String, Unit] =
+    RemovedSwitches
+      .find(s => env(s.envVar).isDefined || raw.hasPathOrNull(s.path))
+      .fold[Either[String, Unit]](Right(()))(s => Left(s.message))
+
   /** The refusal for a FlightSQL edge with no authenticator, verbatim in the boot error. */
   val NoEdgeAuthMessage: String =
     "the FlightSQL edge and the Quack front door have no authenticator: QOD_AUTH_DB_ENABLED=false " +

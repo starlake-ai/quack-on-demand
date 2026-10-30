@@ -73,10 +73,5 @@ class CopyListingRefusalSpec extends AnyFlatSpec with Matchers:
       withClue(sql) {
         refusal(sql, wildcard) shouldBe None
         refusal(sql, root) shouldBe None
-        FlightSqlRouter.copyListingRefusal(
-          sql,
-          new MetadataFilterRewriter(enabled = false).narrows(alice, schemaCtx),
-          _ => ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough
-        ) shouldBe None
       }
     }

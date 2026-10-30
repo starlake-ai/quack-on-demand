@@ -4,7 +4,7 @@ import java.nio.file.Path
 import ai.starlake.quack.{ManagerConfig, RuntimeType}
 import ai.starlake.quack.edge.authz.AuthzDecider
 import ai.starlake.quack.edge.authz.location.LocationRulesSource
-import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
+import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.federation.{
@@ -166,20 +166,6 @@ object BootFactories extends LazyLogging:
             s"secrets actually carry an '$s:' externalRef will fail at resolve time)."
         )
       case other => sys.error(s"unknown federation.secretStore: '$other'")
-
-  /** Whether the edge's system-catalog filter is mounted. ONE value decides both the filter mount
-    * (Main) and every validator arm's implicit metadata admit: an admit is only safe while the
-    * filter that narrows those rows is mounted, so the two must never be able to disagree. With ACL
-    * off nothing is filtered (there is no principal to filter for), so the conjunction.
-    */
-  def metadataFilterMounted(aclCfg: AclConfig): Boolean =
-    aclCfg.enabled && aclCfg.filteredMetadata
-
-  /** The edge's system-catalog filter, mounted from [[metadataFilterMounted]]. */
-  def metadataFilterRewriter(
-      aclCfg: AclConfig
-  ): ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-    new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = metadataFilterMounted(aclCfg))
 
   /** The live location rules of the decision pipeline (spec decisions 15, 18 and 23): the
     * supervisor's data paths, tenant locations and users' S3 credential scopes, the store's

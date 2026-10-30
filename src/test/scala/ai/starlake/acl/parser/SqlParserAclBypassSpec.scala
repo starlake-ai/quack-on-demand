@@ -430,7 +430,7 @@ class SqlParserAclBypassSpec extends AnyFunSuite with Matchers:
     )
   }
 
-  // QOD_ACL_DIALECT=generic maps names through the ANSI mapper: the guard must hold there too, or
+  // The generic dialect maps names through the ANSI mapper: the guard must hold there too, or
   // a four-part name qualifies as some three-part ref the grants may cover.
   private val genericConfig = Config.forGeneric("db", "main")
 

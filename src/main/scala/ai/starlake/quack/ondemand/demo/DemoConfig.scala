@@ -1,7 +1,6 @@
 package ai.starlake.quack.ondemand.demo
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
-import ai.starlake.quack.edge.config.AclConfig
 
 /** The effective demo configs produced by [[DemoConfig.overlay]]. */
 /** `adminPasswordLabel` is what the banner shows as the seeded admins' password: the literal demo
@@ -11,7 +10,6 @@ import ai.starlake.quack.edge.config.AclConfig
 final case class DemoConfigs(
     manager: ManagerConfig,
     flight: FlightConfig,
-    acl: AclConfig,
     adminPasswordLabel: String
 )
 
@@ -35,7 +33,6 @@ object DemoConfig:
   def overlay(
       baseManager: ManagerConfig,
       baseFlight: FlightConfig,
-      baseAcl: AclConfig,
       pg: PgCoords,
       home: DemoHome
   ): DemoConfigs =
@@ -62,11 +59,9 @@ object DemoConfig:
       tlsCertChain = home.root.resolve("certs/server-cert.pem").toString,
       tlsPrivateKey = home.root.resolve("certs/server-key.pem").toString
     )
-    val acl = baseAcl.copy(enabled = true)
     DemoConfigs(
       manager,
       flight,
-      acl,
       adminPasswordLabel =
         if passwordDefaulted then DefaultAdminPassword else ChosenAdminPasswordLabel
     )

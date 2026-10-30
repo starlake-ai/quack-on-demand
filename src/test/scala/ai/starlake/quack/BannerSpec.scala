@@ -54,11 +54,10 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         "0.0.0.0",
         31338,
         tlsEnabled = true,
-        aclEnabled = true,
         nodeLockdown = true
       )
     b should include("http://localhost:20900/ui")
-    b should include("SQL ACL       : ENABLED")
+    b should include("SQL ACL       : ENFORCED on every node")
     b should include("grpc+tls://localhost:31338")
     b should include("Client connection strings: https://docs.starlake.ai/qod/connecting/clients")
     (b should not).include("jdbc:arrow-flight-sql")
@@ -75,35 +74,37 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         "myhost",
         31338,
         tlsEnabled = false,
-        aclEnabled = false,
         nodeLockdown = true
       )
     b should include("grpc://myhost:31338")
-    b should include("SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true")
+    (b should not).include("QOD_ACL_ENABLED")
     b should include(
       "ACL MODE      : qod (default for tenants that set none; 0 tenant(s) in opa mode)"
     )
   }
 
-  it should "not imply nothing is enforced when the ACL is off but a tenant is in opa mode" in {
-    val b = Banner.startup(
-      meta,
-      "myhost",
-      20900,
-      "myhost",
-      31338,
-      tlsEnabled = false,
-      aclEnabled = false,
-      nodeLockdown = true,
-      aclMode = "qod",
-      opaTenants = 2
-    )
-    b should include("SQL ACL       : DISABLED for qod tenants")
-    b should include("opa tenants enforced by OPA")
-    b should include(
-      "ACL MODE      : qod (default for tenants that set none; 2 tenant(s) in opa mode)"
-    )
-    (b should not).include("SQL ACL       : DISABLED (every statement admitted")
+  it should "say every node enforces, whatever the default mode and the opa tenants" in {
+    for (mode, opa) <- List(("qod", 0), ("qod", 2), ("opa", 0)) do
+      val b = Banner.startup(
+        meta,
+        "myhost",
+        20900,
+        "myhost",
+        31338,
+        tlsEnabled = false,
+        nodeLockdown = true,
+        aclMode = mode,
+        opaTenants = opa
+      )
+      withClue(s"$mode/$opa ") {
+        b should include(
+          "SQL ACL       : ENFORCED on every node (QoD grants, or the tenant's OPA in opa mode)"
+        )
+        b should include(
+          s"ACL MODE      : $mode (default for tenants that set none; $opa tenant(s) in opa mode)"
+        )
+        (b should not).include("DISABLED")
+      }
   }
 
   it should "name opa as the default mode when QOD_ACL_MODE=opa" in {
@@ -114,32 +115,14 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      aclEnabled = false,
       nodeLockdown = true,
       aclMode = "opa",
       opaTenants = 0
     )
-    b should include("opa tenants enforced by OPA")
+    b should include("SQL ACL       : ENFORCED on every node")
     b should include(
       "ACL MODE      : opa (default for tenants that set none; 0 tenant(s) in opa mode)"
     )
-  }
-
-  it should "keep the plain ENABLED line with the mode line when the ACL is on" in {
-    val b = Banner.startup(
-      meta,
-      "myhost",
-      20900,
-      "myhost",
-      31338,
-      tlsEnabled = false,
-      aclEnabled = true,
-      nodeLockdown = true,
-      aclMode = "qod",
-      opaTenants = 1
-    )
-    b should include("SQL ACL       : ENABLED (grants, column and row policies enforced)")
-    b should include("1 tenant(s) in opa mode")
   }
 
   it should "name the qod CLI config file only when launched through the CLI" in {
@@ -150,7 +133,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      aclEnabled = true,
       nodeLockdown = true,
       cliConfigFile = Some("/home/u/.config/qod/config.toml")
     )
@@ -165,7 +147,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         "myhost",
         31338,
         tlsEnabled = false,
-        aclEnabled = true,
         nodeLockdown = true
       )
     (bare should not).include("qod config")
@@ -179,7 +160,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      aclEnabled = true,
       nodeLockdown = true
     )
     b should include(
@@ -196,7 +176,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      aclEnabled = true,
       nodeLockdown = false,
       unlockedPools = 3
     )
@@ -213,7 +192,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      aclEnabled = true,
       nodeLockdown = true,
       unlockedPools = 2
     )

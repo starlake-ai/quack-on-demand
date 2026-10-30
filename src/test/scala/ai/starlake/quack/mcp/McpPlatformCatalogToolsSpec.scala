@@ -3,7 +3,7 @@ package ai.starlake.quack.mcp
 import ai.starlake.quack.{CatalogConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.{QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.NodeLoadTracker
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, ValidationConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, ValidationConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -173,7 +173,6 @@ class McpPlatformCatalogToolsSpec extends AnyFlatSpec with Matchers:
       managerCls = classOf[ManagerConfig],
       flightCls = classOf[FlightConfig],
       authCls = classOf[AuthenticationConfig],
-      aclCls = classOf[AclConfig],
       validationCls = classOf[ValidationConfig],
       metricsCls = classOf[MetricsConfig]
     )

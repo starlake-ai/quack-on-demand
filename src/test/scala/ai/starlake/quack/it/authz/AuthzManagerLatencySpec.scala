@@ -60,7 +60,6 @@ class AuthzManagerLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAf
         20965,
         23240,
         23249,
-        aclEnabled = true,
         filesRoot = Files.createDirectories(root.resolve("files")),
         stackPrefixes = List("lat_authz_latency_")
       )

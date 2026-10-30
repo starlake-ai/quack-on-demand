@@ -5,7 +5,6 @@ import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.config.{
-  AclConfig,
   AuthenticationConfig,
   AwsAuthConfig,
   AzureAuthConfig,
@@ -240,7 +239,6 @@ object Main extends IOApp with LazyLogging:
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg   = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val opaCfg   = OpaConfig
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
       .fold(err => throw new IllegalArgumentException(err), identity)
@@ -251,7 +249,6 @@ object Main extends IOApp with LazyLogging:
         resolved,
         edgeCfg,
         resolvedAuth,
-        aclCfg,
         metricsCfg,
         opaCfg,
         lockdownCfg = lockdownCfg,
@@ -264,7 +261,6 @@ object Main extends IOApp with LazyLogging:
       mgrCfg0: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
-      aclCfg: AclConfig,
       metricsCfg: MetricsConfig,
       /** Validated `quack-flightsql.opa` block (`OpaConfig.validate`). No default: every caller
         * must load and validate it, so a bad QOD_ACL_MODE / QOD_OPA_URL fails boot everywhere.
@@ -276,8 +272,9 @@ object Main extends IOApp with LazyLogging:
         * pass one (demo and serve overlays set their system properties before this runs).
         */
       quackCfg: Option[QuackNativeConfig] = None,
-      /** What the removed-key refusal reads (`BootPreflight.checkRemovedApiKey`): the process
-        * environment and the raw configuration. Tests pass their own.
+      /** What the removed-key and removed-switch refusals read (`BootPreflight.checkRemovedApiKey`,
+        * `checkRemovedSwitches`): the process environment and the raw configuration. Tests pass
+        * their own.
         */
       env: String => Option[String] = sys.env.get,
       rawConfig: com.typesafe.config.Config = com.typesafe.config.ConfigFactory.load()
@@ -286,6 +283,9 @@ object Main extends IOApp with LazyLogging:
     // read the configuration alone. A removed QOD_API_KEY refuses boot before HA validation, so an
     // upgrade that still sets the key stops with the reason.
     BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
+    // Then a removed switch (QOD_ACL_ENABLED, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT): the node
+    // enforces always and the listing filter is always mounted.
+    BootPreflight.checkRemovedSwitches(env, rawConfig).left.foreach(msg => sys.error(msg))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -393,7 +393,6 @@ object Main extends IOApp with LazyLogging:
       mgrCfg,
       edgeCfg,
       authCfg,
-      aclCfg,
       metricsCfg,
       opaCfg,
       lockdownCfg,
@@ -409,7 +408,6 @@ object Main extends IOApp with LazyLogging:
       mgrCfg: ManagerConfig,
       edgeCfg: FlightConfig,
       authCfg: AuthenticationConfig,
-      aclCfg: AclConfig,
       metricsCfg: MetricsConfig,
       opaCfg: OpaConfig,
       lockdownCfg: NodeLockdownConfig,
@@ -1447,8 +1445,10 @@ object Main extends IOApp with LazyLogging:
         placement = placementDirectory,
         cacheAwareRouting = mgrCfg.routing.cacheAware,
         loadCapFactor = mgrCfg.routing.loadCapFactor,
-        // Mounted from BootFactories.metadataFilterMounted.
-        metadataFilterRewriter = BootFactories.metadataFilterRewriter(aclCfg),
+        // Always mounted (Phase D decision 31): a tenant user's listings are narrowed to the
+        // granted objects, and nothing switches that off.
+        metadataFilterRewriter =
+          new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true),
         protectedWriteGuard = protectedWriteGuard,
         adminExecutor = adminExecutor
       )
@@ -1584,7 +1584,6 @@ object Main extends IOApp with LazyLogging:
           managerCls = classOf[ManagerConfig],
           flightCls = classOf[FlightConfig],
           authCls = classOf[AuthenticationConfig],
-          aclCls = classOf[AclConfig],
           validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
           metricsCls = classOf[MetricsConfig]
         )
@@ -2140,7 +2139,6 @@ object Main extends IOApp with LazyLogging:
                     quack = quackDoor.map(_ =>
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
                     ),
-                    aclEnabled = aclCfg.enabled,
                     nodeLockdown = lockdownCfg.enabled,
                     unlockedPools = sup.unlockedPoolCount,
                     aclMode = opaCfg.defaultMode,

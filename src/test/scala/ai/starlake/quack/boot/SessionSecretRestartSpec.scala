@@ -1,12 +1,7 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{
-  AclConfig,
-  AuthenticationConfig,
-  NodeLockdownConfig,
-  OpaConfig
-}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, NodeLockdownConfig, OpaConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -150,7 +145,6 @@ class SessionSecretRestartSpec extends AnyFlatSpec with Matchers with BeforeAndA
          |  host = "127.0.0.1"
          |  port = $FlightPort
          |  tlsEnabled = false
-         |  acl.enabled = false
          |}
          |quack-native { enabled = false, port = 29496 }
          |""".stripMargin
@@ -168,7 +162,6 @@ class SessionSecretRestartSpec extends AnyFlatSpec with Matchers with BeforeAndA
         source.at("quack-on-demand").loadOrThrow[ManagerConfig],
         source.at("quack-flightsql").loadOrThrow[FlightConfig],
         authCfg,
-        source.at("quack-flightsql.acl").loadOrThrow[AclConfig],
         source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
         opa,
         lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig],

@@ -12,14 +12,13 @@ import scala.util.Try
   */
 object GenConfigDocs:
 
-  /** The six config roots, copied verbatim from Main.scala. */
+  /** The config roots, copied verbatim from Main.scala. */
   def entries: List[ConfigEntry] =
     ConfigRegistry.collect(
       ConfigRegistry.rootsFor(
         managerCls = classOf[ai.starlake.quack.ManagerConfig],
         flightCls = classOf[ai.starlake.quack.FlightConfig],
         authCls = classOf[ai.starlake.quack.edge.config.AuthenticationConfig],
-        aclCls = classOf[ai.starlake.quack.edge.config.AclConfig],
         validationCls = classOf[ai.starlake.quack.edge.config.ValidationConfig],
         metricsCls = classOf[ai.starlake.quack.observability.metrics.MetricsConfig]
       )

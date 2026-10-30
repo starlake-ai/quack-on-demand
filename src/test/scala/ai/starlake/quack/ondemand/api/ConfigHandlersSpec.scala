@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, ValidationConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, ValidationConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.ondemand.auth.SessionScope
 import cats.effect.unsafe.implicits.global
@@ -16,7 +16,6 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
       managerCls = classOf[ManagerConfig],
       flightCls = classOf[FlightConfig],
       authCls = classOf[AuthenticationConfig],
-      aclCls = classOf[AclConfig],
       validationCls = classOf[ValidationConfig],
       metricsCls = classOf[MetricsConfig]
     )
@@ -35,7 +34,9 @@ class ConfigHandlersSpec extends AnyFlatSpec with Matchers:
     es.exists(_.path == "quack-flightsql.auth.database.password") shouldBe true
     es.exists(_.path == "quack-flightsql.auth.oauthScopes") shouldBe true
     es.exists(_.path == "quack-flightsql.validation.bypassUsers") shouldBe true
-    es.exists(_.path == "quack-flightsql.acl.enabled") shouldBe true
+    // The acl block was removed (its keys refuse boot): the config page lists none of them.
+    es.exists(_.path.startsWith("quack-flightsql.acl.")) shouldBe false
+    es.exists(_.path == "quack-flightsql.opa.defaultMode") shouldBe true
   }
 
   it should "carry the env-var name on each entry" in {

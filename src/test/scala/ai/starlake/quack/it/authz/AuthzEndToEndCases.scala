@@ -135,7 +135,6 @@ abstract class AuthzEndToEndCases(
         relayPort,
         minNodePort,
         maxNodePort,
-        aclEnabled = !nodeOnly,
         filesRoot = root,
         userS3Endpoints = s"$Rustfs,${fake.endpoint}",
         // Tenant catalogs and the Postgres source database of an earlier run of this stack.

@@ -61,18 +61,14 @@ object Banner:
       tlsEnabled: Boolean,
       /** The native Quack front door `(host, port, tls)` when it is enabled. */
       quack: Option[(String, Int, Boolean)] = None,
-      /** Whether the SQL ACL (`quack-flightsql.acl.enabled`, env `QOD_ACL_ENABLED`) is enforced.
-        * Required, not defaulted: the logger's ACL line sits below the default ERROR level, so this
-        * banner is the one place an operator reliably sees whether grants are enforced.
-        */
-      aclEnabled: Boolean,
       /** The global node-lockdown default (`quack-flightsql.nodeLockdown.enabled`, env
-        * `QOD_NODE_LOCKDOWN`). Required for the same reason as `aclEnabled`: without lockdown a
-        * tenant can ATTACH, INSTALL, read local files and the node environment. The catalog
-        * password, object-store keys and federation secrets reach the node as files under
-        * `QOD_SECRETS_DIR` (on Kubernetes a mounted volume, so within reach of a local file read),
-        * not as variables; only inherited cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) can
-        * still sit in the node environment.
+        * `QOD_NODE_LOCKDOWN`). Required, not defaulted: the logger sits at ERROR by default, so
+        * this banner is the one place an operator reliably sees it, and without lockdown a tenant
+        * can ATTACH, INSTALL, read local files and the node environment. The catalog password,
+        * object-store keys and federation secrets reach the node as files under `QOD_SECRETS_DIR`
+        * (on Kubernetes a mounted volume, so within reach of a local file read), not as variables;
+        * only inherited cloud SDK variables (`AWS_*`, `AZURE_*`, `GOOGLE_*`) can still sit in the
+        * node environment.
         */
       nodeLockdown: Boolean,
       /** Pools whose effective lockdown is off (per-pool override, else the global default). */
@@ -81,9 +77,7 @@ object Banner:
         * `QOD_ACL_MODE`): `qod` or `opa`.
         */
       aclMode: String = "qod",
-      /** Tenants currently in `opa` mode. Their statements are enforced by their OPA even with the
-        * SQL ACL disabled, so the banner must never imply "nothing enforced" while one exists.
-        */
+      /** Tenants currently in `opa` mode. Named on the ACL MODE line. */
       opaTenants: Int = 0,
       /** The `qod` CLI config file (`QOD_CONFIG_FILE`, set by `qod start`) the manager was launched
         * with; None when launched outside the CLI.
@@ -91,13 +85,9 @@ object Banner:
       cliConfigFile: Option[String] = None
   ): String =
     def display(h: String) = if h == "0.0.0.0" || h == "::" then "localhost" else h
-    val opaInPlay          = aclMode != "qod" || opaTenants > 0
-    val aclLine            =
-      if aclEnabled then "   SQL ACL       : ENABLED (grants, column and row policies enforced)"
-      else if opaInPlay then
-        "   SQL ACL       : DISABLED for qod tenants (every statement admitted; set QOD_ACL_ENABLED=true to enforce); opa tenants enforced by OPA"
-      else
-        "   SQL ACL       : DISABLED (every statement admitted; set QOD_ACL_ENABLED=true to enforce)"
+    // Constant since Phase D: every node checks every statement, and nothing switches it off.
+    val aclLine =
+      "   SQL ACL       : ENFORCED on every node (QoD grants, or the tenant's OPA in opa mode)"
     val exposure     = "can ATTACH/INSTALL/LOAD, read local files and node credentials"
     val lockdownLine =
       if !nodeLockdown then

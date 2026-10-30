@@ -1,7 +1,7 @@
 package ai.starlake.quack.it.authz
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, NodeLockdownConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, NodeLockdownConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -51,7 +51,6 @@ final class AuthzStack(
     relayPort: Int,
     minNodePort: Int,
     maxNodePort: Int,
-    aclEnabled: Boolean,
     filesRoot: Path,
     relayed: Boolean = true,
     /** `quack-on-demand.userS3.allowedEndpoints`: the endpoints users' S3 credentials may name. */
@@ -112,7 +111,6 @@ final class AuthzStack(
          |  host = "127.0.0.1"
          |  port = $flightPort
          |  tlsEnabled = false
-         |  acl.enabled = $aclEnabled
          |}
          |quack-native { enabled = true, host = "127.0.0.1", port = $quackPort }
          |""".stripMargin
@@ -124,7 +122,6 @@ final class AuthzStack(
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg   = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val lockdown = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
     val metrics  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     val opa      = ai.starlake.quack.edge.config.OpaConfig
@@ -138,7 +135,6 @@ final class AuthzStack(
         mgrCfg,
         edgeCfg,
         authCfg,
-        aclCfg,
         metrics,
         opa,
         lockdownCfg = lockdown,

@@ -35,12 +35,11 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
   private val superuser = EffectiveSet(RbacUser("u-0", None, "root", "admin"), Nil, Nil, Nil, Nil)
 
   /** A router over one in-memory pool (catalog `memory`, schema `main`) with the metadata filter
-    * mounted (unless `filter` is false); every SQL the node is sent, in order, and the answer
+    * mounted, as `Main` always mounts it; every SQL the node is sent, in order, and the answer
     * `answer` gives it.
     */
   private def setup(
       answer: String => QuackResponse = _ => TestArrow.okResponse(),
-      filter: Boolean = true,
       journal: ai.starlake.quack.ondemand.telemetry.EventJournal =
         ai.starlake.quack.ondemand.telemetry.EventJournal.noop,
       columns: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
@@ -95,7 +94,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       journal = journal,
       columnPolicyRewriter = columns,
       attachedCatalogsOf = _ => attached,
-      metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter)
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     (router, () => sent.synchronized(sent.toList))
 
@@ -444,10 +443,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     write.detail.get("locations").map(_.length) shouldBe Some(500)
   }
 
-  "SHOW TABLES" should "reach the node as written when the metadata filter does not narrow it" in {
-    val (router, sent) = setup(filter = false)
-    run(router, "SHOW TABLES", tenantUser).isRight shouldBe true
-    sent().last should endWith("SHOW TABLES")
+  "SHOW TABLES" should "reach the node as written for a principal the filter does not narrow" in {
     val all = EffectiveSet(
       RbacUser("u-2", Some("acme"), "bob", "user"),
       Nil,
@@ -455,9 +451,11 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       List(RolePermission("p-2", "r-2", "*", "*", "*", "ALL")),
       Nil
     )
-    val (router2, sent2) = setup()
-    run(router2, "SHOW ALL TABLES", all).isRight shouldBe true
-    sent2().last should endWith("SHOW ALL TABLES")
+    val (router, sent) = setup()
+    run(router, "SHOW TABLES", all).isRight shouldBe true
+    sent().last should endWith("SHOW TABLES")
+    run(router, "SHOW ALL TABLES", all).isRight shouldBe true
+    sent().last should endWith("SHOW ALL TABLES")
   }
 
   "a two-part name whose head is a catalog" should "reach the node unchanged" in {

@@ -5,39 +5,6 @@ import pureconfig.*
 
 import scala.annotation.meta.field
 
-/** SQL ACL knobs. The pre-Phase-C file/cloud store path is dead --
-  * [[ai.starlake.quack.edge.sql.PostgresAclValidator]] reads the cached
-  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] instead.
-  */
-case class AclConfig(
-    @field @ConfigField(
-      envVar = "QOD_ACL_ENABLED",
-      description = "Enable table-level RBAC (per-statement EffectiveSet check)."
-    )
-    enabled: Boolean,
-    @field @ConfigField(
-      envVar = "QOD_ACL_DIALECT",
-      description = "Statement parser dialect for ACL extraction."
-    )
-    dialect: String,
-    @field @ConfigField(
-      envVar = "QOD_ACL_FILTERED_METADATA",
-      description = "Implicitly admit reads of the session catalog's information_schema " +
-        "(schemata/tables/columns/views) and filter the result rows to the " +
-        "principal's granted objects. false = the pre-0.6.7 grant-required posture."
-    )
-    filteredMetadata: Boolean = true
-)
-
-object AclConfig:
-  // kebab-case reader (matches application.conf) to dodge the
-  // default mangling of "s3" / "gcs" style keys.
-  given ConfigReader[AclConfig] = ConfigReader.forProduct3(
-    "enabled",
-    "dialect",
-    "filteredMetadata"
-  )(AclConfig.apply)
-
 /** Node-lockdown knob (QOD_NODE_LOCKDOWN). When enabled, every statement from a non-superuser
   * caller is screened by [[ai.starlake.quack.edge.sql.LockdownScreen]] before the ACL validation
   * gate, denying ATTACH/DETACH/INSTALL/LOAD, protected settings, and local-path file functions.

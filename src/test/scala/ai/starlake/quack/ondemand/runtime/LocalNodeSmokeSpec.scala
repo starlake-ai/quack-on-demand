@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, NodeLockdownConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, NodeLockdownConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -172,7 +172,6 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
          |  host = "127.0.0.1"
          |  port = $FlightPort
          |  tlsEnabled = false
-         |  acl.enabled = false
          |}
          |quack-native { enabled = false, port = 29495 }
          |""".stripMargin
@@ -184,7 +183,6 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val aclCfg   = source.at("quack-flightsql.acl").loadOrThrow[AclConfig]
     val lockdown = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
     val metrics  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     val opa      = ai.starlake.quack.edge.config.OpaConfig
@@ -198,7 +196,6 @@ class LocalNodeSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAl
         mgrCfg,
         edgeCfg,
         authCfg,
-        aclCfg,
         metrics,
         opa,
         lockdownCfg = lockdown,

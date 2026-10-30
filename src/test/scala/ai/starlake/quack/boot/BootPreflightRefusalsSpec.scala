@@ -8,7 +8,7 @@ import ai.starlake.quack.{
   ManagerConfig
 }
 import ai.starlake.quack.edge.auth.AuthenticationService
-import ai.starlake.quack.edge.config.{AclConfig, AuthenticationConfig, AzureAuthConfig, OpaConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, AzureAuthConfig, OpaConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.security.InMemoryAuthService.emptyAuthConfig
@@ -78,7 +78,6 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       source.at("quack-on-demand").loadOrThrow[ManagerConfig],
       source.at("quack-flightsql").loadOrThrow[FlightConfig],
       source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig],
-      source.at("quack-flightsql.acl").loadOrThrow[AclConfig],
       source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
       opa,
       env = env,
@@ -311,4 +310,68 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       )
     )
     fleet.getMessage shouldBe BootPreflight.InternalUrlFleetMessage
+  }
+
+  private def switchEnv(name: String, v: String): String => Option[String] = Map(name -> v).get
+
+  /** Every removed enforcement switch: its environment variable, its configuration path, and the
+    * refusal naming the variable to unset.
+    */
+  private val removedSwitches = List(
+    ("QOD_ACL_ENABLED", "quack-flightsql.acl.enabled", BootPreflight.RemovedAclEnabledMessage),
+    (
+      "QOD_ACL_FILTERED_METADATA",
+      "quack-flightsql.acl.filteredMetadata",
+      BootPreflight.RemovedAclFilteredMetadataMessage
+    ),
+    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage)
+  )
+
+  "checkRemovedSwitches" should "refuse each removed variable set to any value, empty included" in {
+    for (name, _, message) <- removedSwitches; v <- List("true", "false", "duckdb", "", "  ") do
+      withClue(s"$name='$v' ")(
+        BootPreflight.checkRemovedSwitches(switchEnv(name, v), ConfigFactory.empty()) shouldBe
+          Left(message)
+      )
+  }
+
+  it should "refuse each removed path in the loaded configuration" in {
+    for (_, path, message) <- removedSwitches; v <- List("true", "false", "duckdb", "null") do
+      withClue(s"$path = $v ")(
+        BootPreflight.checkRemovedSwitches(
+          noEnv,
+          ConfigFactory.parseString(s"$path = $v")
+        ) shouldBe Left(message)
+      )
+  }
+
+  it should "accept the bundled configuration and the variables that remain" in {
+    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.empty()) shouldBe Right(())
+    // The bundled application.conf must hold no removed key, or every default boot is refused.
+    BootPreflight.checkRemovedSwitches(noEnv, ConfigFactory.load()) shouldBe Right(())
+    // QOD_ACL_MODE (quack-flightsql.opa.defaultMode) picks a tenant's engine: not a removed switch.
+    BootPreflight.checkRemovedSwitches(
+      switchEnv("QOD_ACL_MODE", "opa"),
+      ConfigFactory.parseString("quack-flightsql.opa.defaultMode = opa")
+    ) shouldBe Right(())
+  }
+
+  it should "carry the removal messages verbatim, each naming the variable to unset" in {
+    BootPreflight.RemovedAclEnabledMessage shouldBe
+      "QOD_ACL_ENABLED (quack-flightsql.acl.enabled) was removed: qod-node now checks every " +
+      "statement against the grants (or the tenant's OPA) always, and nothing switches that " +
+      "off. Unset QOD_ACL_ENABLED."
+    BootPreflight.RemovedAclFilteredMetadataMessage shouldBe
+      "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
+      "user's catalog listings are always narrowed to the objects the user is granted, and " +
+      "nothing switches that off. Unset QOD_ACL_FILTERED_METADATA."
+    BootPreflight.RemovedAclDialectMessage shouldBe
+      "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
+      "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
+  }
+
+  "Main.bootManager" should "refuse a set removed switch before HA validation" in {
+    for (name, _, message) <- removedSwitches do
+      val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "true")))
+      withClue(name)(err.getMessage shouldBe message)
   }

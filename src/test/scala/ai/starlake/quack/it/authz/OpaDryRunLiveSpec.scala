@@ -58,7 +58,6 @@ class OpaDryRunLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         20981,
         23260,
         23264,
-        aclEnabled = false,
         filesRoot = Files.createDirectories(root.resolve("files")),
         stackPrefixes = List("opadry_")
       )

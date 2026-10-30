@@ -1456,7 +1456,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
 
-  it should "deny a two-part name headed by the pool's catalog alias with the ACL off (audit F20)" in:
+  it should "deny a two-part name headed by the pool's catalog alias (audit F20)" in:
     // DuckDB binds `memory.customer` catalog-first, under the USE prelude, to main.customer;
     // read schema-first it matched no policy keyed on schema main, so a write copied the masked
     // or filtered rows out and an RLS-only principal's plain SELECT went out unfiltered (F22).
@@ -3044,7 +3044,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // Under RoutingRefs.MaxSqlLength, so the placement walk parses it.
   private val tooDeep = "SELECT " + List.fill(45000)("1").mkString("+")
 
-  "a too-deep statement" should "be forwarded, not crash the router, with the ACL off" in:
+  "a too-deep statement" should "be forwarded, not crash the router" in:
     val (router, _, _) = setup()
     onWorkerStack(router.execute("deep-1", "alice", poolKey, tooDeep).unsafeRunSync()) match
       case Right(out) => out shouldBe a[Right[?, ?]]

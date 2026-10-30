@@ -757,8 +757,8 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
   // Audit F20 / F22: DuckDB binds a two-part `X.t` catalog-first when X is an attached catalog
   // (the tenant-db alias, a federated alias), under the USE prelude to the very table a bare name
   // reads. Read schema-first, the name matched no policy keyed on the real schema: a write copied
-  // masked or filtered data out, and a plain SELECT read every row past a row policy. With the ACL
-  // on the gate refuses the name; the guard now refuses it for a policy holder with the ACL off.
+  // masked or filtered data out, and a plain SELECT read every row past a row policy. The guard
+  // refuses it for a policy holder.
 
   private val attachedCtx = ctx.copy(attachedCatalogs = Set("acme_tpch", "pg_src"))
 

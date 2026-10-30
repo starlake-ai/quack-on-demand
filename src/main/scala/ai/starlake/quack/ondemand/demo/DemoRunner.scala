@@ -1,7 +1,6 @@
 package ai.starlake.quack.ondemand.demo
 
 import ai.starlake.quack.Main
-import ai.starlake.quack.edge.config.AclConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec
 import ai.starlake.quack.{FlightConfig, ManagerConfig}
 import cats.effect.{ExitCode, IO}
@@ -101,7 +100,7 @@ object DemoRunner extends LazyLogging:
     pg.createDatabase(DbName) // tenant-db DuckLake catalog
 
     val base    = loadBase()
-    val configs = DemoConfig.overlay(base._1, base._2, base._3, pg.coords, home)
+    val configs = DemoConfig.overlay(base._1, base._2, pg.coords, home)
 
     // Point DemoBootstrapHook at the bundled minimal manifest so the manager seeds the control
     // plane on first boot. The hook's env reader is patched (Step 6b) to fall back to system
@@ -116,12 +115,11 @@ object DemoRunner extends LazyLogging:
       case Right(()) => ()
     configs
 
-  private def loadBase(): (ManagerConfig, FlightConfig, AclConfig) =
+  private def loadBase(): (ManagerConfig, FlightConfig) =
     val src = ConfigSource.default
     (
       src.at("quack-on-demand").loadOrThrow[ManagerConfig],
-      src.at("quack-flightsql").loadOrThrow[FlightConfig],
-      src.at("quack-flightsql.acl").loadOrThrow[AclConfig]
+      src.at("quack-flightsql").loadOrThrow[FlightConfig]
     )
 
   // NOTE (Step 6b): the manifest path is delivered via System.setProperty above; the boot-time
@@ -179,4 +177,4 @@ object DemoRunner extends LazyLogging:
       println(banner)
     }
     printWhenReady.start *>
-      Main.bootManager(configs.manager, configs.flight, authCfg, configs.acl, metricsCfg, opaCfg)
+      Main.bootManager(configs.manager, configs.flight, authCfg, metricsCfg, opaCfg)
