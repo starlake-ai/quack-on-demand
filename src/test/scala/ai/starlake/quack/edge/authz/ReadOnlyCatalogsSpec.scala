@@ -115,6 +115,29 @@ class ReadOnlyCatalogsSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  // A tenant-db miss must never be cached as "no read-only catalog": the node alone enforces the
+  // flag, so that answer would let writes into a read-only source through for the TTL.
+  "FederatedReadOnlyCatalogs.sourcesOf" should "fail a tenant-db miss uncached, the next lookup reading again" in {
+    val tenantDbId = new AtomicReference[Option[String]](None)
+    val catalogs   = new FederatedReadOnlyCatalogs()
+    catalogs.wire(
+      FederatedReadOnlyCatalogs.sourcesOf(
+        _ => tenantDbId.get(),
+        Some(id => if id == "td-1" then List(source("erp_pg", readOnly = true)) else Nil)
+      )
+    )
+    val miss = intercept[NoSuchElementException](catalogs.of(Pool))
+    miss.getMessage should include("acme/acme_db")
+    tenantDbId.set(Some("td-1"))
+    catalogs.of(Pool) shouldBe Set("erp_pg")
+  }
+
+  it should "answer no source without a federation store, never looking the tenant-db up" in {
+    val catalogs = new FederatedReadOnlyCatalogs()
+    catalogs.wire(FederatedReadOnlyCatalogs.sourcesOf(_ => fail("looked up"), None))
+    catalogs.of(Pool) shouldBe Set.empty
+  }
+
   "NodeKeys" should "carry the pool's read-only catalogs, sorted, in a user's and a superuser's handle" in {
     val keys = new NodeKeys(
       "s" * 32,

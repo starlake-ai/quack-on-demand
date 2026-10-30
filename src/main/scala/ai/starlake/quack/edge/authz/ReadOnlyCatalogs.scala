@@ -35,7 +35,7 @@ final class FederatedReadOnlyCatalogs(
   private val sourcesOf = new AtomicReference[Option[PoolKey => List[FederatedSource]]](None)
   private val cache     = new ConcurrentHashMap[PoolKey, (Long, Set[String])]()
 
-  /** The federated sources of a pool's tenant-db (none for a pool it does not know). */
+  /** The federated sources of a pool's tenant-db ([[FederatedReadOnlyCatalogs.sourcesOf]]). */
   def wire(sources: PoolKey => List[FederatedSource]): Unit = sourcesOf.set(Some(sources))
 
   def of(key: PoolKey): Set[String] =
@@ -49,3 +49,24 @@ final class FederatedReadOnlyCatalogs(
           cache.put(key, (now, set))
           set
     }
+
+object FederatedReadOnlyCatalogs:
+
+  /** The source lookup Main wires: the federated sources of the pool's tenant-db, by its id
+    * (`tenantDbIdOf`), from the manager's federation store (`listSources`); none without a store. A
+    * tenant-db `tenantDbIdOf` does not know (a cache race, a deleted database) throws rather than
+    * answering "no read-only catalog": [[FederatedReadOnlyCatalogs.of]] caches only a lookup that
+    * returned, so the statement fails and the next one asks again (fail closed, since the node
+    * alone enforces the flag).
+    */
+  def sourcesOf(
+      tenantDbIdOf: PoolKey => Option[String],
+      listSources: Option[String => List[FederatedSource]]
+  ): PoolKey => List[FederatedSource] = key =>
+    listSources match
+      case None       => Nil
+      case Some(list) =>
+        tenantDbIdOf(key) match
+          case Some(id) => list(id)
+          case None     =>
+            throw new NoSuchElementException(s"no tenant-db for ${key.tenant}/${key.tenantDb}")

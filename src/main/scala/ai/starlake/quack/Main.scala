@@ -711,10 +711,11 @@ object Main extends IOApp with LazyLogging:
     )
     supRef.set(sup)
     usePaths.set(key => sup.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""))
-    readOnlyCatalogs.wire(key =>
-      (sup.findTenantDb(key.tenant, key.tenantDb), manifestFedStore) match
-        case (Some(td), Some(fedStore)) => fedStore.listSources(td.id)
-        case _                          => Nil
+    readOnlyCatalogs.wire(
+      ai.starlake.quack.edge.authz.FederatedReadOnlyCatalogs.sourcesOf(
+        key => sup.findTenantDb(key.tenant, key.tenantDb).map(_.id),
+        manifestFedStore.map(fedStore => fedStore.listSources)
+      )
     )
     // The tenants' local folders, the users' S3 scopes and every database data folder, read live
     // (decisions 15, 18, 23): the decision pipeline's and the credential handlers' rules.
