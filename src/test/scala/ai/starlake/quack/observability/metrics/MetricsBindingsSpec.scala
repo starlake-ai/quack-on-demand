@@ -1,7 +1,13 @@
 package ai.starlake.quack.observability.metrics
 
 import ai.starlake.quack.edge.SessionRegistry
-import ai.starlake.quack.edge.adapter.{EngineStats, EngineStatsTracker, NodeLoadTracker}
+import ai.starlake.quack.edge.adapter.{
+  EngineStats,
+  EngineStatsTracker,
+  NodeAuthzStats,
+  NodeAuthzStatsTracker,
+  NodeLoadTracker
+}
 import ai.starlake.quack.model.{PoolKey, Role, RoleDistribution, RunningNode, StatementKind}
 import ai.starlake.quack.ondemand.PoolState
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -109,3 +115,38 @@ class MetricsBindingsSpec extends AnyFlatSpec with Matchers:
     mb.refresh()
     reg.find("node_duckdb_memory_used_bytes").tag("node_id", "n1").gauge.value() shouldBe 999.0
     reg.find("node_duckdb_spill_bytes").tag("node_id", "n1").gauge.value() shouldBe 3.0
+
+  it should "export qod_node_authz_*_total counters for the nodes the probe has read" in:
+    val reg     = new SimpleMeterRegistry()
+    val stats   = new NodeAuthzStatsTracker
+    var current = List(fakePool(List(node("n1", Role.ReadOnly), node("n2", Role.Dual))))
+    val mb      = new MetricsBindings(
+      reg,
+      new NodeLoadTracker,
+      fakeSessions(0, 0),
+      () => current,
+      new EngineStatsTracker,
+      stats
+    )
+    stats.update("n1", NodeAuthzStats(5L, 2L, 3L, 0L, 1L, 4L, 9L))
+    mb.refresh()
+    def counter(name: String, id: String) =
+      reg
+        .find(s"qod_node_authz_${name}_total")
+        .tags("tenant", "acme", "pool", "sales", "node", id)
+        .functionCounter()
+    NodeAuthzStats.Counters.foreach(c => withClue(c)(counter(c, "n1") should not be null))
+    counter("plan_cache_hits", "n1").count() shouldBe 5.0
+    counter("screen_calls", "n1").count() shouldBe 9.0
+    // n2 never read: no series at all, not a zero.
+    counter("plan_cache_hits", "n2") shouldBe null
+    // The counters read the tracker's totals live, a node restart included.
+    stats.update("n1", NodeAuthzStats(8L, 2L, 3L, 0L, 1L, 4L, 12L))
+    counter("plan_cache_hits", "n1").count() shouldBe 8.0
+    stats.update("n1", NodeAuthzStats(1L, 0L, 0L, 0L, 0L, 0L, 2L))
+    counter("plan_cache_hits", "n1").count() shouldBe 9.0
+    // A node the pools no longer list loses its series and its totals.
+    current = List(fakePool(List(node("n2", Role.Dual))))
+    mb.refresh()
+    counter("plan_cache_hits", "n1") shouldBe null
+    stats.total("n1") shouldBe None

@@ -257,6 +257,55 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     adapter.engineStats(node("es2")).unsafeRunSync() shouldBe None
     tracker.snapshot("es2").healthy shouldBe true
 
+  private val CountersRow =
+    "SELECT 1::BIGINT, 2::BIGINT, 3::BIGINT, 4::BIGINT, 5::BIGINT, 6::BIGINT, 7::BIGINT"
+
+  "authzStats" should "read the node's counters as the system principal, without tracker bookkeeping" in:
+    val client = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" -> (() =>
+          QuackResponse.Ok(TestArrow.readerFor(CountersRow), 3L, () => ())
+        )
+      )
+    )
+    val tracker = new NodeLoadTracker
+    val adapter = new QuackHttpAdapter(client, tracker)
+    adapter.authzStats(node("as1")).unsafeRunSync() shouldBe
+      Some(NodeAuthzStats(1L, 2L, 3L, 4L, 5L, 6L, 7L))
+    val payload = ai.starlake.quack.edge.authz.HandleInspector.payload(client.preludes.head)
+    payload.hcursor.downField("principal").get[Boolean]("system") shouldBe Right(true)
+    tracker.snapshot("as1").totalServed shouldBe 0L
+    tracker.snapshot("as1").ewmaMs shouldBe 0.0
+
+  it should "return None, never raise, when the node refuses the read or the client raises" in:
+    val refusing = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" ->
+          (() =>
+            QuackResponse.Failed(
+              QuackError.Permanent("QoD: function qod_authz_stats is superuser-only"),
+              1
+            )
+          )
+      )
+    )
+    val tracker = new NodeLoadTracker
+    new QuackHttpAdapter(refusing, tracker).authzStats(node("as2")).unsafeRunSync() shouldBe None
+    tracker.snapshot("as2").healthy shouldBe true
+    val raising =
+      new QuackHttpClient(TestArrow.sharedAllocator):
+        override def query(
+            e: String,
+            t: String,
+            s: String,
+            ss: Option[String],
+            authorize: () => String
+        ): IO[QuackResponse] =
+          IO.raiseError(new RuntimeException("socket reset"))
+    new QuackHttpAdapter(raising, new NodeLoadTracker)
+      .authzStats(node("as3"))
+      .unsafeRunSync() shouldBe None
+
   "tracked" should "release inFlight when the call is cancelled" in:
     val tracker = new NodeLoadTracker
     val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)

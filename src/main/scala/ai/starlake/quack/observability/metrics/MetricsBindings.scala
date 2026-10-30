@@ -1,23 +1,32 @@
 package ai.starlake.quack.observability.metrics
 
 import ai.starlake.quack.edge.SessionRegistry
-import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
+import ai.starlake.quack.edge.adapter.{
+  EngineStatsTracker,
+  NodeAuthzStats,
+  NodeAuthzStatsTracker,
+  NodeLoadTracker
+}
+import ai.starlake.quack.model.RunningNode
 import ai.starlake.quack.ondemand.PoolState
-import io.micrometer.core.instrument.{MeterRegistry, MultiGauge, Tags}
+import io.micrometer.core.instrument.{FunctionCounter, MeterRegistry, MultiGauge, Tags}
 
 import scala.jdk.CollectionConverters._
 
 /** Wires NodeLoadTracker / PoolSupervisor / SessionRegistry into the Micrometer registry as
   * read-on-scrape gauges. `refresh()` is called from MetricsEndpoint before each scrape (and once
   * at startup); each call updates the row set of every MultiGauge so dynamic membership (createPool
-  * / scale / stopPool) is reflected automatically without leaving stale series behind.
+  * / scale / stopPool) is reflected automatically without leaving stale series behind. qod-node's
+  * authorization counters (NodeAuthzStatsTracker, from the probe's reads) are exported as counters,
+  * one series set per node the probe has read.
   */
 final class MetricsBindings(
     registry: MeterRegistry,
     tracker: NodeLoadTracker,
     sessions: SessionRegistry,
     listPools: () => List[PoolState],
-    engineStats: EngineStatsTracker = new EngineStatsTracker
+    engineStats: EngineStatsTracker = new EngineStatsTracker,
+    authzStats: NodeAuthzStatsTracker = new NodeAuthzStatsTracker
 ):
 
   // Per-node MultiGauges. Each row carries (tenant, pool, node_id, role) tags.
@@ -36,6 +45,10 @@ final class MetricsBindings(
     MultiGauge.builder("node_duckdb_spill_files").register(registry)
   private val nodeDuckSpillBytes =
     MultiGauge.builder("node_duckdb_spill_bytes").register(registry)
+
+  // qod-node's authorization counters per node (decision 26): one FunctionCounter per counter over
+  // the tracker's totals, registered once the probe has read the node and removed with it.
+  private val authzCounters = scala.collection.mutable.Map.empty[String, List[FunctionCounter]]
 
   // Free JVM metrics -- operators expect these and Micrometer ships them.
   new io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics().bindTo(registry)
@@ -124,3 +137,32 @@ final class MetricsBindings(
     nodeDuckTemp.register(duckTempRows.asJava, true)
     nodeDuckSpillFiles.register(spillFileRows.asJava, true)
     nodeDuckSpillBytes.register(spillByteRows.asJava, true)
+    refreshAuthzCounters(nodes)
+
+  /** `qod_node_authz_<counter>_total{tenant,pool,node}` for every listed node the probe has read:
+    * counters, since the tracker's totals only grow. A node no longer listed loses its series and
+    * its totals. Synchronized: two scrapes may refresh at once.
+    */
+  private def refreshAuthzCounters(nodes: List[(String, String, RunningNode)]): Unit =
+    synchronized {
+      val live = nodes.map(_._3.nodeId).toSet
+      authzCounters.keySet.toList.filterNot(live).foreach { id =>
+        authzCounters.remove(id).foreach(_.foreach(c => registry.remove(c)))
+      }
+      authzStats.retain(live)
+      nodes.foreach { case (t, p, n) =>
+        val id = n.nodeId
+        if !authzCounters.contains(id) && authzStats.total(id).isDefined then
+          val counters = NodeAuthzStats.Counters.zipWithIndex.map { (name, i) =>
+            FunctionCounter
+              .builder(
+                s"qod_node_authz_${name}_total",
+                authzStats,
+                (s: NodeAuthzStatsTracker) => s.total(id).fold(0.0)(_.values(i).toDouble)
+              )
+              .tags("tenant", t, "pool", p, "node", id)
+              .register(registry)
+          }
+          authzCounters.update(id, counters)
+      }
+    }

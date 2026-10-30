@@ -153,3 +153,30 @@ final class QuackHttpAdapter(
           logger.debug(s"engineStats ${node.nodeId}: scrape failed: $err")
           None
       }
+
+  /** Read the node's authorization counters ([[NodeAuthzStats.sql]]) as the system principal, the
+    * only one the node lets call `qod_authz_stats()`, on a connection of its own. Same policy as
+    * [[engineStats]]: no tracker bookkeeping. Never raises: None, logged at DEBUG, when the node
+    * fails the read, answers another shape, or the call raises. Observability only: no caller lets
+    * it change a node's health.
+    */
+  def authzStats(node: RunningNode): IO[Option[NodeAuthzStats]] =
+    val endpoint = s"quack:${node.host}:${node.port}"
+    client
+      .query(endpoint, node.token, NodeAuthzStats.sql, None, authorizer(node, NodePrincipal.System))
+      .map {
+        case QuackResponse.Ok(rows, _, close) =>
+          val out =
+            try NodeAuthzStats.fromReader(rows)
+            finally close()
+          if out.isEmpty then
+            logger.debug(s"authzStats ${node.nodeId}: result decoded to no reading")
+          out
+        case QuackResponse.Failed(err, _) =>
+          logger.debug(s"authzStats ${node.nodeId}: read failed: $err")
+          None
+      }
+      .handleErrorWith { t =>
+        IO(logger.debug(s"authzStats ${node.nodeId}: read raised ${t.getClass.getSimpleName}"))
+          .as(None)
+      }

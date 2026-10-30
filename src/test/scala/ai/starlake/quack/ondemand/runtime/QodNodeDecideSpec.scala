@@ -15,14 +15,16 @@ import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
 import ai.starlake.quack.edge.FlightSqlRouter
+import ai.starlake.quack.edge.SessionRegistry
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolState
-import ai.starlake.quack.observability.metrics.{AuthzInstruments, OpaInstruments}
+import ai.starlake.quack.observability.metrics.{AuthzInstruments, MetricsBindings, OpaInstruments}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.sun.net.httpserver.HttpServer
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.apache.arrow.memory.RootAllocator
 import org.http4s.{Header, Headers, Method, Request, Uri}
 import org.scalatest.BeforeAndAfterAll
@@ -39,7 +41,8 @@ import scala.jdk.CollectionConverters.*
   * [[AuthzDecider.attachedCatalog]]). Tenant users holding the built-in `qod_all_tables` (`*.*.*
   * ALL`) read a table of a kind=memory database (catalog `memory`) and of a duckdb-file database
   * attached under a custom catalogAlias, each on its own pool (the Task 6 review's I1). Cancelled
-  * without a qod-node build.
+  * without a qod-node build. It also pins the node's authorization counters as the health probe
+  * reads and exports them (decision 26).
   */
 class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
@@ -224,4 +227,61 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
   "a tenant user without a grant on the database" should "be refused by the decision pipeline" in {
     as(OtherDb, MemoryPool, "SELECT v FROM t") shouldBe
       Left("Permission Error: QoD: user:u-ned lacks grants on memory.main.t:read")
+  }
+
+  /** `sql` as `principal` on the memory pool's node, without the router's USE prelude. */
+  private def raw(principal: NodePrincipal, sql: String): Either[String, List[String]] =
+    val onPool = node.node.copy(poolKey = MemoryPool)
+    LiveQodNode.lines(
+      client
+        .query(node.endpoint, node.token, sql, None, () => keys.prelude(onPool, principal))
+        .unsafeRunSync()
+    )
+
+  private val Root = NodePrincipal("u-root", "root", None, superuser = true, system = false)
+
+  "qod_authz_stats" should "be read by the system principal only" in {
+    raw(NodePrincipal.System, NodeAuthzStats.sql) match
+      case Right(List(row)) => row.split(',').length shouldBe NodeAuthzStats.Counters.size
+      case other            => fail(s"the system principal's read: $other")
+    // A tenant user: the node's parse screen refuses a superuser-class table function first, with
+    // its own text.
+    raw(NodePrincipal.of(Some(AllTables), MemoryPool, DecidePurpose.Live), NodeAuthzStats.sql) match
+      case Left(m) =>
+        m should include("QoD: table function qod_authz_stats is not available to non-superusers")
+      case Right(r) => fail(s"a tenant user read the counters: $r")
+    // A superuser passes the screen and every class: the function itself refuses.
+    raw(Root, NodeAuthzStats.sql) match
+      case Left(m)  => m should include("QoD: function qod_authz_stats is superuser-only")
+      case Right(r) => fail(s"a superuser read the counters: $r")
+  }
+
+  "the health probe" should "export plan cache hits after two identical user statements" in {
+    as(AllTables, MemoryPool, "SELECT v FROM t") shouldBe Right(List("1"))
+    as(AllTables, MemoryPool, "SELECT v FROM t") shouldBe Right(List("1"))
+    // As Main's health loop: the probe (statement, then canary), then on a healthy verdict the
+    // counters' read, then the export on scrape.
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, keys)
+    adapter.probe(node.node).unsafeRunSync() shouldBe ProbeVerdict.Ok
+    val reading = adapter.authzStats(node.node).unsafeRunSync()
+    reading.map(_.planCacheHits).getOrElse(0L) should be > 0L
+    reading.map(_.decideCalls).getOrElse(0L) should be > 0L
+    val stats = new NodeAuthzStatsTracker
+    reading.foreach(stats.update(node.node.nodeId, _))
+    val registry = new SimpleMeterRegistry
+    val onPool   = node.node.copy(poolKey = MemoryPool)
+    new MetricsBindings(
+      registry,
+      new NodeLoadTracker,
+      new SessionRegistry,
+      () =>
+        List(PoolState(MemoryPool, List(onPool), RoleDistribution(0, 0, 1), Map.empty, Map.empty)),
+      new EngineStatsTracker,
+      stats
+    ).refresh()
+    registry
+      .find("qod_node_authz_plan_cache_hits_total")
+      .tags("tenant", "acme", "pool", "bi", "node", onPool.nodeId)
+      .functionCounter()
+      .count() should be > 0.0
   }
