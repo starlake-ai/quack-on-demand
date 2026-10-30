@@ -22,6 +22,7 @@
 #include "json.hpp"
 #include "test_http_server.hpp"
 #include "test_verdicts.hpp"
+#include "verdict.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -112,9 +113,12 @@ qod::DecideResult TestDecider(const qod::DecideCall &call) {
 	} else {
 		result.status = qod::DecideResult::Status::Allow;
 		result.has_verdict = true;
-		// The `short_lived` table's verdicts run out within planning when `expire_in_planning` is on.
+		// The `short_lived` table's verdicts run out within planning when `expire_in_planning` is on; a
+		// plan calling reverse() gets one for an hour, as an OPA tenant's may (its decision cache TTL).
 		result.verdict.expires_at =
-		    now_ms + (call.description.find("\"name\":\"short_lived\"") != std::string::npos ? 10 : 60000);
+		    now_ms + (call.description.find("\"name\":\"short_lived\"") != std::string::npos  ? 10
+		              : call.description.find("\"name\":\"reverse\"") != std::string::npos    ? 3600000
+		                                                                                          : 60000);
 	}
 	return result;
 }
@@ -641,6 +645,36 @@ int main() {
 	ExpectQuery(frank, "EXECUTE p10", "", "an EXECUTE whose verdict expired");
 	if (!AskedFor(before, "\"statement\":\"PROJECTION\"")) {
 		std::cerr << "FAIL: a prepared statement whose verdict expired was not decided again" << std::endl;
+		failures++;
+	}
+	// A-m1: a prepared statement keeps its verdict at most kMaxCachedVerdictMs, as the verdict cache does,
+	// whatever the verdict's expiresAt says: a Rego change bumps no policy version. (A statement over no
+	// table: a prepared read of one is bound again at every EXECUTE here, whatever its verdict.)
+	auto long_lived = frank.Prepare("SELECT reverse('long')");
+	Check(long_lived->HasError() ? long_lived->GetError() : "", long_lived->HasError(), "",
+	      "frank prepares under an hour-long verdict");
+	now_ms += 60000;
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's handle a minute on");
+	before = decide_calls.size();
+	if (!long_lived->HasError()) {
+		auto executed = long_lived->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "",
+		      "the prepared statement within the cap");
+	}
+	if (AskedFor(before, "\"name\":\"reverse\"")) {
+		std::cerr << "FAIL: a prepared statement within kMaxCachedVerdictMs was decided again" << std::endl;
+		failures++;
+	}
+	now_ms += qod::kMaxCachedVerdictMs;
+	ExpectQuery(frank, Prelude(Fresh("u-frank", kNode, 3)), "", "frank's handle six minutes on");
+	before = decide_calls.size();
+	if (!long_lived->HasError()) {
+		auto executed = long_lived->Execute();
+		Check(executed->HasError() ? executed->GetError() : "", executed->HasError(), "",
+		      "the prepared statement past the cap");
+	}
+	if (!AskedFor(before, "\"name\":\"reverse\"")) {
+		std::cerr << "FAIL: a prepared statement ran past kMaxCachedVerdictMs without a new decision" << std::endl;
 		failures++;
 	}
 

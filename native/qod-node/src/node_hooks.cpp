@@ -27,6 +27,7 @@
 #include "duckdb/planner/operator/logical_prepare.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -620,7 +621,10 @@ Admitted Decide(Gate &gate, const Installed &installed, const Described &describ
 	if (result.status != DecideResult::Status::Allow) {
 		throw PermissionException(RefusalMessage(result));
 	}
-	admitted.expires_at = result.has_verdict ? result.verdict.expires_at : gate.authz->Now();
+	// Capped as the verdict cache caps it (VerdictCache::Put): a far-future expiry (an OPA tenant's
+	// decision cache TTL) must not pin a prepared statement's verdict either.
+	auto now = gate.authz->Now();
+	admitted.expires_at = result.has_verdict ? std::min(result.verdict.expires_at, now + kMaxCachedVerdictMs) : now;
 	return admitted;
 }
 
