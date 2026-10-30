@@ -133,6 +133,22 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     now = 60001
     rl.allow("1.2.3.4") shouldBe true
   }
+  it should "forget a key once its interval passed, keeping keys still inside theirs" in {
+    var now = 0L
+    val rl  = new AuditRateLimiter(intervalMillis = 60000, clock = () => now)
+    rl.allow("old") shouldBe true
+    now = 30000
+    rl.allow("recent") shouldBe true
+    rl.allow("old") shouldBe false
+    now = 60000
+    rl.trackedKeys shouldBe 1
+    rl.allow("recent") shouldBe false
+    now = 90000
+    rl.trackedKeys shouldBe 0
+    // Forgetting changes nothing about allow: a key comes back allowed, once per interval.
+    rl.allow("old") shouldBe true
+    rl.allow("old") shouldBe false
+  }
   "onDropCounter" should "route drops through the registered hook instead of the constructor hook" in {
     val store     = new RecordingStore
     var ctorDrops = 0

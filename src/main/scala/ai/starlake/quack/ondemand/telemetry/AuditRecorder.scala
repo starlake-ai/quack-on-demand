@@ -1,10 +1,10 @@
 package ai.starlake.quack.ondemand.telemetry
 
 import ai.starlake.quack.ondemand.api.SessionTokenStore
+import com.github.benmanes.caffeine.cache.{Cache, Caffeine, Expiry}
 import com.typesafe.scalalogging.LazyLogging
 
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import scala.util.control.NonFatal
 
 /** Synchronous best-effort audit writer for the low-volume control-plane and auth event families
@@ -112,16 +112,50 @@ object AuditRecorder:
 
 /** One event per key per interval; used to keep anonymous /api 401 bursts (port scans) from
   * flooding the audit table.
+  *
+  * A key's entry lives exactly one interval past the event that wrote it (an older entry can never
+  * refuse `allow` again), so the table holds only the keys seen within the last interval instead of
+  * every user and client address ever seen. The expiry derives from the stored event time, never
+  * from when the entry was last touched, so a refused `allow` does not extend it. No size cap: a
+  * cap would evict live keys and let a key through twice in one interval.
   */
 final class AuditRateLimiter(
     intervalMillis: Long = 60000,
     clock: () => Long = () => System.currentTimeMillis()
 ):
-  private val last                = new ConcurrentHashMap[String, java.lang.Long]()
+  private val NanosPerMilli = 1000000L
+
+  // Nanoseconds left before the interval that started at `stampMillis` ends.
+  private def left(stampMillis: Long, nowNanos: Long): Long =
+    math.max(0L, (stampMillis + intervalMillis) * NanosPerMilli - nowNanos)
+
+  private val last: Cache[String, java.lang.Long] = Caffeine
+    .newBuilder()
+    .ticker(() => clock() * NanosPerMilli)
+    .executor(_.run())
+    .expireAfter(new Expiry[String, java.lang.Long]:
+      def expireAfterCreate(k: String, v: java.lang.Long, now: Long): Long = left(v, now)
+      def expireAfterUpdate(k: String, v: java.lang.Long, now: Long, current: Long): Long =
+        left(v, now)
+      def expireAfterRead(k: String, v: java.lang.Long, now: Long, current: Long): Long = current)
+    .build[String, java.lang.Long]()
+
   def allow(key: String): Boolean =
-    val now  = clock()
-    val prev = last.get(key)
-    if prev == null || now - prev >= intervalMillis then
-      last.put(key, now)
-      true
-    else false
+    val now     = clock()
+    var allowed = false
+    last
+      .asMap()
+      .compute(
+        key,
+        (_, prev) =>
+          if prev == null || now - prev >= intervalMillis then
+            allowed = true
+            java.lang.Long.valueOf(now)
+          else prev
+      )
+    allowed
+
+  /** Visible for tests: keys still inside their interval. */
+  private[telemetry] def trackedKeys: Int =
+    last.cleanUp()
+    last.asMap().size()
