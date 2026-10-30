@@ -46,7 +46,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
         new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
           new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
         ),
-      attached: Set[String] = Set.empty
+      attached: Set[String] = Set.empty,
+      nodes: Int = 1
   ) =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -75,7 +76,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     sup
       .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "")
       .unsafeRunSync()
-    sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    sup.createPool(poolKey, RoleDistribution(0, 0, nodes)).unsafeRunSync()
     val sent   = scala.collection.mutable.ListBuffer.empty[String]
     val client = new QuackHttpClient(TestArrow.sharedAllocator):
       override def query(
@@ -391,6 +392,55 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     // The evaluation only: neither the substituted statement nor the client's own was sent.
     sent().count(_.endsWith(Evaluated)) shouldBe 1
     sent().exists(s => !s.endsWith(Evaluated)) shouldBe false
+    router.registry.list() shouldBe Nil
+  }
+
+  it should "stop the statement when it is killed while its retry runs" in {
+    // The first node fails the evaluation in transport; the router retries it on the other one,
+    // and the PAT is revoked while that retry runs. The retry must be in the registry to be seen.
+    var router: FlightSqlRouter = null
+    val evaluations             = new java.util.concurrent.atomic.AtomicInteger(0)
+    val (r, sent)               = setup(
+      sql =>
+        if sql.endsWith(" AS location") && evaluations.incrementAndGet() == 1 then
+          QuackResponse.Failed(QuackError.Transient("node went away"))
+        else
+          if sql.endsWith(" AS location") then router.registry.killByPats(Set("pat-1"))
+          evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+      ,
+      nodes = 2
+    )
+    router = r
+    router
+      .execute("c-kill2", "alice", poolKey, Computed, Some(tenantUser), patId = Some("pat-1"))
+      .unsafeRunSync() match
+      case Left(f)  => f.reason should include(FlightSqlRouter.KilledReason)
+      case Right(r) => r.close(); fail("a killed evaluation's statement ran")
+    sent().count(_.endsWith(Evaluated)) shouldBe 2
+    sent().exists(s => !s.endsWith(Evaluated)) shouldBe false
+    router.registry.list() shouldBe Nil
+  }
+
+  "a retried statement" should "be in the kill registry while it runs, under the client's text" in {
+    // The substituted statement fails in transport on its first node and is retried: the registry
+    // shows what the client sent (never the rewrite, which may carry a row policy's predicates)
+    // from the retry's first wire byte.
+    var router: FlightSqlRouter = null
+    var seen                    = List.empty[String]
+    val statements              = new java.util.concurrent.atomic.AtomicInteger(0)
+    val (r, _)                  = setup(
+      sql =>
+        if !sql.endsWith(" AS location") && statements.incrementAndGet() == 1 then
+          QuackResponse.Failed(QuackError.Transient("node went away"))
+        else
+          if !sql.endsWith(" AS location") then seen = router.registry.list().map(_.sql)
+          evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+      ,
+      nodes = 2
+    )
+    router = r
+    run(router, Computed, tenantUser).isRight shouldBe true
+    seen shouldBe List(Computed)
     router.registry.list() shouldBe Nil
   }
 

@@ -1367,8 +1367,13 @@ final class FlightSqlRouter(
                             stmtId.foreach(registry.deregister)
                             maybeRecord(nodeId, latency, "transient", Some(m))
                             if s.txOpen then
-                              // A probe or the manager's own read fails alone: the client's
-                              // transaction keeps its pin, and its own statement answers.
+                              // Only the client's own statement drops the transaction's pin. A
+                              // statement that records nothing fails alone and keeps it: the
+                              // manager's own read (`internal`: a SUMMARIZE's columns, a computed
+                              // location) and the FlightSQL Prepare-time schema probe
+                              // (FlightProducerImpl runs it with recordExecution = false), whose
+                              // statement the client then executes on the pinned node, where it
+                              // is answered (Phase C review D-m7).
                               if recordExecution then sessions.invalidatePin(connectionId)
                               IO.pure(
                                 Left(
@@ -1386,10 +1391,12 @@ final class FlightSqlRouter(
                                 poolKey,
                                 kind,
                                 finalSql,
+                                clientSql = clientSql,
                                 exclude = nodeId,
                                 send = send,
                                 principal = principal,
                                 recordLoad = recordExecution,
+                                internal = internal,
                                 prelude = prelude,
                                 patId = patId
                               )
@@ -1519,18 +1526,26 @@ final class FlightSqlRouter(
           case None       => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
           case Some(snap) => IO.pure(Right(snap))
 
+  /** One more try of a statement that failed in transport, on another node (never inside a client
+    * transaction). Mirrors the primary path: `sql` (the fully rewritten statement) runs, the kill
+    * registry shows `clientSql`, the entry is registered before the send so a kill reaches the
+    * retry from its first wire byte, and the manager's own reads (`internal`) are registered too, a
+    * kill while one runs stopping the statement that would use its value.
+    */
   private def retryOnce[A](
       connectionId: String,
       user: String,
       poolKey: PoolKey,
       kind: StatementKind,
       sql: String,
+      clientSql: String,
       exclude: String,
       send: FlightSqlRouter.NodeSend[A],
       principal: ai.starlake.quack.edge.authz.NodePrincipal,
-      recordLoad: Boolean = true,
-      prelude: Option[String] = None,
-      patId: Option[String] = None
+      recordLoad: Boolean,
+      internal: Boolean,
+      prelude: Option[String],
+      patId: Option[String]
   ): IO[Either[RouterFailure, Routed[A]]] =
     supervisor.snapshot(poolKey) match
       case None          => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
@@ -1541,17 +1556,21 @@ final class FlightSqlRouter(
             snap.nodes.find(_.nodeId == nodeId) match
               case Some(n) =>
                 val wrapped = wrapWithDefaultSchema(supervisor.get(poolKey), sql)
+                val stmtId  =
+                  if recordLoad || internal then
+                    Some(
+                      registry
+                        .register(user, poolKey.tenant, poolKey.pool, nodeId, clientSql, patId)
+                    )
+                  else None
                 send(n, wrapped, prelude, recordLoad, principal)
                   .map {
+                    case NodeOutcome.Ok(_, _, close)
+                        if internal && stmtId.exists(id => !registry.isRegistered(id)) =>
+                      // Killed while the node ran it, as on the primary path.
+                      close()
+                      Left(RouterFailure.AccessDenied(FlightSqlRouter.KilledReason))
                     case NodeOutcome.Ok(reader, latency, close) =>
-                      // Mirror the primary path: registered, killable, gated on recordLoad.
-                      val stmtId =
-                        if recordLoad then
-                          Some(
-                            registry
-                              .register(user, poolKey.tenant, poolKey.pool, nodeId, sql, patId)
-                          )
-                        else None
                       val closedOnce = new java.util.concurrent.atomic.AtomicBoolean(false)
                       val closeOnce: () => Unit =
                         () => if closedOnce.compareAndSet(false, true) then close()
@@ -1565,8 +1584,10 @@ final class FlightSqlRouter(
                       sessions.onStatement(connectionId, kind, nodeId)
                       Right(Routed(reader, closeAndDeregister, nodeId, latency))
                     case NodeOutcome.Transient(m, _) =>
+                      stmtId.foreach(registry.deregister)
                       Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                     case NodeOutcome.Permanent(m, _) =>
+                      stmtId.foreach(registry.deregister)
                       Left(
                         classifyPermanent(
                           m,
