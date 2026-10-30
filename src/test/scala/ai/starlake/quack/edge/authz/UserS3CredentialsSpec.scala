@@ -69,6 +69,22 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     c.digest("u-1") shouldBe ""
   }
 
+  it should "never publish a read over one that started after it" in {
+    // restore() reads before its snapshot and publishes after; a local mutation's refresh may read
+    // and publish in between, and saw every commit the earlier read saw.
+    val rows  = new AtomicReference(List(A))
+    val c     = new UserS3CredentialCache(() => rows.get())
+    val early = c.read()
+    rows.set(List(A, B))
+    c.refresh()
+    c.publish(early)
+    c.of("u-1") shouldBe List(B, A)
+    rows.set(Nil)
+    val late = c.read()
+    c.publish(late)
+    c.of("u-1") shouldBe Nil
+  }
+
   it should "retry a failing store at most once per RetryMs" in {
     val loads = new AtomicLong(0L)
     val clock = new AtomicLong(1_000_000L)

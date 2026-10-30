@@ -3129,3 +3129,41 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     sup.rbacResolver.role(created.toOption.get.id) shouldBe defined
     store.findRole(tenantId, "analyst") shouldBe defined
   }
+
+  /** A peer commits between this replica's reads: it lands right after `snapshot()` returns, so
+    * the snapshot holds the state before it while every later read sees the commit (a new policy
+    * version, a new credential).
+    */
+  private final class PeerCommitsAfterSnapshot extends InMemoryControlPlaneStore:
+    @volatile var armed = false
+    override def snapshot(): ai.starlake.quack.ondemand.state.ControlPlaneSnapshot =
+      val snap = super.snapshot()
+      if armed then
+        armed = false
+        bumpPolicyVersion("acme")
+        putUserS3Credential(
+          ai.starlake.quack.model.UserS3Credential(
+            "0123456789abcdef0123456789abcdef", "u-1", "s3://acme-etl/", "AK", "SK", None, None,
+            None, None, 0L, 0L
+          )
+        )
+      snap
+
+  "restore" should "publish the policy versions and credentials it read before the snapshot" in {
+    val store = new PeerCommitsAfterSnapshot
+    val sup   = new PoolSupervisor(fakeBackend(), new NodeLoadTracker, store)
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    sup.restore()
+    val before = sup.policyVersions.current("acme")
+    before shouldBe store.policyVersions()("acme")
+    store.armed = true
+    sup.restore()
+    // A version must never vouch for state older than itself: the state restore loaded is from
+    // before the peer's commit, so the version it publishes is too. The commit's own NOTIFY runs
+    // the next restore, which moves both.
+    sup.policyVersions.current("acme") shouldBe before
+    sup.userS3.of("u-1") shouldBe Nil
+    sup.restore()
+    sup.policyVersions.current("acme") should be > before
+    sup.userS3.of("u-1").map(_.scope) shouldBe List("s3://acme-etl/")
+  }

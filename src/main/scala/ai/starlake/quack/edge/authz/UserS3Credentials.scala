@@ -71,6 +71,10 @@ final class UserS3CredentialCache(
   @volatile private var byUser: Map[String, (List[UserS3Credential], String)] = Map.empty
   @volatile private var stale: Boolean                                        = false
   @volatile private var lastAttempt: Long                                     = 0L
+  // Reads are numbered as they start; a read publishes only when no later-started one has, since
+  // a read that started later saw every commit an earlier one saw.
+  private val reads               = new java.util.concurrent.atomic.AtomicLong(0L)
+  @volatile private var published = 0L
 
   def of(userId: String): List[UserS3Credential] = byUser.get(userId).fold(Nil)(_._1)
 
@@ -83,21 +87,39 @@ final class UserS3CredentialCache(
     if stale && byUser.contains(userId) then Left(UserS3CredentialCache.StaleReason)
     else Right(of(userId))
 
-  def refresh(): Unit = synchronized {
-    lastAttempt = clock()
-    try
-      byUser = load().groupBy(_.userId).map { (user, creds) =>
-        user -> (creds.sortBy(_.scope), UserS3Credentials.digestOf(creds))
-      }
-      if stale then logger.info("user S3 credentials: reloaded after a failed refresh")
-      stale = false
-    catch
-      case NonFatal(e) =>
-        stale = true
-        logger.warn(
-          "user S3 credentials: refresh failed, serving none until a reload succeeds: " +
-            e.getClass.getSimpleName
-        )
+  /** Reloads every user's credentials: [[read]] then [[publish]]. */
+  def refresh(): Unit = synchronized(publish(read()))
+
+  /** The credential sets as the store holds them now, to [[publish]] later. restore() reads them
+    * before it loads the state their digests vouch for, and publishes once that state is in place.
+    */
+  def read(): UserS3CredentialCache.Loaded =
+    val seq  = reads.incrementAndGet()
+    val at   = clock()
+    val sets =
+      try Right(load())
+      catch case NonFatal(e) => Left(e.getClass.getSimpleName)
+    UserS3CredentialCache.Loaded(seq, at, sets)
+
+  /** Publishes what [[read]] returned, unless a read that started after it has published already
+    * (it saw every commit this one saw). A failed read marks the cache stale.
+    */
+  def publish(loaded: UserS3CredentialCache.Loaded): Unit = synchronized {
+    if loaded.seq > published then
+      published = loaded.seq
+      lastAttempt = loaded.at
+      loaded.sets match
+        case Right(all) =>
+          byUser = all.groupBy(_.userId).map { (user, creds) =>
+            user -> (creds.sortBy(_.scope), UserS3Credentials.digestOf(creds))
+          }
+          if stale then logger.info("user S3 credentials: reloaded after a failed refresh")
+          stale = false
+        case Left(cause) =>
+          stale = true
+          logger.warn(
+            s"user S3 credentials: refresh failed, serving none until a reload succeeds: $cause"
+          )
   }
 
   private def retryIfStale(): Unit =
@@ -107,6 +129,12 @@ final class UserS3CredentialCache(
       )
 
 object UserS3CredentialCache:
+
+  /** One [[UserS3CredentialCache.read]]: its start order, its clock, and the sets or the failure's
+    * class name (never its message, which could carry a credential).
+    */
+  final case class Loaded(seq: Long, at: Long, sets: Either[String, List[UserS3Credential]]):
+    override def toString: String = s"Loaded($seq,$at,${sets.map(_.size)})"
 
   /** How often a stale cache retries its load, at most. */
   val RetryMs: Long = 1_000L

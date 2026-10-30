@@ -311,9 +311,18 @@ final class PoolSupervisor(
     * after a change carry the new version and the new credential digest.
     */
   private def invalidateEffectiveCacheLocal(): Unit =
+    invalidateEffectiveCacheLocal(policyVersions.read(), userS3.read())
+
+  /** [[invalidateEffectiveCacheLocal]] publishing versions and credentials read earlier: restore()
+    * reads them before its snapshot, so neither vouches for state older than itself.
+    */
+  private def invalidateEffectiveCacheLocal(
+      versions: Option[Map[String, Long]],
+      credentials: ai.starlake.quack.edge.authz.UserS3CredentialCache.Loaded
+  ): Unit =
     effectiveCache.invalidateAll()
-    policyVersions.refresh()
-    userS3.refresh()
+    policyVersions.publish(versions)
+    userS3.publish(credentials)
 
   /** Drop every cached `EffectiveSet` and notify peers, so a freshly-granted role or pool
     * permission takes effect on the next handshake, not after a TTL window.
@@ -584,7 +593,14 @@ final class PoolSupervisor(
     effectiveMetastoreFor(td)
 
   def restore(): Unit =
-    val snap = store.snapshot()
+    // Read before the snapshot and published once the caches are rebuilt: a version (and a
+    // credential digest) must never vouch for state older than itself. A peer's commit between the
+    // reads would otherwise publish its new version over the deny sets, ACL modes and grants of
+    // before it, and a node would cache that decision under the new version for 60 s; read first,
+    // the version is the older one, and the commit's own NOTIFY runs the restore that moves it.
+    val versions    = policyVersions.read()
+    val credentials = userS3.read()
+    val snap        = store.snapshot()
 
     // Diff-aware rehydration: restore() is also driven by peer NOTIFY handlers, so a row a peer
     // DELETED must disappear from this mirror, not just get overwritten. Compute the snapshot key
@@ -738,7 +754,7 @@ final class PoolSupervisor(
     locationsByTenant.foreach((t, ls) => locationCache.put(t, ls.sortBy(_.location)))
     // Local-only: restore() is called by peer-notification handlers; broadcasting here
     // would cause infinite echo across replicas.
-    invalidateEffectiveCacheLocal()
+    invalidateEffectiveCacheLocal(versions, credentials)
 
   /** Wraps a mutator body so a failure after the store write leaves the caches consistent with the
     * store instead of half-applied. All caches (`tenants`, `tenantDbs`, `poolRows`, `pools`,

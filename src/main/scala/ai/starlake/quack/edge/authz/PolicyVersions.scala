@@ -31,20 +31,30 @@ final class PolicyVersionCache(load: () => Map[String, Long])
 
   def current(tenantId: String): Long = versions.getOrElse(tenantId, 0L)
 
-  /** Reloads every tenant's version. A failure keeps the last values: the mutation that asked for
-    * the refresh has committed, and a stale version only delays the flush of cached verdicts until
-    * the next refresh or their 60 s expiry.
+  /** Reloads every tenant's version: [[read]] then [[publish]]. */
+  def refresh(): Unit = publish(read())
+
+  /** Every tenant's version as the store holds it now, to [[publish]] later; None when the load
+    * failed (logged). restore() reads before it loads the state the versions vouch for and
+    * publishes once that state is in place, so a version never vouches for state older than itself.
     */
-  def refresh(): Unit =
-    try
-      load().foreach { case (tenant, v) =>
-        versions.updateWith(tenant) {
-          case Some(old) => Some(math.max(old, v))
-          case None      => Some(v)
-        }
-      }
+  def read(): Option[Map[String, Long]] =
+    try Some(load())
     catch
       case NonFatal(e) =>
         logger.warn(
           s"policy versions: refresh failed, keeping the last values: ${e.getClass.getSimpleName}"
         )
+        None
+
+  /** Publishes what [[read]] returned, never moving a version backwards. None keeps the last
+    * values: the mutation that asked for the refresh has committed, and a stale version only delays
+    * the flush of cached verdicts until the next refresh or their 60 s expiry.
+    */
+  def publish(loaded: Option[Map[String, Long]]): Unit =
+    loaded.foreach(_.foreach { case (tenant, v) =>
+      versions.updateWith(tenant) {
+        case Some(old) => Some(math.max(old, v))
+        case None      => Some(v)
+      }
+    })
