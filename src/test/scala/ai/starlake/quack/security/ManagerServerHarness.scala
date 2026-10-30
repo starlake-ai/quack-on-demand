@@ -339,6 +339,9 @@ object ManagerServerHarness:
       // The OPA authorizer behind POST /api/tenant/opaTest. Defaults to a real one with a short
       // timeout and no decision cache, so a dry run against an unreachable OPA fails fast.
       opa: Option[ai.starlake.quack.edge.opa.OpaAuthorizer] = Some(defaultOpaAuthorizer),
+      // The OPA dry run's node path (statement form of POST /api/tenant/opaTest). None answers
+      // dry_run_not_wired, as no harness runs nodes; a spec passes its own to drive the handler.
+      opaNodeRun: Option[ai.starlake.quack.ondemand.api.OpaDryRun.NodeRun] = None,
       // The management user directory behind the REST user handlers, password reset, SCIM and the
       // grants of an admin-console SSO login (Main binds AuthHandlers.grantsForIdentity to
       // UserStore.grantsForIdentity on the same store). None keeps a fresh, empty DuckDB
@@ -459,7 +462,7 @@ object ManagerServerHarness:
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     // audit: tenant/setAuth's refusal and success rows (and every other tenant action) reach the
     // spec's recorder; the default noop recorder keeps every other spec's boot unchanged.
-    val tenants   = new TenantHandlers(sup, audit = audit, opa = opa)
+    val tenants   = new TenantHandlers(sup, audit = audit, opa = opa, nodeRun = opaNodeRun)
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val health = new HealthHandler(sup)

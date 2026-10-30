@@ -601,9 +601,10 @@ final case class UserS3ListRequest(userId: String)
 
 final case class UserS3RemoveRequest(userId: String, id: String)
 
-/** OPA dry run: builds the exact input the edge would send for `user` on `pool` (a `connect`
-  * decision without `sql`, a `statement` decision with it) and evaluates it against the tenant's
-  * OPA. Nothing is executed and the decision cache is not touched.
+/** OPA dry run for `user` on `pool`: without `sql`, the `connect` decision the edge would send;
+  * with it, the statement run through a node of the (running) pool as the user, its `statement`
+  * decision evaluated against the tenant's OPA. Nothing is executed and the decision cache is not
+  * touched.
   */
 final case class OpaTestRequest(
     tenant: String,

@@ -173,7 +173,7 @@ def opa_test(
     tenant: str = typer.Argument(..., metavar="TENANT"),
     pool: str = typer.Option(..., "--pool"),
     user: str = typer.Option(..., "--user"),
-    sql: str = typer.Option(None, "--sql", help="Omit to test pool access (connect); unqualified tables resolve to <database>.main."),
+    sql: str = typer.Option(None, "--sql", help="Omit to test pool access (connect). With it, the statement runs on a node of the pool (which must be running) as the user, exactly as live, and is judged, never executed."),
 ):
     """Dry-run an OPA decision: prints the exact input and the decision. Executes nothing."""
     body: dict = {"tenant": tenant, "pool": pool, "user": user}

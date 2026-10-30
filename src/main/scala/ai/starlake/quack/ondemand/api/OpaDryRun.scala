@@ -1,23 +1,27 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.acl.model.Config
-import ai.starlake.acl.parser.TableAccess
-import ai.starlake.quack.edge.opa.{Decision, OpaAuthorizer, OpaInput, OpaTarget, OpaUser}
-import ai.starlake.quack.edge.sql.{AccessGate, GateOutcome}
-import ai.starlake.quack.model.{StatementKind, TenantDb}
+import ai.starlake.quack.edge.{FlightSqlRouter, RouterFailure}
+import ai.starlake.quack.edge.authz.{AuthzDecider, DryRunOutcome, DryRunResults, NodeHandles}
+import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaInput, OpaTarget, OpaUser}
+import ai.starlake.quack.edge.sql.StatementHead
+import ai.starlake.quack.model.{PoolKey, Tenant}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.route.StatementClassifier
-import io.circe.Json
+import ai.starlake.quack.ondemand.state.RbacUser
+import cats.effect.IO
 
-/** Builds the exact OPA input a real handshake (no SQL) or statement would send and evaluates it
-  * against the tenant's OPA, without executing anything and without touching the decision cache.
+/** The OPA dry run (`POST /api/tenant/opaTest`). Without SQL: the exact `connect` input a handshake
+  * would send, evaluated against the tenant's OPA without touching the decision cache; the client
+  * edge is reported as `dry-run` and no token claims are carried (claims exist only on a live
+  * credential).
   *
-  * Differences from the live edge, all deliberate: the client edge is reported as `dry-run`, no
-  * token claims are carried (claims exist only on a live credential), the statement class comes
-  * from the default keyword classifier (not the operator-tuned one), and unqualified table names
-  * resolve against the pool's catalog alias and schema (falling back to the tenant-db name and
-  * `main`) with no session `USE` state.
+  * With SQL (decision 25): the statement runs through a node of the pool as the named user, exactly
+  * as live (the router's USE prelude and policy rewriters, the node's parse screen and describer,
+  * the decision pipeline), under a decide context marked dry run. The decision endpoint asks the
+  * tenant's OPA past its decision cache, records what it sent and got back, and refuses the
+  * statement, so nothing runs; the answer is that recorded call. Its input is the node decision's
+  * own: edge `node`, no statement text, claims `{}`. OPA tenants only, one statement, a running
+  * pool (a dry run never wakes one).
   */
 object OpaDryRun:
 
@@ -29,15 +33,81 @@ object OpaDryRun:
     */
   val GenericTransportError: String = OpaAuthorizer.UnavailableMessage
 
-  /** A left is `(errorCode, message)`; `not_found` maps to 404, anything else to 400.
+  /** How the statement form reaches a node ([[nodeRun]] over the router, in Main). */
+  trait NodeRun:
+
+    /** Whether `key` has a routable node now: a dry run never wakes a suspended pool. */
+    def running(key: PoolKey): Boolean
+
+    /** Runs `sql` for `eff`'s user on a node of `key` under a dry-run context: the router's failure
+      * (None when the node ran it) and the OPA call the decision endpoint recorded for it, if any.
+      */
+    def run(
+        user: String,
+        key: PoolKey,
+        eff: EffectiveSet,
+        sql: String
+    ): IO[(Option[RouterFailure], Option[DryRunOutcome])]
+
+  /** [[NodeRun]] over `router` ([[FlightSqlRouter.dryRun]]) and the decision endpoint's `results`.
+    */
+  def nodeRun(router: FlightSqlRouter, results: DryRunResults): NodeRun = new NodeRun:
+
+    def running(key: PoolKey): Boolean =
+      router.supervisor.get(key).exists(st => !st.suspended && !st.disabled) &&
+        router.supervisor
+          .snapshot(key)
+          .exists(snap => snap.nodes.exists(n => snap.loadOf(n.nodeId).routable))
+
+    def run(
+        user: String,
+        key: PoolKey,
+        eff: EffectiveSet,
+        sql: String
+    ): IO[(Option[RouterFailure], Option[DryRunOutcome])] =
+      router.dryRun(user, key, sql, eff).map { (failure, nonces) =>
+        // Every handle's outcome is taken, so none waits out its retention; the statement's is the
+        // last OPA answered (an earlier one belongs to an attempt the router retried elsewhere).
+        (failure, nonces.flatMap(results.take).lastOption)
+      }
+
+  private final case class Resolved(
+      authz: OpaAuthorizer,
+      tenant: Tenant,
+      key: PoolKey,
+      user: RbacUser,
+      eff: EffectiveSet
+  )
+
+  private val NothingToAuthorize: (String, String) =
+    "nothing_to_authorize" -> "the statement touches no table or location OPA would decide on"
+
+  /** A left is `(errorCode, message)`; [[TenantHandlers.opaTest]] maps each code to its status.
     * `detailedErrors` is true only for a superuser caller: see [[GenericTransportError]].
     */
   def run(
       sup: PoolSupervisor,
       opa: Option[OpaAuthorizer],
+      nodes: Option[NodeRun],
       req: OpaTestRequest,
       detailedErrors: Boolean
-  ): Either[(String, String), OpaTestResponse] =
+  ): IO[Either[(String, String), OpaTestResponse]] =
+    IO.blocking(resolve(sup, opa, req)).flatMap {
+      case Left(error) => IO.pure(Left(error))
+      case Right(r)    =>
+        req.sql.map(_.trim).filter(_.nonEmpty) match
+          case None =>
+            IO.blocking[Either[(String, String), OpaTestResponse]](
+              Right(connect(sup, r, detailedErrors))
+            )
+          case Some(sql) => statement(r, nodes, sql, detailedErrors)
+    }
+
+  private def resolve(
+      sup: PoolSupervisor,
+      opa: Option[OpaAuthorizer],
+      req: OpaTestRequest
+  ): Either[(String, String), Resolved] =
     for
       authz  <- opa.toRight("opa_not_wired" -> "OPA is not wired on this manager")
       tenant <- sup
@@ -52,46 +122,72 @@ object OpaDryRun:
         // answering it differently from an unknown user would make this a superuser-name oracle.
         .filter(_.tenant.nonEmpty)
         .toRight("not_found" -> s"user '${req.user}' not found in tenant '${tenant.id}'")
-      eff = sup
-        .effectiveSetForUser(user.id)
-        .getOrElse(EffectiveSet(user, Nil, Nil, Nil, Nil))
-      target = OpaTarget(key.tenant, key.tenantDb, key.pool, sup.parentPoolNamesOf(key))
-      u      = OpaUser(user.username, eff.roles.map(_.name), eff.groups.map(_.name), Map.empty)
-      built <- req.sql.map(_.trim).filter(_.nonEmpty) match
-        case None => Right(("connect", OpaInput.connect(target, u, Edge), Set.empty[TableAccess]))
-        case Some(sql) =>
-          val meta    = sup.get(key).map(_.metastore).getOrElse(Map.empty)
-          val catalog = TenantDb.catalogAlias(meta, key.tenantDb)
-          val schema  = meta.get("schemaName").filter(_.nonEmpty).getOrElse("main")
-          val cfg     = Config.forDuckDB(Some(catalog), Some(schema), Set(catalog))
-          AccessGate.evaluate(
-            sql,
-            cfg,
-            catalog,
-            filteredMetadata = false,
-            clientDataScans = false
-          ) match
-            case GateOutcome.Refuse(msg, _, _)  => Left("refused_before_opa" -> msg)
-            case GateOutcome.NothingGated(_, _) =>
-              Left("nothing_to_authorize" -> "the statement touches no table OPA would decide on")
-            case GateOutcome.Gated(gated, _) =>
-              val cls = StatementClassifier.classify(sql) match
-                case StatementKind.Ddl => "DDL"
-                case StatementKind.Dml => "WRITE"
-                case _                 => "READ"
-              val text = Option.when(tenant.acl.sendStatementText)(sql)
-              Right(("statement", OpaInput.statement(target, u, Edge, cls, gated, text), gated))
-      (rule, input, accesses) = built
-    yield toResponse(rule, input, authz.dryRun(tenant, input, rule, accesses), detailedErrors)
+    yield Resolved(
+      authz,
+      tenant,
+      key,
+      user,
+      sup.effectiveSetForUser(user.id).getOrElse(EffectiveSet(user, Nil, Nil, Nil, Nil))
+    )
 
-  private def toResponse(
-      rule: String,
-      input: Json,
-      d: Decision,
+  /** The handshake form: the `connect` input, sent through [[OpaAuthorizer.dryRun]]. */
+  private def connect(sup: PoolSupervisor, r: Resolved, detailedErrors: Boolean): OpaTestResponse =
+    val target = OpaTarget(r.key.tenant, r.key.tenantDb, r.key.pool, sup.parentPoolNamesOf(r.key))
+    val user   =
+      OpaUser(r.user.username, r.eff.roles.map(_.name), r.eff.groups.map(_.name), Map.empty)
+    val input = OpaInput.connect(target, user, Edge)
+    response(
+      DryRunOutcome.of("connect", input, r.authz.dryRun(r.tenant, input, "connect", Set.empty)),
+      detailedErrors
+    )
+
+  /** The statement form (decision 25). */
+  private def statement(
+      r: Resolved,
+      nodes: Option[NodeRun],
+      sql: String,
       detailedErrors: Boolean
-  ): OpaTestResponse = d match
-    case Decision.Allow(id)           => OpaTestResponse(rule, input, "allow", None, id)
-    case Decision.Deny(reason, _, id) => OpaTestResponse(rule, input, "deny", Some(reason), id)
-    case Decision.Error(cause)        =>
-      val shown = if detailedErrors then cause else GenericTransportError
-      OpaTestResponse(rule, input, "error", Some(shown), None)
+  ): IO[Either[(String, String), OpaTestResponse]] =
+    if !r.authz.isOpa(r.tenant) then
+      IO.pure(
+        Left(
+          "opa_mode_required" ->
+            s"tenant '${r.tenant.id}' decides with QoD grants: only an OPA tenant's statements reach OPA"
+        )
+      )
+    else if StatementHead.split(sql).length != 1 then
+      IO.pure(
+        Left("single_statement_required" -> "a statement dry run takes exactly one statement")
+      )
+    else
+      nodes match
+        case None =>
+          IO.pure(Left("dry_run_not_wired" -> "statement dry runs are not wired on this manager"))
+        case Some(n) if !n.running(r.key) => IO.pure(Left(notRunning(r.key)))
+        case Some(n)                      =>
+          n.run(r.user.username, r.key, r.eff, sql).map {
+            case (_, Some(outcome)) => Right(response(outcome, detailedErrors))
+            case (Some(f), None)    => Left(unanswered(r.key, f))
+            // The node ran it: only a USE of the session's own path is let through.
+            case (None, None) => Left(NothingToAuthorize)
+          }
+
+  private def notRunning(key: PoolKey): (String, String) =
+    "pool_not_running" ->
+      s"pool '${key.pool}' has no running node; start or resume it first (a dry run never wakes a pool)"
+
+  /** A statement OPA was not asked about: why, from the router's failure. */
+  private def unanswered(key: PoolKey, f: RouterFailure): (String, String) =
+    val text = NodeHandles.refusalText(f.reason)
+    if f.reason == FlightSqlRouter.PoolNotWoken then notRunning(key)
+    // The rules allowed it and OPA had nothing to judge: the decision endpoint's dry-run refusal.
+    else if text.endsWith(s"QoD: ${AuthzDecider.DryRunReason}") then NothingToAuthorize
+    else
+      f match
+        case _: RouterFailure.Unavailable => "authz_unavailable"  -> text
+        case _                            => "refused_before_opa" -> text
+
+  private def response(o: DryRunOutcome, detailedErrors: Boolean): OpaTestResponse =
+    val reason =
+      if o.decision == "error" && !detailedErrors then Some(GenericTransportError) else o.reason
+    OpaTestResponse(o.rule, o.input, o.decision, reason, o.decisionId)

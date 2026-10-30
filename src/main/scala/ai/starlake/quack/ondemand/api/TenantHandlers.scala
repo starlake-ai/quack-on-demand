@@ -17,14 +17,16 @@ import sttp.model.StatusCode
   *
   * `opa` is the manager's single [[ai.starlake.quack.edge.opa.OpaAuthorizer OpaAuthorizer]] (used
   * only by the `opaTest` dry run; None answers `opa_not_wired`), `opaCfg` the manager-wide OPA
-  * defaults `setTenantAcl` validates against.
+  * defaults `setTenantAcl` validates against, `nodeRun` the dry run's path to a node for a
+  * statement ([[OpaDryRun.nodeRun]] over the router; None answers `dry_run_not_wired`).
   */
 final class TenantHandlers(
     sup: PoolSupervisor,
     onAuthChanged: String => Unit = _ => (),
     audit: AuditRecorder = AuditRecorder.noop,
     opa: Option[OpaAuthorizer] = None,
-    opaCfg: OpaConfig = OpaConfig.default
+    opaCfg: OpaConfig = OpaConfig.default,
+    nodeRun: Option[OpaDryRun.NodeRun] = None
 ):
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -362,10 +364,8 @@ final class TenantHandlers(
       case None =>
         // Only a superuser keeps the transport detail (see OpaDryRun.run).
         val detailedErrors = scopeOf(apiKey).superuser
-        IO.blocking(OpaDryRun.run(sup, opa, req, detailedErrors)).map {
-          case Left(("not_found", msg)) =>
-            Left((StatusCode.NotFound, ErrorResponse("not_found", msg)))
-          case Left((code, msg)) => Left((StatusCode.BadRequest, ErrorResponse(code, msg)))
+        OpaDryRun.run(sup, opa, nodeRun, req, detailedErrors).map {
+          case Left((code, msg)) => Left((dryRunStatus(code), ErrorResponse(code, msg)))
           case Right(resp)       =>
             audit.rest(
               apiKey,
@@ -378,3 +378,10 @@ final class TenantHandlers(
             )
             Right(resp)
         }
+
+  /** The status of an OPA dry run's error code ([[OpaDryRun.run]]). */
+  private def dryRunStatus(code: String): StatusCode = code match
+    case "not_found"         => StatusCode.NotFound
+    case "pool_not_running"  => StatusCode.Conflict
+    case "authz_unavailable" => StatusCode.ServiceUnavailable
+    case _                   => StatusCode.BadRequest

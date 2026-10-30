@@ -1208,14 +1208,6 @@ object Main extends IOApp with LazyLogging:
       // Handshake gate 4 for opa tenants; wired before any edge starts so no handshake ever sees
       // an unwired supervisor (which would refuse opa tenants as Unavailable).
       sup.wireOpa(opaAuthorizer)
-      // Built here, not with the other handlers, so the admin dry-run shares the one authorizer.
-      val tenants = new TenantHandlers(
-        sup,
-        onAuthChanged = tenantOidcRegistry.invalidate,
-        audit = auditRecorder,
-        opa = Some(opaAuthorizer),
-        opaCfg = opaCfg
-      )
       val tenantLocationHandlers = new ai.starlake.quack.ondemand.api.TenantLocationHandlers(
         sup,
         mgrCfg.tenantFiles.rootOpt,
@@ -1476,6 +1468,16 @@ object Main extends IOApp with LazyLogging:
           if RuntimeType.isLocal(mgrCfg.runtimeType) then
             path => ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
           else Some(_)
+      )
+      // The OPA dry run reaches a node through the router (decision 25), so its handler is built
+      // after it, sharing the one authorizer and the decision endpoint's dry-run results.
+      val tenants = new TenantHandlers(
+        sup,
+        onAuthChanged = tenantOidcRegistry.invalidate,
+        audit = auditRecorder,
+        opa = Some(opaAuthorizer),
+        opaCfg = opaCfg,
+        nodeRun = Some(OpaDryRun.nodeRun(fsRouter, dryRunResults))
       )
 
       // The try/catch downgrades JVM Errors (e.g. Arrow/Netty LinkageError) into a
