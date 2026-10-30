@@ -240,7 +240,22 @@ void CheckLocationHelpers() {
 	       "https://acct.invalid/c/x.csv", "a kept URL is redacted");
 	expect(qod::RedactedUrl("http://h.invalid/a@b/x.csv"), "http://h.invalid/a@b/x.csv",
 	       "an '@' past the authority is part of the path");
-	expect(qod::RedactedUrl("s3://b/x.csv?versionId=1"), "s3://b/x.csv?versionId=1", "an s3 URL is kept whole");
+	// An s3 URL keeps its path, but loses its query string and fragment: httpfs reads credentials from it.
+	expect(qod::RedactedUrl("s3://b/x.csv?versionId=1"), "s3://b/x.csv", "an s3 URL loses its query string");
+	expect(qod::RedactedUrl("s3://b/x.csv#f"), "s3://b/x.csv", "an s3 URL loses its fragment");
+	expect(qod::RedactedUrl("s3://b/x.csv"), "s3://b/x.csv", "an s3 URL without either is kept whole");
+	expect(qod::DescribedLocation("s3://b/x.csv?s3_secret_access_key=qod-not-a-real-password", false), "s3://b/x.csv",
+	       "a kept s3 URL is redacted");
+	try {
+		qod::DescribedLocation("s3://b/x.csv?s3_secret_access_key=qod-not-a-real-password", true);
+		std::cerr << "FAIL: an s3 URL with a query string was described" << std::endl;
+		failures++;
+	} catch (std::exception &error) {
+		if (std::string(error.what()).find("qod-not-a-real-password") != std::string::npos) {
+			std::cerr << "FAIL: the refusal of an s3 URL quotes its query string" << std::endl;
+			failures++;
+		}
+	}
 	expect(qod::RedactedUrl("/srv/a?b"), "/srv/a?b", "a local path is no URL");
 	for (auto refused : {"http://h.invalid/x.csv", "file:///srv/x.csv", "s3://", "/srv/../x.csv"}) {
 		try {

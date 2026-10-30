@@ -201,6 +201,13 @@ std::optional<Location> MakeLocation(const std::string &given, const std::string
 			why = "names no bucket";
 			return std::nullopt;
 		}
+		// httpfs reads credentials (s3_secret_access_key, s3_session_token...) from an s3 URL's query
+		// string: refused here, so none is ever described, sent to the manager or logged.
+		if (rest.find_first_of("?#") != std::string::npos) {
+			why = "carries a query string or a fragment, which QoD does not admit in an s3:// URL (httpfs reads "
+			      "credentials from it)";
+			return std::nullopt;
+		}
 		return Location {given, given, access, via};
 	}
 	auto resolved = ResolveLocalPath(given, &why);

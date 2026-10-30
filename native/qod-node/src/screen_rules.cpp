@@ -23,6 +23,7 @@
 #include "duckdb/parser/statement/list.hpp"
 #include "duckdb/parser/statement/multi_statement.hpp"
 #include "duckdb/parser/tableref/list.hpp"
+#include "describer.hpp"
 #include "file_functions.hpp"
 #include "function_classes.hpp"
 
@@ -1486,7 +1487,8 @@ private:
 		std::string why;
 		auto location = MakeLocation(given, access, via, why);
 		if (!location) {
-			Refuse((given.find('\0') == std::string::npos ? given : via + "'s file name") + " " + why);
+			// Redacted (RedactedUrl): the refusal never quotes a URL's credentials.
+			Refuse((given.find('\0') == std::string::npos ? RedactedUrl(given) : via + "'s file name") + " " + why);
 		}
 		locations.push_back(*location);
 	}

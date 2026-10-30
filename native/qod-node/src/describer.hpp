@@ -94,13 +94,15 @@ void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &
 
 //! `given` as a description carries it, rendered as the parse screen renders it (MakeLocation): an
 //! s3:// URL naming a bucket unchanged, an absolute local path as ResolveLocalPath resolves it. Anything
-//! MakeLocation refuses (a relative path, an empty, '.' or '..' segment, another scheme) is refused
-//! ("QoD: <given> is outside the tenant's authorized locations") when `refuse_unresolved`, else kept
-//! as given, a URL of another scheme without its userinfo, query string or fragment (RedactedUrl).
+//! MakeLocation refuses (a relative path, an empty, '.' or '..' segment, another scheme, an s3:// URL
+//! with a query string or a fragment) is refused ("QoD: <given> is outside the tenant's authorized
+//! locations", <given> redacted) when `refuse_unresolved`, else kept as given, a URL without its
+//! query string or fragment, and of a scheme other than s3 without its userinfo too (RedactedUrl).
 std::string DescribedLocation(const std::string &given, bool refuse_unresolved);
 
 //! `text` without the userinfo (`user:password@`), the query string and the fragment when it is a URL
-//! of a scheme other than s3 (where a SAS token or a password travels); anything else unchanged.
+//! of a scheme other than s3 (where a SAS token or a password travels), an s3:// URL without its query
+//! string and fragment (httpfs reads credentials from them); anything else unchanged.
 std::string RedactedUrl(const std::string &text);
 
 //! The path the one COPY ... FROM `statement_text` parses to names (under EXPLAIN or PREPARE), or

@@ -143,6 +143,10 @@ int main() {
 	Expect(upper && upper->resolved == "S3://acme-etl/x.csv", "the s3 scheme in any case, sent as given");
 	ExpectLocationRefused("s3://", "names no bucket", "an s3 URL without a bucket");
 	ExpectLocationRefused("s3:///x.csv", "names no bucket", "an s3 URL with an empty bucket");
+	// httpfs reads credentials from an s3 URL's query string: refused on the node, so none is ever sent.
+	ExpectLocationRefused("s3://acme-etl/in/x.csv?s3_secret_access_key=qod-not-a-real-password", "query string",
+	                      "an s3 URL with a query string");
+	ExpectLocationRefused("s3://acme-etl/in/x.csv#f", "fragment", "an s3 URL with a fragment");
 	for (auto other : {"https://example.com/x.csv", "http://example.com/x.csv", "gs://b/x.csv", "az://c/x.csv",
 	                   "r2://b/x.csv", "hf://datasets/x/y.csv", "file:///etc/passwd"}) {
 		ExpectLocationRefused(other, "uses a scheme QoD does not admit", other);

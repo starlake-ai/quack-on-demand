@@ -2648,9 +2648,13 @@ void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path) 
 std::string RedactedUrl(const std::string &text) {
 	auto scheme_end = text.find("://");
 	if (scheme_end == std::string::npos || scheme_end == 0 ||
-	    !std::all_of(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(scheme_end), IsSchemeCharacter) ||
-	    duckdb::StringUtil::Lower(text.substr(0, scheme_end)) == "s3") {
+	    !std::all_of(text.begin(), text.begin() + static_cast<std::ptrdiff_t>(scheme_end), IsSchemeCharacter)) {
 		return text;
+	}
+	if (duckdb::StringUtil::Lower(text.substr(0, scheme_end)) == "s3") {
+		// Its path as given (s3 URLs are judged by text), but never its query string or fragment, which
+		// httpfs reads credentials from.
+		return text.substr(0, text.find_first_of("?#", scheme_end + 3));
 	}
 	auto start = scheme_end + 3;
 	auto rest = text.substr(start);
@@ -2674,7 +2678,7 @@ std::string DescribedLocation(const std::string &given, bool refuse_unresolved) 
 	if (!refuse_unresolved) {
 		return RedactedUrl(given);
 	}
-	throw duckdb::PermissionException("QoD: " + given + " is outside the tenant's authorized locations");
+	throw duckdb::PermissionException("QoD: " + RedactedUrl(given) + " is outside the tenant's authorized locations");
 }
 
 std::string CopyFromLiteralPath(duckdb::ClientContext &context, const std::string &statement_text) {

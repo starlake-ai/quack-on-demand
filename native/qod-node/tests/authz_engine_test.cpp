@@ -391,6 +391,16 @@ int main() {
 	            ScreenCall("c-judy", "COPY t TO 's3://acme-etl/out/' (FORMAT parquet, PARTITION_BY (a), "
 	                                 "FILENAME_PATTERN [X'2F2E2E2F2E2E2F78'])"),
 	            "QoD: COPY option filename_pattern needs one literal string", "a file name pattern of hex bytes");
+	// httpfs reads credentials from an s3 URL's query string: refused before any description is sent, and
+	// the refusal does not quote it.
+	ExpectQuery(internal,
+	            ScreenCall("c-judy", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv?s3_secret_access_key="
+	                                 "qod-not-a-real-password')"),
+	            "QoD: s3://acme-etl/in/x.csv carries a query string or a fragment",
+	            "an s3 URL with a query string is refused on the node");
+	ExpectQuery(internal, ScreenCall("c-judy", "SELECT * FROM read_csv('s3://acme-etl/in/x.csv#f')"),
+	            "QoD: s3://acme-etl/in/x.csv carries a query string or a fragment",
+	            "an s3 URL with a fragment is refused on the node");
 	Check("", replica.Requests() != asked, "", "neither asks the replica");
 	// Decision 23: a location one of the node's own S3 secrets would sign, over judy's (she has none
 	// recorded), is refused on the node. A stand-in s3 type: httpfs registers the real one.
