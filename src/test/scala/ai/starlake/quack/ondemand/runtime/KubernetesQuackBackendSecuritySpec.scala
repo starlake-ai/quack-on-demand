@@ -355,7 +355,8 @@ class KubernetesQuackBackendSecuritySpec
     names.distinct shouldBe names
     names.toSet shouldBe allowed.keySet ++
       Set("kind", NodeSecretFiles.DirEnv, "QOD_NODE_PORT", NodeSecretFiles.NodeIdEnv) ++
-      ai.starlake.quack.NodeExtensionsConfig.EnvNames
+      ai.starlake.quack.NodeExtensionsConfig.EnvNames ++
+      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
     val values = env.map(e => e.getName -> e.getValue).toMap
     allowed.foreach { case (k, v) => values.get(k) shouldBe Some(v) }
     values.get("kind") shouldBe Some("ducklake")
@@ -503,6 +504,36 @@ class KubernetesQuackBackendSecuritySpec
       "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"   -> "false",
       "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"    -> "false",
       "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS" -> "true"
+    )
+
+  it should "carry the manager's decide limits as plain env, once each" in:
+    val names = ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames
+    def limitEnv(nodeId: String): List[(String, String)] =
+      podEnv(nodeId).filter(e => names.contains(e.getName)).map(e => e.getName -> e.getValue).sorted
+    makeBackend().start(nodeEnvSpec("quack-nodeenv-lim-def", lakeMeta)).unsafeRunSync()
+    limitEnv("quack-nodeenv-lim-def") shouldBe List(
+      "QOD_AUTHZ_CACHE_ENTRIES"     -> "10000",
+      "QOD_AUTHZ_DECIDE_TIMEOUT_MS" -> "2000"
+    )
+    val backend = new KubernetesQuackBackend(
+      client = server.getClient,
+      namespace = ns,
+      image = image,
+      quackPort = 8080,
+      podLabel = "managed-by=quack-on-demand",
+      startupTimeoutSec = 5,
+      readPodReady = _ => true,
+      readEnv = _ => None,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+    )
+    // A metastore entry spelled like one reaches no pod: the pod has each name once, from config.
+    backend
+      .start(nodeEnvSpec("quack-nodeenv-lim-set", lakeMeta + ("QOD_AUTHZ_CACHE_ENTRIES" -> "1")))
+      .unsafeRunSync()
+    limitEnv("quack-nodeenv-lim-set") shouldBe List(
+      "QOD_AUTHZ_CACHE_ENTRIES"     -> "0",
+      "QOD_AUTHZ_DECIDE_TIMEOUT_MS" -> "750"
     )
 
   // No back-compat shape is emitted (owner decision 2026-09-21: operators restart their nodes on

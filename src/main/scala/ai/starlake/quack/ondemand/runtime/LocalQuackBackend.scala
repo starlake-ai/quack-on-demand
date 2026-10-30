@@ -25,6 +25,8 @@ import scala.jdk.CollectionConverters.*
   *   handles verify. Required: keys of another secret would have the node refuse every handle
   * @param nodeExtensions
   *   the extension policy every spawn hands qod-node (spec decision 17); Main passes the manager's
+  * @param nodeAuthzLimits
+  *   the decide limits every spawn hands qod-node; Main passes the manager's
   */
 final class LocalQuackBackend(
     min: Int,
@@ -34,7 +36,9 @@ final class LocalQuackBackend(
     nodeBin: Option[Path] = None,
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
-      ai.starlake.quack.NodeExtensionsConfig()
+      ai.starlake.quack.NodeExtensionsConfig(),
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig =
+      ai.starlake.quack.NodeAuthzLimitsConfig()
 ) extends QuackBackend
     with LazyLogging:
 
@@ -119,6 +123,8 @@ final class LocalQuackBackend(
     // always, after the metastore overlay, so neither a variable this process inherited (they are
     // also the manager's own config variables) nor a metastore entry decides one.
     nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
+    // The decide limits, both, always, after the metastore overlay, for the same reason.
+    nodeAuthzLimits.env.foreach { case (k, v) => env.put(k, v) }
     val secretsDir =
       try NodeSecretFiles.writePrivateDir(secrets)
       catch

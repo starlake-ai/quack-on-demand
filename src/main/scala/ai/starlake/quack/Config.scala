@@ -577,6 +577,7 @@ final case class ManagerConfig(
     userS3: UserS3Config = UserS3Config(),
     nodeAuthz: NodeAuthzConfig = NodeAuthzConfig(),
     nodeExtensions: NodeExtensionsConfig = NodeExtensionsConfig(),
+    nodeAuthzLimits: NodeAuthzLimitsConfig = NodeAuthzLimitsConfig(),
     @field @ConfigField(
       envVar = "QOD_PUBLIC_BASE_URL",
       description =
@@ -767,6 +768,53 @@ object NodeExtensionsConfig:
   val AllowUnsignedEnv: String    = "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"
   val AutoinstallKnownEnv: String = "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
   val EnvNames: Set[String]       = Set(AllowCommunityEnv, AllowUnsignedEnv, AutoinstallKnownEnv)
+
+/** The decide limits qod-node reads from its environment at start (in-engine authorization): how
+  * long one decide call may take, and how many plan verdicts a node keeps. Every backend hands both
+  * to every node it starts ([[env]]), so the manager's setting applies on every runtime (before,
+  * Kubernetes pods and fleet nodes ran qod-node's defaults whatever the manager was given); a
+  * change applies at each node's next start. The defaults and ranges are qod-node's own
+  * (`ParseAuthzLimits`, native/qod-node/src/decide_client.cpp), so a node never refuses to start on
+  * what the manager forwards.
+  */
+final case class NodeAuthzLimitsConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_DECIDE_TIMEOUT_MS",
+      description =
+        "How long a node waits for one verdict from the manager, connect to last byte, in ms " +
+          "(1 to 60000). A slower answer refuses the statement as retryable. Applies at each " +
+          "node's next start."
+    )
+    decideTimeoutMs: Int = 2000,
+    @field @ConfigField(
+      envVar = "QOD_AUTHZ_CACHE_ENTRIES",
+      description =
+        "How many plan verdicts a node caches (0 to 10000000; 0 caches none). Applies at each " +
+          "node's next start."
+    )
+    cacheEntries: Int = 10000
+):
+  require(
+    decideTimeoutMs >= 1 && decideTimeoutMs <= 60000,
+    s"nodeAuthzLimits.decideTimeoutMs (QOD_AUTHZ_DECIDE_TIMEOUT_MS) must be 1 to 60000, " +
+      s"got $decideTimeoutMs"
+  )
+  require(
+    cacheEntries >= 0 && cacheEntries <= 10000000,
+    s"nodeAuthzLimits.cacheEntries (QOD_AUTHZ_CACHE_ENTRIES) must be 0 to 10000000, " +
+      s"got $cacheEntries"
+  )
+
+  /** The spawn environment carrying these to qod-node: both names, always. */
+  def env: Map[String, String] = Map(
+    NodeAuthzLimitsConfig.DecideTimeoutEnv -> decideTimeoutMs.toString,
+    NodeAuthzLimitsConfig.CacheEntriesEnv  -> cacheEntries.toString
+  )
+
+object NodeAuthzLimitsConfig:
+  val DecideTimeoutEnv: String = "QOD_AUTHZ_DECIDE_TIMEOUT_MS"
+  val CacheEntriesEnv: String  = "QOD_AUTHZ_CACHE_ENTRIES"
+  val EnvNames: Set[String]    = Set(DecideTimeoutEnv, CacheEntriesEnv)
 
 final case class RoutingConfig(
     @field @ConfigField(

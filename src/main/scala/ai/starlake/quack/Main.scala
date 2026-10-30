@@ -91,6 +91,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[HaConfig]                  = ProductHint[HaConfig](camelMapping)
   given ProductHint[NodeAuthzConfig]           = ProductHint[NodeAuthzConfig](camelMapping)
   given ProductHint[NodeExtensionsConfig]      = ProductHint[NodeExtensionsConfig](camelMapping)
+  given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
@@ -128,6 +129,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[HaConfig]                 = deriveReader[HaConfig]
   given ConfigReader[NodeAuthzConfig]          = deriveReader[NodeAuthzConfig]
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
+  given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
@@ -1983,7 +1985,8 @@ object Main extends IOApp with LazyLogging:
             publish = publisher,
             audit = auditRecorder,
             nodeKeys = nodeKeys,
-            nodeExtensions = mgrCfg.nodeExtensions
+            nodeExtensions = mgrCfg.nodeExtensions,
+            nodeAuthzLimits = mgrCfg.nodeAuthzLimits
           )
         ),
         patAuth = Some(patAuthenticator),

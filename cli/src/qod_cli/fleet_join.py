@@ -92,6 +92,11 @@ _TENANT_INIT_KEYS = (("tenantDbInitSql", "tenantDbInitTrusted", "tenantDbInitSql
 _NODE_EXTENSION_ENV = (("allowCommunity", "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS"),
                        ("allowUnsigned", "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS"),
                        ("autoinstallKnown", "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"))
+# The manager's decide limits (quack-on-demand.nodeAuthzLimits), assignment key -> the variable
+# qod-node reads. From the assignment only; an older manager sends none, and a value that is not a
+# JSON integer is dropped, both leaving qod-node's defaults (it refuses to start on a malformed one).
+_NODE_AUTHZ_LIMIT_ENV = (("decideTimeoutMs", "QOD_AUTHZ_DECIDE_TIMEOUT_MS"),
+                         ("cacheEntries", "QOD_AUTHZ_CACHE_ENTRIES"))
 # Sensitive values never sit in the node's environment or command line (a node user with SQL reads
 # both back through getenv() or /proc/<pid>/environ|cmdline): they go to a private directory, one
 # file per key, that the spawn script reads and deletes. Same list as SECRET_KEYS in
@@ -549,6 +554,11 @@ class FleetMember:
         extensions = assignment.get("nodeExtensions") or {}
         for key, name in _NODE_EXTENSION_ENV:
             env[name] = "true" if extensions.get(key) is True else "false"
+        limits = assignment.get("authzLimits")
+        for key, name in _NODE_AUTHZ_LIMIT_ENV:
+            value = limits.get(key) if isinstance(limits, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool):
+                env[name] = str(value)
         if self.node_bin is not None:
             env["QOD_NODE_BIN"] = str(self.node_bin)
         env["QOD_SECRETS_DIR_EPHEMERAL"] = "1"

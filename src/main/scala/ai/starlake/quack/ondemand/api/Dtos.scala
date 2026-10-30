@@ -345,6 +345,11 @@ final case class FleetNodeExtensionsDto(
     allowUnsigned: Boolean,
     autoinstallKnown: Boolean
 )
+
+/** The manager's decide limits for the node, as the join process hands them to qod-node. Derived
+  * per heartbeat from `quack-on-demand.nodeAuthzLimits`, never stored.
+  */
+final case class FleetNodeAuthzLimitsDto(decideTimeoutMs: Int, cacheEntries: Int)
 final case class FleetAssignmentDto(
     epoch: Long,
     nodeId: String,
@@ -358,6 +363,7 @@ final case class FleetAssignmentDto(
     objectStoreSql: String,
     extraSetupSql: String,
     nodeExtensions: FleetNodeExtensionsDto,
+    authzLimits: FleetNodeAuthzLimitsDto,
     tenantDbInitSql: String,
     tenantDbInitTrusted: Boolean,
     tenantPoolInitSql: String,
@@ -1770,6 +1776,7 @@ object Dtos:
   given Codec[FleetHeartbeatRequest]        = deriveCodec
   given Codec[FleetPoolKeyDto]              = deriveCodec
   given Codec[FleetNodeExtensionsDto]       = deriveCodec
+  given Codec[FleetNodeAuthzLimitsDto]      = deriveCodec
   given Codec[FleetAssignmentDto]           = deriveCodec
   given Codec[FleetHeartbeatResponse]       = deriveCodec
   given Codec[FleetServerDto]               = deriveCodec

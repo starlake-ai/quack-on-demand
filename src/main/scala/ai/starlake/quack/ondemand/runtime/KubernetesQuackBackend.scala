@@ -70,7 +70,10 @@ final class KubernetesQuackBackend(
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     // The extension policy every pod's qod-node fixes before its database opens (spec decision 17).
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
-      ai.starlake.quack.NodeExtensionsConfig()
+      ai.starlake.quack.NodeExtensionsConfig(),
+    // The decide limits every pod's qod-node reads at start.
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig =
+      ai.starlake.quack.NodeAuthzLimitsConfig()
 ) extends QuackBackend,
       LazyLogging:
 
@@ -161,8 +164,8 @@ final class KubernetesQuackBackend(
     nodeIdEnv.setName(NodeSecretFiles.NodeIdEnv)
     nodeIdEnv.setValue(spec.nodeId)
     envs.add(nodeIdEnv)
-    // Plain env like the node id: the policy is the manager's, not a secret.
-    nodeExtensions.env.toList.sorted.foreach { case (k, v) =>
+    // Plain env like the node id: the policy and the limits are the manager's, not secrets.
+    (nodeExtensions.env ++ nodeAuthzLimits.env).toList.sorted.foreach { case (k, v) =>
       val e = new EnvVar()
       e.setName(k)
       e.setValue(v)

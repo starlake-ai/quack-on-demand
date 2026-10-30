@@ -419,6 +419,36 @@ def test_an_extension_setting_is_on_only_for_a_json_true(tmp_path):
     assert _extension_env(tmp_path, odd) == ["false", "false", "false"]
 
 
+LIMIT_ENV = ("QOD_AUTHZ_DECIDE_TIMEOUT_MS", "QOD_AUTHZ_CACHE_ENTRIES")
+
+
+def _limit_env(tmp_path, a):
+    """The two decide-limit variables the node of assignment `a` is started with (None: unset)."""
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append(env); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return [seen[0].get(k) for k in LIMIT_ENV]
+
+
+def test_the_decide_limits_come_from_the_assignment_only(tmp_path, monkeypatch):
+    # Neither this process's own environment nor the metastore decides them; an older manager
+    # sends none, which leaves qod-node's defaults.
+    for k in LIMIT_ENV:
+        monkeypatch.setenv(k, "9")
+    spoofed = dict(assignment(1), env={"pgHost": "h", "QOD_AUTHZ_CACHE_ENTRIES": "1"})
+    assert _limit_env(tmp_path / "none", spoofed) == [None, None]
+    sent = dict(assignment(1), authzLimits={"decideTimeoutMs": 750, "cacheEntries": 0})
+    assert _limit_env(tmp_path / "sent", sent) == ["750", "0"]
+
+
+def test_a_decide_limit_is_set_only_for_a_json_integer(tmp_path):
+    odd = dict(assignment(1), authzLimits={"decideTimeoutMs": "750", "cacheEntries": True})
+    assert _limit_env(tmp_path, odd) == [None, None]
+    assert _limit_env(tmp_path / "list", dict(assignment(1), authzLimits=[750, 0])) == [None, None]
+
+
 def test_a_dropped_assignment_key_is_named_once_per_pool(tmp_path, capsys):
     member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
     a = dict(assignment(1), env={**SEC1_ALLOWED, "PATH": "/nonexistent/sec1-marker-path"})

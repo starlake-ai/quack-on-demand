@@ -8550,6 +8550,7 @@ components:
       - objectStoreSql
       - extraSetupSql
       - nodeExtensions
+      - authzLimits
       - tenantDbInitSql
       - tenantDbInitTrusted
       - tenantPoolInitSql
@@ -8581,6 +8582,8 @@ components:
           type: string
         nodeExtensions:
           $ref: '#/components/schemas/FleetNodeExtensionsDto'
+        authzLimits:
+          $ref: '#/components/schemas/FleetNodeAuthzLimitsDto'
         tenantDbInitSql:
           type: string
         tenantDbInitTrusted:
@@ -8633,6 +8636,19 @@ components:
           $ref: '#/components/schemas/FleetAssignmentDto'
         approval:
           type: string
+    FleetNodeAuthzLimitsDto:
+      title: FleetNodeAuthzLimitsDto
+      type: object
+      required:
+      - decideTimeoutMs
+      - cacheEntries
+      properties:
+        decideTimeoutMs:
+          type: integer
+          format: int32
+        cacheEntries:
+          type: integer
+          format: int32
     FleetNodeExtensionsDto:
       title: FleetNodeExtensionsDto
       type: object

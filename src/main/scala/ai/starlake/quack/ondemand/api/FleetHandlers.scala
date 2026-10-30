@@ -41,7 +41,9 @@ final class FleetHandlers(
     // Required: the keys each assignment's node key derives from (the manager's).
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
-      ai.starlake.quack.NodeExtensionsConfig()
+      ai.starlake.quack.NodeExtensionsConfig(),
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig =
+      ai.starlake.quack.NodeAuthzLimitsConfig()
 ) extends LazyLogging:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -173,7 +175,10 @@ final class FleetHandlers(
                       r.approved && r.approvedSource.forall(b => hb.sourceAddr.contains(b))
                     )
                     .flatMap(_.assignment)
-                    .map(a => FleetHandlers.toDto(a, nodeKeys.keyHex(a.nodeId), nodeExtensions)),
+                    .map(a =>
+                      FleetHandlers
+                        .toDto(a, nodeKeys.keyHex(a.nodeId), nodeExtensions, nodeAuthzLimits)
+                    ),
                   approval
                 )
               )
@@ -329,13 +334,14 @@ object FleetHandlers:
     case ServerLiveness.Unreachable(_) => "unreachable"
     case ServerLiveness.Dead           => "dead"
 
-  /** The heartbeat's assignment, with the node key derived for its node id and the manager's
-    * extension policy (neither stored).
+  /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
+    * policy and its decide limits (none stored).
     */
   def toDto(
       a: FleetAssignment,
       authzKey: String,
-      extensions: ai.starlake.quack.NodeExtensionsConfig
+      extensions: ai.starlake.quack.NodeExtensionsConfig,
+      limits: ai.starlake.quack.NodeAuthzLimitsConfig
   ): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
@@ -354,6 +360,7 @@ object FleetHandlers:
         extensions.allowUnsigned,
         extensions.autoinstallKnown
       ),
+      FleetNodeAuthzLimitsDto(limits.decideTimeoutMs, limits.cacheEntries),
       a.tenantDbInitSql,
       a.tenantDbInitTrusted,
       a.tenantPoolInitSql,

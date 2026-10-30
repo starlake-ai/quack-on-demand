@@ -351,6 +351,40 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       )
     finally backend.stop(key, "node-extensions").unsafeRunSync()
 
+  // The decide limits reach the spawn script as two plain variables, always both, with the
+  // backend's config values; a metastore entry spelled like one is dropped and changes nothing.
+  // The checks print only these two variables, never the dump.
+  it should "hand the node the manager's decide limits, whatever its metastore carries" in:
+    val capture = java.io.File.createTempFile("env-capture-limits-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = 23094,
+      max = 23095,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      "node-limits",
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "QOD_AUTHZ_CACHE_ENTRIES" -> "1"),
+      s3 = Map.empty
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      ai.starlake.quack.NodeAuthzLimitsConfig.EnvNames.toList.sorted.map { name =>
+        out.linesIterator.filter(_.startsWith(s"$name=")).toList
+      } shouldBe List(
+        List("QOD_AUTHZ_CACHE_ENTRIES=0"),
+        List("QOD_AUTHZ_DECIDE_TIMEOUT_MS=750")
+      )
+    finally backend.stop(key, "node-limits").unsafeRunSync()
+
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
   // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
   // QOD_NODE_BIN would run commands as the manager's user, and a stale lockdownSql

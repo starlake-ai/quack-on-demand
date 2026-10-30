@@ -146,6 +146,42 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
   }
 
+  it should "carry the manager's decide limits in the assignment" in {
+    def limits(h: FleetHandlers, store: FleetServerStore): Option[FleetNodeAuthzLimitsDto] =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+      store.claim(
+        FleetAssignment(
+          epoch = 0,
+          nodeId = "n1",
+          poolKey = PoolKey("acme", "db", "bi"),
+          port = 21900,
+          token = "tok",
+          kind = "memory",
+          env = Map("pgHost" -> "h"),
+          objectStoreSql = "",
+          extraSetupSql = ""
+        ),
+        30,
+        None
+      )
+      h.heartbeat(req(), Some("secret"), loopback, None)
+        .unsafeRunSync()
+        .toOption
+        .flatMap(_.assignment)
+        .map(_.authzLimits)
+    val (store, h) = fixture()
+    limits(h, store) shouldBe Some(FleetNodeAuthzLimitsDto(2000, 10000))
+    val setStore = new InMemoryFleetServerStore(clock = () => t0)
+    val set      = new FleetHandlers(
+      setStore,
+      hbCfg,
+      backend = Some(new FleetQuackBackend(setStore, hbCfg, clock = () => t0)),
+      nodeKeys = NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0)
+    )
+    limits(set, setStore) shouldBe Some(FleetNodeAuthzLimitsDto(750, 0))
+  }
+
   it should "409 an address change on a known name even when idle (no takeover)" in {
     val (store, h) = fixture()
     h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
@@ -879,7 +915,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
     a.nodeId shouldBe "n1"
     io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "lockdownSql"
-    val dto = FleetHandlers.toDto(a, "ab" * 32, ai.starlake.quack.NodeExtensionsConfig())
+    val dto = FleetHandlers.toDto(
+      a,
+      "ab" * 32,
+      ai.starlake.quack.NodeExtensionsConfig(),
+      ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     io.circe
       .Encoder[FleetAssignmentDto]
       .apply(dto)
