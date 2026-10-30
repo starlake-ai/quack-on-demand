@@ -312,6 +312,8 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       messageType(commit) shouldBe Type.ErrorResponse
       decodeErrorMessage(commit).toOption.get should
         include(s"has no access to pool '$TenantId/$PoolName'")
+      decodeErrorMessage(commit).toOption.get should
+        include("the transaction was ended, nothing was committed")
       withClue("the refused COMMIT ended the node transaction: ") {
         t.disconnected should contain(txConn)
       }

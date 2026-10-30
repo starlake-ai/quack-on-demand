@@ -893,10 +893,12 @@ object QuackFrontDoor:
     s"transaction aborted: $reason; ROLLBACK to continue"
 
   /** Answer to a client's COMMIT that the session's grants now refuse (`reason`): it was never
-    * sent, and the node rolled the transaction back with its connection.
+    * sent, so nothing was committed, and the transaction's link was released. The release (a
+    * DISCONNECT, on which the node rolls the transaction back) is best effort, so the answer does
+    * not claim the rollback itself: a node that missed it ends the transaction with the connection.
     */
   def grantsRefusedCommitMessage(reason: String): String =
-    s"$reason; the transaction was rolled back, nothing was committed"
+    s"$reason; the transaction was ended, nothing was committed"
 
   /** Answer to every statement a client sends inside a transaction an admin kill tore down. */
   val TxKilledMessage: String =
