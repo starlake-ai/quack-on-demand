@@ -30,8 +30,6 @@
   rest itself:
 
     kind                               (ducklake | duckdb-file | memory)
-    lockdownSql                        (optional engine lockdown SQL, NodeLockdown.scala; runs
-                                        last, before qod-node serves)
 
   The node process is qod-node (native/qod-node), not the DuckDB CLI: it links an official DuckDB
   release library, runs the init SQL this script assembles, and serves over quack.
@@ -164,7 +162,6 @@ $tenantDbInitSqlTrusted   = Secret-Or 'tenantDbInitSqlTrusted' ''
 $tenantPoolInitSql        = Secret-Or 'tenantPoolInitSql' ''
 $tenantPoolInitSqlTrusted = Secret-Or 'tenantPoolInitSqlTrusted' ''
 $extraSetupSql  = Secret-Or 'extraSetupSql' ''
-$lockdownSql    = [Environment]::GetEnvironmentVariable('lockdownSql')
 $objectStoreSql = Secret-Or 'objectStoreSql' ''
 
 function Env-Or([string]$name, [string]$default) {
@@ -540,8 +537,8 @@ New-PrivateDirectory $workDir
 $secretPath = New-SecretDirectory (Join-Path $nodeDir 'secrets')
 # DuckDB's spill directory defaults to `.tmp` under its working directory, which no longer persists
 # across nodes. Give each node its own under `.tmp` of the starting directory (where it spilled
-# before), per node so that under lockdown, where DuckDB admits its temp directory, no node can read
-# another's spill files. Under $nodeDir when that is not writable.
+# before), per node so that no node can read another's spill files. Under $nodeDir when that is not
+# writable.
 try {
   $spillDir = Join-Path (Join-Path $startDir '.tmp') "qod-node.$nodeId"
   New-PrivateDirectory $spillDir
@@ -681,10 +678,6 @@ foreach ($section in @((Format-TenantInitSql 'pool' $tenantPoolInitSqlTrusted $t
   if (-not [string]::IsNullOrEmpty($section)) { [void]$sb.AppendLine($section) }
 }
 if (-not [string]::IsNullOrEmpty($extraSetupSql)) { [void]$sb.AppendLine($extraSetupSql) }
-
-# Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala). Runs last, before
-# qod-node serves, so the restrictions are in effect before the node serves any tenant statement.
-if (-not [string]::IsNullOrEmpty($lockdownSql)) { [void]$sb.AppendLine($lockdownSql) }
 
 $initSql = $sb.ToString()
 

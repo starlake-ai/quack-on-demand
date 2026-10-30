@@ -68,8 +68,8 @@ def node_failure_action(error: str | None, port: int) -> str | None:
 DRAIN_JOIN_S = 0.5
 
 # The node's environment is built from this allowlist, never from this process's whole environment:
-# the join process holds QOD_FLEET_JOIN_TOKEN (the fleet-wide credential), and tenant SQL on a node
-# without lockdown can read /proc/self/environ.
+# the join process holds QOD_FLEET_JOIN_TOKEN (the fleet-wide credential), which no node's process
+# environment may hold.
 _ENV_PASSTHROUGH = (
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "USER", "LOGNAME", "SHELL",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
@@ -80,7 +80,7 @@ _ENV_PASSTHROUGH = (
 )
 # Object-storage settings the spawn script reads.
 _ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
-_SQL_KEYS = ("resourceSql", "lockdownSql")
+_SQL_KEYS = ("resourceSql",)
 # The tenant-db's and the pool's initSql: assignment key, its trust key, and the secret file it goes
 # to by trust. The file's name is the trust: the spawn script runs a ...Trusted file as written (a
 # superuser's or the manager's text) and any other under qod-node's tenant initSql allowlist. Trusted
@@ -104,7 +104,7 @@ _CLOUD_CRED_KEYS = _SECRET_KEYS[11:]
 # An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
 # reads from its environment are laid over the node's environment, and only the metastore's own
 # secrets below become files. Any other name (BASH_ENV, which bash expands before running the
-# script, PATH, QOD_NODE_BIN, lockdownSql...) would run commands on this server or replace what this
+# script, PATH, QOD_NODE_BIN...) would run commands on this server or replace what this
 # process sets. The manager filters too; this is defense in depth against an older manager or a
 # manager bug. Same set as TenantDb.NodeEnvKeys on the manager (NodeSecretFilesSpec pins it).
 _NODE_ENV_KEYS = ("pgHost", "pgPort", "pgUser", "dbName", "catalogAlias", "schemaName", "dataPath", "encrypted")
@@ -530,7 +530,7 @@ class FleetMember:
         env["kind"] = str(assignment["kind"])
         env["QOD_NODE_BIND"] = self.bind_host
         # Always from the assignment, empty when absent: a stray value in this process's environment
-        # (a lockdownSql=... exported by hand) must never reach a node.
+        # (a resourceSql=... exported by hand) must never reach a node.
         for key in _SQL_KEYS:
             env[key] = str(assignment.get(key) or "")
         for key in ("extraSetupSql", "objectStoreSql"):

@@ -310,7 +310,7 @@ class KubernetesQuackBackendSecuritySpec
 
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may
   // become pod env: BASH_ENV (bash expands it before running the spawn script), PATH, LD_PRELOAD
-  // or QOD_NODE_BIN would run commands inside the pod before node lockdown applies, and a name the
+  // or QOD_NODE_BIN would run commands inside the pod before the node starts, and a name the
   // manager sets itself would give the pod a second value of it.
   it should "carry only TenantDb.NodeEnvKeys of the metastore, plus what the manager sets" in:
     val backend = makeBackend()

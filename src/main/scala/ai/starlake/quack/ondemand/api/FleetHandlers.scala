@@ -349,7 +349,6 @@ object FleetHandlers:
       a.resourceSql,
       a.objectStoreSql,
       a.extraSetupSql,
-      a.lockdownSql,
       FleetNodeExtensionsDto(
         extensions.allowCommunity,
         extensions.allowUnsigned,

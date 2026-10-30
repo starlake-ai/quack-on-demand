@@ -408,13 +408,17 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     (lockCalls - before) shouldBe 1
     sup.effectiveLockdown(key) shouldBe true
 
-  it should "stamp the per-pool effective value into spawned lockdownSql" in:
-    val (sup, backend) = freshSupervisorWithBackend(lockdownEnabled = false)
+  "a spawned node" should "carry no engine lockdown block: qod-node enforces on every pool" in:
+    val (sup, backend) = freshSupervisorWithBackend()
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
       .unsafeRunSync()
-    sup.createPool(key, RoleDistribution(0, 0, 1), lockdown = Some(true)).unsafeRunSync()
-    backend.specs.last.lockdownSql should include("SET autoinstall_known_extensions = false")
+    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
+    val spec = backend.specs.last
+    spec.productElementNames.toList should not contain "lockdownSql"
+    spec.productIterator
+      .collect { case s: String => s }
+      .exists(_.contains("disabled_filesystems")) shouldBe false
 
   // ---- autoscaleBand / setPoolAutoscale: owner-declared scale-out band ----
 

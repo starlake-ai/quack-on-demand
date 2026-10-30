@@ -122,8 +122,8 @@ final class KubernetesQuackBackend(
     // Secrets start() creates before the pod.
     // Only TenantDb.NodeEnvKeys of the metastore become env (NodeMetastore): the metastore is
     // tenant-admin input, and any other name (BASH_ENV, PATH, LD_PRELOAD, QOD_NODE_BIN...) would run
-    // commands in the pod before node lockdown applies, or give the pod a second value of a
-    // variable set below (its id, kind, lockdownSql...).
+    // commands in the pod before the node starts, or give the pod a second value of a variable set
+    // below (its id, kind...).
     droppedKeys.report(spec.poolKey, spec.metastore)
     NodeMetastore.env(spec.metastore).foreach { case (k, v) =>
       val e = new EnvVar()
@@ -150,15 +150,6 @@ final class KubernetesQuackBackend(
     kindEnv.setName("kind")
     kindEnv.setValue(spec.kindWire)
     envs.add(kindEnv)
-    // Engine lockdown block (NodeLockdown.sql). Inlined like `kind` (not
-    // credential-bearing): spawn-quack-node.sh appends it right before
-    // quack_serve, so the value restrictions are in effect before the node
-    // serves any tenant statement.
-    if spec.lockdownSql.nonEmpty then
-      val lockdownEnv = new EnvVar()
-      lockdownEnv.setName("lockdownSql")
-      lockdownEnv.setValue(spec.lockdownSql)
-      envs.add(lockdownEnv)
     val secretsDirEnv = new EnvVar()
     secretsDirEnv.setName(NodeSecretFiles.DirEnv)
     secretsDirEnv.setValue(KubernetesQuackBackend.SecretsMountPath)

@@ -101,7 +101,6 @@ final class FleetQuackBackend(
       resourceSql = NodeResourceSql.render(spec.cpu, spec.memory),
       objectStoreSql = spec.objectStoreSql,
       extraSetupSql = spec.extraSetupSql,
-      lockdownSql = spec.lockdownSql,
       tenantDbInitSql = spec.tenantDbInitSql,
       tenantDbInitTrusted = spec.tenantDbInitTrusted,
       tenantPoolInitSql = spec.tenantPoolInitSql,

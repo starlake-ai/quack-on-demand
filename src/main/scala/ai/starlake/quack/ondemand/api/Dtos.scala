@@ -369,7 +369,6 @@ final case class FleetAssignmentDto(
     resourceSql: String,
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String,
     nodeExtensions: FleetNodeExtensionsDto,
     tenantDbInitSql: String,
     tenantDbInitTrusted: Boolean,

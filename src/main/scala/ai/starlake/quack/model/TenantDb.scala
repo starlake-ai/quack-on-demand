@@ -90,7 +90,7 @@ object TenantDb {
     * `NodeSecretFilesSpec`). Any other name would become an environment variable of a bash script
     * and of qod-node: `BASH_ENV` (bash expands it before running the script), `PATH`, `LD_PRELOAD`,
     * `QOD_NODE_BIN`, or a variable the manager sets itself (`kind`, `QOD_INIT_TRUSTED_DB`,
-    * `lockdownSql`). The metastore's secrets ([[NodeSecretEnvKeys]]) reach the launcher as files,
+    * `QOD_NODE_ID`). The metastore's secrets ([[NodeSecretEnvKeys]]) reach the launcher as files,
     * never env. A key the scripts start reading from the metastore must be added here, or every
     * launcher drops it.
     */

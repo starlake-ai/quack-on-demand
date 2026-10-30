@@ -107,7 +107,7 @@ final class LocalQuackBackend(
     // bootstrap tenant-db's DuckLake directory reappearing as `dataPath` on a
     // pathless duckdb-file node, which then fails ATTACH with "Is a directory").
     // Only TenantDb.NodeEnvKeys of it reach the script (NodeMetastore): the metastore is
-    // tenant-admin input, and any other name (BASH_ENV, PATH, QOD_NODE_BIN, lockdownSql...) would
+    // tenant-admin input, and any other name (BASH_ENV, PATH, QOD_NODE_BIN...) would
     // run commands as this process's user or replace a variable set here, whatever the order of
     // the puts.
     droppedKeys.report(spec.poolKey, spec.metastore)
@@ -120,9 +120,6 @@ final class LocalQuackBackend(
     // always, after the metastore overlay, so neither a variable this process inherited (they are
     // also the manager's own config variables) nor a metastore entry decides one.
     nodeExtensions.env.foreach { case (k, v) => env.put(k, v) }
-    // Engine lockdown block (NodeLockdown.sql). spawn-quack-node.sh appends it after extraSetupSql,
-    // last, so the restrictions are in effect before qod-node serves any tenant statement.
-    if spec.lockdownSql.nonEmpty then env.put("lockdownSql", spec.lockdownSql)
     val secretsDir =
       try NodeSecretFiles.writePrivateDir(secrets)
       catch

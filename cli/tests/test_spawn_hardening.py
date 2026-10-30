@@ -54,9 +54,10 @@ def test_the_init_sql_holds_no_dot_command_and_passes_values_through(tmp_path):
     assert res.returncode == 0, res.stderr
     dots = [line for line in res.stdout.splitlines() if line.lstrip().startswith(".")]
     assert dots == []
-    for value in ("SELECT 1.5 AS x;", "SELECT '.not a command';", "SET threads = 2;",
-                  "SET enable_external_access = false;"):
+    for value in ("SELECT 1.5 AS x;", "SELECT '.not a command';", "SET threads = 2;"):
         assert value in res.stdout
+    # Phase D: the script reads no lockdownSql; a stale one in the environment never reaches a node.
+    assert "enable_external_access" not in res.stdout
     # The node token never enters the init SQL: qod-node reads it from the secrets directory itself.
     assert "tok-hard" not in res.stdout
     assert "quack_serve" not in res.stdout

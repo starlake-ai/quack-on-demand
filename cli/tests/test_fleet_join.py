@@ -78,7 +78,7 @@ def assignment(epoch, node_id="quack-acme-db-bi-1", port=21900):
     return {"epoch": epoch, "nodeId": node_id, "poolKey": {"tenant": "acme", "tenantDb": "db", "pool": "bi"},
             "port": port, "token": "tok", "authzKey": "ab" * 32, "kind": "memory",
             "env": {"pgHost": "h", "pgPassword": "pw"},
-            "resourceSql": "", "objectStoreSql": "", "extraSetupSql": "", "lockdownSql": ""}
+            "resourceSql": "", "objectStoreSql": "", "extraSetupSql": ""}
 
 
 def read_secrets(env):
@@ -270,12 +270,16 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
     envs = []
     def popen(cmd, env=None, **kw):
         envs.append(env); return FakeProc()
-    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": assignment(1)})])
+    # An earlier manager's assignment still carries lockdownSql.
+    stale = dict(assignment(1), lockdownSql="SET disabled_filesystems = 'LocalFileSystem';")
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": stale})])
     make_member(http, popen, tmp_path).run_once()
     env = envs[0]
     assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
     assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
-    assert env["lockdownSql"] == "" and env["resourceSql"] == ""
+    assert "lockdownSql" not in env and env["resourceSql"] == ""
+    leaked = any("disabled_filesystems" in v for v in env.values())
+    assert not leaked, "an earlier manager's lockdownSql reached the node"
     # Trust rides the secret file's name, never a variable: none reaches the node.
     assert "QOD_INIT_TRUSTED_DB" not in env and "QOD_INIT_TRUSTED_POOL" not in env
     assert env["kind"] == "memory" and env["QOD_NODE_BIND"] == "10.0.0.7"
@@ -353,7 +357,7 @@ def test_assignment_env_overlays_only_the_node_env_keys(tmp_path, monkeypatch, c
     own_path = env.get("PATH") == os.environ.get("PATH")
     assert own_path, "the node's PATH is not this process's own"
     assert [env.get(k) for k in ("lockdownSql", "resourceSql", "kind", "QOD_NODE_ID", "QOD_NODE_BIND")] == \
-        ["", "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
+        [None, "", "memory", "quack-acme-db-bi-1", "10.0.0.7"]
     assert "dbInitSql" not in env
     nonce = secrets.pop("QOD_INIT_NONCE")
     assert re.fullmatch(r"[0-9a-f]{32}", nonce)

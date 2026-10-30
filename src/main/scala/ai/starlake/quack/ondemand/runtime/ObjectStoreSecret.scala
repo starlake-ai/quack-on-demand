@@ -2,12 +2,12 @@ package ai.starlake.quack.ondemand.runtime
 
 import java.util.Locale
 
-/** Authors the per-database object-store CREATE SECRET, single source of truth (like NodeLockdown).
-  * Reads the tenant-db `objectStore` map (keys per the UI's DataPathEditor: s3_*, azure_*, gcs_*)
-  * and emits `qod_db_store`, scoped to the data path ([[dataScopes]]). No unscoped s3 secret exists
-  * on a node (spec decision 23): a user's s3:// URL signs with that user's own connection secret,
-  * and the data path with this one or the spawn scripts' `qod_data_s3`, which follows the same
-  * scopes. Every s3 key is named, so DuckDB fills none from a session's settings. Empty map or a
+/** Authors the per-database object-store CREATE SECRET, single source of truth. Reads the tenant-db
+  * `objectStore` map (keys per the UI's DataPathEditor: s3_*, azure_*, gcs_*) and emits
+  * `qod_db_store`, scoped to the data path ([[dataScopes]]). No unscoped s3 secret exists on a node
+  * (spec decision 23): a user's s3:// URL signs with that user's own connection secret, and the
+  * data path with this one or the spawn scripts' `qod_data_s3`, which follows the same scopes.
+  * Every s3 key is named, so DuckDB fills none from a session's settings. Empty map or a
   * non-object-store dataPath yields "" (`qod_data_s3` then signs the data path).
   */
 object ObjectStoreSecret:

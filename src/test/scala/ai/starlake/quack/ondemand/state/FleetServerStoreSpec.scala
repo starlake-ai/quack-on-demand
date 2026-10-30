@@ -57,7 +57,6 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
       Map("pgHost" -> "h"),
       "",
       "",
-      "",
       ""
     )
 

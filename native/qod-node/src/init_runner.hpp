@@ -17,8 +17,8 @@ size_t RunBestEffort(duckdb::Connection &con, const std::string &sql, const std:
 
 //! Whether `statement` is a SET of a setting that restricts what the node may read or reach
 //! (disabled_filesystems, enable_external_access, lock_configuration, allowed_directories,
-//! allowed_paths), as the manager's lockdown block ends a node's init SQL with: whatever needs the
-//! local file system (loading quack) must run before it. False for anything that does not parse.
+//! allowed_paths), as a superuser's initSql may set: whatever needs the local file system
+//! (loading quack) must run before it. False for anything that does not parse.
 bool RestrictsNodeAccess(duckdb::ClientContext &context, const std::string &statement);
 
 //! Runs one statement and throws std::runtime_error with label and DuckDB's error

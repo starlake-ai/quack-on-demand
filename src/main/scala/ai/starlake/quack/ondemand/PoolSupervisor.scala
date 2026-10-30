@@ -27,7 +27,6 @@ import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
 import ai.starlake.quack.ondemand.fleet.MissingSlots
 import ai.starlake.quack.ondemand.runtime.{
   NoFreeServer,
-  NodeLockdown,
   NodePaths,
   NodeProcess,
   ObjectStoreSecret,
@@ -136,10 +135,8 @@ final class PoolSupervisor(
     locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop,
     publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
       ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
-    /** Engine lockdown gate (QOD_NODE_LOCKDOWN), from Main via `lockdownCfg.enabled`. Every
-      * NodeSpec build site stamps `effectiveLockdown(key)` into `lockdownSql`; this flag is the
-      * global default the per-pool tri-state inherits, so the query path and the maintenance path
-      * can never drift.
+    /** QOD_NODE_LOCKDOWN, from Main via `lockdownCfg.enabled`: the global default the per-pool
+      * lockdown tri-state inherits.
       */
     lockdownEnabled: Boolean = false,
     /** Managed object storage (QOD_MANAGED_STORE_*), from Main; `None` when the config block is
@@ -1038,8 +1035,6 @@ final class PoolSupervisor(
       tenantDbInitTrusted = state.dbInitSqlTrusted,
       tenantPoolInitSql = state.initSql,
       tenantPoolInitTrusted = state.initSqlTrusted,
-      lockdownSql =
-        NodeLockdown.sql(state.metastore.getOrElse("dataPath", ""), effectiveLockdown(key)),
       objectStoreSql = ObjectStoreSecret.sql(
         state.s3,
         state.metastore.getOrElse("dataPath", ""),
@@ -1168,7 +1163,6 @@ final class PoolSupervisor(
         tenantDbInitTrusted = donor.exists(_.dbInitSqlTrusted),
         tenantPoolInitSql = donor.map(_.initSql).getOrElse(""),
         tenantPoolInitTrusted = donor.exists(_.initSqlTrusted),
-        lockdownSql = NodeLockdown.sql(dataPath, effectiveLockdown(key)),
         objectStoreSql = ObjectStoreSecret.sql(s3, dataPath, kindWire)
       )
     }
@@ -1234,7 +1228,7 @@ final class PoolSupervisor(
         .getOrElse(Nil)
 
   /** NodeSpec for the ephemeral merge node (design section 4.5): the parent's maintenance-node
-    * shape (same catalog ATTACH, secrets, lockdown) plus the branch catalog attached read-only as
+    * shape (same catalog ATTACH and secrets) plus the branch catalog attached read-only as
     * [[ai.starlake.quack.ondemand.branch.BranchMergeSql.BranchAlias]]. The object-store secret is
     * scoped to the common parent prefix so it covers the parent's files AND the branch's. Pool
     * segment `__merge`, never registered in the router.

@@ -439,7 +439,7 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.join("a")
       val orphan = fx.inner
         .claim(
-          FleetAssignment(0, id(1), fx.key, 0, "t", "memory", Map.empty, "", "", "", ""),
+          FleetAssignment(0, id(1), fx.key, 0, "t", "memory", Map.empty, "", "", ""),
           30,
           None
         )

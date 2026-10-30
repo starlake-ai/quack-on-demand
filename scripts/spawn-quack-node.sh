@@ -406,8 +406,8 @@ fi
 # DuckDB's spill directory defaults to `.tmp` under its working directory, which no longer persists
 # across nodes. Give each node its own, on the filesystem it spilled to before: the emptyDir
 # KubernetesQuackBackend mounts on every pod when present, else `.tmp` of the starting directory
-# (not TMPDIR, which is often RAM-backed on Linux). Per node so that under lockdown, where DuckDB
-# admits its temp directory, no node can read another's spill files. NODE_DIR when neither works.
+# (not TMPDIR, which is often RAM-backed on Linux). Per node, so that no node can read another's
+# spill files. NODE_DIR when neither works.
 if [[ -d /duckdb-tmp && -w /duckdb-tmp ]]; then
   SPILL_ROOT=/duckdb-tmp
 else
@@ -700,12 +700,6 @@ append_tenant_init_sql pool "${tenantPoolInitSqlTrusted:-}" trusted
 append_tenant_init_sql pool "${tenantPoolInitSql:-}" untrusted
 if [[ -n "${extraSetupSql:-}" ]]; then
   INIT_SQL+="$extraSetupSql"$'\n'
-fi
-
-# Deployment lockdown (lockdownSql env var, authored by NodeLockdown.scala). Runs last, before
-# qod-node serves, so the restrictions are in effect before the node serves any tenant statement.
-if [[ -n "${lockdownSql:-}" ]]; then
-  INIT_SQL+="$lockdownSql"$'\n'
 fi
 
 # Test seam: print the assembled init SQL and exit without launching qod-node.

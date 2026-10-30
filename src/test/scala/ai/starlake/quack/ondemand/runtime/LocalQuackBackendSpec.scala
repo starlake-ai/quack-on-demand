@@ -327,8 +327,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
 
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
   // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
-  // QOD_NODE_BIN would run commands as the manager's user, lockdownSql would replace the manager's
-  // own. The metastore's other keys never become a secret file either. The values are inert
+  // QOD_NODE_BIN would run commands as the manager's user, and a stale lockdownSql
+  // (Phase D removed it) must reach no node. The metastore's other keys never become a secret file either. The values are inert
   // markers, and the checks are booleans: a failing `should not include` would print the dump.
   it should "pass only TenantDb.NodeEnvKeys of the metastore to the spawn environment" in:
     val captures = scala.collection.concurrent.TrieMap.empty[String, java.io.File]
@@ -371,17 +371,15 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       "QOD_S3_SECRET_ACCESS_KEY" -> "sec1-marker-s3-secret",
       "sec1Unknown"              -> "sec1-marker-unknown"
     )
-    val key             = PoolKey("t", "t_default", "p")
-    val managerLockdown = "SET enable_external_access = false;"
+    val key = PoolKey("t", "t_default", "p")
 
-    def spec(nodeId: String, lockdownSql: String) = NodeSpec(
+    def spec(nodeId: String) = NodeSpec(
       key,
       nodeId,
       Role.Dual,
       metastore = allowed ++ hostile + ("pgPassword" -> "sec1-pg-password"),
       s3 = Map.empty,
-      kindWire = "memory",
-      lockdownSql = lockdownSql
+      kindWire = "memory"
     )
     def dumpOf(nodeId: String): String =
       val f        = capture(nodeId)
@@ -391,8 +389,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     def lines(out: String, name: String): List[String] =
       out.linesIterator.filter(_.startsWith(s"$name=")).toList
     val (_, logged) = LogCapture.logged(classOf[LocalQuackBackend].getName) {
-      backend.start(spec("node-sec1-open", lockdownSql = "")).unsafeRunSync()
-      backend.start(spec("node-sec1-locked", lockdownSql = managerLockdown)).unsafeRunSync()
+      backend.start(spec("node-sec1-a")).unsafeRunSync()
+      backend.start(spec("node-sec1-b")).unsafeRunSync()
     }
     try
       // Each dropped key named once for the pool, not once per node, at ERROR, never with its value
@@ -402,9 +400,9 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       withClue("a metastore marker in the backend's log: ")(
         logged.exists(_.getFormattedMessage.contains("sec1-marker")) shouldBe false
       )
-      val open   = dumpOf("node-sec1-open")
-      val locked = dumpOf("node-sec1-locked")
-      Seq(open, locked).foreach { out =>
+      val a = dumpOf("node-sec1-a")
+      val b = dumpOf("node-sec1-b")
+      Seq(a, b).foreach { out =>
         withClue("a metastore marker in the spawn environment: ")(
           out.contains("sec1-marker") shouldBe false
         )
@@ -437,15 +435,12 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
             java.nio.file.Files.readString(s3).contains("sec1-marker")) shouldBe false
         )
       }
-      withClue("lockdownSql without the manager's: ")(
-        lines(open, "lockdownSql").isEmpty shouldBe true
-      )
-      withClue("the manager's lockdownSql: ")(
-        (lines(locked, "lockdownSql") == List(s"lockdownSql=$managerLockdown")) shouldBe true
+      withClue("a lockdownSql in the spawn environment: ")(
+        Seq(a, b).forall(lines(_, "lockdownSql").isEmpty) shouldBe true
       )
     finally
-      backend.stop(key, "node-sec1-open").unsafeRunSync()
-      backend.stop(key, "node-sec1-locked").unsafeRunSync()
+      backend.stop(key, "node-sec1-a").unsafeRunSync()
+      backend.stop(key, "node-sec1-b").unsafeRunSync()
 
   // Regression for issue #2 (Graceful JVM shutdown hook): cleanup()
   // must SIGTERM every tracked child, wait for them to exit (falling

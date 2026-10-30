@@ -248,9 +248,7 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
   /** The secret each of `files` signs with on a node of a database at `dataPath` whose connection
     * holds a user's credential for `s3://lake/` (when `user`), `none` for no secret. The node's
     * order: the storage secrets the spawn rendered, the ATTACH (its secret lookup, here a
-    * which_secret, runs before lockdown, as on a node: the first lookup reads the persistent secret
-    * storage, which lockdown's disabled LocalFileSystem would refuse), lockdown, then a statement's
-    * lookups.
+    * which_secret), then a statement's lookups.
     */
   private def winners(
       cli: Path,
@@ -266,10 +264,7 @@ class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPath
     val init = initSql(dataPath, extra*)
     val sql  = (List("INSTALL httpfs;", "LOAD httpfs;") ++
       List("qod_data_s3", "qod_db_store").flatMap(secret(init, _)) ++
-      List(
-        s"SELECT coalesce((SELECT name FROM which_secret('${files.head}', 's3')), 'none');",
-        NodeLockdown.sql(dataPath, enabled = true)
-      ) ++
+      List(s"SELECT coalesce((SELECT name FROM which_secret('${files.head}', 's3')), 'none');") ++
       Option.when(user)(UserSecret).toList ++
       files.map(f => s"SELECT coalesce((SELECT name FROM which_secret('$f', 's3')), 'none');"))
       .mkString("\n")

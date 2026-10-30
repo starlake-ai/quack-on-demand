@@ -21,7 +21,6 @@ final case class FleetAssignment(
     resourceSql: String = "",
     objectStoreSql: String,
     extraSetupSql: String,
-    lockdownSql: String,
     // The tenant-db's and the pool's initSql, each with whether it runs as written (written by a
     // superuser or the manager) or under qod-node's tenant initSql allowlist.
     tenantDbInitSql: String = "",

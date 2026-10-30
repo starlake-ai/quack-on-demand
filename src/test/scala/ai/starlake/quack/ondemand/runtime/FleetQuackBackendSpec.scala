@@ -206,10 +206,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       "QOD_NODE_TOKEN"           -> "sec1-marker-token",
       "sec1Unknown"              -> "sec1-marker-unknown"
     )
-    val sec1 = spec("n1").copy(
-      metastore = allowed ++ hostile + ("PgPassword" -> "pw"),
-      lockdownSql = "SET enable_external_access = false;"
-    )
+    val sec1        = spec("n1").copy(metastore = allowed ++ hostile + ("PgPassword" -> "pw"))
     val (_, logged) =
       LogCapture.logged(classOf[FleetQuackBackend].getName)(withAgent(agent)(backend.start(sec1)))
     // Each dropped key named once, at ERROR, never with its value.
@@ -220,7 +217,6 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     )
     val a = store.get("srv-1").get.assignment.get
     a.env shouldBe allowed + ("PgPassword" -> "pw")
-    a.lockdownSql shouldBe "SET enable_external_access = false;"
     // Nor does any other field of the assignment (its SQL, kind, identity) carry a hostile value.
     withClue("a metastore marker in the assignment: ")(
       a.productIterator.exists(_.toString.contains("sec1-marker")) shouldBe false
@@ -399,7 +395,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     val (store, backend, setNow, now) = fixture()
     val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
     store.claim(
-      FleetAssignment(0, "orphan", pk, 21900, "t", "memory", Map.empty, "", "", "", ""),
+      FleetAssignment(0, "orphan", pk, 21900, "t", "memory", Map.empty, "", "", ""),
       30,
       None
     )
@@ -416,7 +412,7 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
     val (store, _, setNow, now) = fixture()
     val agent = new FakeAgent(store, "srv-1"); agent.reportAs = "starting"; agent.beat()
     store.claim(
-      FleetAssignment(0, "fresh", pk, 21900, "t", "memory", Map.empty, "", "", "", ""),
+      FleetAssignment(0, "fresh", pk, 21900, "t", "memory", Map.empty, "", "", ""),
       30,
       None
     )

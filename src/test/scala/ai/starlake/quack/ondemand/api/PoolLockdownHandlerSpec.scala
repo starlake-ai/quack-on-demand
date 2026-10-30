@@ -156,13 +156,6 @@ class PoolLockdownHandlerSpec extends AnyFlatSpec with Matchers:
     resp.lockdownEffective shouldBe true
     sup.effectiveLockdown(key) shouldBe true
     nodeIdsBefore.foreach(id => backend.stopped should contain(id))
-    // The respawn half must be stamped with the engine lockdown block at spawn
-    // time, not merely flip the persisted flag: the pool started with lockdown
-    // off (empty lockdownSql), so the only NodeSpec carrying the engine block
-    // is the one respawned after setLockdown("on").
-    backend.starts.last.lockdownSql should include(
-      "SET autoinstall_known_extensions = false"
-    )
     // The ok arm audits the action with the lockdown value in detail and the
     // pool key (tenant/tenantDb/pool) as the target.
     auditStore.events should not be empty

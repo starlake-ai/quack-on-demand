@@ -96,7 +96,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         Map("pgHost" -> "h"),
         "",
         "",
-        "",
         ""
       ),
       30,
@@ -122,7 +121,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
           "tok",
           "memory",
           Map("pgHost" -> "h"),
-          "",
           "",
           "",
           ""
@@ -329,7 +327,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         Map("pgPassword" -> "p"),
         "",
         "",
-        "",
         ""
       )
     )
@@ -349,7 +346,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         "tok",
         "memory",
         Map("pgPassword" -> "p"),
-        "",
         "",
         "",
         ""
@@ -392,7 +388,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         "tok",
         "memory",
         Map("pgPassword" -> "p"),
-        "",
         "",
         "",
         ""
@@ -480,7 +475,6 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       "t",
       "memory",
       Map.empty,
-      "",
       "",
       "",
       ""
@@ -847,4 +841,23 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
     (a.resourceSql, a.tenantDbInitSql, a.tenantDbInitTrusted) shouldBe ("", "", false)
     io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "CREATE VIEW"
+  }
+
+  // Phase D: an assignment an earlier manager stored carries lockdownSql. It still decodes, the field
+  // is dropped, and no heartbeat hands it on.
+  it should "drop the lockdownSql of an earlier manager" in {
+    import FleetAssignment.given
+    import Dtos.given
+    val json =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"resourceSql":"","objectStoreSql":"",
+        |"extraSetupSql":"","lockdownSql":"SET disabled_filesystems = 'LocalFileSystem';"}""".stripMargin
+    val a = io.circe.parser.decode[FleetAssignment](json).toOption.get
+    a.nodeId shouldBe "n1"
+    io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "lockdownSql"
+    val dto = FleetHandlers.toDto(a, "ab" * 32, ai.starlake.quack.NodeExtensionsConfig())
+    io.circe
+      .Encoder[FleetAssignmentDto]
+      .apply(dto)
+      .noSpaces should not include "disabled_filesystems"
   }

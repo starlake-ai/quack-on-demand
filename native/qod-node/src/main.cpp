@@ -134,9 +134,8 @@ int Serve(const NodeOptions &options) {
 
 	// quack loads after the trusted init statements that set where extensions come from
 	// (custom_extension_repository, extension_directory), and before the first one that restricts the
-	// node's file or network access: a lockdown pool's init SQL ends by disabling the local file system
-	// (NodeLockdown.sql), and quack's extension file is local. Without such a statement, after the init
-	// SQL.
+	// node's file or network access (a superuser's initSql may disable the local file system, and
+	// quack's extension file is local). Without such a statement, after the init SQL.
 	auto quack_loaded = false;
 	auto load_quack = [&]() {
 		if (!quack_loaded) {

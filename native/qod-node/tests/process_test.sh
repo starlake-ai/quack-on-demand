@@ -333,22 +333,22 @@ else
   cat "$work/term.out"
 fi
 
-# --- serve: node lockdown last in the init SQL ----------------------------------------------------
-# A lockdown pool on an object-store data path ends its init SQL by disabling the local file system
-# (NodeLockdown.sql): quack, whose extension file is local, is loaded before the init SQL runs. Such a
-# node's init SQL loads httpfs first (its data path is remote), which quack_serve needs.
+# --- serve: quack loads before an init statement that restricts file access -----------------------
+# A trusted init statement (a superuser's database or pool initSql) may disable the local file system:
+# quack, whose extension file is local, is loaded before that statement runs (RestrictsNodeAccess).
+# The init SQL loads httpfs first, which quack_serve needs once the local file system is off.
 { nonce_line; printf "INSTALL httpfs;\nLOAD httpfs;\nSET disabled_filesystems = 'LocalFileSystem';\n"; } |
-  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-lockdown)" \
-    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/lockdown.out" 2>&1 &
-lockdown_node=$!
-pids+=("$lockdown_node")
-if wait_for '\[qod-node\] ready' "$work/lockdown.out"; then
-  grep -q '3 of 3 statement(s) ran' "$work/lockdown.out" || fail "lockdown: the init SQL did not run"
-  kill -TERM "$lockdown_node"
-  wait_exit "$lockdown_node" || fail "lockdown: the node did not stop"
+  "$node_bin" --port "$(port)" --bind 127.0.0.1 --secrets-dir "$(new_secrets token-localfs)" \
+    --secret-directory "$work/secret-dir" --node-id "$node_id" --init - > "$work/localfs.out" 2>&1 &
+localfs_node=$!
+pids+=("$localfs_node")
+if wait_for '\[qod-node\] ready' "$work/localfs.out"; then
+  grep -q '3 of 3 statement(s) ran' "$work/localfs.out" || fail "restricted files: the init SQL did not run"
+  kill -TERM "$localfs_node"
+  wait_exit "$localfs_node" || fail "restricted files: the node did not stop"
 else
-  fail "lockdown: the node never became ready with the local file system disabled"
-  cat "$work/lockdown.out"
+  fail "restricted files: the node never became ready with the local file system disabled"
+  cat "$work/localfs.out"
 fi
 
 # --- serve: remote_pushdown stays disabled whatever the init SQL sets (item 32 A) -----------------

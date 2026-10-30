@@ -3,7 +3,7 @@ package ai.starlake.quack.ondemand.federation.iceberg
 import ai.starlake.quack.model.SqlLiterals.{duckdbIdent as ident, duckdbLiteral as lit}
 
 /** Authors the `INSTALL` + `CREATE SECRET` + `ATTACH` block for one Iceberg REST catalog, single
-  * source of truth in the same spirit as `NodeLockdown` and `ObjectStoreSecret`.
+  * source of truth in the same spirit as `ObjectStoreSecret`.
   *
   * Output carries `{{secret.NAME}}` placeholders verbatim: this runs BEFORE
   * [[ai.starlake.quack.ondemand.federation.FederationBlobBuilder]] substitutes and SQL-escapes the
