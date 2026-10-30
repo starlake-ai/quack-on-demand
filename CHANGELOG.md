@@ -307,7 +307,8 @@
   function and setting classification and the same file rules the gateway uses. Verdicts are cached
   on the node for 60 s (an OPA tenant's for its OPA cache TTL) and dropped as soon as a grant,
   membership, ACL setting or data folder changes (`qodstate_tenant.policy_version`, Liquibase
-  `0050` and `0054`). The gateway's own checks still run first. Consequences:
+  `0050` and `0054`); an OPA tenant's policy change, which bumps nothing, takes effect as those
+  verdicts expire. The gateway's own checks still run first. Consequences:
   - `QOD_ACL_ENABLED=false` no longer opens tables to tenant users: it turns off the gateway's
     check only, and the node refuses any statement no grant covers. A manager that relied on the
     ACL being off to let tenant users read everything must grant them first (the built-in
@@ -319,11 +320,15 @@
     unavailable, retry` and is retryable: FlightSQL answers it `UNAVAILABLE` (every other node
     refusal stays a permanent error), and the native front door relays the node's message. Clients
     may retry it as they retry a transient failure.
-  - A fresh FlightSQL query costs two verdicts (its schema probe and the statement), about 1.7 ms
-    end to end on one host; a cached one adds about 0.3 ms per statement on the node. Bearer-token
+  - A fresh FlightSQL query costs two verdicts (its schema probe and the statement), about 1.4 ms
+    end to end on one host (0.7 to 0.9 ms per verdict); a cached one adds about 0.3 ms per
+    statement on the node. Bearer-token
     sessions share no verdict across tokens.
-  - Superusers and the manager's own work are not decided (their statements are still described,
-    and the always-on refusals apply).
+  - Superusers and the manager's own work are not decided: their statements are still described,
+    and the node's local refusals apply (statement shapes the node cannot describe, and `SET` /
+    `RESET` of `disabled_optimizers`, `enable_optimizer`, `debug_disable_optimizer`,
+    `quack_authentication_function` and `quack_authorization_function`, refused to every principal:
+    `QoD: <name> cannot be changed`).
   - Operator action: restart every node after upgrading (a node an earlier release started is
     never routed to). Release note: the vendored qod-node binaries (`native/qod-node/binaries/`,
     the qod wheel's bundled copies for `qod fleet join`, the Windows downloads and the Kubernetes
@@ -339,16 +344,19 @@
     a built-in (which also makes the built-in macros calling that name unreadable), until it is
     called as `system.main.<name>` or the macro is dropped or renamed;
   - a plain view whose body calls a user macro, an unclassified or superuser-only function,
-    `histogram()` or a `query()` with a computed argument, or that nests views more than 16 deep;
+    the `histogram(<table>, <column>)` table macro, or a `query()` with a computed argument or one
+    that runs a statement other than a query, or that nests views more than 16 deep;
     a table whose generated column, column default, CHECK constraint or trigger does the same (it
     becomes unreadable or unwritable for users);
   - a secure view whose definition names a table, function, macro, type or sequence without
     qualifying it, reads a plain view or a user-defined type, advances a sequence, calls
     `current_setting()`, or uses `query()` or a time-travel read; and any secure view read while the
     session holds a temporary view, macro or type (DuckDB's own dynamic-PIVOT types and temporary
-    indexes excepted), a `SET VARIABLE` variable, or a session setting other than `schema` /
-    `search_path`. Superusers write secure views fully qualified, over base tables and other secure
-    views only;
+    indexes excepted), a `SET VARIABLE` variable, a session setting it changed other than `schema` /
+    `search_path` (a client that sets `TimeZone` on connect included), or a search path other than
+    the session's default (a `USE` of another schema): `QoD: statement uses a secure view while the
+    session ..., which QoD does not support`, for as long as the session holds that state. Superusers write secure views fully qualified, over base tables and other secure views
+    only;
   - `CREATE MACRO`, `CREATE` / `DROP SECRET` in any storage, `ATTACH`, `IMPORT` / `EXPORT
     DATABASE`, `CONNECT`, `DESCRIBE (<query>)` / `SUMMARIZE (<query>)`, a PRAGMA off a read-only
     list, `current_setting()` of any setting, the catalog-wide listings nothing filters yet
@@ -356,7 +364,12 @@
     `duckdb_types()`, `duckdb_functions()`, `duckdb_dependencies()`), and `SET` / `RESET` of the
     `s3_*`, `external_file_cache_*`, secret, certificate, proxy, HTTP client and cache settings;
   - a file named in a table position (`FROM 'x.parquet'` is now "table not found": use the reader
-    function).
+    function);
+  - with the ACL on and `QOD_ACL_FILTERED_METADATA` off, `SHOW TABLES` (refused at the gateway; it
+    used to list every table of the session schema unfiltered):
+    turn the filter on, or query `information_schema.tables`;
+  - `ALTER TABLE ... ADD COLUMN ... DEFAULT <expr>` without an update grant on the table: it is
+    judged as DuckDB's own ADD COLUMN and UPDATE, so it needs `update` as well as `alter`.
   Residuals, not refusals: a constant argument DuckDB folds while binding is evaluated before a
   refusal (no value reaches the client), and a wildcard grant (`*.*.*`) never covers a federated
   catalog (grant it by its alias).
@@ -371,11 +384,8 @@
   is evaluated by the node as the user and judged as the literal it yields (at most 4 KiB). Inside
   a native front door transaction the evaluation runs on the transaction's own link, and a failing
   one (or a NULL or non-text value) aborts the transaction as DuckDB would. Under the FlightSQL
-  prepare probe a computed location and a SUMMARIZE are evaluated twice. `ALTER TABLE ... ADD
-  COLUMN ... DEFAULT <expr>` is judged as DuckDB's own ADD COLUMN and UPDATE, so it needs an update
-  grant on the table as well as `alter`. With the ACL on and `QOD_ACL_FILTERED_METADATA` off,
-  SHOW TABLES is now refused at the gateway (it used to list every table of the session schema
-  unfiltered); SUMMARIZE over a row-filtered table, refused before, now runs through the filter.
+  prepare probe a computed location and a SUMMARIZE are evaluated twice. SUMMARIZE over a
+  row-filtered table, refused before, now runs through the filter.
 
 - **Security: BREAKING: files by path only where the user may reach, with S3 keys of the user's
   own.** A tenant user (`*.*.* ALL` included, the ACL on or off) reads or writes a file by path only
@@ -403,21 +413,30 @@
   when added, `400 scope_in_data_folder`). Any other scheme (`http(s)`, `gs`, `az`, `r2`) is
   refused. Before, file access was superuser-only while the ACL validated and open to everyone with
   the ACL off. Users' keys travel from the manager to the nodes signed, not encrypted: keep
-  manager-to-node traffic on a private network. Operator action: set `QOD_TENANT_FILES_ROOT` and
+  manager-to-node traffic on a private network. They are stored in plaintext in the control-plane
+  database (`qodstate_user_s3_credential.secret_access_key` and `session_token`), so its backups and
+  replicas carry every user's keys: protect them accordingly. Operator action: set `QOD_TENANT_FILES_ROOT` and
   `QOD_USER_S3_ALLOWED_ENDPOINTS` as needed, and tell tenant users that loading their own files now
   starts with `qod profile s3 add`.
 
-- **Security: the nodes' own S3 credentials no longer sign users' requests.** Nodes open with
+- **Security: BREAKING: the nodes' own S3 credentials no longer sign users' requests.** Nodes open with
   DuckDB's external file cache and HTTP metadata cache off (both are shared across connections), no
   longer hold the unscoped `quack_s3` secret (the data path's secret is scoped to the data path and
   its branches and names every key), reset the S3 settings httpfs copied from `AWS_*` /
   `DUCKDB_S3_*` environment variables, and turn `aws_default_credentials` off. Non-superusers may
-  not create or drop secrets, change those settings, or `ATTACH`.
+  not create or drop secrets, change those settings, or `ATTACH`. So the manager's `QOD_S3_*` keys
+  (or the instance's credential chain) now sign only a database's own data path: a superuser read
+  of another bucket, and a trusted initSql or `sql` federation setup that read one with the node's
+  keys, now finds no secret. Operator action: superusers register their own keys (`qod profile s3
+  add`) or create a scoped secret; an initSql that reads other buckets needs its own `CREATE
+  SECRET`.
 
-- **Iceberg tables on S3 are read-only for tenant users in this release.** A catalog that neither
-  vends credentials nor has AWS credentials of its own now reads its tables with each reading
-  user's own S3 keys, and DuckDB's Iceberg extension (v2.0.0) commits its manifest files without
-  them, so a user's write fails with HTTP 403 at commit. Write as a superuser for now. The raw files
+- **Iceberg tables on S3 are read-only through QoD for every principal, superusers included.** A
+  catalog that neither vends credentials nor has AWS credentials of its own now reads its tables
+  with each reading user's own S3 keys, which qod-node installs as connection secrets, and DuckDB's
+  Iceberg extension (v2.0.0) commits its manifest files without connection secrets, so a write
+  fails with HTTP 403 at commit, a superuser's too. This lasts until upstream duckdb-iceberg signs
+  its commits with connection secrets. The raw files
   of a warehouse bucket are not data folders QoD knows: a user holding keys for it can read them
   directly.
 

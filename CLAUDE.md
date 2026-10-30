@@ -141,7 +141,8 @@ the node (below).
 **Node-side authorization (Phase C, node protocol 4).** A non-superuser statement is decided on what
 DuckDB resolved for it, on the node, before it runs. The parse screen re-parses every PREPARE with
 DuckDB's own parser and refuses what binding would already do outside the node (IMPORT, CONNECT,
-DESCRIBE/SHOW/SUMMARIZE, PRAGMAs off a read-only list, the fresh-connection functions,
+DESCRIBE / SHOW / SUMMARIZE of a table or query (the listing forms such as SHOW TABLES stay), PRAGMAs
+off a read-only list, the fresh-connection functions,
 `query()`/`query_table()` with a non-literal argument; a literal one is screened like the statement,
 at any depth), any call-shaped name the generated classification does not list or classes superuser,
 anywhere in the text, and, in every slot DuckDB evaluates while binding (SET values,
@@ -151,6 +152,11 @@ COPY, ATTACH, IMPORT, EXPORT, LOAD) is sent to the manager as a `kind = screen` 
 binding. Replacement scans are off for such a session (`ClientConfig::use_replacement_scans`, no SQL
 reaches it): `FROM 'x.csv'` is "table not found". Every node opens with `remote_pushdown` in
 `disabled_optimizers` (DuckLake-on-Postgres folded constant calls before `post_bind`).
+Every principal, superusers and the manager included, is refused SET / RESET of
+`disabled_optimizers`, `enable_optimizer`, `debug_disable_optimizer`,
+`quack_authentication_function` and `quack_authorization_function` on a quack connection (`QoD:
+<name> cannot be changed`, the describer's `IsLockedSetting`); only a trusted init statement can
+touch them, and qod-node puts `remote_pushdown` back after the init SQL.
 `post_bind` describes the bound plan (objects with access and read columns, functions, settings with
 the scope DuckDB applies, control operations; canonical JSON, fingerprint = SHA-256) and walks the call
 names as written, in the client text and transitively in every view, secure view, macro, table macro
@@ -186,8 +192,9 @@ for 1 s after a failed refresh), outside the decide deadline. The policy version
 `qodstate_tenant.policy_version` (Liquibase `0050`, values from the global
 `qodstate_policy_version_seq`), bumped by the plpgsql trigger `qod_bump_policy_version()` on every RBAC
 table and on the tenant's ACL and OPA columns (`0051` adds `qodstate_tenant_location`, `0052`
-`qodstate_user_s3_credential`, which bumps the user's tenant; `0054` bumps every tenant on a change to
-the data-path deny set: `qodstate_tenant_db` and `qodstate_managed_prefix`), carried in every handle
+`qodstate_user_s3_credential`, which bumps the user's tenant; `0054` adds
+`qod_bump_every_policy_version()`, which bumps every tenant, on a change to the data-path deny set:
+`qodstate_tenant_db` and `qodstate_managed_prefix`), carried in every handle
 with `ctx`, the SHA-256 of the session's authorization context (JWT roles and groups, a PAT's
 restriction, the pool, every claim of a bearer token), so a restricted token never reuses a full
 session's verdict, and with `path`, the session's default `<catalog>.<schema>` (the router's USE
@@ -234,7 +241,10 @@ statement runs on that connection until a prelude succeeds. A user's `s3://` URL
 under one of their own scopes and outside every data folder; one that a node secret of its own (an
 Iceberg catalog's `qod_ice_*`, an operator's) would sign over the user's is refused on the node. The
 keys travel manager to node signed, not encrypted, like the node token: a private network is
-required. Superusers are unrestricted: they use credentials they registered, or a secret they create.
+required. The keys sit in plaintext in the control-plane database (`qodstate_user_s3_credential.
+secret_access_key`, `session_token`), so its backups and replicas carry them. Superusers are not
+restricted by these rules, but the node's own keys no longer sign for them outside the data path: they
+use credentials they registered, or a secret they create.
 **Local folders are tenant-authorized** (`qodstate_tenant_location`, Liquibase `0051`, kind `local`
 only; REST `POST /api/tenant/location/list|add|remove` (superusers and the tenant's admins; an `s3://`
 location is refused, `400 invalid_location`), `qod tenant location list|add|remove`, MCP
@@ -250,8 +260,10 @@ duckdb-file row with no data path while the default metastore has none) denies e
 to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to non-superusers. Not
 covered: an attached Iceberg catalog's raw warehouse files (decision 21). An Iceberg catalog that
 neither vends credentials nor has `awsCredentials` reads its table data with each reading user's own
-keys, and writes to such a table fail (duckdb-iceberg commits manifests without the
-connection's secrets), so it is read-only for users. An Iceberg source's `awsCredentials` carry no
+keys. Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until
+upstream duckdb-iceberg signs its commits with connection secrets (DuckDB v2.0.0 commits manifests
+without them, and qod-node installs every registered credential `IN connection`: HTTP 403 at
+commit). An Iceberg source's `awsCredentials` carry no
 S3 endpoint, so an S3-compatible (non-AWS) warehouse is read only with users' own keys or vended
 credentials. A change of the default metastore's `dataPath`
 in the configuration bumps no policy version: restart the nodes after one.
@@ -312,28 +324,26 @@ placeholder); a stored template's unquoted placeholder is substituted only for a
 next to no quote, `-`, `/`, `*`, `$` or letter, else that source's block is left out
 with a WARN. Manifests carry `initSqlTrusted` and `setupSqlTrusted`.
 
-**Known over-refusals (accepted, Phase C).** For non-superusers: a misspelled function reads "is not
-classified"; a superuser-made macro, or a catalog macro shadowing a built-in name (a built-in macro's
-body included: a planted `main.list_append` makes `array_append` unreadable), is refused until it is
-classified or qualified with `system.main`; a plain view whose body calls a user macro, an unclassified
-or (outside a secure view) superuser-class function, `histogram()`, or a non-literal `query()`, or
-that nests views past 16, is unreadable; a table whose generated column, default, CHECK or trigger
-breaks the same rules is unreadable or unwritable; a secure view must qualify its tables, functions,
-macros, types and sequences, may not read plain views or user types, may not advance a sequence, and
-refuses `current_setting()` by name; `ADD COLUMN ... DEFAULT <expr>` runs as DuckDB's own parts (the
-UPDATE part needs an update grant besides `alter`); DESCRIBE answers `key` (and `PRAGMA table_info`
-`pk`) as NULL; an OPA tenant's DESCRIBE and SHOW TABLES come back empty and SUMMARIZE is refused (the
-metadata filter narrows by QoD grants); a wildcard grant (`*.*.*`) never covers a federated catalog
-(grant it by alias); with the gateway ACL on, a wildcard grant does not cover a `memory`
-catalog or a custom `catalogAlias` at the gateway either (Phase D removes that check); with the ACL
-on and filtered metadata off, SHOW TABLES is refused at the gateway. Residuals: `pg_sleep` /
-`sleep_ms` are allowed, in bind-time slots too; foldable constant arguments are evaluated during bind before a
-refusal (no value reaches the client); SQL stored by others (view bodies, defaults) runs its bind-time
-slots as the reader; an optimizer extension loaded after qod-node is not re-described; statements an
-extension runs on its own untagged connections (DuckLake metadata, Iceberg commits) are admitted as
-node-internal; a superuser's `SET GLOBAL disabled_optimizers` that drops `remote_pushdown` holds until
-the node restarts; under the FlightSQL prepare probe a computed location and a SUMMARIZE run twice,
-and a fresh FlightSQL query costs two decisions (the GetFlightInfo schema probe is a plan of its own).
+**Accepted over-refusals** (owner rulings, CONTRACT Addendum 4 items 13-21, 24, 30-32a: changing one
+needs the owner; never loosen a rule to fix one). For non-superusers: an unclassified name (a typo
+included) reads "is not classified"; a superuser-made macro, or a catalog macro shadowing a built-in
+name (inside a built-in macro's body too), is refused until classified or called as `system.main`; a
+plain view or stored expression (generated column, default, CHECK, trigger) that calls a user macro, an
+unclassified or (outside a secure view) superuser-class function, the `histogram(<table>, <column>)`
+table macro, or a `query()` that is not a literal query, or views nested past 16, makes its view or
+table unreadable or unwritable; secure views follow the definition and session rules above; DESCRIBE
+`key` / table_info `pk` are NULL; an OPA tenant's DESCRIBE and SHOW TABLES are empty and SUMMARIZE is
+refused; `*.*.*` never covers a federated catalog, nor (at the gateway with the ACL on) a `memory`
+catalog or a custom `catalogAlias`; with the ACL on and filtered metadata off, SHOW TABLES is refused
+at the gateway.
+
+**Residuals** (known, not holes to report): foldable constant arguments are evaluated during bind
+before a refusal (no value reaches the client); `pg_sleep` / `sleep_ms` are allowed, in bind-time
+slots too; SQL stored by others (view bodies, defaults) runs its bind-time slots as the reader; an
+optimizer extension loaded after qod-node is not re-described; statements an extension runs on its own
+untagged connections (DuckLake metadata, Iceberg commits) are admitted as node-internal; under the
+FlightSQL prepare probe a computed location and a SUMMARIZE run twice, and a fresh FlightSQL query
+costs two decisions (the GetFlightInfo schema probe is a plan of its own).
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to
@@ -598,7 +608,7 @@ On the wire:
 - `ManagerServer.apiKeyGuard` admits a session or a live PAT and nothing else, on the `X-API-Key` header (CLI, scripts; the name is historical) OR the `qod_session` cookie (browser), plus `Authorization: Bearer` on `/api/scim/**`. `/mcp`, outside the guard, admits only a live PAT as `Authorization: Bearer` (sessions are refused there).
 - UI does not stash a token in localStorage; fetch's same-origin credentials policy auto-attaches the cookie.
 
-Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. The secret is resolved by `BootPreflight.withSessionSecret` (over `SessionSecretStore`, `ondemand/state/`) right after the Liquibase apply and before anything reads it: a non-empty (after trim) `QOD_SESSION_JWT_SECRET` wins, is used as given and is never written to the database; otherwise the first boot generates one and stores it in `qodstate_boot_secret` (Liquibase `0049`, row `session_jwt`; Postgres generates the value, 96 hex digits from three `gen_random_uuid()`, at least as strong as `SessionTokenStore.randomSecret()`, so it never travels as a bind parameter that statement logging would record), and every later boot and every HA replica reads it (`INSERT ... ON CONFLICT (name) DO NOTHING` then `SELECT`, so replicas booting together converge on one value). Sessions and password-reset links therefore survive restarts. While a value is configured the stored row is left untouched, so removing the env falls back to it. Boot prints one line naming the source (`from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)`, `generated and stored in the control plane`, `stored in the control plane`), never the value (println, not the logger, so the default ERROR level can't swallow it); `/api/config` shows the configured key only as `(set)` / `(unset)`, and neither manifest export nor telemetry reads the table. Every consumer takes the resolved `mgrCfg`: `SessionTokenStore`, `ResetTokenStore`, the management `OidcStateCodec` and `SqlTokenOidcService`. Rotation: change `QOD_SESSION_JWT_SECRET`, or, for the stored one, `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and restart every replica; either way every session and outstanding reset link dies. Set a value only when another service verifies the sessions: Starflow (`qod start --with-starflow` generates one into the profile, Compose's `SESSION_JWT_SECRET` feeds both `QOD_SESSION_JWT_SECRET` and the `JWT_SECRET_KEY` bearer provider). **Trust boundary (read is not write):** a writer of the control-plane database (the Postgres admin, or anyone holding the control-plane login, nodes that inherit it included) gains nothing new, since it can already rewrite `qodstate_user`. A read-only holder (a `pg_dump` backup, a snapshot, a read replica, a SELECT-only role) now also gets the management plane: on an install with no `QOD_SESSION_JWT_SECRET` it can forge a superuser session. That comes on top of the credentials the same database already stores, among them: each tenant-db's catalog `pgPassword` and duckdb-file `encryptionKey` (`qodstate_tenant_db.metastore_params`), its object-store keys (`object_store_params`), inline federation secrets (`qodstate_federated_secret.value`), the node-key secret (`qodstate_node_authz`), the manager's bearer to each node's `/quack` endpoint (`qodstate_node.token`), tenant OIDC client secrets (`qodstate_tenant.auth_client_secret`) and tenant OPA tokens (`qodstate_tenant.opa_token`). Protect control-plane backups and replicas like the secret itself; when they are less trusted than the manager, pin `QOD_SESSION_JWT_SECRET` from an external secret store: nothing is persisted then, and backups never carry it.
+Cookie attributes are configurable: `sessionCookieSecure` (env `QOD_SESSION_COOKIE_SECURE`, default `true`), `sessionCookiePath` (env `QOD_SESSION_COOKIE_PATH`, default `/api` -- override behind a path-rewriting reverse proxy). The JWT exp is absolute (8h from mint by default, env `QOD_SESSION_IDLE_TTL_SEC`); there's no sliding-window refresh. The secret is resolved by `BootPreflight.withSessionSecret` (over `SessionSecretStore`, `ondemand/state/`) right after the Liquibase apply and before anything reads it: a non-empty (after trim) `QOD_SESSION_JWT_SECRET` wins, is used as given and is never written to the database; otherwise the first boot generates one and stores it in `qodstate_boot_secret` (Liquibase `0049`, row `session_jwt`; Postgres generates the value, 96 hex digits from three `gen_random_uuid()`, at least as strong as `SessionTokenStore.randomSecret()`, so it never travels as a bind parameter that statement logging would record), and every later boot and every HA replica reads it (`INSERT ... ON CONFLICT (name) DO NOTHING` then `SELECT`, so replicas booting together converge on one value). Sessions and password-reset links therefore survive restarts. While a value is configured the stored row is left untouched, so removing the env falls back to it. Boot prints one line naming the source (`from QOD_SESSION_JWT_SECRET (quack-on-demand.auth.management.sessionJwtSecret)`, `generated and stored in the control plane`, `stored in the control plane`), never the value (println, not the logger, so the default ERROR level can't swallow it); `/api/config` shows the configured key only as `(set)` / `(unset)`, and neither manifest export nor telemetry reads the table. Every consumer takes the resolved `mgrCfg`: `SessionTokenStore`, `ResetTokenStore`, the management `OidcStateCodec` and `SqlTokenOidcService`. Rotation: change `QOD_SESSION_JWT_SECRET`, or, for the stored one, `DELETE FROM qodstate_boot_secret WHERE name = 'session_jwt'` and restart every replica; either way every session and outstanding reset link dies. Set a value only when another service verifies the sessions: Starflow (`qod start --with-starflow` generates one into the profile, Compose's `SESSION_JWT_SECRET` feeds both `QOD_SESSION_JWT_SECRET` and the `JWT_SECRET_KEY` bearer provider). **Trust boundary (read is not write):** a writer of the control-plane database (the Postgres admin, or anyone holding the control-plane login, nodes that inherit it included) gains nothing new, since it can already rewrite `qodstate_user`. A read-only holder (a `pg_dump` backup, a snapshot, a read replica, a SELECT-only role) now also gets the management plane: on an install with no `QOD_SESSION_JWT_SECRET` it can forge a superuser session. That comes on top of the credentials the same database already stores, among them: each tenant-db's catalog `pgPassword` and duckdb-file `encryptionKey` (`qodstate_tenant_db.metastore_params`), its object-store keys (`object_store_params`), inline federation secrets (`qodstate_federated_secret.value`), the node-key secret (`qodstate_node_authz`), the manager's bearer to each node's `/quack` endpoint (`qodstate_node.token`), tenant OIDC client secrets (`qodstate_tenant.auth_client_secret`), tenant OPA tokens (`qodstate_tenant.opa_token`) and each user's own S3 keys (`qodstate_user_s3_credential.secret_access_key`, `session_token`). Protect control-plane backups and replicas like the secret itself; when they are less trusted than the manager, pin `QOD_SESSION_JWT_SECRET` from an external secret store: nothing is persisted then, and backups never carry it.
 
 Forced password change: `qodstate_user.must_change_password` (set via `mustChangePassword`
 on `user/create` / `user/update`) makes `DatabaseAuthenticator` refuse the password on BOTH
@@ -615,9 +625,10 @@ principal holding a grant on `t`, not just an admin, and mints a non-admin, prof
 session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions (and
 a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
 `/api/auth/logout`, `/api/profile/usage`, `/api/profile/statements`, `/api/profile/pools`, the
-caller's own `/api/auth/pat/{create,list,revoke,delete}`, and `/api/auth/sso/ticket` when the
+caller's own `/api/auth/pat/{create,list,revoke,delete}`, their own S3 credentials
+`/api/profile/s3/{list,add,remove}`, and `/api/auth/sso/ticket` when the
 Starlake integration is on) and answers `403 admin_required` on everything else; the UI mounts
-only the `/profile` route (own password change; own usage/statements) for them.
+only the `/profile` route (own password change; own usage/statements; own S3 credentials) for them.
 `GET /api/profile/pools` (`qod profile pools`) answers
 `{"pools":[{"tenant":...,"tenantDb":...,"pool":...,"status":...}]}` (the field names and
 `status` values of `/api/pool/list`, `ready` or `disabled`, nothing else) for the pools of the
@@ -745,15 +756,16 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
   `settings.json` and `macros.json` from the host's qod-node build and the release CLI with every
   extension a node loads, then the generated `src/main/resources/authz/function-classes.tsv`,
   `setting-classes.tsv`, `native/qod-node/file-functions.txt`, `admitted-table-functions.txt` and
-  `src/function_classes.inc`), review every `review:` default it prints, change the rule tables in
+  `native/qod-node/src/function_classes.inc`), review every `review:` default it prints, change the rule tables in
   `scripts/dev/classify-qod-node.py` where a default is wrong (a setting is `session` only when changing
   it for one session cannot reach credentials, files, I/O endpoints, resources or other sessions), then
   rebuild qod-node. `FunctionClassesSpec` (its fixture case needs `python3`), `FunctionClassesHeaderSpec`
   and `SettingClassesSpec` fail until the tables and the JSON agree; `InitSettingsAllowlistSpec` fails
   when a setting of the tenant initSql allowlist changes class.
 - **Add every new RBAC table to the policy-version trigger.** `qod_bump_policy_version()` (Liquibase
-  `0050`, extended by `0051`, `0052` and `0054`) bumps `qodstate_tenant.policy_version` on writes to the
-  tables it is attached to; a table that changes what a principal may do but is not attached (a new
+  `0050`, extended by `0051` and `0052`) bumps `qodstate_tenant.policy_version` on writes to the
+  tables it is attached to, and `qod_bump_every_policy_version()` (`0054`) bumps every tenant on a
+  change to the data-path deny set (attach a new source of data folders to that one); a table that changes what a principal may do but is not attached (a new
   grant or policy table, a new tenant ACL column, a new source of data folders) never invalidates
   cached verdicts, so nodes keep allowing for up to the verdict's 60 s. Attach it in the same changeset
   that creates it.

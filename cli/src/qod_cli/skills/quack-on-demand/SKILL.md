@@ -577,7 +577,9 @@ Hosted deployments can cap a tenant's *cumulated* cores and memory across all it
 
 Tenant users never read or write a file by path unless it is theirs to reach: an S3 location
 with S3 keys of their own, or a local folder their tenant authorized on the node hosts.
-Superusers keep full access (with keys they registered, or a secret they create).
+Superusers are not limited by these rules, but the nodes' own keys now sign only each database's
+data path: a superuser reading another bucket registers keys too (`qod profile s3 add`) or creates a
+secret.
 
 Each user registers their own S3 keys, for a bucket or a prefix of one:
 
@@ -607,7 +609,8 @@ too_many_credentials` (32 per user). Over MCP: `list_my_s3_credentials`, `remove
 {id}` (no add: a secret never goes through an agent). Credentials are not in manifests: users enter
 them again after an import. The profile page of the UI shows the same list. The keys travel from the
 manager to the nodes signed but not encrypted, like every node credential: keep manager-to-node
-traffic on a private network.
+traffic on a private network. They are stored in plaintext in the control-plane database, so its
+backups and replicas carry every user's keys: protect them like the keys themselves.
 
 A tenant admin or a superuser authorizes local folders:
 
@@ -657,9 +660,10 @@ S3 then lets them do what their keys allow, no more. Always refused to tenant us
 
 The raw files of an attached Iceberg catalog's warehouse are not data folders QoD knows: keys for a
 warehouse bucket let their holder read its files directly. A catalog that neither vends credentials
-nor has AWS credentials of its own reads its tables with the reading user's keys, and writing to it
-fails with an HTTP 403 at commit (DuckDB's Iceberg extension commits without the user's keys): such
-Iceberg tables are read-only for tenant users in this release. An Iceberg source's AWS credentials
+nor has AWS credentials of its own reads its tables with the reading user's keys. Iceberg tables on
+S3 are read-only through QoD for every principal, superusers included: DuckDB's Iceberg extension
+commits without the connection secrets the nodes hold users' keys in, so a write fails with an HTTP
+403 at commit, until upstream duckdb-iceberg signs its commits with connection secrets. An Iceberg source's AWS credentials
 name no S3 endpoint, so a warehouse on an S3-compatible store (not AWS) is read only with the users'
 own keys (an endpoint the operator allowed) or credentials the catalog vends.
 
@@ -1219,7 +1223,8 @@ manager on Kubernetes, or in fleet mode without `QOD_FLEET_EPHEMERAL=local`, has
 to check with: the write is accepted and the response carries `initSqlWarning`. A tenant admin's
 initSql holds at most 64 KiB, and no initSql may contain the text `qod:untrusted-`. Responses show
 `initSqlTrusted`. A session-level setting (`timezone`, `calendar`, `errors_as_json`, ...) set this
-way changes only the node's start connection, never the sessions it serves.
+way at the default scope changes only the node's start connection, never the sessions it serves;
+with `SET GLOBAL` it becomes every session's default.
 
 After upgrading, every non-empty initSql a tenant admin wrote before is untrusted: the boot log has a
 WARN for each database or pool that loses statements, naming it (never the SQL). To keep such a
@@ -2263,7 +2268,12 @@ opt-in except pod security:
     ("node: settings that act on the whole node are reserved to superusers").
     Set resources at node start instead: database / pool `initSql` or
     `qod pool set-resources`. Session settings (`search_path`, `TimeZone`,
-    `http_timeout`, `SET VARIABLE`, ...) stay open.
+    `http_timeout`, `SET VARIABLE`, ...) stay open, but any of them other than
+    `schema` / `search_path`, a `SET VARIABLE`, a temporary view, macro or type,
+    or a `USE` of another schema (a search path other than the session's
+    default) makes every secure view unreadable for as long as the session holds
+    it (`QoD: statement uses a secure view while the session ...`). A client
+    that sets `TimeZone` on connect loses secure views for that session.
 - **Table grants, enforced on the nodes in every mode** - each node decides every tenant statement
   on what DuckDB resolved (plain views by the tables they read, secure views by their own grant),
   whatever `QOD_ACL_ENABLED` says: with the ACL off only the gateway skips its own check, and a
@@ -2272,17 +2282,18 @@ opt-in except pod security:
   an unknown name, a misspelled one included, reads `QoD: function <name> is not classified`, and so
   does a macro a superuser created, or a catalog macro named like a built-in, until it is called as
   `system.main.<name>` or classified. Views follow the same rules: a view whose body calls a user
-  macro, an unclassified or superuser-only function, `histogram()` or a `query()` with a computed
-  argument, or that nests views more than 16 deep, is unreadable for tenant users, and so is a table
+  macro, an unclassified or superuser-only function, the `histogram(<table>, <column>)` table macro,
+  or a `query()` with a computed argument or one running a statement other than a query, or that
+  nests views more than 16 deep, is unreadable for tenant users, and so is a table
   whose generated column, default, CHECK constraint or trigger does that (unreadable or unwritable).
   A secure view must qualify every table, function, macro, type and sequence its body names, read
   only base tables, other secure views and built-ins (no plain view, no user type), advance no
   sequence and call no `current_setting()`. A wildcard grant (`*.*.*`, `qod_all_tables`) never
   covers a federated catalog: grant it by its alias. Cost: each plan a node has not judged costs
-  one call to the manager replica that minted the session (measured at about 1.7 ms end to end on
-  one host; a fresh FlightSQL query costs two, its schema probe and the statement); the verdict is
-  then cached on that node for 60 s (an OPA tenant's for its OPA cache TTL), so a statement repeated
-  all day costs one call per minute per node. Sessions of one user with the same grants share
+  one call to the manager replica that minted the session (about 0.8 ms per call; a fresh FlightSQL
+  query makes two, its schema probe and the statement, about 1.4 ms end to end on one host); the
+  verdict is then cached on that node for 60 s (an OPA tenant's for its OPA cache TTL), so a
+  statement repeated all day costs one or two calls per minute per node. Sessions of one user with the same grants share
   verdicts; bearer-token sessions share them only within one token, so a client that mints a token
   per connection pays a call on the first run of every statement.
 - **Direct file access, only where the user may reach** (every mode) - a tenant user, `*.*.* ALL`
@@ -2458,12 +2469,13 @@ opt-in except pod security:
 | `qod serve: provisioning failed: the manager answers /ready but wrote no provisioning outcome within --ready-timeout (<N>s)`, then three `finish by hand:` lines; or `... could not read the provisioning file the launcher wrote` | The manager release does not provision at boot, or is not the one this CLI expects (a launcher/manager version mismatch), or it did not reach its boot provisioning in time | Run the manager release matching this CLI (drop an older `--jar` or `--version`), or `qod login` and run the printed commands; a slow first boot needs a larger `--ready-timeout`. The manager log says what it did |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
 | `access denied: missing RO grant on ...` (gateway) or `QoD: ...` naming the table (node) | The user has no matching grant. The nodes check grants whatever `QOD_ACL_ENABLED` says, so turning the ACL off does not help | Add the grant via `qod role permission grant` |
+| `QoD: statement uses a secure view while the session holds variables` / `... has changed the setting <name>` / `... search path differs from the one it was given` / `... holds temporary entries ...`, `which QoD does not support` | The session set a variable, changed a setting other than `schema` / `search_path` (a client's `SET TimeZone` on connect included), ran `USE` of another schema, or created a temporary view, macro or type: any of them could change what a secure view's body reads | Open a new session (or reconnect) without that state, and read the secure view there; set time zones and other settings in a session that reads no secure view |
 | `QoD: function <name> is not classified` | A tenant user called a name the node's classification does not list: a typo, a function of an extension the node loaded later, a macro a superuser created, or a catalog macro named like a built-in (also reached through a view, a default or a built-in macro's body) | Check the spelling; call DuckDB's own with `system.main.<name>`; have a superuser drop or rename the shadowing macro. A new extension's functions need a manager release that classifies them |
 | `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes | Retry the statement. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20900 |
 | `QoD: <url> is outside the tenant's authorized locations` / `QoD: <path> is a database data folder` | A tenant user named a file their own S3 credentials or their tenant's folders do not cover, or a database's data folder | `qod profile s3 add` for the user's own bucket or prefix, or `qod tenant location add` for a local folder (see "Files and S3 for tenant users"); a data folder is never reachable |
 | Manager refuses to boot: `fleet mode requires QOD_INTERNAL_URL ...` or `the node decide URL is ..., a loopback address no node pod can reach on the kubernetes runtime ...` | Nodes call the manager back for every statement's verdict, at the URL each handle carries | Fleet: set `QOD_INTERNAL_URL` to this replica's own `http://` address on the servers' network. Kubernetes: the Helm chart sets `QOD_POD_IP`; a hand-written manifest sets `QOD_POD_IP` from the downward API (`status.podIP`) or `QOD_INTERNAL_URL` to the pod's own address |
 | `400 init_sql_refused` on `database create` / `update`, `pool create` / `set-init-sql` | A tenant admin's initSql holds a statement outside the allowlist ("Who may write what in initSql") | Keep only allowlisted SETs, read-only PRAGMAs and extension INSTALL/LOADs, or have a superuser write it |
-| A tenant user's `INSERT` into an Iceberg table fails with an HTTP 403 at commit | The table's data is signed with the user's own S3 keys, which DuckDB's Iceberg extension does not use for its commit | Such a table is read-only for tenant users in this release (a catalog that vends credentials or has AWS credentials of its own does not sign with the user's keys); write as a superuser |
+| An `INSERT` into an Iceberg table on S3 fails with an HTTP 403 at commit | DuckDB's Iceberg extension commits without connection secrets, and the nodes hold every registered S3 credential as one | Iceberg tables on S3 are read-only through QoD for every principal, superusers included, until upstream duckdb-iceberg signs its commits with connection secrets; write with the warehouse's own tooling |
 | A FlightSQL call fails `UNAUTHENTICATED` with `No bearer auth providers configured` or `Bearer authentication failed: ...` | The client replayed a session bearer the manager no longer holds (it restarted between calls), or sent a token no configured provider accepts | Reconnect with username and password (Basic) |
 | `Could not connect to server` for `http://127.0.0.1:21NNN/quack` | Quack child died after manager restart | Reconcile respawns on next boot; until then `qod pool delete` + `qod pool create` |
 | A pool's nodes all go unhealthy and its statements fail (`the node refused the statement's session handle`, then `no node with role ...`) after `QOD_NODE_KEY_SECRET` was set or changed, with manager replicas that disagree on it, or once host clocks drift | The nodes refuse the manager's session handles. The manager log says why, once per node: `node <id> refuses the manager's session handles ... it holds a key derived from another node-key secret` (the nodes' keys come from another secret), or `... the manager's and the node's clocks disagree by about the handle lifetime (60 s) or more` | Give every replica the same `QOD_NODE_KEY_SECRET` (or unset it on all of them), then restart the nodes so they get keys from it: `qod node restart --tenant <t> --db <db> --pool <pool> --node-id <id>` per node, or scale the pool down and back up. For the clock message, sync the clocks (NTP) of the manager and node hosts |
