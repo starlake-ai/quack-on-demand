@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.authz
 
+import ai.starlake.quack.model.PoolKey
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.parser.parse
@@ -22,6 +23,14 @@ import scala.util.control.NonFatal
   *   3. a user's handle names a context this replica minted ([[MintedHandles]]), consistent with
   *      the handle (user, pool, `ctx` digest).
   *
+  * A context minted for the OPA dry run ([[DecidePurpose.DryRun]], decision 25) is judged and never
+  * run: its plans are refused whatever the rules decide (with their reason, or
+  * [[AuthzDecider.DryRunReason]] when they allow), retryably so the node never caches the refusal,
+  * and the OPA call the decision made is kept in `dryRuns` under the handle's nonce for the REST
+  * handler. The one plan allowed is the router's USE prelude to the pool's own session default path
+  * (`paths`, the function [[NodeKeys]] carries into every handle): it runs before the statement and
+  * moves nothing.
+  *
   * Answers (all `text/plain; charset=UTF-8`): 200 with a signed [[Verdict]] (allow or refuse), 401
   * when the node or the handle fails, 503 when the decision is unavailable (an expired context
   * included), 400 for a malformed request, 413 past [[DecideRoute.MaxBodyBytes]]. The log never
@@ -32,6 +41,8 @@ final class DecideRoute(
     keys: NodeKeys,
     minted: MintedHandles,
     decider: AuthzDecider,
+    dryRuns: DryRunResults,
+    paths: PoolKey => String,
     clock: () => Long = () => System.currentTimeMillis()
 ) extends LazyLogging:
   import DecideRoute.*
@@ -86,6 +97,8 @@ final class DecideRoute(
       val who         = DecidePrincipal(p, entry.map(_.context))
       val fingerprint = NodeHandles.hex(MessageDigest.getInstance("SHA-256").digest(r.description))
       val brief       = s"${r.kind} ${fingerprint.take(12)} for ${p.name} on node '$nodeId'"
+      // A dry run's plan is judged, never run (judgeDryRun).
+      val dryRun = r.kind == "plan" && entry.exists(_.context.purpose == DecidePurpose.DryRun)
       // Whatever a decision fails to read, thrown included, is unavailable: never a verdict. A
       // screen verdict expires at once; a plan verdict lives for the decider's lifetime.
       val (decision, lifetimeMs) =
@@ -95,7 +108,10 @@ final class DecideRoute(
               .decode(r.description)
               .fold(
                 why => Decision.Refuse(s"malformed description: $why"),
-                decider.decidePlan(who, _)
+                plan =>
+                  entry match
+                    case Some(e) if dryRun => judgeDryRun(h.nonce, who, e.context, plan)
+                    case _                 => decider.decidePlan(who, plan)
               )
             (d, decider.lifetimeMs(who))
           else
@@ -124,7 +140,9 @@ final class DecideRoute(
             kind = r.kind,
             decision = verdict,
             reason = reason,
-            retryable = false,
+            // The node never caches a retryable refusal: the next dry run of the same statement
+            // (same ctx digest, same description) is judged, and recorded, again.
+            retryable = dryRun && verdict == "refuse",
             principal = p.id,
             policyVersion = h.policyVersion,
             fingerprint = fingerprint,
@@ -132,6 +150,25 @@ final class DecideRoute(
             ctx = h.ctx
           )
           (Status.Ok, Verdicts.sign(v, key))
+
+  /** A dry run's plan (decision 25). The pool's own USE prelude, which the router sends before
+    * every statement, is allowed as for any session. Any other plan is judged with the tenant's OPA
+    * asked past its cache; the OPA call's outcome is kept under the handle's nonce, and the answer
+    * is a refusal whatever the rules decided: their reason, or [[AuthzDecider.DryRunReason]].
+    */
+  private def judgeDryRun(
+      nonce: String,
+      who: DecidePrincipal,
+      context: DecideContext,
+      d: Description
+  ): Decision =
+    if isUsePrelude(d, paths(context.poolKey)) then Decision.Allow
+    else
+      val (decision, asked) = decider.dryRunPlan(who, d)
+      asked.foreach(dryRuns.put(nonce, _))
+      decision match
+        case Decision.Allow => Decision.Refuse(AuthzDecider.DryRunReason)
+        case other          => other
 
   /** The registered context is the one the handle was minted with: its user, its pool and the `ctx`
     * digest computed at mint (never recomputed per call).
@@ -170,3 +207,11 @@ object DecideRoute:
 
   /** The largest request accepted: a description is a few kilobytes. */
   val MaxBodyBytes: Int = 1 << 20
+
+  /** Whether `d` is the router's USE prelude for a pool whose session default path is `path`
+    * (`FlightSqlRouter.usePath`, which the describer reports as the `schema` setting's value): one
+    * session-scope `schema` setting to exactly that path, and nothing else. No path, no prelude.
+    */
+  private[authz] def isUsePrelude(d: Description, path: String): Boolean =
+    path.nonEmpty && d.objects.isEmpty && d.functions.isEmpty && d.control.isEmpty &&
+      d.settings == List(DescribedSetting("schema", "session", Some(path)))

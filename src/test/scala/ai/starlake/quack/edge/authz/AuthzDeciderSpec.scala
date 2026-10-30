@@ -75,7 +75,8 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
       rules: Either[String, LocationRules] = Right(Rules),
       opaReply: Either[String, (Int, String)] = Right((200, """{"result":{"allow":true}}""")),
       opaTtlSec: Int = 5,
-      rulesThrow: Boolean = false
+      rulesThrow: Boolean = false,
+      opaCacheTtlSec: Int = 0
   ):
     val rulesCalls = new AtomicInteger(0)
     val rulesUsers = ListBuffer.empty[String]
@@ -112,7 +113,7 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
             opaReply
           }
         ),
-        new OpaDecisionCache(0),
+        new OpaDecisionCache(opaCacheTtlSec),
         OpaInstruments.noop
       ),
       opaCfg = opaCfg,
@@ -819,6 +820,60 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Decision.Refuse(
       "user:alice denied by token verb ceiling on opaco_lake.main.orders:insert"
     )
+    f.opaBodies shouldBe empty
+  }
+
+  private val OpaAliceDry =
+    OpaAlice.copy(context = OpaAlice.context.map(_.copy(purpose = DecidePurpose.DryRun)))
+
+  "a dry run's plan" should "ask OPA past the decision cache and return the exact call" in {
+    val f                 = new Fixture(opaCacheTtlSec = 60)
+    val d                 = plan(objects = List(obj("orders", catalog = "opaco_lake")))
+    val (decision, asked) = f.decider.dryRunPlan(OpaAliceDry, d)
+    decision shouldBe Decision.Allow
+    f.opaBodies should have size 1
+    asked.map(o => (o.rule, o.decision, o.reason, o.decisionId)) shouldBe
+      Some(("statement", "allow", None, None))
+    asked.map(_.input) shouldBe parse(f.opaBodies.head).toOption
+    // The dry run left the cache empty: the live decision asks, its repeat is answered by the cache.
+    f.decider.decidePlan(OpaAlice, d) shouldBe Decision.Allow
+    f.decider.decidePlan(OpaAlice, d) shouldBe Decision.Allow
+    f.opaBodies should have size 2
+    // And a dry run never reads it.
+    f.decider.dryRunPlan(OpaAliceDry, d)._1 shouldBe Decision.Allow
+    f.opaBodies should have size 3
+  }
+
+  it should "return a denial and an outage with what OPA answered" in {
+    val d    = plan(objects = List(obj("orders", catalog = "opaco_lake")))
+    val deny = new Fixture(opaReply =
+      Right((200, """{"result":{"allow":false,"reason":"no"},"decision_id":"d-2"}"""))
+    )
+    val (refused, denied) = deny.decider.dryRunPlan(OpaAliceDry, d)
+    refused shouldBe Decision.Refuse(
+      "user:alice denied by policy on opaco_lake.main.orders:read: no"
+    )
+    denied.map(o => (o.decision, o.reason, o.decisionId)) shouldBe
+      Some(("deny", Some("no"), Some("d-2")))
+    val down                  = new Fixture(opaReply = Left("connection refused"))
+    val (unavailable, failed) = down.decider.dryRunPlan(OpaAliceDry, d)
+    unavailable shouldBe Decision.Unavailable(OpaAuthorizer.UnavailableMessage)
+    failed.map(o => (o.decision, o.reason)) shouldBe Some(("error", Some("connection refused")))
+  }
+
+  it should "return no call when a rule decides before OPA, or there is nothing to judge" in {
+    val f = new Fixture()
+    f.decider.dryRunPlan(OpaAliceDry, plan(control = List(ctl("attach")))) shouldBe
+      ((Decision.Refuse("statement uses attach, which only superusers may run"), None))
+    f.decider.dryRunPlan(OpaAliceDry, plan(functions = List(fn("lower", tpe = "scalar")))) shouldBe
+      ((Decision.Allow, None))
+    f.opaBodies shouldBe empty
+  }
+
+  "decidePlan" should "refuse a dry run's context: only dryRunPlan judges one" in {
+    val f = new Fixture()
+    f.decider.decidePlan(OpaAliceDry, plan(functions = List(fn("lower", tpe = "scalar")))) shouldBe
+      Decision.Refuse(AuthzDecider.DryRunReason)
     f.opaBodies shouldBe empty
   }
 

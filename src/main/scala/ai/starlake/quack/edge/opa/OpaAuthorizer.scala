@@ -110,14 +110,12 @@ final class OpaAuthorizer(
       accesses: List[OpaAccess],
       locations: List[OpaLocation]
   ): Decision =
-    val input  = OpaInput.decide(target, user, statementClass, accesses, locations)
-    val tables =
-      accesses.map(a => TableAccess(TableRef(a.catalog, a.schema, a.table), a.verb)).toSet
+    val input = OpaInput.decide(target, user, statementClass, accesses, locations)
     run(
       tenant,
       "statement",
       input,
-      tables,
+      tablesOf(accesses),
       target,
       user,
       userId,
@@ -126,6 +124,23 @@ final class OpaAuthorizer(
       text = None,
       detail = sha256Hex(input.noSpaces)
     )
+
+  /** [[decide]] for the OPA dry run (decision 25): the same input, sent through [[dryRun]] (never
+    * cached, never counted), returned with OPA's answer.
+    */
+  def decideDryRun(
+      tenant: Tenant,
+      target: OpaTarget,
+      user: OpaUser,
+      statementClass: String,
+      accesses: List[OpaAccess],
+      locations: List[OpaLocation]
+  ): (Json, Decision) =
+    val input = OpaInput.decide(target, user, statementClass, accesses, locations)
+    (input, dryRun(tenant, input, "statement", tablesOf(accesses)))
+
+  private def tablesOf(accesses: List[OpaAccess]): Set[TableAccess] =
+    accesses.map(a => TableAccess(TableRef(a.catalog, a.schema, a.table), a.verb)).toSet
 
   /** Admin dry-run: same transport and parsing, never cached, never counted. */
   def dryRun(tenant: Tenant, input: Json, rule: String, accesses: Set[TableAccess]): Decision =

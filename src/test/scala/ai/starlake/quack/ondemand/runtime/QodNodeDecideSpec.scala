@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.authz.{
   AuthzDecider,
   DecidePurpose,
   DecideRoute,
+  DryRunResults,
   MintedHandles,
   NodeKeys,
   NodePrincipal,
@@ -127,7 +128,13 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         readOnlyCatalogs = ReadOnlyCatalogs.none
       )
-      val app = new DecideRoute(keys, minted, decider).routes.orNotFound
+      val app = new DecideRoute(
+        keys,
+        minted,
+        decider,
+        new DryRunResults(),
+        key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse("")
+      ).routes.orNotFound
       server.createContext(
         "/",
         exchange =>

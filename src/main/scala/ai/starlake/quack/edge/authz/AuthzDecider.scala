@@ -77,6 +77,26 @@ final class AuthzDecider(
     xs.foldLeft(Pass)((acc, x) => acc.flatMap(_ => f(x)))
 
   def decidePlan(p: DecidePrincipal, d: Description): Decision =
+    // Defense in depth: a dry run's plan is judged by dryRunPlan, whose caller never allows it.
+    if p.context.exists(_.purpose == DecidePurpose.DryRun) then Decision.Refuse(DryRunReason)
+    else plan(p, d, None)
+
+  /** [[decidePlan]] of a dry run's statement (decision 25): the same rules, with the tenant's OPA
+    * asked past its decision cache ([[OpaAuthorizer.decideDryRun]]). Returns the rules' decision
+    * and the OPA call's outcome, None when they decided without asking OPA. [[DecideRoute]], the
+    * caller, never answers it an allow.
+    */
+  def dryRunPlan(p: DecidePrincipal, d: Description): (Decision, Option[DryRunOutcome]) =
+    val asked    = new java.util.concurrent.atomic.AtomicReference[Option[DryRunOutcome]](None)
+    val decision = plan(p, d, Some(o => asked.set(Some(o))))
+    (decision, asked.get())
+
+  /** The plan rules; `dryRun` set asks OPA past its cache and is told the call's outcome. */
+  private def plan(
+      p: DecidePrincipal,
+      d: Description,
+      dryRun: Option[DryRunOutcome => Unit]
+  ): Decision =
     judged(p) { ctx =>
       val rules      = new Rules(p, ctx)
       val writesFile = d.control.exists(_.op == "copy_to")
@@ -91,7 +111,7 @@ final class AuthzDecider(
         _ <- all(d.control)(copyTarget(_, rules))
         _ <- branchOnly(ctx, writes)
         _ <- fileWriteCeiling(ctx, writesFile)
-        _ <- objects(ctx, narrowed(ctx), d, rules)
+        _ <- objects(ctx, narrowed(ctx), d, rules, dryRun)
       yield ()
     }
 
@@ -268,9 +288,15 @@ final class AuthzDecider(
 
   // ---- rule 3 ----
 
-  private def objects(ctx: DecideContext, eff: EffectiveSet, d: Description, rules: Rules): Step =
+  private def objects(
+      ctx: DecideContext,
+      eff: EffectiveSet,
+      d: Description,
+      rules: Rules,
+      dryRun: Option[DryRunOutcome => Unit]
+  ): Step =
     val gated = d.objects.filterNot(admittedWithoutGrant)
-    if isOpa(ctx.poolKey.tenant) then policy(ctx, eff, d, gated, rules)
+    if isOpa(ctx.poolKey.tenant) then policy(ctx, eff, d, gated, rules, dryRun)
     else
       val missing = gated.filterNot(granted(eff, sessionCatalogs(eff, ctx.poolKey), d, _))
       if missing.isEmpty then Pass
@@ -342,7 +368,8 @@ final class AuthzDecider(
       eff: EffectiveSet,
       d: Description,
       gated: List[DescribedObject],
-      rules: Rules
+      rules: Rules,
+      dryRun: Option[DryRunOutcome => Unit]
   ): Step =
     tenantOf(ctx.poolKey.tenant) match
       case None    => refuse(s"tenant '${ctx.poolKey.tenant}' not found; deny")
@@ -380,15 +407,15 @@ final class AuthzDecider(
             val key  = ctx.poolKey
             val user =
               OpaUser(eff.user.username, eff.roles.map(_.name), eff.groups.map(_.name), eff.claims)
-            opa.decide(
-              t,
-              OpaTarget(key.tenant, key.tenantDb, key.pool, parentPoolsOf(key)),
-              user,
-              eff.user.id,
-              statementClass(gated, d),
-              accesses,
-              located
-            ) match
+            val target = OpaTarget(key.tenant, key.tenantDb, key.pool, parentPoolsOf(key))
+            val cls    = statementClass(gated, d)
+            val answer = dryRun match
+              case None         => opa.decide(t, target, user, eff.user.id, cls, accesses, located)
+              case Some(record) =>
+                val (input, decision) = opa.decideDryRun(t, target, user, cls, accesses, located)
+                record(DryRunOutcome.of("statement", input, decision))
+                decision
+            answer match
               case PolicyDecision.Allow(_)                => Pass
               case PolicyDecision.Deny(reason, denied, _) =>
                 val on = denied.toList
@@ -422,6 +449,9 @@ object AuthzDecider:
 
   /** A user statement whose handle's context this replica no longer holds (or never held). */
   val ContextExpired: String = "authorization context expired; retry"
+
+  /** What a dry run's plan is answered when the rules allow it: refused, so it never runs. */
+  val DryRunReason: String = "dry run"
 
   /** The location rules threw while being read (a store failure): the decision is unavailable. */
   val RulesUnavailable: String = "the location rules could not be read; retry"

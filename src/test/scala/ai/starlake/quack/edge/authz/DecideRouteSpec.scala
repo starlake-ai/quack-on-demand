@@ -3,7 +3,7 @@ package ai.starlake.quack.edge.authz
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
-import ai.starlake.quack.model.{PoolKey, Role, RunningNode, Tenant}
+import ai.starlake.quack.model.{PoolKey, Role, RunningNode, Tenant, TenantAcl}
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
@@ -100,14 +100,22 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
   private def sign(body: Array[Byte], key: Array[Byte] = Key): String =
     NodeHandles.hex(NodeHandles.hmac(key, body))
 
+  private val UsePath  = "acme_lake.main"
+  private val AliceDry = NodePrincipal.of(Some(Alice), Pool, DecidePurpose.DryRun)
+
   private final class Fixture(
       failLocations: Boolean = false,
       throwLocations: Boolean = false,
-      throwTenants: Boolean = false
+      throwTenants: Boolean = false,
+      opaTenant: Boolean = false,
+      opaReply: Either[String, (Int, String)] = Left("no OPA in this spec"),
+      opaCacheTtlSec: Int = 0
   ):
-    val clock  = new AtomicLong(1_761_200_000_000L)
-    val minted = new MintedHandles(clock = () => clock.get())
-    val keys   =
+    val clock    = new AtomicLong(1_761_200_000_000L)
+    val minted   = new MintedHandles(clock = () => clock.get())
+    val dryRuns  = new DryRunResults(clock = () => clock.get())
+    val opaPosts = new java.util.concurrent.atomic.AtomicInteger(0)
+    val keys     =
       new NodeKeys(
         Secret,
         "http://127.0.0.1:20900",
@@ -118,7 +126,12 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val decider = new AuthzDecider(
       tenantOf = t =>
         if throwTenants then throw new IllegalStateException("control plane down")
-        else Option.when(t == "acme")(Tenant("acme")),
+        else
+          Option.when(t == "acme")(
+            if opaTenant then Tenant("acme", acl = TenantAcl(Some("opa"), Some("http://opa")))
+            else Tenant("acme")
+          )
+      ,
       tenantCatalogs = _ => Set("acme_lake"),
       poolCatalog = _ => Some("acme_lake"),
       parentPoolsOf = _ => Nil,
@@ -130,17 +143,26 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       },
       opa = new OpaAuthorizer(
         OpaConfig.default,
-        new OpaClient(500, (_, _, _) => Left("no OPA in this spec")),
-        new OpaDecisionCache(0),
+        new OpaClient(
+          500,
+          (_, _, _) => {
+            opaPosts.incrementAndGet()
+            opaReply
+          }
+        ),
+        new OpaDecisionCache(opaCacheTtlSec),
         OpaInstruments.noop
       ),
       opaCfg = OpaConfig.default,
       functionClass = (_, _, name, _) => Option.when(name == "read_parquet")(FunctionClass.File),
       settingClass = _ => None
     )
-    val route = new DecideRoute(keys, minted, decider, () => clock.get())
+    val route = new DecideRoute(keys, minted, decider, dryRuns, _ => UsePath, () => clock.get())
 
     def handle(p: NodePrincipal = AliceP): String = keys.handle(Node, p)
+
+    def nonceOf(text: String): String =
+      NodeHandles.verify(text, Key, Node.nodeId, clock.get()).toOption.get.nonce
 
     def call(
         body: Array[Byte],
@@ -171,6 +193,23 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
         mac shouldBe NodeHandles.hex(NodeHandles.hmac(key, bytes))
         parse(new String(bytes, UTF_8)).toOption.get.hcursor
       case other => fail(s"not a verdict: $other")
+
+  /** The router's USE prelude as the describer sends it, to `path`, with `objects` beside it. */
+  private def use(path: String, objects: List[Json] = Nil): Array[Byte] =
+    CanonicalJson
+      .render(
+        Json.obj(
+          "control"   -> Json.arr(),
+          "functions" -> Json.arr(),
+          "objects"   -> Json.arr(objects*),
+          "settings"  -> Json.arr(
+            Json.obj("name" -> s("schema"), "scope" -> s("session"), "value" -> s(path))
+          ),
+          "statement" -> s("SET"),
+          "v"         -> Json.fromInt(1)
+        )
+      )
+      .getBytes(UTF_8)
 
   "a signed decide call" should "answer a signed allow verdict for the handle's principal" in {
     val f              = new Fixture()
@@ -305,6 +344,93 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     f.minted.put(nonce, AliceP.context.get, "f" * 64, f.clock.get() + 60_000L)
     f.call(request(text, "plan", plan(List(read("orders"))))) shouldBe
       (Status.Unauthorized, "handle does not match its minted context", Some(MediaType.text.plain))
+  }
+
+  "a dry run's handle" should "never get an allow: a plan the rules allow is refused, retryably" in {
+    val f             = new Fixture()
+    val text          = f.handle(AliceDry)
+    val (st, body, _) = f.call(request(text, "plan", plan(List(read("orders")))))
+    st shouldBe Status.Ok
+    val v = verdict(body)
+    v.get[String]("decision") shouldBe Right("refuse")
+    v.get[String]("reason") shouldBe Right(AuthzDecider.DryRunReason)
+    // Retryable: the node never caches it, so the next dry run of the statement is judged again.
+    v.get[Boolean]("retryable") shouldBe Right(true)
+    v.get[String]("ctx") shouldBe Right(NodeHandles.contextDigest(AliceDry.context))
+    // A tenant on QoD grants: OPA is never asked, nothing is recorded.
+    f.dryRuns.take(f.nonceOf(text)) shouldBe None
+    f.opaPosts.get() shouldBe 0
+  }
+
+  it should "keep the rules' reason when they refuse" in {
+    val f = new Fixture()
+    val v = verdict(f.call(request(f.handle(AliceDry), "plan", plan(List(read("customers")))))._2)
+    v.get[String]("decision") shouldBe Right("refuse")
+    v.get[String]("reason") shouldBe Right(
+      "user:alice lacks grants on acme_lake.main.customers:read"
+    )
+    v.get[Boolean]("retryable") shouldBe Right(true)
+  }
+
+  it should "record what an OPA tenant's policy was asked and answered, past the decision cache" in {
+    val f = new Fixture(
+      opaTenant = true,
+      opaReply = Right((200, """{"result":{"allow":true},"decision_id":"d-7"}""")),
+      opaCacheTtlSec = 60
+    )
+    val desc  = plan(List(read("orders")))
+    val first = f.handle(AliceDry)
+    verdict(f.call(request(first, "plan", desc))._2).get[String]("reason") shouldBe
+      Right(AuthzDecider.DryRunReason)
+    val second = f.handle(AliceDry)
+    verdict(f.call(request(second, "plan", desc))._2).get[String]("decision") shouldBe
+      Right("refuse")
+    // Two dry runs, two questions: the decision cache neither answered nor kept them.
+    f.opaPosts.get() shouldBe 2
+    // A live session asks once, then its cache answers.
+    verdict(f.call(request(f.handle(), "plan", desc))._2).get[String]("decision") shouldBe
+      Right("allow")
+    verdict(f.call(request(f.handle(), "plan", desc))._2).get[String]("decision") shouldBe
+      Right("allow")
+    f.opaPosts.get() shouldBe 3
+    val o = f.dryRuns.take(f.nonceOf(first)).get
+    (o.rule, o.decision, o.reason, o.decisionId) shouldBe ((
+      "statement",
+      "allow",
+      None,
+      Some("d-7")
+    ))
+    val in = o.input.hcursor.downField("input")
+    in.downField("client").get[String]("edge") shouldBe Right("node")
+    in.downField("accesses").downN(0).get[String]("table") shouldBe Right("orders")
+    f.dryRuns.take(f.nonceOf(second)).map(_.decision) shouldBe Some("allow")
+  }
+
+  it should "record an OPA failure and answer it unavailable" in {
+    val f    = new Fixture(opaTenant = true, opaReply = Right((500, "")))
+    val text = f.handle(AliceDry)
+    f.call(request(text, "plan", plan(List(read("orders"))))) shouldBe
+      (Status.ServiceUnavailable, OpaAuthorizer.UnavailableMessage, Some(MediaType.text.plain))
+    f.dryRuns.take(f.nonceOf(text)).map(o => (o.decision, o.reason)) shouldBe
+      Some(("error", Some("OPA returned HTTP 500")))
+  }
+
+  it should "allow the pool's own USE prelude, and nothing beside it" in {
+    val f                           = new Fixture()
+    def decision(desc: Array[Byte]) =
+      verdict(f.call(request(f.handle(AliceDry), "plan", desc))._2).get[String]("decision")
+    decision(use(UsePath)) shouldBe Right("allow")
+    decision(use("other.main")) shouldBe Right("refuse")
+    decision(use(UsePath, List(read("orders")))) shouldBe Right("refuse")
+    decision(use(UsePath.toUpperCase)) shouldBe Right("refuse")
+  }
+
+  it should "judge a screen description as any screen" in {
+    val f = new Fixture()
+    val v = verdict(f.call(request(f.handle(AliceDry), "screen", EmptyScreen))._2)
+    v.get[String]("decision") shouldBe Right("allow")
+    v.get[Boolean]("retryable") shouldBe Right(false)
+    v.get[Long]("expiresAt") shouldBe Right(f.clock.get())
   }
 
   "a malformed request" should "be answered 400 or 413" in {

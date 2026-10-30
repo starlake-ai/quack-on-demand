@@ -500,6 +500,9 @@ object Main extends IOApp with LazyLogging:
     // The authorization context of every handle this replica mints, by nonce: the decision
     // endpoint judges a node's statement with the context its handle was minted for.
     val mintedHandles = new ai.starlake.quack.edge.authz.MintedHandles()
+    // What the tenant's OPA was asked and answered for each OPA dry-run statement, by handle nonce:
+    // the decision endpoint records, the dry-run handler takes (decision 25).
+    val dryRunResults = new ai.starlake.quack.edge.authz.DryRunResults()
     // Each pool's read-only federated catalogs (decision 24), carried in every handle but the
     // system's: the node refuses any principal's write into them, superusers included. Its source
     // lookup is wired once the supervisor exists; until then no user handle is minted.
@@ -1225,7 +1228,14 @@ object Main extends IOApp with LazyLogging:
       val authzDecider =
         BootFactories.authzDecider(sup, opaCfg, opaAuthorizer, locationRules)
       val decideRoute =
-        new ai.starlake.quack.edge.authz.DecideRoute(nodeKeys, mintedHandles, authzDecider)
+        new ai.starlake.quack.edge.authz.DecideRoute(
+          nodeKeys,
+          mintedHandles,
+          authzDecider,
+          dryRunResults,
+          // The USE prelude a dry run lets run: the path NodeKeys carries in every handle.
+          key => usePaths.get()(key)
+        )
       // Runs after sup.restore() (tenants are loaded by then): an OPA-mode tenant with no URL
       // anywhere has every decision refused, which is fail-closed but worth shouting about.
       def warnOpaTenantsWithoutUrl(): Unit =

@@ -6,6 +6,7 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.authz.{
   AuthzDecider,
   DecideRoute,
+  DryRunResults,
   MintedHandles,
   NodeKeys,
   ReadOnlyCatalogs
@@ -201,7 +202,13 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         ),
         opaCfg = OpaConfig.default
       )
-      val app = new DecideRoute(keys, minted, decider).routes.orNotFound
+      val app = new DecideRoute(
+        keys,
+        minted,
+        decider,
+        new DryRunResults(),
+        key => Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse("")
+      ).routes.orNotFound
       decide.createContext(
         "/",
         exchange =>
