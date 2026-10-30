@@ -145,6 +145,7 @@ configure_file(cmake/init_policy_lists.hpp.in ${CMAKE_BINARY_DIR}/generated/init
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
   src/authz.cpp
+  src/authz_stats.cpp
   src/build_info.cpp
   src/credentials.cpp
   src/crypto.cpp

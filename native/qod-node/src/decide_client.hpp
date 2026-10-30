@@ -1,5 +1,6 @@
 #pragma once
 
+#include "authz_stats.hpp"
 #include "handle.hpp"
 #include "verdict.hpp"
 
@@ -66,13 +67,16 @@ constexpr const char *kDecidePath = "/api/internal/authz/decide";
 //! Asks the issuing replica for verdicts (Section 5) and verifies them. Thread safe.
 class DecideClient {
 public:
-	DecideClient(std::string node_id, std::string node_key, AuthzLimits limits, std::function<int64_t()> clock);
+	//! Counts every decision into `stats` (decision 26), which must outlive the client.
+	DecideClient(std::string node_id, std::string node_key, AuthzLimits limits, std::function<int64_t()> clock,
+	             AuthzStats &stats);
 
 	//! The verdict on `call`. A plan: from the cache when it holds one for the principal id, policy
 	//! version, ctx and fingerprint, else from the replica, then cached (an allow, or a refusal that is
 	//! not retryable). A screen: from the replica every time, never cached. Never throws: a transport
 	//! failure, a timeout or an unexpected status is Unavailable (retryable); a 401, a replica URL that
-	//! is not plain http, or a verdict that does not verify is a Refuse.
+	//! is not plain http, or a verdict that does not verify is a Refuse. Counts a plan's cache hit or
+	//! miss, then each call and how it was answered.
 	DecideResult Decide(const DecideCall &call);
 
 	VerdictCache &Cache() {
@@ -86,6 +90,7 @@ private:
 	std::string node_key_;
 	AuthzLimits limits_;
 	std::function<int64_t()> clock_;
+	AuthzStats &stats_;
 	VerdictCache cache_;
 };
 

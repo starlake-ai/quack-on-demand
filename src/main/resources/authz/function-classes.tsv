@@ -998,6 +998,7 @@ pragma_version	main	table	allowed
 prefix	main	scalar	allowed
 printf	main	scalar	allowed
 product	main	aggregate	allowed
+qod_authz_stats	main	table	superuser
 qod_screen	main	scalar	superuser
 qod_session	main	table	allowed
 quack_active_connections	main	table	superuser

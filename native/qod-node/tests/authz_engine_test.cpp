@@ -4,6 +4,7 @@
 // with -DQOD_NODE_TESTS=ON, run by CTest.
 
 #include "authz.hpp"
+#include "authz_stats.hpp"
 #include "decide_client.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -187,6 +188,16 @@ std::string Fresh(const std::string &principal_id, const std::string &node = kNo
 std::string ScreenCall(const std::string &connection_id, const std::string &sql) {
 	return std::string("SELECT ") + qod::kScreenFunction + "(" + qod::QuoteLiteral(connection_id) + ", " +
 	       qod::QuoteLiteral(sql) + ")";
+}
+
+//! qod_authz_stats()'s counter `column` as `con` reads it; -1 when the read fails.
+int64_t Counter(duckdb::Connection &con, const std::string &column) {
+	auto value = FirstValue(con, "SELECT " + column + " FROM system.main.qod_authz_stats()");
+	try {
+		return std::stoll(value);
+	} catch (std::exception &) {
+		return -1;
+	}
 }
 
 } // namespace
@@ -814,6 +825,63 @@ int main() {
 	            "denied by test", "refused when its sequence update is refused");
 	auto columns_m = "SELECT count(*) FROM duckdb_columns() WHERE table_name = 't19' AND column_name = 'm'";
 	Check("", FirstValue(internal, columns_m) != "0", "", "and no part of it stays: the parts run in one transaction");
+
+	// ---- Task 8 (decision 26): qod_authz_stats() is the system principal's read of the node's counters
+	auto &stats = authz->Stats();
+	const std::string stats_sql = "SELECT * FROM system.main.qod_authz_stats()";
+	const std::string stats_refused = "QoD: function qod_authz_stats is superuser-only";
+	ExpectQuery(internal, stats_sql, stats_refused, "an internal connection cannot read the counters");
+	duckdb::Connection nobody(db);
+	TagAsQuackSession(nobody);
+	ExpectQuery(nobody, stats_sql, stats_refused, "nor a quack connection without a principal");
+	duckdb::Connection quinn(db);
+	TagAsQuackSession(quinn);
+	ExpectQuery(quinn, Prelude(Fresh("u-quinn")), "", "quinn installs");
+	ExpectQuery(quinn, stats_sql, stats_refused, "nor a tenant user");
+	duckdb::Connection rhea(db);
+	TagAsQuackSession(rhea);
+	ExpectQuery(rhea, Prelude(Flagged("u-rhea", true, false)), "", "a superuser installs");
+	ExpectQuery(rhea, stats_sql, stats_refused, "nor a superuser: the system principal only");
+	duckdb::Connection probe(db);
+	TagAsQuackSession(probe);
+	ExpectQuery(probe, Prelude(Flagged("system", false, true)), "",
+	            "the manager's probe installs the system principal");
+	{
+		auto result = probe.Query(stats_sql);
+		auto &expected = qod::AuthzStatsColumns();
+		auto shaped = !result->HasError() && result->RowCount() == 1 && result->GetNames().size() == expected.size() &&
+		              expected.size() == 7;
+		for (size_t i = 0; shaped && i < expected.size(); i++) {
+			shaped = result->GetNames()[i].GetIdentifierName() == expected[i] &&
+			         result->GetTypes()[i] == duckdb::LogicalType::BIGINT;
+		}
+		Check(result->HasError() ? result->GetError() : "", !shaped, "",
+		      "the system principal reads one row of seven BIGINT counters, by name, in order");
+	}
+	Check("", Counter(probe, "local_refusals") != stats.local_refusals.load(), "",
+	      "local_refusals is the node's counter");
+	Check("", Counter(probe, "screen_calls") != stats.screen_calls.load(), "", "and so is screen_calls");
+
+	// What counts as a local refusal: the node's own refusal of a statement on a connection whose
+	// principal is current, never the refusal for want of a principal (the probe's canary).
+	auto local = stats.local_refusals.load();
+	ExpectQuery(quinn, "SET GLOBAL quack_authorization_function = 'x'", "cannot be changed",
+	            "a refusal the describer makes");
+	Check("", stats.local_refusals.load() != local + 1, "", "counts one local refusal");
+	local = stats.local_refusals.load();
+	ExpectQuery(nobody, "SELECT 1", "no verified principal", "a statement without a principal");
+	Check("", stats.local_refusals.load() != local, "", "is not a local refusal");
+	auto screens = stats.screen_calls.load();
+	ExpectQuery(internal, ScreenCall("c-stats", Prelude(Fresh("u-sam"))), "", "the screen admits sam's prelude");
+	ExpectQuery(internal, ScreenCall("c-stats", "DESCRIBE t"), "reserved to superusers",
+	            "and refuses one of sam's statements by a content rule");
+	Check("", stats.screen_calls.load() != screens + 2, "", "two statements screened");
+	Check("", stats.local_refusals.load() != local + 1, "", "the content rule's refusal is local");
+	local = stats.local_refusals.load();
+	ExpectQuery(internal, ScreenCall("c-stats-none", "SELECT 1"), "no verified principal",
+	            "the screen refuses a connection it holds no principal for");
+	Check("", stats.screen_calls.load() != screens + 3, "", "a third statement screened");
+	Check("", stats.local_refusals.load() != local, "", "and its refusal is not local");
 
 	if (failures == 0) {
 		std::cout << "authz_engine_test: all passed" << std::endl;

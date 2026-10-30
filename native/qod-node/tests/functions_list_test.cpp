@@ -103,7 +103,8 @@ int main() {
 	for (auto &listed : {"{\"aliasOf\":null,\"name\":\"lower\",\"schema\":\"main\",\"type\":\"scalar\"}",
 	                     "{\"aliasOf\":null,\"name\":\"read_parquet\",\"schema\":\"main\",\"type\":\"table\"}",
 	                     "{\"aliasOf\":null,\"name\":\"qod_session\",\"schema\":\"main\",\"type\":\"table\"}",
-	                     "{\"aliasOf\":null,\"name\":\"qod_screen\",\"schema\":\"main\",\"type\":\"scalar\"}"}) {
+	                     "{\"aliasOf\":null,\"name\":\"qod_screen\",\"schema\":\"main\",\"type\":\"scalar\"}",
+	                     "{\"aliasOf\":null,\"name\":\"qod_authz_stats\",\"schema\":\"main\",\"type\":\"table\"}"}) {
 		Expect(Contains(fns, listed), std::string("functions: missing ") + listed);
 	}
 	for (auto &e : fns) {

@@ -322,6 +322,7 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       ("duckdb_keywords", "table", Allowed)      -> ("duckdb_approx_database_count", "table"),
       ("postgres_hstore_get", "scalar", Allowed) -> ("postgres_pin_connection", "scalar"),
       ("qod_session", "table", Allowed)          -> ("qod_screen", "scalar"),
+      ("qod_session", "table", Allowed)          -> ("qod_authz_stats", "table"),
       ("lower", "scalar", Allowed)               -> ("current_setting", "scalar"),
       ("json_serialize_sql", "scalar", Allowed)  -> ("json_serialize_plan", "scalar"),
       ("nextval", "scalar", Allowed)             -> ("setval", "scalar"),

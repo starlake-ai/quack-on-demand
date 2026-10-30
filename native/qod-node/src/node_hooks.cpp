@@ -1,5 +1,6 @@
 #include "node_hooks.hpp"
 
+#include "authz_stats.hpp"
 #include "credentials.hpp"
 #include "crypto.hpp"
 #include "describer.hpp"
@@ -263,12 +264,23 @@ public:
 	//! (ClientContext::CreatePreparedStatement).
 	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
 		bool judged;
+		NodeAuthz *authz;
 		{
 			std::lock_guard<std::mutex> guard(lock_);
 			judged = installed_ && !current_.principal.superuser && !current_.principal.system;
+			authz = authz_;
 		}
 		if (judged) {
-			JudgeFailedStatement(context, statement);
+			try {
+				JudgeFailedStatement(context, statement);
+			} catch (PermissionException &) {
+				// Decision 26: a refusal the node made alone. A refusal Enforce threw is a planning error
+				// too, already counted there: one that replaces it is not counted again.
+				if (authz && error.Type() != ExceptionType::PERMISSION) {
+					authz->Stats().local_refusals++;
+				}
+				throw;
+			}
 		}
 		return RebindQueryInfo::DO_NOT_REBIND;
 	}
@@ -425,6 +437,67 @@ void SessionScan(ClientContext &context, TableFunctionInput &input, DataChunk &o
 	output.CheckCardinality(1);
 }
 
+// ---- qod_authz_stats -----------------------------------------------------------------------------
+
+//! The refusal of qod_authz_stats() to every principal but the system's (decision 26).
+constexpr const char *kStatsRefused = "QoD: function qod_authz_stats is superuser-only";
+
+struct StatsBindData : public TableFunctionData {
+	explicit StatsBindData(std::shared_ptr<NodeAuthz> authz_p) : authz(std::move(authz_p)) {
+	}
+	std::shared_ptr<NodeAuthz> authz;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<StatsBindData>(authz);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return authz == other.Cast<StatsBindData>().authz;
+	}
+};
+
+struct StatsScanState : public GlobalTableFunctionState {
+	std::vector<int64_t> values;
+	bool done = false;
+};
+
+//! The manager's health probe reads the node's counters with it, as the system principal: refused on
+//! any other connection, an internal one or a superuser's included (only the manager's own read is
+//! needed, and a superuser has no business with another tenant's traffic counts).
+unique_ptr<FunctionData> StatsBind(ClientContext &context, TableFunctionBindInput &input,
+                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto authz = input.info->Cast<AuthzTableInfo>().authz;
+	auto session = context.registered_state->Get<SessionState>(SessionState::kKey);
+	Installed installed;
+	if (!IsQuackSession(context) || !session || !session->Snapshot(authz->Now(), installed) ||
+	    !installed.principal.system) {
+		throw PermissionException(kStatsRefused);
+	}
+	for (auto &column : AuthzStatsColumns()) {
+		return_types.push_back(LogicalType::BIGINT);
+		names.emplace_back(column);
+	}
+	return make_uniq<StatsBindData>(std::move(authz));
+}
+
+//! Read when the statement runs, not at bind: a prepared statement executed again reads them again.
+unique_ptr<GlobalTableFunctionState> StatsInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto state = make_uniq<StatsScanState>();
+	state->values = AuthzStatsValues(input.bind_data->Cast<StatsBindData>().authz->Stats());
+	return std::move(state);
+}
+
+void StatsScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<StatsScanState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	for (idx_t column = 0; column < state.values.size(); column++) {
+		output.data[column].Append(Value::BIGINT(state.values[column]));
+	}
+	output.CheckCardinality(1);
+}
+
 //! The scopes of this node's own S3 secrets: outside connection storage, of the types httpfs reads for
 //! an s3:// URL (S3SecretConfig::SecretTypes, httpfs 77392a7). DuckDB signs a URL with one of them
 //! over a user's when it scores higher (decision 23, ShadowingScope), so each scope comes with its
@@ -456,6 +529,12 @@ std::vector<NodeSecretScope> NodeS3SecretScopes(ClientContext &context) {
 
 std::string RefusalMessage(const DecideResult &decided);
 
+//! `refusal`, counted as one the node made alone (decision 26: AuthzStats::local_refusals).
+std::string LocalRefusal(NodeAuthz &authz, std::string refusal) {
+	authz.Stats().local_refusals++;
+	return refusal;
+}
+
 //! The parse screen's content rules for a statement on a connection whose principal is current
 //! (`recorded`): nothing for a superuser or the manager itself; else ScreenStatement, then, when the
 //! statement names locations, a refusal of any s3:// one a node secret would sign over the user's own
@@ -466,8 +545,11 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 		return "";
 	}
 	auto outcome = ScreenStatement(context, sql);
-	if (!outcome.refusal.empty() || outcome.facts.locations.empty()) {
-		return outcome.refusal;
+	if (!outcome.refusal.empty()) {
+		return LocalRefusal(authz, outcome.refusal);
+	}
+	if (outcome.facts.locations.empty()) {
+		return "";
 	}
 	auto user_scopes = authz.CredentialScopes(recorded.nonce);
 	std::vector<NodeSecretScope> node_scopes;
@@ -476,12 +558,14 @@ std::string ScreenContent(ClientContext &context, NodeAuthz &authz, const Instal
 	} catch (std::exception &error) {
 		// The cause can name the node's secret directory: the node's log has it, the client does not.
 		std::cerr << "[qod-node] listing the node's S3 secrets failed: " << ErrorData(error).RawMessage() << std::endl;
-		return "QoD: this node's own S3 secrets cannot be listed, so the statement's locations cannot be checked";
+		return LocalRefusal(
+		    authz, "QoD: this node's own S3 secrets cannot be listed, so the statement's locations cannot be checked");
 	}
 	for (auto &location : outcome.facts.locations) {
 		if (ShadowingScope(location.resolved, user_scopes, node_scopes)) {
-			return "QoD: " + location.given +
-			       " would be signed with this node's own S3 keys, not with an S3 credential of yours";
+			return LocalRefusal(authz, "QoD: " + location.given +
+			                               " would be signed with this node's own S3 keys, not with an S3 credential "
+			                               "of yours");
 		}
 	}
 	DecideCall call;
@@ -510,6 +594,7 @@ void ScreenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &function = state.expr.Cast<BoundFunctionExpression>().Function();
 	auto &authz = *function.GetDefinition()->GetExtraFunctionInfo().Cast<AuthzScalarInfo>().authz;
 	for (idx_t row = 0; row < args.size(); row++) {
+		authz.Stats().screen_calls++;
 		auto connection_id = args.GetValue(0, row);
 		auto sql = args.GetValue(1, row);
 		if (connection_id.IsNull() || sql.IsNull()) {
@@ -641,21 +726,29 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		session->AdmitPrelude();
 		return;
 	}
-	auto text = session->StatementText(context);
-	if (!text && !installed.principal.superuser && !installed.principal.system) {
-		// Item 32 B judges the call names as written: a statement whose text is out of reach is refused.
-		throw PermissionException("QoD: statement uses a statement whose text cannot be read, so its calls "
-		                          "cannot be judged, which QoD does not support");
-	}
-	auto described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
-	// Decision 24: a read-only catalog refuses every principal's writes, superusers and the manager
-	// itself included, before the verdict the statement holds, the node's verdict cache or the replica.
-	auto read_only = ReadOnlyRefusal(described.written_catalogs, installed.read_only);
-	if (!read_only.empty()) {
-		throw PermissionException(read_only);
-	}
-	if (!installed.principal.superuser && !installed.principal.system) {
-		RefuseForeignCopyFunction(context, plan);
+	auto privileged = installed.principal.superuser || installed.principal.system;
+	Described described;
+	try {
+		auto text = session->StatementText(context);
+		if (!text && !privileged) {
+			// Item 32 B judges the call names as written: a statement whose text is out of reach is refused.
+			throw PermissionException("QoD: statement uses a statement whose text cannot be read, so its calls "
+			                          "cannot be judged, which QoD does not support");
+		}
+		described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
+		// Decision 24: a read-only catalog refuses every principal's writes, superusers and the manager
+		// itself included, before the verdict the statement holds, the node's verdict cache or the replica.
+		auto read_only = ReadOnlyRefusal(described.written_catalogs, installed.read_only);
+		if (!read_only.empty()) {
+			throw PermissionException(read_only);
+		}
+		if (!privileged) {
+			RefuseForeignCopyFunction(context, plan);
+		}
+	} catch (PermissionException &) {
+		// Decision 26: a refusal the node made alone, before any verdict.
+		gate.authz->Stats().local_refusals++;
+		throw;
 	}
 	if (session->Covers(described.fingerprint)) {
 		return;
@@ -702,6 +795,10 @@ void RegisterNodeAuthz(DatabaseInstance &db, std::shared_ptr<NodeAuthz> authz, P
 	TableFunction session("qod_session", {LogicalType::VARCHAR}, SessionScan, SessionBind, SessionInit);
 	session.function_info = make_shared_ptr<AuthzTableInfo>(authz);
 	loader.RegisterFunction(session);
+
+	TableFunction stats("qod_authz_stats", vector<LogicalType>(), StatsScan, StatsBind, StatsInit);
+	stats.function_info = make_shared_ptr<AuthzTableInfo>(authz);
+	loader.RegisterFunction(stats);
 
 	ScalarFunction screen("qod_screen", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BOOLEAN,
 	                      ScreenFunction, nullptr, nullptr, nullptr, LogicalType(LogicalTypeId::INVALID),

@@ -149,11 +149,41 @@ void ExpectRefusal(const DecideResult &result, DecideResult::Status status, bool
 	}
 }
 
+//! The decide counters (decision 26) at one moment.
+struct Counts {
+	int64_t hits = 0;
+	int64_t misses = 0;
+	int64_t calls = 0;
+	int64_t unavailable = 0;
+	int64_t refused = 0;
+};
+
+Counts Read(const qod::AuthzStats &stats) {
+	return Counts {stats.plan_cache_hits.load(), stats.plan_cache_misses.load(), stats.decide_calls.load(),
+	               stats.decide_unavailable.load(), stats.decide_refused.load()};
+}
+
+//! Records a failure unless the counters moved from `before` by exactly `moved`.
+void ExpectMoved(const qod::AuthzStats &stats, const Counts &before, const Counts &moved, const std::string &what) {
+	auto now = Read(stats);
+	if (now.hits - before.hits != moved.hits || now.misses - before.misses != moved.misses ||
+	    now.calls - before.calls != moved.calls || now.unavailable - before.unavailable != moved.unavailable ||
+	    now.refused - before.refused != moved.refused) {
+		std::cerr << "FAIL: " << what << ": hits +" << now.hits - before.hits << ", misses +"
+		          << now.misses - before.misses << ", calls +" << now.calls - before.calls << ", unavailable +"
+		          << now.unavailable - before.unavailable << ", refused +" << now.refused - before.refused
+		          << std::endl;
+		failures++;
+	}
+}
+
 } // namespace
 
 int main() {
 	qod_test::TestHttpServer server(Answer);
-	qod::DecideClient client(kNode, kKey, qod::AuthzLimits {300, 100}, [] { return now_ms.load(); });
+	qod::AuthzStats stats;
+	qod::DecideClient client(kNode, kKey, qod::AuthzLimits {300, 100}, [] { return now_ms.load(); }, stats);
+	auto counted = Read(stats);
 
 	// ---- allow, and the request as the manager reads it
 	auto call = Call(server.Url());
@@ -168,19 +198,24 @@ int main() {
 	       "Content-Type and X-QoD-Node");
 	Expect(request.headers["x-qod-signature"] == qod::Hex(qod::HmacSha256(kKey, request.body)),
 	       "X-QoD-Signature is the node key's HMAC of the body bytes");
+	ExpectMoved(stats, counted, Counts {0, 1, 1, 0, 0}, "a plan the cache does not hold: a miss and a call");
 
 	// ---- the cache: plan verdicts by principal, policy version, ctx and fingerprint
 	auto requests = server.Requests();
+	counted = Read(stats);
 	auto again = client.Decide(call);
 	Expect(again.status == DecideResult::Status::Allow && again.cached && server.Requests() == requests,
 	       "the same plan again is answered from the cache");
+	ExpectMoved(stats, counted, Counts {1, 0, 0, 0, 0}, "a plan the cache holds: a hit, no call");
 	// The same statement under another session context (a restricted PAT of alice): the cache must not
 	// serve it alice's allow. This replica always signs kCtx, so the answer it gets does not match.
 	auto other_ctx = call;
 	other_ctx.ctx = std::string(64, 'e');
+	counted = Read(stats);
 	ExpectRefusal(client.Decide(other_ctx), DecideResult::Status::Refuse, false,
 	              "authorization refused: the verdict does not verify: verdict is for another session context",
 	              "another ctx is never served alice's cached verdict, and a mismatched verdict is refused");
+	ExpectMoved(stats, counted, Counts {0, 1, 1, 0, 1}, "a verdict that does not verify: a miss, a call, a refusal");
 	Expect(server.Requests() == requests + 1, "another ctx went to the replica");
 	auto other_version = call;
 	other_version.policy_version = 2;
@@ -204,6 +239,7 @@ int main() {
 	Expect(server.Requests() == requests + 1, "a retryable refusal is not cached");
 
 	// ---- status codes and transport
+	counted = Read(stats);
 	Mode("401");
 	ExpectRefusal(client.Decide(Call(server.Url())), DecideResult::Status::Refuse, false,
 	              "authorization refused: signature does not verify", "a 401 for the request signature");
@@ -229,6 +265,9 @@ int main() {
 	              "authorization refused: the handle's replica cannot be called (not a plain http:// URL)",
 	              "an https replica");
 	Expect(server.Requests() == requests, "and no request was made");
+	// Two 401s and the https replica refused, the 503, the 500, the dropped connection and the
+	// unreachable replica unavailable: every one a miss and a call.
+	ExpectMoved(stats, counted, Counts {0, 7, 7, 4, 3}, "each answer counts as its outcome");
 
 	// ---- verdicts that do not verify
 	struct Bad {
@@ -252,10 +291,12 @@ int main() {
 	// ---- screen verdicts are fetched every time
 	Mode("allow");
 	auto screen = Call(server.Url(), "screen");
+	counted = Read(stats);
 	Expect(client.Decide(screen).status == DecideResult::Status::Allow, "a screen allow");
 	requests = server.Requests();
 	Expect(client.Decide(screen).status == DecideResult::Status::Allow && server.Requests() == requests + 1,
 	       "a screen verdict is never cached");
+	ExpectMoved(stats, counted, Counts {0, 0, 2, 0, 0}, "screen decisions: calls, never a cache hit or miss");
 
 	// ---- chunked answers and a replica URL with a path prefix
 	Mode("chunked");

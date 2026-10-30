@@ -105,6 +105,9 @@ SUPERUSER_TABLE = {
     "set_iceberg_schema_properties", "set_iceberg_table_properties",
     # lists a directory from SQL text
     "sql_auto_complete",
+    # qod-node's authorization counters: the manager's health probe reads them as the system principal
+    # (the node refuses every other principal, superusers too)
+    "qod_authz_stats",
 }
 
 # Whole families, superuser: DuckLake and Iceberg catalog functions (maintenance, raw catalog rows,

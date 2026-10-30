@@ -906,6 +906,7 @@
 {"aliasOf":null,"name":"prefix","schema":"main","type":"scalar"},
 {"aliasOf":null,"name":"printf","schema":"main","type":"scalar"},
 {"aliasOf":null,"name":"product","schema":"main","type":"aggregate"},
+{"aliasOf":null,"name":"qod_authz_stats","schema":"main","type":"table"},
 {"aliasOf":null,"name":"qod_screen","schema":"main","type":"scalar"},
 {"aliasOf":null,"name":"qod_session","schema":"main","type":"table"},
 {"aliasOf":null,"name":"quack_active_connections","schema":"main","type":"table"},

@@ -27,6 +27,8 @@ using PlanDecider = std::function<DecideResult(const DecideCall &call)>;
 //!    installs its principal on the connection (single use, refresh rules: RefreshRefusal);
 //!  - qod_screen(connection_id, sql), the parse screen quack calls for every PREPARE (installed as
 //!    quack_authorization_function once quack is loaded);
+//!  - qod_authz_stats(), the node's authorization counters (AuthzStats) as one row, for the manager's
+//!    health probe: the system principal only, refused on every other connection;
 //!  - a post_bind hook: no statement on a quack client connection binds without a current principal;
 //!    every other plan bound on such a connection is described (Describe: its local refusals hold for
 //!    every principal) and runs only under a verdict, a local allow for superuser and system

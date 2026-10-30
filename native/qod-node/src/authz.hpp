@@ -155,6 +155,12 @@ public:
 		return credentials_;
 	}
 
+	//! This node's authorization counters (decision 26): the decide client's, the parse screen's and the
+	//! hooks'. qod_authz_stats() reads them.
+	AuthzStats &Stats() {
+		return stats_;
+	}
+
 private:
 	//! Drops the records whose handles expired, at most every 10 s. Called with lock_ held.
 	void Sweep(int64_t now_ms);
@@ -162,7 +168,9 @@ private:
 	std::string node_id_;
 	std::string node_key_;
 	Clock clock_;
-	//! After the three above: initialized from them.
+	//! Before decider_, which counts into it.
+	AuthzStats stats_;
+	//! After the four above: initialized from them.
 	DecideClient decider_;
 	CredentialClient credentials_;
 	NonceLedger ledger_;

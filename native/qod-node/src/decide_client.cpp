@@ -93,9 +93,9 @@ AuthzLimits AuthzLimitsFromEnv() {
 }
 
 DecideClient::DecideClient(std::string node_id, std::string node_key, AuthzLimits limits,
-                           std::function<int64_t()> clock)
+                           std::function<int64_t()> clock, AuthzStats &stats)
     : node_id_(std::move(node_id)), node_key_(std::move(node_key)), limits_(limits), clock_(std::move(clock)),
-      cache_(limits.cache_entries) {
+      stats_(stats), cache_(limits.cache_entries) {
 }
 
 DecideResult DecideClient::Decide(const DecideCall &call) {
@@ -103,10 +103,18 @@ DecideResult DecideClient::Decide(const DecideCall &call) {
 	if (call.kind == "plan") {
 		Verdict cached;
 		if (cache_.Find(call.principal.id, call.policy_version, call.ctx, fingerprint, clock_(), cached)) {
+			stats_.plan_cache_hits++;
 			return FromVerdict(cached, true);
 		}
+		stats_.plan_cache_misses++;
 	}
+	stats_.decide_calls++;
 	auto result = Ask(call, fingerprint);
+	if (result.status == DecideResult::Status::Unavailable) {
+		stats_.decide_unavailable++;
+	} else if (result.status == DecideResult::Status::Refuse) {
+		stats_.decide_refused++;
+	}
 	if (result.has_verdict) {
 		cache_.Put(result.verdict, clock_());
 	}

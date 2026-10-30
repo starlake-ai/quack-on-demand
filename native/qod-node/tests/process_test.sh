@@ -114,6 +114,8 @@ status=$?
 [[ "$(head -1 "$work/functions.json")" == "[" ]] || fail "--list-functions: not one element per line"
 grep -qF '{"aliasOf":null,"name":"qod_session","schema":"main","type":"table"}' "$work/functions.json" ||
   fail "--list-functions: qod_session is not listed"
+grep -qF '{"aliasOf":null,"name":"qod_authz_stats","schema":"main","type":"table"}' "$work/functions.json" ||
+  fail "--list-functions: qod_authz_stats is not listed"
 "$node_bin" --list-settings > "$work/settings.json" 2> "$work/settings.err"
 status=$?
 [[ $status -eq 0 ]] || fail "--list-settings: exit $status"
