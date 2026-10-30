@@ -2,7 +2,7 @@ package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, Verb}
-import ai.starlake.quack.edge.sql.{BacktickScreen, FileAccessScreen, FileAdmission}
+import ai.starlake.quack.edge.sql.{FileAccessScreen, FileAdmission}
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
   ColumnPolicyRewriter,
@@ -80,13 +80,11 @@ final class ProtectedWriteGuard(
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
     else
       // Every kind, a plain SELECT included: a table named in a string is invisible to the
-      // rewriters, so the read would come back unfiltered and unmasked. The backtick screen goes
-      // first: on a DuckDB 1.x engine a backtick pair hides a call from CatalogReachingCalls.
-      // A quoted name holding a dot is matched by the rewriters as a qualified name, not as the
-      // one table DuckDB reads (DottedIdentifierScreen).
-      BacktickScreen
+      // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
+      // dot is matched by the rewriters as a qualified name, not as the one table DuckDB reads
+      // (DottedIdentifierScreen).
+      DottedIdentifierScreen
         .find(sql)
-        .orElse(DottedIdentifierScreen.find(sql))
         .orElse(CatalogReachingCalls.find(sql).map(CatalogReachingCalls.denyReason))
         .orElse(FileAccessScreen.find(sql, admission)) match
         case Some(reason) => Deny(s"access denied: $reason")

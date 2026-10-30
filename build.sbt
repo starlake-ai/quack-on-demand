@@ -177,8 +177,8 @@ lazy val root = (project in file("."))
         binaries :+ (outRoot / "VERSION")
       } else binaries
     }.taskValue,
-    // The pinned DuckDB release at runtime, from project/Versions.scala, so behaviour that differs
-    // between engine generations (BacktickScreen) follows the pin with no source edit on a bump.
+    // The pinned DuckDB release at runtime, from project/Versions.scala: QodNodeBinary checks the
+    // node's engine against it, so a pin bump needs no source edit.
     Compile / sourceGenerators += Def.task {
       val out =
         (Compile / sourceManaged).value / "ai" / "starlake" / "quack" / "BuildVersions.scala"
