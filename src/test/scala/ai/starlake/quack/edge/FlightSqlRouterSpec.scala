@@ -504,6 +504,30 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .toOption
       .get shouldBe a[RouterFailure.BadRequest]
 
+  it should "not mark that refusal retryable for a multi-statement submission" in:
+    // In `SELECT 1; SELECT 2` the first statement may have run (each autocommits) before the node
+    // refused the second for want of a verdict: a client retry would run it twice (D-m5).
+    val perm = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Permission Error: QoD: authorization unavailable, retry: timed out"),
+        1L
+      )
+    val (router, _, _) = setup(stub = perm)
+    router.execute("c-batch", "alice", poolKey, "SELECT 1; SELECT 2").unsafeRunSync() match
+      case Left(RouterFailure.BadRequest(reason)) =>
+        reason should startWith("permanent failure: Permission Error: QoD: authorization")
+        reason should endWith(s"(${FlightSqlRouter.BatchNotRetried})")
+      case other => fail(s"expected BadRequest, got $other")
+    // The nearest admitted case: one statement, a trailing separator and a comment included.
+    router
+      .execute("c-one", "alice", poolKey, "SELECT 1; -- done")
+      .unsafeRunSync()
+      .swap
+      .toOption
+      .get shouldBe a[RouterFailure.Unavailable]
+    FlightSqlRouter.isMultiStatement("SELECT ';'; ") shouldBe false
+    FlightSqlRouter.isMultiStatement("SELECT 1;SELECT 2") shouldBe true
+
   it should "book a node's authorization refusal as a denial, in either shape the node raises it" in:
     List(
       "Permission Error: QoD: user:alice lacks grants on memory.main.t:read",

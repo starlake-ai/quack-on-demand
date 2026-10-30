@@ -1400,7 +1400,9 @@ final class FlightSqlRouter(
                             val status =
                               if FlightSqlRouter.isNodeRefusal(m) then "denied" else "permanent"
                             maybeRecord(nodeId, latency, status, Some(m))
-                            IO.pure(Left(classifyPermanent(m)))
+                            IO.pure(
+                              Left(classifyPermanent(m, FlightSqlRouter.isMultiStatement(finalSql)))
+                            )
                         }
           }
 
@@ -1565,7 +1567,13 @@ final class FlightSqlRouter(
                     case NodeOutcome.Transient(m, _) =>
                       Left(RouterFailure.Unavailable(s"retry failed (transient): $m"))
                     case NodeOutcome.Permanent(m, _) =>
-                      Left(classifyPermanent(m, context = "retry failed: "))
+                      Left(
+                        classifyPermanent(
+                          m,
+                          FlightSqlRouter.isMultiStatement(sql),
+                          context = "retry failed: "
+                        )
+                      )
                   }
               case None =>
                 IO.pure(Left(RouterFailure.Unavailable("no fallback node available")))
@@ -1574,18 +1582,27 @@ final class FlightSqlRouter(
 
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
     * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
-    * Unavailable, which the client may retry; any other refusal of the node's
+    * Unavailable, which the client may retry, for a single-statement submission only: in a batch
+    * (`multiStatement`) the statements before the refused one may have run, each autocommitting,
+    * and a retry would run them twice (Phase C review D-m5), so the batch gets a BadRequest saying
+    * so ([[FlightSqlRouter.BatchNotRetried]]); any other refusal of the node's
     * ([[FlightSqlRouter.isNodeRefusal]]) becomes AccessDenied; missing-object errors become
     * NotFound; the rest BadRequest. The "permanent failure:" prefix is preserved for operators on
     * the last two. `context` (the retry's "retry failed: ") goes into the reason after the prefix,
     * never into the node's message the checks read: they match that message's start.
     */
-  private def classifyPermanent(message: String, context: String = ""): RouterFailure =
+  private def classifyPermanent(
+      message: String,
+      multiStatement: Boolean,
+      context: String = ""
+  ): RouterFailure =
     val lower    = message.toLowerCase(Locale.ROOT)
     val notFound = lower.contains("does not exist") || lower.contains("not found") ||
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $context$message"
-    if FlightSqlRouter.isNodeAuthzUnavailable(message) then RouterFailure.Unavailable(full)
+    if FlightSqlRouter.isNodeAuthzUnavailable(message) then
+      if multiStatement then RouterFailure.BadRequest(s"$full (${FlightSqlRouter.BatchNotRetried})")
+      else RouterFailure.Unavailable(full)
     else if FlightSqlRouter.isNodeRefusal(message) then
       RouterFailure.AccessDenied(s"access denied: $context$message")
     else if notFound then RouterFailure.NotFound(full)
@@ -1610,6 +1627,14 @@ object FlightSqlRouter:
     s"Permission Error: $NodeAuthzUnavailable",
     s"Invalid Input Error: Authorization callback failed: Permission Error: $NodeAuthzUnavailable"
   )
+
+  /** Why a batch's "authorization unavailable" refusal is not marked retryable. */
+  val BatchNotRetried: String =
+    "not retryable as a whole: the statements before the refused one may have run"
+
+  /** Whether `sql` holds more than one statement, split as DuckDB's lexer splits it. */
+  def isMultiStatement(sql: String): Boolean =
+    SqlCommentStripper.splitStatements(sql).lengthCompare(1) > 0
 
   /** Whether a node's error `message` is its authorization refusal, other than
     * [[NodeAuthzUnavailable]]: `QoD: ` right after DuckDB's Permission Error, in a statement's or
