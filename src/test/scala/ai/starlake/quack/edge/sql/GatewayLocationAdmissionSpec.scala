@@ -301,7 +301,11 @@ class GatewayLocationAdmissionSpec extends AnyFlatSpec with Matchers:
     new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true)
   private val schemaCtx                   = SchemaContext(Some("lake"), Some("main"), Set("lake"))
   private def listingRefusal(sql: String) =
-    FlightSqlRouter.copyListingRefusal(sql, s => metadataFilter.rewrite(s, alice, schemaCtx))
+    FlightSqlRouter.copyListingRefusal(
+      sql,
+      metadataFilter.narrows(alice, schemaCtx),
+      s => metadataFilter.rewrite(s, alice, schemaCtx)
+    )
 
   "a COPY of filtered metadata" should "be refused, whatever form names the listing" in {
     List(

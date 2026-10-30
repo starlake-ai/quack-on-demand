@@ -3926,6 +3926,39 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       case Left(f)  => fail(s"refused: $f")
     capturedSql() should include("COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'")
 
+  it should "refuse a COPY the gateway cannot read to a principal the filter narrows, only" in:
+    val unread = List(
+      "SELECT 1; COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'",
+      "EXPLAIN ANALYZE COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "PREPARE p AS COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (DESCRIBE customer) TO 's3://acme-etl/out/t.csv'"
+    )
+    val (narrowing, narrowingCaptured, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    unread.zipWithIndex.foreach { (sql, i) =>
+      withClue(sql) {
+        narrowing
+          .execute(s"copy-unread-$i", "alice", poolKey, sql, effectiveSet = tableGrants)
+          .unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(m)) => m should include("COPY")
+          case other                               => fail(s"expected AccessDenied, got $other")
+        narrowingCaptured() shouldBe ""
+      }
+    }
+    // The filter leaves these listings alone (a superuser; the filter off), so the COPY is the
+    // node's to judge.
+    val (open, openCaptured, _) = setupWithRewriter()
+    unread.foreach { sql =>
+      withClue(sql) {
+        narrowing
+          .execute("copy-unread-su", "alice", poolKey, sql, Some(superuserSet))
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+        open
+          .execute("copy-unread-off", "alice", poolKey, sql, effectiveSet = tableGrants)
+          .unsafeRunSync() shouldBe a[Right[?, ?]]
+      }
+    }
+    openCaptured() should include("COPY")
+
   it should "filter a metadata read hiding behind the first statement of a read batch" in:
     // A single parse reads only the first statement, so the second used to reach the node
     // untouched while the validator admitted the batch as a pure read: a zero-grant principal
@@ -4048,6 +4081,47 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router
       .executeWith(
         "cds-3",
+        "alice",
+        poolKey,
+        ClientFedInsert,
+        Some(ordersWriter),
+        okSend,
+        source = "quack",
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
+      .map(_.value) shouldBe Right("count")
+
+  it should "refuse a client data scan off the native front door, superusers included" in:
+    val (router, captured, _) = setupWithRewriter()
+    List(Some(ordersWriter), Some(superuserSet), None).foreach { eff =>
+      withClue(eff.map(_.user.username)) {
+        router
+          .execute("cds-x1", "alice", poolKey, ClientFedInsert, effectiveSet = eff)
+          .unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(m)) =>
+            m should include("scan_data_from_quack_client")
+          case other => fail(s"expected AccessDenied, got $other")
+        router
+          .executeWith(
+            "cds-x2",
+            "alice",
+            poolKey,
+            ClientFedInsert,
+            eff,
+            okSend,
+            source = "quack",
+            purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+          )
+          .unsafeRunSync() shouldBe a[Left[?, ?]]
+      }
+    }
+    captured() shouldBe ""
+    // the front door feeds the scan: admitted there, for the same principal
+    router
+      .executeWith(
+        "cds-x3",
         "alice",
         poolKey,
         ClientFedInsert,

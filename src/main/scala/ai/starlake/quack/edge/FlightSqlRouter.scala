@@ -1177,6 +1177,14 @@ final class FlightSqlRouter(
             Left(RouterFailure.AccessDenied(s"access denied: $reason"))
     }
 
+    // A client data scan only the native front door can feed (clientDataScanRefusal).
+    def clientScan(): Either[RouterFailure, Unit] =
+      FlightSqlRouter.clientDataScanRefusal(sql, clientDataScans) match
+        case None         => Right(())
+        case Some(reason) =>
+          maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
+          Left(RouterFailure.AccessDenied(s"access denied: $reason"))
+
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = ctx.defaultDatabase,
@@ -1298,10 +1306,11 @@ final class FlightSqlRouter(
         // so nothing filterable survives to here.
         case None      => Right(rewrittenSql)
         case Some(eff) =>
-          // An admitted COPY is authorized on its stand-in, which the filter never sees in the
-          // COPY text: refused unless the filter would leave that stand-in as it is.
+          // The filter cannot read a COPY: one it narrows a listing for is refused unless the
+          // lone COPY's stand-in would pass through it unchanged (copyListingRefusal).
           FlightSqlRouter.copyListingRefusal(
             sql,
+            metadataFilterRewriter.narrows(eff, schemaCtx),
             standIn => metadataFilterRewriter.rewrite(standIn, eff, schemaCtx)
           ) match
             case Some(reason) =>
@@ -1380,6 +1389,7 @@ final class FlightSqlRouter(
     // arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
       catalogDenial
+        .flatMap(_ => clientScan())
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)
@@ -1946,29 +1956,70 @@ object FlightSqlRouter:
             .fold(FileAdmission.Closed)(rules => FileAdmission.of(rules, resolveLocal))
         FileAdmission(location => admission.admits(location))
 
-  /** Why `sql`, a lone COPY, may not run (Task 12 review I1): the access check authorizes an
-    * admitted COPY on its stand-in ([[ai.starlake.quack.edge.sql.FileLocations.CopyUse]]'s
-    * `tableSide`), and admits a session-catalog `information_schema` read or a SHOW TABLES only on
-    * the strength of the edge metadata filter narrowing it. The filter cannot read a COPY and would
-    * pass it through, so the stand-in is put to it (`filter`, the principal's) and the COPY refused
-    * unless the filter would leave the stand-in as it is: a narrowed listing cannot be narrowed
-    * inside a COPY, and qod-node narrows nothing in Phase C. Any lone COPY, its location admitted
-    * or not, so the rule does not depend on the ACL mode. None for any other statement.
+  /** Why `sql` may not run for a principal whose catalog reads the edge metadata filter narrows
+    * (`narrowed`, [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.narrows]]), or None. The
+    * filter rewrites SELECTs and SHOW TABLES; it cannot read a COPY, and qod-node narrows nothing
+    * (spec Section 12 item 6), so a COPY could carry a listing the filter would have narrowed to a
+    * file the principal may write. Refused:
+    *   - any COPY the gateway cannot read as the one statement of the submission
+    *     ([[ai.starlake.quack.edge.sql.FileLocations.unreadCopy]]: in a batch, behind EXPLAIN or
+    *     PREPARE, from a SHOW / DESCRIBE / SUMMARIZE source, or in a shape the reader stops short
+    *     of; Phase C review D-m1);
+    *   - a lone COPY whose stand-in (its table side,
+    *     [[ai.starlake.quack.edge.sql.FileLocations.CopyUse]]) the filter would change (`filter`,
+    *     the principal's): an information_schema or catalog-function source.
+    * Nothing for a principal the filter leaves alone (a superuser, `*.*.* ALL`, an explicit
+    * information_schema grant, or the filter not mounted): it reads the same listing unfiltered
+    * directly, so its COPY is the node's to judge.
     */
   def copyListingRefusal(
       sql: String,
+      narrowed: Boolean,
       filter: String => ai.starlake.quack.edge.meta.MetadataFilterOutcome
   ): Option[String] =
-    ai.starlake.quack.edge.sql.FileLocations
-      .copy(sql)
-      .flatMap { c =>
-        val untouched =
-          filter(c.tableSide) == ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough
-        Option.unless(untouched)(
-          "a COPY may not write catalog metadata the edge filters (information_schema, SHOW) to " +
-            "a file: query the listing directly"
+    if !narrowed then None
+    else if ai.starlake.quack.edge.sql.FileLocations.unreadCopy(sql) then Some(UnreadCopyRefusal)
+    else
+      ai.starlake.quack.edge.sql.FileLocations
+        .copy(sql)
+        .flatMap { c =>
+          val untouched =
+            filter(c.tableSide) == ai.starlake.quack.edge.meta.MetadataFilterOutcome.Passthrough
+          Option.unless(untouched)(ListingCopyRefusal)
+        }
+
+  val UnreadCopyRefusal: String =
+    "a COPY in a batch, behind EXPLAIN or PREPARE, or from a SHOW / DESCRIBE / SUMMARIZE source " +
+      "cannot be checked against the edge metadata filter: send one COPY of a query or table"
+
+  val ListingCopyRefusal: String =
+    "a COPY may not write catalog metadata the edge filters (information_schema, SHOW) to a " +
+      "file: query the listing directly"
+
+  /** Why `sql` may not run from an edge that cannot feed a client data scan, or None.
+    * `scan_data_from_quack_client` reads rows a DuckDB 2.0 client sends on its own connection
+    * (SEND_DATA), which only the native Quack front door relays (`clientDataScans`): from any other
+    * edge the node would wait for rows nobody sends. Read lexically, literal bodies included, so a
+    * name in a string over-refuses (the safe direction), and a statement nesting literals too
+    * deeply to scan is refused too. Not an authorization rule: it holds for every caller.
+    */
+  def clientDataScanRefusal(sql: String, clientDataScans: Boolean): Option[String] =
+    if clientDataScans then None
+    else
+      val scan = ai.starlake.quack.edge.sql.FunctionCalls.scan(sql)
+      if scan.calls.exists(_.name == ClientDataScan) then
+        Some(
+          s"$ClientDataScan reads rows only the native Quack front door relays; it cannot run " +
+            "from this edge"
         )
-      }
+      else if scan.truncated then
+        Some(
+          s"statement nests string literals too deeply to check for $ClientDataScan; it cannot " +
+            "run from this edge"
+        )
+      else None
+
+  private val ClientDataScan = "scan_data_from_quack_client"
 
   /** One node call for [[FlightSqlRouter.executeWith]]: `(node, wrappedSql, stampPrelude,
     * recordLoad, principal) => outcome`. `principal` is who the statement runs for: the call sends

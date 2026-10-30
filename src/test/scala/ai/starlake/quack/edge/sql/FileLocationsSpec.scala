@@ -253,6 +253,28 @@ class FileLocationsSpec extends AnyFlatSpec with Matchers:
       "COPY (WITH s AS (DESCRIBE orders) SELECT * FROM s) TO 's3://acme-etl/out/t.csv'"
     ).foreach(sql => withClue(sql)(FileLocations.copy(sql) shouldBe None))
 
+  "unreadCopy" should "flag every COPY the reader cannot take as the lone statement" in
+    List(
+      "SELECT 1; COPY t TO 's3://acme-etl/out/t.csv'",
+      "COPY t TO 's3://acme-etl/out/t.csv'; SELECT 1",
+      "EXPLAIN ANALYZE COPY t TO 's3://acme-etl/out/t.csv'",
+      "PREPARE p AS COPY t TO 's3://acme-etl/out/t.csv'",
+      "COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
+      "COPY (DESCRIBE orders) TO 's3://acme-etl/out/t.csv'",
+      "COPY (SELECT 1) TO 's3://acme-etl/out/' || 't.csv'",
+      "COPY FROM DATABASE a TO b"
+    ).foreach(sql => withClue(sql)(FileLocations.unreadCopy(sql) shouldBe true))
+
+  it should "leave a lone COPY it reads, and every statement that is no COPY" in
+    List(
+      "COPY (SELECT * FROM main.orders) TO 's3://acme-etl/out/o.csv'",
+      "COPY lake.main.orders TO 's3://acme-etl/out/o.parquet' (FORMAT parquet)",
+      "COPY lake.main.events FROM 's3://acme-etl/in/e.csv'",
+      "SELECT 'COPY t TO x'",
+      "SELECT * FROM read_csv('s3://acme-etl/in/x.csv')",
+      "SELECT 1; SELECT 2"
+    ).foreach(sql => withClue(sql)(FileLocations.unreadCopy(sql) shouldBe false))
+
   "the COPY option lists" should "be qod-node's, name for name" in {
     val source = Files.readString(Paths.get("native/qod-node/src/screen_rules.cpp"))
     def names(array: String): Set[String] =

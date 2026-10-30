@@ -112,6 +112,16 @@ private[quack] object FileLocations:
       case List(stmt) => copyOne(stmt)
       case _          => None
 
+  /** True when a statement of `sql` is a COPY (the statement an EXPLAIN or PREPARE carries
+    * included) and `sql` is not the one lone COPY [[copy]] reads: a COPY in a batch, behind a
+    * wrapper, from a listing source, or in any shape this reader stops short of.
+    */
+  def unreadCopy(sql: String): Boolean =
+    StatementHead.split(sql).exists { stmt =>
+      val head = StatementHead.of(stmt)
+      head.word(head.start).contains("copy")
+    } && copy(sql).isEmpty
+
   // ---- qod-node's COPY option rule (native/qod-node/src/screen_rules.cpp, CopyOptions) ----
   // The three lists are the node's, copied verbatim; FileLocationsSpec fails until both sides
   // carry the same names.
