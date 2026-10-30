@@ -298,6 +298,54 @@
   manager's WARN line `OPA <connect|statement> error for tenant=<id>: ...`, where the bearer token
   is now masked.
 
+- **BREAKING: nodes run qod-node instead of the DuckDB CLI.** Every node, on every backend, is now
+  `qod-node` (native/qod-node): QoD's own executable on the unmodified official DuckDB release
+  library, the host the node-side authorization below builds on. The spawn scripts hand it the init
+  SQL on its stdin, never on disk; it runs it statement by statement and carries on past a failing
+  one, as the CLI did, with no CLI dot-commands, and a failing statement is logged without DuckDB's
+  `LINE n:` excerpt (init SQL can carry credentials). It reads the node token and the node key
+  itself from the node's secret files and exits with its wrapper or on SIGTERM. Which binary:
+  - a manager that starts nodes on its host (runtime local, or fleet with
+    `QOD_FLEET_EPHEMERAL=local`) uses `QOD_NODE_BIN` when set, else the binary the jar bundles for
+    Linux and macOS (x86_64, aarch64), installed beside the libduckdb it loaded; it refuses to boot
+    without one, or on one whose `--build-info` names another node protocol or DuckDB release;
+  - on Windows, `qod start`, `qod serve` and `run-jar.ps1` download the release's
+    `qod-node-windows-<arch>.exe` (too large to bundle) and set `QOD_NODE_BIN`;
+  - `qod fleet join` runs the copy the qod wheel bundles (or `--qod-node-bin`);
+  - the Kubernetes node image ships the vendored binary and libduckdb in `/opt/qod-node`, and no
+    DuckDB CLI.
+  Operator action: restart every node after upgrading, and on Kubernetes pull this release's node
+  image.
+
+- **Security: BREAKING: every statement on a node runs for a principal the manager vouches for.**
+  Before each statement it sends a node (a relayed client statement, a stamp prelude, a COMMIT,
+  the health probe), the manager sends its own `CALL system.main.qod_session('<handle>')`: a
+  session handle naming the principal (a user, a superuser, or the manager's system principal for
+  probes, statistics, maintenance and merges), the node, the pool, the policy version, a
+  single-use nonce and a 60 s expiry, signed with that node's own key. qod-node installs it on the
+  connection, keeps one principal per connection, and refuses any statement, at its parse screen
+  and again after binding, on a connection with no current principal. A refused handle drops the
+  connection before the statement is sent (retryable). The health probe also sends a handle-less
+  `SELECT 1`: a node that runs it does not enforce, and is marked unhealthy and never routed to.
+  Each node's key is HMAC-SHA256 of the node-key secret and the node id, delivered as the secret
+  file `QOD_NODE_AUTHZ_KEY` (with the id as `QOD_NODE_ID`, on Kubernetes in the pod's token Secret,
+  in fleet mode in the assignment), never in argv or env. The node-key secret is
+  `QOD_NODE_KEY_SECRET` (`quack-on-demand.nodeAuthz.keySecret`, at least 32 characters, else boot
+  refuses) when set, else one value the first boot generates and keeps in the control plane
+  (`qodstate_node_authz`, Liquibase `0047`), shared by every replica. Consequences:
+  - Under HA, set `QOD_NODE_KEY_SECRET` the same on every replica, or leave it unset on all: a node
+    whose key derives from another secret refuses the handles, and the health loop names that
+    cause.
+  - Changing it, or deleting the stored row, means restarting every node.
+  - Trust boundary: unless `QOD_NODE_KEY_SECRET` is set, whoever can read the control-plane database
+    (backups, dumps, read replicas, a SELECT-only role) can mint a handle for any principal on any
+    node, on top of the credentials that database already stores. Protect it like the secret
+    itself, or pin `QOD_NODE_KEY_SECRET` from an external secret store.
+  - Every handle also names the replica that minted it (`QOD_INTERNAL_URL`, see "nodes call the
+    manager back" below).
+  - Operator action: restart every node after upgrading. A node an earlier release started does
+    not know `qod_session` and is never routed to.
+
 - **Security: BREAKING: the nodes decide every tenant statement on what DuckDB resolved.** Each
   node (qod-node, node protocol 4) now judges a statement of a user who is not a superuser on the
   plan DuckDB bound for it, before it runs: the tables, views and columns it reads or writes, the
@@ -525,7 +573,8 @@
   chart set `QOD_POD_IP`. Grant tenant users what they read before relying on `QOD_ACL_ENABLED=false`
   (it no longer opens tables), set `QOD_TENANT_FILES_ROOT` / `QOD_USER_S3_ALLOWED_ENDPOINTS` if users
   load files, review the boot WARNs about untrusted initSql and `sql` federation sources (a superuser
-  re-saves what should stay), and restart every node.
+  re-saves what should stay), and restart every node. Under HA, set `QOD_NODE_KEY_SECRET` the same on
+  every replica or leave it unset on all.
 
 ## 0.10.1
 
