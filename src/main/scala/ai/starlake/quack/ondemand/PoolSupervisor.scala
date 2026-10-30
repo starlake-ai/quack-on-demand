@@ -850,7 +850,10 @@ final class PoolSupervisor(
   private def withCacheRecoveryIO[A](op: String)(io: IO[A]): IO[A] =
     io.onError { case t => IO(recover("withCacheRecoveryIO", op, t)) }
 
-  /** The caches rebuilt from the store after `op` failed with `t`, and the WARN saying so. */
+  /** The caches rebuilt from the store after `op` failed with `t`, and the WARN saying so. The
+    * operations of [[PoolSupervisor.SecretBearingOps]] are named by class and SQLState only (Phase
+    * C review C-m4): their failure's message can quote the row they wrote, a secret included.
+    */
   private def recover(wrapper: String, op: String, t: Throwable): Unit =
     try restore()
     catch
@@ -860,7 +863,11 @@ final class PoolSupervisor(
             s"${rebuildError.getMessage}",
           rebuildError
         )
-    logger.warn(s"$wrapper[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}")
+    val why =
+      if PoolSupervisor.SecretBearingOps.contains(op) then
+        ai.starlake.quack.edge.authz.FailureText.of(t)
+      else t.getMessage
+    logger.warn(s"$wrapper[$op]: mutation failed, caches rebuilt from store: $why")
 
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db, one controlled session
     * per tenant-db so concurrent node ATTACHes don't race on the `ducklake_metadata` CREATE TABLE.
@@ -4468,6 +4475,11 @@ object PoolSupervisor:
 
   /** How long a restore waits for running local mutations before it skips (amendment A7). */
   val RestoreLockWaitMs: Long = 5_000L
+
+  /** The mutators whose failure's message can quote a secret they wrote (pgjdbc's "Failing row
+    * contains (...)"): their recovery WARN names the failure by class and SQLState only.
+    */
+  val SecretBearingOps: Set[String] = Set("putUserS3Credential", "removeUserS3Credential")
 
   /** Two fragments of the manager's own SQL as one `extraSetupSql` (a merge node's federation blob
     * and its branch attach), `first` FIRST, with a forced newline between two non-empty fragments.

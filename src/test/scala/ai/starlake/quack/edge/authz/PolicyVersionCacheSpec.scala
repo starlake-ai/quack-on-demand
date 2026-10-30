@@ -54,3 +54,14 @@ class PolicyVersionCacheSpec extends AnyFlatSpec with Matchers:
     noException should be thrownBy cache.refresh()
     cache.current("acme") shouldBe 5L
   }
+
+  it should "name a failed refresh by class and SQLState, never by its message" in {
+    val cache = new PolicyVersionCache(() =>
+      throw new java.sql.SQLException("FATAL: policy-version-marker-detail", "57P01")
+    )
+    val (_, events) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+      .logged(classOf[PolicyVersionCache].getName)(cache.refresh())
+    events.map(_.getFormattedMessage) shouldBe List(
+      "policy versions: refresh failed, keeping the last values: SQLException (SQLState 57P01)"
+    )
+  }

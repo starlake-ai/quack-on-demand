@@ -98,7 +98,7 @@ final class UserS3CredentialCache(
     val at   = clock()
     val sets =
       try Right(load())
-      catch case NonFatal(e) => Left(e.getClass.getSimpleName)
+      catch case NonFatal(e) => Left(FailureText.of(e))
     UserS3CredentialCache.Loaded(seq, at, sets)
 
   /** Publishes what [[read]] returned, unless a read that started after it has published already
@@ -130,8 +130,8 @@ final class UserS3CredentialCache(
 
 object UserS3CredentialCache:
 
-  /** One [[UserS3CredentialCache.read]]: its start order, its clock, and the sets or the failure's
-    * class name (never its message, which could carry a credential).
+  /** One [[UserS3CredentialCache.read]]: its start order, its clock, and the sets or the failure as
+    * [[FailureText.of]] names it (never its message, which could carry a credential).
     */
   final case class Loaded(seq: Long, at: Long, sets: Either[String, List[UserS3Credential]]):
     override def toString: String = s"Loaded($seq,$at,${sets.map(_.size)})"

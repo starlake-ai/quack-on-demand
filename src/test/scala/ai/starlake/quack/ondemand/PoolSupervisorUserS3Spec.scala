@@ -145,3 +145,35 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
       .check("s3://lake/root/salesdb/main/t/x.parquet", r)
       .isLeft shouldBe true
   }
+
+  "a failed credential write" should "be logged by class and SQLState, never by the row it quotes" in {
+    // pgjdbc quotes the row in a NOT NULL or CHECK violation's Detail, the secret included.
+    val store = new InMemoryControlPlaneStore():
+      override def putUserS3Credential(
+          c: ai.starlake.quack.model.UserS3Credential
+      ): ai.starlake.quack.model.UserS3Credential =
+        throw new java.sql.SQLException(
+          "ERROR: new row violates check constraint\n  Detail: Failing row contains " +
+            s"(${c.id}, ${c.userId}, ${c.scope}, ${c.accessKeyId}, ${c.secretAccessKey}).",
+          "23514"
+        )
+    val sup = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, store)
+    sup.restore()
+    sup.createTenant(Tenant("acme")).unsafeRunSync()
+    val alice    = store.upsertUserWithHash(Some("acme"), "alice", "x", "user")
+    val accepted = UserS3CredentialRules
+      .validate(UserS3CredentialRules.Input("s3://acme-etl/", "AKIA", "sekr3t-c-m4-marker"), Nil)
+      .toOption
+      .get
+    val (thrown, events) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+      .logged(classOf[PoolSupervisor].getName)(
+        scala.util.Try(sup.putUserS3Credential(alice, accepted).unsafeRunSync())
+      )
+    thrown.failed.toOption.map(_.getClass.getSimpleName) shouldBe Some("SQLException")
+    events.map(_.getFormattedMessage).filter(_.contains("[putUserS3Credential]")) shouldBe List(
+      "withCacheRecovery[putUserS3Credential]: mutation failed, caches rebuilt from store: " +
+        "SQLException (SQLState 23514)"
+    )
+    // Checked as a boolean: a failing `should not include` would print the line.
+    events.exists(_.getFormattedMessage.contains("sekr3t-c-m4-marker")) shouldBe false
+  }

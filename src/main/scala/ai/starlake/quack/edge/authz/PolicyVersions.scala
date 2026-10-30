@@ -43,7 +43,7 @@ final class PolicyVersionCache(load: () => Map[String, Long])
     catch
       case NonFatal(e) =>
         logger.warn(
-          s"policy versions: refresh failed, keeping the last values: ${e.getClass.getSimpleName}"
+          s"policy versions: refresh failed, keeping the last values: ${FailureText.of(e)}"
         )
         None
 
