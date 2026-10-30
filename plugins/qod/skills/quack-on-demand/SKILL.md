@@ -645,7 +645,8 @@ Then a user of `acme` holding keys for `s3://acme-etl/` may:
 
 S3 then lets them do what their keys allow, no more. Always refused to tenant users:
 
-- a database's data folder, any tenant's (`QoD: <path> is a database data folder`): keys for a
+- a database's data folder, any tenant's (`QoD: <path> is a database data folder`), except through
+  a symbolic link below a tenant folder (see below): keys for a
   DuckLake bucket never open the folder holding its Parquet files; `s3://b/lake-1/` does not cover
   `s3://b/lake-10/`;
 - an `s3://` URL none of their keys covers (`QoD: <url> is outside the tenant's authorized locations
@@ -661,7 +662,9 @@ Keep tenant folders free of symbolic links: the node resolves a path's deepest e
 but a link below it can still lead out of the authorized folder through a glob (`*/x.csv`) or a
 `COPY ... (PARTITION_BY ...)`, `PER_THREAD_OUTPUT` or `OVERWRITE`. Users cannot create links with
 SQL; uploads that preserve links (`rsync -a`, some SFTP clients) can, so copy files in without them
-(`rsync -rt`, or `-L` to copy what a link points to) and check with `find <folder> -type l`.
+(`rsync -rt`, or `-L` to copy what a link points to) and check with `find <folder> -type l`. The
+stakes: such a link can point into any tenant's data folder, and a COPY with `OVERWRITE` deletes
+files under its target.
 
 The raw files of an attached Iceberg catalog's warehouse are not data folders QoD knows: keys for a
 warehouse bucket let their holder read its files directly. A catalog that neither vends credentials
@@ -2474,7 +2477,7 @@ opt-in except pod security:
 | `qod serve: provisioning failed: the manager answers /ready but wrote no provisioning outcome within --ready-timeout (<N>s)`, then three `finish by hand:` lines; or `... could not read the provisioning file the launcher wrote` | The manager release does not provision at boot, or is not the one this CLI expects (a launcher/manager version mismatch), or it did not reach its boot provisioning in time | Run the manager release matching this CLI (drop an older `--jar` or `--version`), or `qod login` and run the printed commands; a slow first boot needs a larger `--ready-timeout`. The manager log says what it did |
 | `no node with role READONLY or DUAL` | All nodes flipped unhealthy (port unreachable) | Check `pgrep -fl spawn-quack-node`; if 0, run `qod stop` + `qod start` (reconcile respawns) |
 | `access denied: missing RO grant on ...` (gateway) or `QoD: ...` naming the table (node) | The user has no matching grant. The nodes check grants whatever `QOD_ACL_ENABLED` says, so turning the ACL off does not help | Add the grant via `qod role permission grant` |
-| On a `qod serve` pool, with the ACL on: `lacks grants on <catalog>.main.<table>:Read` although the user holds the default `qod_all_tables` (`*.*.*`) | The served catalog's name is not the database's: a `.duckdb` file is attached under its stem (`sales`, the database being `<tenant>_sales`) and loose files are views in `memory`. The gateway's `*` catalog covers only database names; this lasts until the gateway check is retired | Grant that catalog explicitly: `qod role permission grant --role-id <roleId> --catalog <catalog> --schema '*' --table '*' --verb RO` |
+| On a `qod serve` pool, with the ACL on: `lacks grants on <catalog>.main.<table>:Read` although the user holds the default `qod_all_tables` (`*.*.*`) | The served catalog's name is not the database's: a `.duckdb` file is attached under its stem (`sales`, the database being `<tenant>_sales`) and loose files are views in `memory`. The gateway's `*` catalog covers only database names; this lasts until the gateway check is retired | Grant that catalog on a role of your own (the built-in `qod_all_tables` takes no grant: `409 builtin_protected`): `qod role create --tenant <tenant> --name <role>`, then `qod role permission grant --role-id <roleId> --catalog <catalog> --schema '*' --table '*' --verb RO`, then `qod membership user-role add --user-id <userId> --role-id <roleId>` |
 | `QoD: statement uses a secure view while the session holds variables` / `... has changed the setting <name>` / `... search path differs from the one it was given` / `... holds temporary entries ...`, `which QoD does not support` | The session set a variable, changed a setting other than `schema` / `search_path` (a client's `SET TimeZone` on connect included), ran `USE` of another schema, or created a temporary view, macro or type: any of them could change what a secure view's body reads | Open a new session (or reconnect) without that state, and read the secure view there; set time zones and other settings in a session that reads no secure view |
 | `QoD: function <name> is not classified` | A tenant user called a name the node's classification does not list: a typo, a function of an extension the node loaded later, a macro a superuser created, or a catalog macro named like a built-in (also reached through a view, a default or a built-in macro's body) | Check the spelling; call DuckDB's own with `system.main.<name>`; have a superuser drop or rename the shadowing macro. A new extension's functions need a manager release that classifies them |
 | `QoD: authorization unavailable, retry` (FlightSQL `UNAVAILABLE`) | The node could not get a verdict from the manager replica that minted the session's handle in time (`QOD_AUTHZ_DECIDE_TIMEOUT_MS`, default 2000): that replica restarted, is down or unreachable from the nodes | Retry the statement. If it persists, check that the nodes reach `QOD_INTERNAL_URL` (boot prints `node decide URL: ...`), and on Kubernetes that the NetworkPolicy lets node pods reach the manager on 20900 |

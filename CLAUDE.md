@@ -263,7 +263,8 @@ before the check, but does not judge links below it (CONTRACT item 33): through 
 `PER_THREAD_OUTPUT` or `OVERWRITE` (its directory walk follows linked directories), a symbolic link
 inside an authorized folder can lead out of it. Keeping tenant folders free of symbolic links is an
 operator duty, uploads that preserve links (`rsync -a`, some SFTP clients) included; users cannot
-create links with SQL. A data path the checker cannot place
+create links with SQL. The stakes: such a link can point into any tenant's data folder, and a COPY
+with `OVERWRITE` deletes files under its target. A data path the checker cannot place
 on the node (a relative one off the local runtime, or `DataFolders.Unplaced`: a DuckLake or
 duckdb-file row with no data path while the default metastore has none) denies every local location
 to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to non-superusers. Not
@@ -347,7 +348,9 @@ catalog or a custom `catalogAlias` (CONTRACT item 34, until Phase D deletes the 
 includes `qod serve`: a `.duckdb` file is attached under its stem (`sales`), not the tenant-db name
 (`smoke_sales`), and loose files are views in `memory`, so with the ACL on a user holding only the
 default `qod_all_tables` is refused at the gateway (`lacks grants on sales.main.<table>:Read`) until
-granted `sales.*.*` (or `memory.*.*`) explicitly. With the ACL
+it holds a role of its own granted `sales.*.*` (or `memory.*.*`): `qod role create`, `qod role
+permission grant --catalog sales`, `qod membership user-role add` (a built-in role takes no grant,
+`409 builtin_protected`). With the ACL
 on and filtered metadata off, SHOW TABLES is refused at the gateway.
 
 **Residuals** (known, not holes to report): foldable constant arguments are evaluated during bind

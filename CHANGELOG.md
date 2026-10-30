@@ -463,10 +463,13 @@
     Windows nodes admit no local folder. The node resolves a path's deepest existing folder,
     symbolic links included, but does not judge links below it: through a glob segment or a COPY
     with `PARTITION_BY`, `PER_THREAD_OUTPUT` or `OVERWRITE`, a link inside an authorized folder can
-    lead out of it. Operator action: keep tenant folders free of symbolic links, uploads that
-    preserve links (`rsync -a`, some SFTP clients) included; users cannot create links with SQL.
-  A database's data folder, any tenant's, is never reachable (a scope at or under one is refused
-  when added, `400 scope_in_data_folder`). Any other scheme (`http(s)`, `gs`, `az`, `r2`) is
+    lead out of it, into any tenant's data folder too, and a COPY with `OVERWRITE` then deletes
+    files under the link's target. Operator action: keep tenant folders free of symbolic links,
+    uploads that preserve links (`rsync -a`, some SFTP clients) included; users cannot create links
+    with SQL.
+  A database's data folder, any tenant's, is never reachable by its path (a scope at or under one
+  is refused when added, `400 scope_in_data_folder`), only through a symbolic link below a tenant
+  folder (above). Any other scheme (`http(s)`, `gs`, `az`, `r2`) is
   refused. Before, file access was superuser-only while the ACL validated and open to everyone with
   the ACL off. Users' keys travel from the manager to the nodes signed, not encrypted: keep
   manager-to-node traffic on a private network. They are stored in plaintext in the control-plane
