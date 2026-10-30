@@ -600,6 +600,10 @@ final class FlightSqlRouter(
                   )
                 case Left(failure) =>
                   (fence, failure) match
+                    // A killed evaluation stops the statement: nothing else runs for it.
+                    case (_, FlightSqlRouter.LocationFailure.Evaluation(f))
+                        if f.reason == FlightSqlRouter.KilledReason =>
+                      refused(f)
                     // Outside a native transaction: the node refuses the unchanged statement.
                     case (None, _) => run(sql, preferredNode)
                     case (Some(_), FlightSqlRouter.LocationFailure.Evaluation(f)) =>
@@ -1364,6 +1368,15 @@ final class FlightSqlRouter(
                           )
                       send(node, wrappedSql, prelude, recordExecution, principal)
                         .flatMap {
+                          case NodeOutcome.Ok(_, _, close)
+                              if internal && stmtId.exists(id => !registry.isRegistered(id)) =>
+                            // Killed while the node ran it (a PAT revoked mid-evaluation): its
+                            // entry had no cancel to fire, so the kill only evicted it. The value
+                            // must not feed the statement that follows, which would register anew
+                            // and run.
+                            close()
+                            IO.pure(Left(RouterFailure.AccessDenied(FlightSqlRouter.KilledReason)))
+
                           case NodeOutcome.Ok(reader, latency, close) =>
                             // Idempotent close: an admin kill and the Flight producer fire the
                             // same close; the second invocation must be a no-op.
@@ -1655,6 +1668,11 @@ object FlightSqlRouter:
     * statement and every later one until ROLLBACK (QuackFrontDoor's `abortTx`).
     */
   type TransactionFence = String => IO[Unit]
+
+  /** Why a statement the manager ran for the client ([[readBack]]) failed when it was killed while
+    * the node ran it: the client's statement then stops there.
+    */
+  val KilledReason: String = "access denied: the statement was killed"
 
   /** Why a computed file location got no literal: its evaluation failed (`Evaluation`, the
     * gateway's or the node's answer), or the value it yielded is no location (`Rejected`).

@@ -362,6 +362,25 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     router.registry.list() shouldBe Nil
   }
 
+  it should "stop the statement when it is killed while it runs (a PAT revoked meanwhile)" in {
+    var router: FlightSqlRouter = null
+    val (r, sent)               = setup { sql =>
+      // The revocation lands while the node evaluates: the entry has no cancel attached yet.
+      if sql.endsWith(" AS location") then router.registry.killByPats(Set("pat-1"))
+      evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+    }
+    router = r
+    router
+      .execute("c-kill", "alice", poolKey, Computed, Some(tenantUser), patId = Some("pat-1"))
+      .unsafeRunSync() match
+      case Left(f)  => f.reason should include(FlightSqlRouter.KilledReason)
+      case Right(r) => r.close(); fail("a killed evaluation's statement ran")
+    // The evaluation only: neither the substituted statement nor the client's own was sent.
+    sent().count(_.endsWith(Evaluated)) shouldBe 1
+    sent().exists(s => !s.endsWith(Evaluated)) shouldBe false
+    router.registry.list() shouldBe Nil
+  }
+
   it should "keep a transaction's pin when it fails transiently" in {
     val (router, _) = setup { sql =>
       if sql.endsWith(" AS location") then QuackResponse.Failed(QuackError.Transient("gone"))
