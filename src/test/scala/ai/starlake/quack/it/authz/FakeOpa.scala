@@ -17,7 +17,7 @@ final class FakeOpa(denyTable: String):
   private val server =
     HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress, 0), 0)
   private val asked  = new AtomicInteger(0)
-  private val denied = ("\"table\"\\s*:\\s*\"" + denyTable + "\"").r
+  private val denied = ("\"table\"\\s*:\\s*\"" + java.util.regex.Pattern.quote(denyTable) + "\"").r
 
   /** While true, every statement decision answers 500. */
   val failStatements = new AtomicBoolean(false)

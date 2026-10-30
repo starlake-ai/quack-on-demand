@@ -1686,11 +1686,18 @@ abstract class AuthzEndToEndCases(
     // may create one over the metadata catalog in a schema he holds (the gateway refused that), and
     // every read through it is refused.
     val view = s"$lake.main.qod_e2e_meta"
-    allowed("bob", "lake", s"CREATE OR REPLACE VIEW $view AS SELECT * FROM $dataFile")
     try
+      allowed("bob", "lake", s"CREATE OR REPLACE VIEW $view AS SELECT * FROM $dataFile")
       refused("bob", "lake", s"SELECT count(*) FROM $view", node = "DuckLake catalog metadata")
+      refused("erin", "lake", s"SELECT count(*) FROM $view", node = "DuckLake catalog metadata")
       refused(
         "bob",
+        "lake",
+        s"SELECT * FROM query_table('$view')",
+        node = "DuckLake catalog metadata"
+      )
+      refused(
+        "erin",
         "lake",
         s"SELECT * FROM query_table('$view')",
         node = "DuckLake catalog metadata"
