@@ -133,7 +133,7 @@ pgPassword="${pgPassword:-azizam}"
 dbName="${dbName:-db1}"
 catalogAlias="${catalogAlias:-$dbName}"
 schemaName="${schemaName:-main}"
-dataPath="${dataPath:-/Users/hayssams/git/public/quack-on-demand/ducklake/$dbName}"
+dataPath="${dataPath:-}"
 
 kind="${kind:?kind env var is required (ducklake | duckdb-file | memory)}"
 case "$kind" in
@@ -143,6 +143,14 @@ case "$kind" in
     exit 92
     ;;
 esac
+
+# A DuckLake or duckdb-file node gets its data path from the manager. None means the database has no
+# dataPath of its own and the default metastore none either: refused, since a folder picked here
+# would lie where the manager's data-folder deny set cannot see it.
+if [[ -z "$dataPath" && "$kind" != "memory" ]]; then
+  echo "fatal: kind=$kind needs a dataPath, and none came from the manager (set the database's dataPath, or the default metastore's)" >&2
+  exit 1
+fi
 
 if [[ "$schemaName" == "$catalogAlias" ]]; then
   echo "ERROR: schemaName ($schemaName) must differ from the catalog alias ($catalogAlias)." >&2

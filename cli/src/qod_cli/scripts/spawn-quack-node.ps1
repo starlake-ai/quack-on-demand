@@ -176,7 +176,7 @@ $pgPassword = Secret-Or 'pgPassword' 'azizam'
 $dbName     = Env-Or 'dbName'     'db1'
 $catalogAlias = Env-Or 'catalogAlias' $dbName
 $schemaName = Env-Or 'schemaName' 'main'
-$dataPath   = Env-Or 'dataPath'   (Join-Path (Get-Location) "ducklake\$dbName")
+$dataPath   = Env-Or 'dataPath'   ''
 
 $kind = [Environment]::GetEnvironmentVariable('kind')
 if ([string]::IsNullOrEmpty($kind)) {
@@ -186,6 +186,14 @@ if ([string]::IsNullOrEmpty($kind)) {
 if ($kind -notin @('ducklake', 'duckdb-file', 'memory')) {
   [Console]::Error.WriteLine("fatal: unknown kind='$kind' (expected: ducklake | duckdb-file | memory)")
   Exit-Spawn 92
+}
+
+# A DuckLake or duckdb-file node gets its data path from the manager. None means the database has no
+# dataPath of its own and the default metastore none either: refused, since a folder picked here
+# would lie where the manager's data-folder deny set cannot see it.
+if ([string]::IsNullOrEmpty($dataPath) -and $kind -ne 'memory') {
+  [Console]::Error.WriteLine("fatal: kind=$kind needs a dataPath, and none came from the manager (set the database's dataPath, or the default metastore's)")
+  Exit-Spawn 1
 }
 
 if ($schemaName -eq $catalogAlias) {

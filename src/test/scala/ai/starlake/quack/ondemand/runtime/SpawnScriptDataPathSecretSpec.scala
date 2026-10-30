@@ -44,6 +44,27 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
     )
     runSpawn(command, base ++ extra)
 
+  /** The spawn script's exit code and standard error on `env`, the secrets going through a private
+    * directory as [[runSpawn]] sends them.
+    */
+  protected def exitAndError(env: (String, String)*): (Int, String) =
+    assumeHost()
+    val (secret, plain) = env.partition { case (k, _) => NodeSecretFiles.isKey(k) }
+    val dir             = NodeSecretFiles.writePrivateDir(
+      (Seq(NodeSecretFiles.TokenKey -> "t") ++ secret).toMap,
+      Some(tempDir)
+    )
+    val err = new StringBuilder
+    val rc  = Process(
+      command,
+      None,
+      (plain ++ Seq(
+        NodeSecretFiles.DirEnv       -> dir.toString,
+        NodeSecretFiles.EphemeralEnv -> "1"
+      ))*
+    ).!(ProcessLogger(_ => (), l => err.append(l).append('\n')))
+    (rc, err.toString)
+
   private val NoManagerKeys =
     Seq("QOD_S3_ACCESS_KEY_ID" -> "", "QOD_S3_SECRET_ACCESS_KEY" -> "")
 
@@ -199,6 +220,29 @@ private trait SpawnScriptDataPathSecretCases extends Matchers with SpawnScriptTe
         initSql("s3://lake/acme_lake", (NoManagerKeys :+ ("QOD_S3_USE_SSL" -> "False"))*),
         "qod_data_s3"
       ).get should include("USE_SSL false")
+    }
+
+    it should "refuse to start a DuckLake or duckdb-file node with no data path" in
+      // No folder of the script's own: the manager's data-folder deny set could not see it.
+      List("ducklake", "duckdb-file").foreach { kind =>
+        val (rc, err) = exitAndError(
+          "QOD_SPAWN_DRY_RUN" -> "1",
+          "schemaName"        -> "main",
+          "catalogAlias"      -> "acme_lake",
+          "dbName"            -> "acme_lake",
+          "kind"              -> kind,
+          "dataPath"          -> "",
+          "pgHost"            -> "h",
+          "pgPort"            -> "5432",
+          "pgUser"            -> "u",
+          "pgPassword"        -> "p"
+        )
+        withClue(kind)(rc shouldBe 1)
+        withClue(kind)(err should include(s"fatal: kind=$kind needs a dataPath"))
+      }
+
+    it should "still start a memory node with no data path" in {
+      noException should be thrownBy initSql("", "kind" -> "memory")
     }
 
 class SpawnScriptDataPathSecretSpec extends AnyFlatSpec with SpawnScriptDataPathSecretCases:
