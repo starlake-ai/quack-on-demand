@@ -44,9 +44,9 @@ final case class DecidePrincipal(principal: NodePrincipal, context: Option[Decid
   * grants say (DuckLake catalog metadata, the protected kinds' DDL, the system catalog, function
   * and setting classes, control steps); then every file location (`LocationChecker` on the
   * principal's rules: its own S3 credential scopes, the pool tenant's folders, read once and only
-  * when a location needs them); then a branch-only token's writes; then the objects, by QoD grants
-  * (always: decision 5) or by the tenant's OPA policy. Local rules first, so OPA is never asked
-  * about a statement QoD refuses.
+  * when a location needs them); then a branch-only token's writes, and file writes under a token's
+  * verb ceiling; then the objects, by QoD grants (always: decision 5) or by the tenant's OPA
+  * policy. Local rules first, so OPA is never asked about a statement QoD refuses.
   *
   * Reasons carry no `"QoD: "` prefix; the node adds it.
   */
@@ -78,8 +78,9 @@ final class AuthzDecider(
 
   def decidePlan(p: DecidePrincipal, d: Description): Decision =
     judged(p) { ctx =>
-      val rules  = new Rules(p, ctx)
-      val writes = d.objects.exists(writesData) || d.control.exists(_.op == "copy_to")
+      val rules      = new Rules(p, ctx)
+      val writesFile = d.control.exists(_.op == "copy_to")
+      val writes     = d.objects.exists(writesData) || writesFile
       for
         _ <- all(d.objects)(alwaysOnObject)
         _ <- all(d.functions)(alwaysOnFunction)
@@ -89,6 +90,7 @@ final class AuthzDecider(
         _ <- all(d.functions)(fileFunction(_, rules))
         _ <- all(d.control)(copyTarget(_, rules))
         _ <- branchOnly(ctx, writes)
+        _ <- fileWriteCeiling(ctx, writesFile)
         _ <- objects(ctx, narrowed(ctx), d, rules)
       yield ()
     }
@@ -99,6 +101,7 @@ final class AuthzDecider(
       for
         _ <- all(d.locations)(screenLocation(_, rules))
         _ <- branchOnly(ctx, d.locations.exists(_.access == "write"))
+        _ <- fileWriteCeiling(ctx, d.locations.exists(_.access == "write"))
       yield ()
     }
 
@@ -250,6 +253,17 @@ final class AuthzDecider(
     if writes && ctx.restriction.exists(_.branchOnly) &&
       !BranchNames.isBranchPool(ctx.poolKey.pool)
     then refuse(WriteRequiresBranch)
+    else Pass
+
+  /** A token's verb ceiling on file writes (a COPY TO, a write location). Attenuation clips the
+    * ceiling into the permissions on objects and the OPA arm filters gated objects by it, but a
+    * file is no object, so neither ever meets it: a read-only token would write any file its read
+    * grants and the location rules admit. Both arms.
+    */
+  private def fileWriteCeiling(ctx: DecideContext, writesFile: Boolean): Step =
+    val eff = narrowed(ctx)
+    if writesFile && eff.verbCeiling.exists(c => !c.contains(Verb.Write)) then
+      refuse(s"user:${eff.user.username} denied by token verb ceiling on file writes")
     else Pass
 
   // ---- rule 3 ----

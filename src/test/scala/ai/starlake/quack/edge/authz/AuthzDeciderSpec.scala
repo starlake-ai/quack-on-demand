@@ -704,6 +704,37 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  // ---- a token's verb ceiling on files ----
+
+  private val ReadOnly = Some(TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
+
+  "a read-only token" should "write no file, though the read and the target are allowed" in {
+    val copy = plan(
+      objects = List(obj("orders")),
+      control = List(ctl("copy_to", Some("s3://acme-etl/out/x.parquet")))
+    )
+    allow(copy)
+    refused(
+      copy,
+      "user:alice denied by token verb ceiling on file writes",
+      principal(restriction = ReadOnly)
+    )
+    // An RW ceiling covers Write.
+    allow(
+      copy,
+      principal(restriction = Some(TokenRestriction.Unrestricted.copy(verbCeiling = Some("RW"))))
+    )
+  }
+
+  it should "write no file on an OPA tenant either, and never ask OPA" in {
+    val f = new Fixture()
+    f.decider.decidePlan(
+      principal(OpaAlice.context.get.effective, OpaPool, ReadOnly),
+      plan(control = List(ctl("copy_to", Some("s3://acme-etl/out/x.parquet"))))
+    ) shouldBe Decision.Refuse("user:alice denied by token verb ceiling on file writes")
+    f.opaBodies shouldBe empty
+  }
+
   // ---- OPA tenants ----
 
   private val OpaAlice =
@@ -841,6 +872,23 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
       screen(loc("s3://acme-etl/out/x", "copy_to", "write"))
     ) shouldBe
       Decision.Allow
+  }
+
+  it should "refuse a write location to a read-only token, and keep its reads" in {
+    val f  = new Fixture()
+    val ro = Some(TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
+    f.decider.decideScreen(
+      principal(restriction = ro),
+      screen(loc("s3://acme-etl/out/x", "copy_to", "write"))
+    ) shouldBe Decision.Refuse("user:alice denied by token verb ceiling on file writes")
+    f.decider.decideScreen(
+      principal(OpaAlice.context.get.effective, OpaPool, ro),
+      screen(loc("/srv/qod-files/acme/in/x.csv", "read_csv", "write"))
+    ) shouldBe Decision.Refuse("user:alice denied by token verb ceiling on file writes")
+    f.decider.decideScreen(
+      principal(restriction = ro),
+      screen(loc("s3://acme-etl/in/x.parquet"), loc("/srv/qod-files/acme/in/x.csv", "copy_from"))
+    ) shouldBe Decision.Allow
   }
 
   it should "be unavailable while the rules cannot be read, and never ask OPA" in {

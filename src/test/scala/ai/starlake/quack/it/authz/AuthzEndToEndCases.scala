@@ -1499,6 +1499,13 @@ abstract class AuthzEndToEndCases(
     stack.mcp(ro, s"INSERT INTO $lake.main.events VALUES (101, 'ro')", lake) match
       case Left(err) => if nodeOnly then err should include("QoD: ")
       case Right(t)  => fail(s"the read-only token wrote: $t")
+    // Nor a file, into a folder alice may write to: the gateway admits the target and gates only
+    // branchOnly, so on both stacks the node's verb ceiling refuses it.
+    val roOut = outDir.resolve(s"ro-$run.csv")
+    stack.mcp(ro, s"COPY (SELECT 1 AS id) TO '$roOut' (HEADER)", lake) match
+      case Left(err) => err should include("denied by token verb ceiling on file writes")
+      case Right(t)  => fail(s"the read-only token wrote a file: $t")
+    Files.exists(roOut) shouldBe false
     stack.flight(
       s"SELECT count(*) FROM $lake.main.events WHERE id = 101",
       "admin",
