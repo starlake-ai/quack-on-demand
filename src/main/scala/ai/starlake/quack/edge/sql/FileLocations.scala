@@ -108,7 +108,7 @@ private[quack] object FileLocations:
     * for any other statement or shape.
     */
   def copy(sql: String): Option[CopyUse] =
-    LockdownScreen.splitStatements(sql) match
+    StatementHead.split(sql) match
       case List(stmt) => copyOne(stmt)
       case _          => None
 

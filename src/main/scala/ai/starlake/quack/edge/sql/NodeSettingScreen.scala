@@ -441,8 +441,6 @@ object NodeSettingScreen:
     "installing an extension, or loading one from a path or URL, is reserved to superusers; " +
       "LOAD an installed extension by its bare name"
 
-  private val Scopes = Set("session", "global", "local")
-
   /** The refusal for the first statement of `sql` that changes one of [[Settings]], or imports a
     * database (the `IMPORT DATABASE` statement or the `import_database` pragma), if any. A
     * statement that nests string literals past [[FunctionCalls.MaxDepth]] is refused fail-closed,
@@ -492,17 +490,6 @@ object NodeSettingScreen:
     */
   private def settingTarget(h: StatementHead.Head): Option[String] = settingAt(h).map(_._1)
 
-  /** The one reading of a setting statement every screen shares: for SET [SESSION | GLOBAL | LOCAL]
-    * <name>, RESET [scope] <name> and PRAGMA <name> (assignment and call form), the lowercased,
-    * unquoted name and the index of its token in `h.toks`, so a caller can read the value that
-    * follows. Read from DuckDB 2.0's tokens: glued quotes, comments between tokens, the statement
-    * an EXPLAIN / PREPARE carries.
-    */
+  /** [[StatementHead.settingAt]], under the name this screen's callers use. */
   private[sql] def settingAt(h: StatementHead.Head): Option[(String, Int)] =
-    val i = h.start
-    h.word(i) match
-      case Some("set" | "reset" | "pragma") =>
-        val target =
-          if h.word(i + 1).exists(Scopes) && h.identifier(i + 2).isDefined then i + 2 else i + 1
-        h.identifier(target).map(_ -> target)
-      case _ => None
+    StatementHead.settingAt(h)

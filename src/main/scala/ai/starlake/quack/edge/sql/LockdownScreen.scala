@@ -443,45 +443,8 @@ object LockdownScreen:
           .orElse(exportHit)
           .orElse(deniedFunctionIn(stmt, deniedBuckets, admission))
 
-  /** Splits the input on top-level semicolons: a semicolon inside any of DuckDB's quoting forms
-    * (plain `'...'`, escape `E'...'`, double-quoted and backtick identifiers, dollar-quoted
-    * `$$...$$` / `$tag$...$tag$`), a line comment, or a (nested) block comment does not split.
-    * Blank fragments are dropped.
-    *
-    * `private[sql]`, not `private`, so `CatalogWriteScreen` and `TriggerScreen` can reuse the same
-    * quote- and comment-aware splitter to judge a batch statement by statement instead of by its
-    * first token.
-    *
-    * Every boundary comes from `ai.starlake.sql.SqlLexer`, the one reader shared with
-    * `SqlCommentStripper` and `StatementClassifier` and ported from DuckDB 2.0's own front end, so
-    * the splitter, the stripper and the engine can never disagree on where a literal ends. Knowing
-    * only `'...'` and `"..."` was a desync, not a cosmetic gap: DuckDB reads `$x$'$x$`,
-    * `$<EURO>$'$<EURO>$` and `E'\''` as complete strings holding one quote each, and a backtick
-    * identifier as an identifier, while a `'`-only splitter opened a single-quoted run at that
-    * inner quote (or a comment at a backticked comment opener) and merged every following statement
-    * into the leading `select` fragment, hiding an ATTACH from this screen and a CREATE TRIGGER
-    * from `TriggerScreen` (each verified to run on DuckDB 2.0). A line comment ends at a line feed
-    * OR a bare carriage return, as on DuckDB: ending it at a line feed alone once made
-    * `SELECT 1 -- c<CR>; INSERT INTO <read-only>.t VALUES (1)` one fragment that classified
-    * `Select` while DuckDB ran the INSERT.
-    *
-    * Each fragment is cut from `SqlLexer.engineView(sql)`, not from `sql`: verbatim except that the
-    * unicode spaces DuckDB's own pre-pass turns into spaces ARE spaces, and those it keeps are
-    * pinned to stand-ins. Every caller re-lexes its fragments (stripping comments, classifying),
-    * and the pre-pass state at a statement boundary depends on everything before it: a fragment cut
-    * from the original text would lex alone differently from how DuckDB lexed it in place.
-    */
-  private[sql] def splitStatements(sql: String): List[String] =
-    val view = SqlLexer.engineView(sql)
-    val out  = ListBuffer.empty[String]
-    var from = 0
-    SqlLexer.tokens(view).foreach { t =>
-      if t.kind == SqlLexer.Kind.Punct && view.charAt(t.start) == ';' then
-        out += view.substring(from, t.start)
-        from = t.end
-    }
-    out += view.substring(from)
-    out.toList.filter(_.trim.nonEmpty)
+  /** [[StatementHead.split]], under the name this screen's callers use. */
+  private[sql] def splitStatements(sql: String): List[String] = StatementHead.split(sql)
 
   /** The setting name as a standalone word after the SET/RESET/PRAGMA keyword. */
   private def settingTargeted(lower: String, setting: String): Boolean =
