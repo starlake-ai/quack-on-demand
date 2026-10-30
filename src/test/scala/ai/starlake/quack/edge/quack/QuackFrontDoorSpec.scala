@@ -1060,6 +1060,37 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     routerSession.pinnedNodeId shouldBe None
     fx.router.sessions.inTransactionCount shouldBe 0
 
+  "a transaction whose node leaves the pool" should
+    "be fenced until ROLLBACK, never run on another node" in:
+      val fx     = setup()
+      val connId = connect(fx)
+      // The transaction opens on the pool's last node (the first is made busier): the one a scale
+      // down to one node removes.
+      val first = fx.nodes.head.nodeId
+      val last  = fx.nodes.last.nodeId
+      fx.tracker.onStart(first)
+      prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+      txNode(fx, connId) shouldBe last
+      fx.router.supervisor
+        .scale(poolKey, 1, RoleDistribution(0, 0, 1), force = true)
+        .unsafeRunSync()
+      fx.router.supervisor.get(poolKey).get.nodes.map(_.nodeId) shouldBe List(first)
+      val posted   = fx.transport.posted.size
+      val prepared = fx.transport.prepared.size
+      errorText(prepare(fx, connId, "SELECT 1")) shouldBe FlightSqlRouter.PinLostAnswer
+      // Nothing ran: the transaction's link was DISCONNECTed and no PREPARE went out.
+      fx.transport.prepared.size shouldBe prepared
+      postedSince(fx, posted) shouldBe List((Type.Disconnect, "NODE2"))
+      fx.sessions.get(connId).get.txLink.get() shouldBe None
+      fx.router.sessions.get(connId).get.txOpen shouldBe false
+      // Fenced: the next statement gets the same answer instead of autocommitting on the survivor.
+      errorText(prepare(fx, connId, "SELECT 2")) shouldBe FlightSqlRouter.PinLostAnswer
+      fx.transport.prepared.size shouldBe prepared
+      // ROLLBACK lifts the fence (on the surviving node), and the session runs on there.
+      prepare(fx, connId, "ROLLBACK") shouldBe prepareResp(false)
+      prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
+      lastPrepareNode(fx) shouldBe first
+
   // The DuckDB 2.0 client's catalog sync (duckdb-quack QuackSchemaSet / QuackTableSet
   // GetLoadQuery, abridged): two statements the client joins on node-local oids.
   private val SchemaSync =

@@ -522,9 +522,12 @@ final class FlightSqlRouter(
         * the transaction's own link (`evaluate`); its failure is answered as its own, prefixed
         * "computing the file location: " (a failure the node answers has aborted the transaction,
         * as DuckDB does; a refusal by the gateway leaves it open), and a value no literal may stand
-        * for aborts the transaction through this fence. None (FlightSQL, whose statements share no
-        * node connection): a failing evaluation leaves the statement unchanged, as outside a
-        * transaction.
+        * for aborts the transaction through this fence. The router also fences through it when the
+        * transaction's pinned node has left the pool (Phase C review D-m8): the front door's link
+        * is gone with it, and its next statement must not run elsewhere, outside the transaction.
+        * None (FlightSQL, whose statements share no node connection): a failing evaluation leaves
+        * the statement unchanged, as outside a transaction, and a lost pin only fails the
+        * statement.
         */
       failInTransaction: Option[FlightSqlRouter.TransactionFence] = None,
       /** Why the statement's decisions are taken (decision 25): `DryRun` for the OPA dry run
@@ -601,7 +604,8 @@ final class FlightSqlRouter(
         clientDataScans,
         softPinOverCapacity,
         purpose,
-        detail = detail
+        detail = detail,
+        pinLost = failInTransaction
       )
     // The client's statement answered with `failure` before anything ran it: its history row.
     def refused(failure: RouterFailure): IO[Either[RouterFailure, Routed[A]]] =
@@ -662,7 +666,8 @@ final class FlightSqlRouter(
               source,
               edge,
               patId,
-              purpose
+              purpose,
+              failInTransaction
             )
               .flatMap {
                 case Right(values) =>
@@ -705,7 +710,8 @@ final class FlightSqlRouter(
               source,
               edge,
               patId,
-              purpose
+              purpose,
+              failInTransaction
             )
               .flatMap {
                 case Left(failure)         => refused(failure)
@@ -729,7 +735,8 @@ final class FlightSqlRouter(
       source: String,
       edge: String,
       patId: Option[String],
-      purpose: DecidePurpose
+      purpose: DecidePurpose,
+      pinLost: Option[FlightSqlRouter.TransactionFence]
   ): IO[Either[FlightSqlRouter.LocationFailure, List[String]]] =
     val none: Either[FlightSqlRouter.LocationFailure, List[String]] = Right(Nil)
     locations.foldLeft(IO.pure(none)) { (done, location) =>
@@ -746,7 +753,8 @@ final class FlightSqlRouter(
             source,
             edge,
             patId,
-            purpose
+            purpose,
+            pinLost
           ).map {
             case Right((rows, _)) =>
               ComputedLocations
@@ -775,7 +783,8 @@ final class FlightSqlRouter(
       source: String,
       edge: String,
       patId: Option[String],
-      purpose: DecidePurpose
+      purpose: DecidePurpose,
+      pinLost: Option[FlightSqlRouter.TransactionFence]
   ): IO[Either[RouterFailure, (NodeRows, String)]] =
     executeGuarded[NodeRows](
       connectionId,
@@ -794,7 +803,8 @@ final class FlightSqlRouter(
       clientDataScans = false,
       softPinOverCapacity = false,
       purpose = purpose,
-      internal = true
+      internal = true,
+      pinLost = pinLost
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
       case Right(routed) => IO(routed.close()).as(Right((routed.value, routed.nodeId)))
@@ -818,7 +828,8 @@ final class FlightSqlRouter(
       softPinOverCapacity: Boolean,
       purpose: DecidePurpose,
       internal: Boolean = false,
-      detail: Map[String, String] = Map.empty
+      detail: Map[String, String] = Map.empty,
+      pinLost: Option[FlightSqlRouter.TransactionFence]
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Backstop behind the analysis steps' own TooDeep guards: the screens, gates and rewriters run
     // synchronously here, before any IO, so a walk none of them guards that overflows is denied
@@ -844,7 +855,8 @@ final class FlightSqlRouter(
         softPinOverCapacity,
         purpose,
         internal,
-        detail
+        detail,
+        pinLost
       )
     )
 
@@ -924,6 +936,8 @@ final class FlightSqlRouter(
     * refused form was rewritten): history, audit and the kill registry show the client's.
     * `internal`: a statement the manager runs for the client ([[readBack]]), which is in the kill
     * registry while it runs although it records nothing. `detail`: merged into the audit events.
+    * `pinLost`: the front door's fence for its client transaction, invoked when the transaction's
+    * pinned node has left the pool.
     */
   private def executeUnguarded[A](
       connectionId: String,
@@ -943,7 +957,8 @@ final class FlightSqlRouter(
       softPinOverCapacity: Boolean,
       purpose: DecidePurpose,
       internal: Boolean,
-      detail: Map[String, String]
+      detail: Map[String, String],
+      pinLost: Option[FlightSqlRouter.TransactionFence]
   ): IO[Either[RouterFailure, Routed[A]]] =
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
     val s    = openSession(connectionId, user, poolKey, recordExecution, source)
@@ -1249,9 +1264,14 @@ final class FlightSqlRouter(
                 case RoutingDecision.PinnedNodeGone(_) =>
                   sessions.invalidatePin(connectionId)
                   maybeRecord(nodeId = "-", durationMs = 0, status = "pin-lost", error = None)
-                  IO.pure(
-                    Left(RouterFailure.Unavailable("pinned node disappeared; transaction lost"))
-                  )
+                  // A front door whose node connection carries the client's transaction (the
+                  // native one) ends it there too, as abortTx does for a failed link: else its
+                  // next statement would run on another node, outside the transaction the client
+                  // still believes open (Phase C review D-m8).
+                  pinLost.fold(IO.unit)(fence => fence(FlightSqlRouter.PinLostAnswer)) *>
+                    IO.pure(
+                      Left(RouterFailure.Unavailable("pinned node disappeared; transaction lost"))
+                    )
 
                 case RoutingDecision.Use(nodeId) =>
                   snap.nodes.find(_.nodeId == nodeId) match
@@ -1647,6 +1667,12 @@ object FlightSqlRouter:
     * statement and every later one until ROLLBACK (QuackFrontDoor's `abortTx`).
     */
   type TransactionFence = String => IO[Unit]
+
+  /** The fence's answer when the transaction's pinned node has left the pool: the node, and the
+    * transaction with it, are gone.
+    */
+  val PinLostAnswer: String =
+    "transaction aborted: the transaction's node left the pool; ROLLBACK to continue"
 
   /** Why a statement the manager ran for the client ([[readBack]]) failed when it was killed while
     * the node ran it: the client's statement then stops there.

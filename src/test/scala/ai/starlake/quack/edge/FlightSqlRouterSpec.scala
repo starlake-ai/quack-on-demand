@@ -571,6 +571,38 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Left[_, _]]
     sessions.get("c-5").flatMap(_.pinnedNodeId) shouldBe None
 
+  it should "fence a front door's transaction when its pinned node leaves the pool" in:
+    // The native front door holds the client's transaction on its own node connection: the router
+    // must end it there too (D-m8). FlightSQL passes no fence and gets the same failure.
+    val (router, sessions, _) = setup()
+    val fenced                = scala.collection.mutable.ListBuffer.empty[String]
+    val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
+      router.adapter.send(node, wrappedSql, principal, None).map {
+        case QuackResponse.Ok(_, ms, close) => NodeOutcome.Ok((), ms, close)
+        case QuackResponse.Failed(err, ms)  => NodeOutcome.Permanent(err.toString, ms)
+      }
+    def statement(sql: String) =
+      router
+        .executeWith(
+          "c-fence",
+          "alice",
+          poolKey,
+          sql,
+          None,
+          relay,
+          failInTransaction = Some(answer => IO(fenced += answer).void),
+          purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+        )
+        .unsafeRunSync()
+    statement("BEGIN").foreach(_.close())
+    sessions.get("c-fence").exists(_.txOpen) shouldBe true
+    fenced.toList shouldBe Nil
+    router.supervisor.stopPool(poolKey, force = true).unsafeRunSync()
+    statement("SELECT 1").left.map(_.reason) shouldBe
+      Left("pinned node disappeared; transaction lost")
+    fenced.toList shouldBe List(FlightSqlRouter.PinLostAnswer)
+    sessions.get("c-fence").flatMap(_.pinnedNodeId) shouldBe None
+
   // ---- defaultDatabase / defaultSchema precedence tests ----
 
   /** A router over `sup` whose parser defaults the cases below read; its node is never called. */
