@@ -145,6 +145,29 @@ int main() {
 	stale = stored;
 	stale.expires_at = qod::kNeverExpires;
 	Expect(!qod::RebindRequired(&stale, session, now_ms + 1000), "a local allow never expires");
+	// Decision 24: a statement prepared under other read-only catalogs is bound and checked again, a
+	// local allow included: an EXECUTE that is not rebound shows no plan to check.
+	stale.read_only = {"crm"};
+	Expect(qod::RebindRequired(&stale, session, now_ms), "a verdict taken under other read-only catalogs");
+	auto read_only_session = session;
+	read_only_session.read_only = {"crm"};
+	Expect(!qod::RebindRequired(&stale, read_only_session, now_ms), "the same read-only catalogs");
+	auto checked = stored;
+	checked.read_only = {"crm"};
+	Expect(!qod::ExpiredInPlanning(&checked, session, now_ms + 1000),
+	       "a verdict checked against other read-only catalogs is not this session's");
+
+	// ---- decision 24: the handle's read-only catalogs refuse a write into them
+	Expect(qod::ReadOnlyRefusal({"crm"}, {}).empty(), "nothing is read-only");
+	Expect(qod::ReadOnlyRefusal({}, {"crm"}).empty(), "a statement that writes nowhere");
+	Expect(qod::ReadOnlyRefusal({"memory"}, {"crm", "erp"}).empty(), "a write into a writable catalog");
+	Expect(qod::ReadOnlyRefusal({"crm2"}, {"crm"}).empty(), "a catalog whose name only starts the same");
+	Expect(qod::ReadOnlyRefusal({"crm"}, {"crm"}) == "QoD: catalog crm is read-only",
+	       "a write into a read-only catalog");
+	Expect(qod::ReadOnlyRefusal({"erp", "memory"}, {"crm", "erp"}) == "QoD: catalog erp is read-only",
+	       "one read-only catalog among the written ones");
+	Expect(qod::ReadOnlyRefusal({"crm", "erp"}, {"crm", "erp"}) == "QoD: catalog crm is read-only",
+	       "the first read-only catalog is named");
 
 	if (failures == 0) {
 		std::cout << "authz_test: all passed" << std::endl;

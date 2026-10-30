@@ -11,6 +11,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,8 @@ struct Capture {
 	//! Set by the last refusal; cleared by a described plan.
 	std::string refused;
 	int described = 0;
+	//! The last described plan's written catalogs (decision 24); cleared by a refusal.
+	std::set<std::string> written;
 };
 
 inline Capture &TheCapture() {
@@ -48,6 +51,7 @@ inline void CapturePostBind(duckdb::PlannerExtensionInput &input, duckdb::BoundS
 		auto described = qod::Describe(input.context, *statement.plan, capture.principal, &text);
 		capture.canonical = described.canonical;
 		capture.fingerprint = described.fingerprint;
+		capture.written = described.written_catalogs;
 		capture.all.push_back(described.canonical);
 		capture.contexts.push_back(&input.context);
 		capture.refused.clear();
@@ -55,6 +59,7 @@ inline void CapturePostBind(duckdb::PlannerExtensionInput &input, duckdb::BoundS
 	} catch (duckdb::PermissionException &error) {
 		capture.refused = duckdb::ErrorData(error).RawMessage();
 		capture.canonical.clear();
+		capture.written.clear();
 		throw;
 	}
 }

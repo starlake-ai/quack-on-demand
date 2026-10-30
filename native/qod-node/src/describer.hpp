@@ -9,6 +9,7 @@
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
+#include <set>
 #include <string>
 
 namespace qod {
@@ -21,6 +22,11 @@ struct Described {
 	std::string canonical;
 	//! Lowercase hex SHA-256 of `canonical`.
 	std::string fingerprint;
+	//! The catalogs the plan inserts into, updates, deletes from, or creates, drops or alters entries
+	//! in, and those its ATTACH, DETACH and COPY FROM DATABASE target, lowercased: what the read-only
+	//! rule reads (decision 24, ReadOnlyRefusal). Not part of the description: never sent, never
+	//! fingerprinted.
+	std::set<std::string> written_catalogs;
 };
 
 //! What the describer does with one operator type or expression class. A value a DuckDB upgrade

@@ -23,6 +23,7 @@
 #include "duckdb/common/enums/trigger_type.hpp"
 #include "duckdb/common/enums/view_security_type.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/function/lambda_functions.hpp"
@@ -34,6 +35,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/database_path_and_type.hpp"
 #include "duckdb/parser/constraints/check_constraint.hpp"
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -1350,6 +1352,11 @@ public:
 		                                 {"v", JsonInt(1)}}));
 	}
 
+	//! The catalogs the walk found written or targeted (Described::written_catalogs).
+	const std::set<std::string> &Written() const {
+		return written_;
+	}
+
 private:
 	bool Trusted() const {
 		return principal_.superuser || principal_.system;
@@ -1401,6 +1408,7 @@ private:
 		Add(control_,
 		    JsonObject({{"op", JsonString(op)}, {"target", StringOrNull(target)}, {"type", StringOrNull(type)}}));
 	}
+	void AttachTarget(AttachInfo &info);
 
 	ClientContext &context_;
 	const Principal &principal_;
@@ -1416,6 +1424,7 @@ private:
 	Elements functions_;
 	Elements settings_;
 	Elements control_;
+	std::set<std::string> written_;
 };
 
 // ---- objects ---------------------------------------------------------------------------------
@@ -1427,6 +1436,9 @@ void Walker::AddObject(const std::string &kind, const std::string &access, const
 		Unsupported("a temporary object inside a secure view");
 	}
 	InView(catalog, via);
+	if (access != "read") {
+		written_.insert(StringUtil::Lower(catalog));
+	}
 	Add(objects_, JsonObject({{"access", JsonString(access)},
 	                          {"catalog", JsonString(catalog)},
 	                          {"catalogType", JsonString(catalog_type)},
@@ -1435,6 +1447,27 @@ void Walker::AddObject(const std::string &kind, const std::string &access, const
 	                          {"name", JsonString(name)},
 	                          {"schema", JsonString(schema)},
 	                          {"via", StringOrNull(via)}}));
+}
+
+//! The catalog an ATTACH creates or replaces, for the read-only rule (decision 24), named as
+//! PhysicalAttach::GetData names it when it runs: its alias, else the name DuckDB derives from the
+//! path. The extension prefix is stripped from the path only without a TYPE option, so both derived
+//! names are recorded. An ATTACH TO EXTERNAL RESOURCE takes its path from the resource when it runs; the
+//! v2.0.0 grammar requires its alias, so one without is refused.
+void Walker::AttachTarget(AttachInfo &info) {
+	if (!info.name.empty()) {
+		written_.insert(StringUtil::Lower(Text(info.name)));
+		return;
+	}
+	if (info.external_resource) {
+		Unsupported("an ATTACH TO EXTERNAL RESOURCE without an alias");
+	}
+	auto &fs = FileSystem::GetFileSystem(context_);
+	written_.insert(StringUtil::Lower(Text(AttachedDatabase::ExtractDatabaseName(info.path, fs))));
+	auto stripped = info.path;
+	string db_type;
+	DBPathAndType::ExtractExtensionPrefix(stripped, db_type);
+	written_.insert(StringUtil::Lower(Text(AttachedDatabase::ExtractDatabaseName(stripped, fs))));
 }
 
 void Walker::InSchema(const std::string &kind, const std::string &access, SchemaCatalogEntry &schema,
@@ -2064,10 +2097,13 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 	case LogicalOperatorType::LOGICAL_ATTACH:
 		// Never its path or options: they can carry credentials.
 		AddControl("attach", "", "");
+		AttachTarget(*op.Cast<LogicalAttach>().info);
 		break;
 	case LogicalOperatorType::LOGICAL_DETACH: {
-		auto attached = Catalog::GetCatalogEntry(context_, op.Cast<LogicalDetach>().info->name);
+		auto &name = op.Cast<LogicalDetach>().info->name;
+		auto attached = Catalog::GetCatalogEntry(context_, name);
 		AddControl("detach", "", attached ? attached->GetCatalogType() : "");
+		written_.insert(StringUtil::Lower(Text(name)));
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_LOAD: {
@@ -2124,6 +2160,8 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 	}
 	case LogicalOperatorType::LOGICAL_COPY_DATABASE:
 		AddControl("copy_database", "", "");
+		// Its SCHEMA step creates the source's entries in the target without an object of their own.
+		written_.insert(StringUtil::Lower(Text(op.Cast<LogicalCopyDatabase>().info->target_database)));
 		break;
 	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
 		ExtensionOperator(op.Cast<LogicalExtensionOperator>(), via);
@@ -2594,6 +2632,7 @@ bool IsLockedSetting(const std::string &name) {
 Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan, const Principal &principal,
                    const std::string *statement_text) {
 	std::string canonical;
+	std::set<std::string> written;
 	try {
 		Walker walker(context, principal, statement_text, plan);
 		walker.Operator(plan, "");
@@ -2605,6 +2644,7 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 			JudgeCallNames(context, plan, *statement_text);
 		}
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
+		written = walker.Written();
 	} catch (duckdb::PermissionException &) {
 		throw;
 	} catch (std::invalid_argument &) {
@@ -2618,7 +2658,7 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 		// parser, permission... error does): a refusal, plain.
 		throw duckdb::PermissionException("QoD: statement could not be described");
 	}
-	return Described {canonical, Hex(Sha256(canonical))};
+	return Described {canonical, Hex(Sha256(canonical)), std::move(written)};
 }
 
 void JudgeFailedStatement(duckdb::ClientContext &context, duckdb::SQLStatement &statement) {

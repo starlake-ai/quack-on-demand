@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,8 @@ struct Installed {
 	std::string replica;
 	//! The handle's path: the session default path the manager expects (CONTRACT Addendum 4 item 22).
 	std::string path;
+	//! The handle's read-only catalogs (decision 24): a refresh may change them.
+	std::vector<std::string> read_only;
 };
 
 //! What one verdict admitted: the plan it was taken for and the session it holds for.
@@ -60,6 +63,9 @@ struct Admitted {
 	std::string ctx;
 	//! Epoch milliseconds; kNeverExpires for a local allow (superuser, system, the prelude).
 	int64_t expires_at = 0;
+	//! The read-only catalogs the plan was checked against (decision 24): a prepared statement is checked
+	//! again once they change, since an EXECUTE that DuckDB does not rebind shows no plan.
+	std::vector<std::string> read_only;
 };
 
 constexpr int64_t kNeverExpires = std::numeric_limits<int64_t>::max();
@@ -72,16 +78,23 @@ constexpr const char *kNoVerdict = "QoD: statement reached prepare finalization 
 //! the manager's own), whose plans are admitted on the node.
 std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict);
 
-//! True when the statement's verdict `pending` was taken for `current`'s principal, policy version and
-//! session context, and only its time ran out at `now_ms`, between post_bind and prepare finalization
-//! (T10-N2). OnFinalizePrepare then asks DuckDB to bind the statement once more, which decides it
-//! again, instead of refusing it as one that never had a verdict.
+//! True when the statement's verdict `pending` was taken for `current`'s principal, policy version,
+//! session context and read-only catalogs, and only its time ran out at `now_ms`, between post_bind and
+//! prepare finalization (T10-N2). OnFinalizePrepare then asks DuckDB to bind the statement once more,
+//! which decides it again, instead of refusing it as one that never had a verdict.
 bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms);
 
 //! True when a prepared statement must be bound (described and decided) again before it executes:
 //! no verdict is stored with it (`stored` null), or the stored one was taken for another principal,
-//! policy version or session context than `current`, or has expired at `now_ms`.
+//! policy version, session context or set of read-only catalogs than `current`, or has expired at
+//! `now_ms`.
 bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms);
+
+//! Decision 24: empty to admit a statement whose plan writes into or targets `written` (lowercased
+//! catalog names, Described::written_catalogs), else "QoD: catalog <alias> is read-only" for the first
+//! alias of `read_only` (a verified handle's, sorted) among them. For every principal, the system's
+//! included, before any verdict is reused or asked for.
+std::string ReadOnlyRefusal(const std::set<std::string> &written, const std::vector<std::string> &read_only);
 
 //! Why `next` may not install on a connection that holds `current` (null: none yet); empty when it
 //! may. The first handle installs its principal; a later one only refreshes it: the same principal,

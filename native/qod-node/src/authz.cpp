@@ -138,13 +138,22 @@ std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict) {
 bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms) {
 	return pending && pending->principal_id == current.principal.id &&
 	       pending->policy_version == current.policy_version && pending->ctx == current.ctx &&
-	       pending->expires_at <= now_ms;
+	       pending->read_only == current.read_only && pending->expires_at <= now_ms;
 }
 
 bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms) {
 	return !stored || stored->principal_id != current.principal.id ||
 	       stored->policy_version != current.policy_version || stored->ctx != current.ctx ||
-	       stored->expires_at <= now_ms;
+	       stored->read_only != current.read_only || stored->expires_at <= now_ms;
+}
+
+std::string ReadOnlyRefusal(const std::set<std::string> &written, const std::vector<std::string> &read_only) {
+	for (auto &alias : read_only) {
+		if (written.count(alias) != 0) {
+			return "QoD: catalog " + alias + " is read-only";
+		}
+	}
+	return "";
 }
 
 } // namespace qod
