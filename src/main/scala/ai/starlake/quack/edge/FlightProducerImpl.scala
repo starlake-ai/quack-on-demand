@@ -19,9 +19,14 @@ import scala.jdk.CollectionConverters.*
 /** Minimal FlightSqlProducer that forwards SQL to the [[FlightSqlRouter]]. The router talks to the
   * chosen Quack node through the native Quack wire client and hands us back an
   * [[org.apache.arrow.vector.ipc.ArrowReader]] that we stream batch-by-batch to the Flight client.
+  *
+  * `preparedIdleTtlSec`: a prepared handle unused this long is dropped ([[PreparedHandles]]); the
+  * edge passes its session TTL. The edge also drops a session's handles when the session leaves
+  * [[ConnectionContext]] ([[dropSession]], through [[FlightEdgeServer.sessionEvicted]]).
   */
 final class FlightProducerImpl(
-    router: FlightSqlRouter
+    router: FlightSqlRouter,
+    preparedIdleTtlSec: Long
 ) extends NoOpFlightSqlProducer
     with LazyLogging:
 
@@ -139,7 +144,25 @@ final class FlightProducerImpl(
     serializeSchema(adminStatusSchema)
 
   private val preparedStatements =
-    scala.collection.concurrent.TrieMap.empty[String, PreparedExec]
+    new PreparedHandles[PreparedExec](
+      preparedIdleTtlSec * 1000L,
+      () => System.currentTimeMillis(),
+      _.connId
+    )
+
+  /** Drop every prepared handle of the session `connectionId`, which just left
+    * [[ConnectionContext]]: a later use of one answers "no such prepared statement".
+    */
+  def dropSession(connectionId: String): Unit =
+    val n = preparedStatements.dropConnection(connectionId)
+    if n > 0 then logger.debug(s"dropped $n prepared handle(s) of evicted session $connectionId")
+
+  /** Drop the prepared handles unused for `preparedIdleTtlSec`; run by the edge's session sweeper.
+    */
+  def expireIdlePrepared(): Int = preparedStatements.expireIdle()
+
+  /** Visible for tests. */
+  private[edge] def preparedCount: Int = preparedStatements.size
 
   /** Serialize an Arrow schema as a single IPC `Schema` message. */
   private def serializeSchema(schema: org.apache.arrow.vector.types.pojo.Schema): ByteString =

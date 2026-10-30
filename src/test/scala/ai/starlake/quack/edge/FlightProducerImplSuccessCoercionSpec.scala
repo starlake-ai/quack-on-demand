@@ -94,7 +94,7 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
       adapter,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
-    val producer = new FlightProducerImpl(router)
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
     val peer = s"peer-${java.util.UUID.randomUUID()}"
     ConnectionContext.bind(

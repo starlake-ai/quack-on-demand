@@ -65,20 +65,24 @@ final class FlightEdgeServer(
     )
 
   /** Sweeps expired [[ConnectionContext]] entries so a departed client's session state (the context
-    * entry and the router's session row) does not linger until the peer id happens to be presented
-    * again, which for a gone client is never.
+    * entry, the router's session row and its prepared handles) does not linger until the peer id
+    * happens to be presented again, which for a gone client is never; then drops prepared handles
+    * left idle for the session TTL.
     */
   private var sweeper: ScheduledExecutorService = null.asInstanceOf[ScheduledExecutorService]
 
   def start(): Unit =
-    val producer = new FlightProducerImpl(router)
-    ConnectionContext.onEvict(router.sessions.close)
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = cfg.sessionTtlSec)
+    ConnectionContext.onEvict(FlightEdgeServer.sessionEvicted(router, producer))
     sweeper = Executors.newSingleThreadScheduledExecutor { r =>
       val t = new Thread(r, "flight-session-sweeper"); t.setDaemon(true); t
     }
     sweeper.scheduleAtFixedRate(
       () =>
-        try ConnectionContext.evictExpired()
+        try
+          ConnectionContext.evictExpired()
+          producer.expireIdlePrepared()
+          ()
         catch case t: Throwable => logger.warn(s"Flight session sweep failed: ${t.getMessage}"),
       FlightEdgeServer.SweepSec,
       FlightEdgeServer.SweepSec,
@@ -270,6 +274,15 @@ final class FlightEdgeServer(
       server = null.asInstanceOf[FlightServer]
 
 object FlightEdgeServer:
+
+  /** What the edge installs as [[ConnectionContext]]'s evict hook: a dropped session takes its
+    * router session row and its prepared handles with it.
+    */
+  def sessionEvicted(router: FlightSqlRouter, producer: FlightProducerImpl): String => Unit =
+    connId =>
+      try router.sessions.close(connId)
+      finally producer.dropSession(connId)
+
   /** Seconds between sweeps of expired Flight sessions. */
   val SweepSec: Long = 60L
 

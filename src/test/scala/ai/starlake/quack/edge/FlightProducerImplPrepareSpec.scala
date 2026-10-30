@@ -85,7 +85,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           adapter,
           metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
         )
-    val producer = new FlightProducerImpl(router)
+    val producer = new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
     val peer          = s"peer-${java.util.UUID.randomUUID()}"
     val superuserEff =
@@ -674,6 +674,41 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
     listener.onErrorRef.get() shouldBe null
     // The query actually reached a node.
     sent.exists(_._2.contains("SELECT a FROM t")) shouldBe true
+
+  // ---- a session's prepared handles leave with the session ----
+
+  it should "be gone once the edge's eviction hook ran for its session, live sessions' kept" in:
+    val (producer, _, router, peer) = setupProducer()
+    val command = prepareQueryHandle(producer, peer, "SELECT a FROM t")
+    val connId  = ConnectionContext.connectionIdFor(peer).get
+    // A second live session of the same producer keeps its handle.
+    val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
+    ConnectionContext.bind(
+      otherPeer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "bob",
+      grants = None
+    )
+    val kept = prepareQueryHandle(producer, otherPeer, "SELECT b FROM t")
+    producer.preparedCount shouldBe 2
+    // What the Flight edge installs as ConnectionContext's evict hook, called with the
+    // connection id of the dropped session (the global hook itself is left alone here).
+    ConnectionContext.unbind(peer)
+    FlightEdgeServer.sessionEvicted(router, producer)(connId)
+    producer.preparedCount shouldBe 1
+    val listener = new RecordingStreamListener
+    producer.getStreamPreparedStatement(command, fakeCallContext(peer), listener)
+    listener.awaitTerminal()
+    val err =
+      listener.onErrorRef.get().asInstanceOf[org.apache.arrow.flight.FlightRuntimeException]
+    err.status().code() shouldBe org.apache.arrow.flight.FlightStatusCode.INVALID_ARGUMENT
+    err.getMessage should include("no such prepared statement")
+    an[org.apache.arrow.flight.FlightRuntimeException] should be thrownBy
+      producer.getSchemaPreparedStatement(command, fakeCallContext(peer), null)
+    producer.getSchemaPreparedStatement(kept, fakeCallContext(otherPeer), null) should not be null
+    ConnectionContext.unbind(otherPeer)
+
   // ---- audit F17: a schema probe never runs a statement the Execute runs again ----
   //
   // The node runs every statement of the text it is sent. Probing `SELECT 1; INSERT ...` (or any

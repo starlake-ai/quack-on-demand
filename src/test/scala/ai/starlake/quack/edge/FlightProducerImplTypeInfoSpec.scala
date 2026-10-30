@@ -54,7 +54,7 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
       adapter,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
-    new FlightProducerImpl(router)
+    new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:
     def get(k: String)             = null

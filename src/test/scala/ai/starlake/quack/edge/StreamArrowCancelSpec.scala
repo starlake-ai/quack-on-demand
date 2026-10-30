@@ -64,7 +64,7 @@ class StreamArrowCancelSpec extends AnyFlatSpec with Matchers:
       adapter,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
-    new FlightProducerImpl(router)
+    new FlightProducerImpl(router, preparedIdleTtlSec = 3600L)
 
   /** Counts putNext calls and total rows; flips to cancelled after `cancelAfter` batches. */
   private final class CountingListener(cancelAfter: Int = Int.MaxValue)
