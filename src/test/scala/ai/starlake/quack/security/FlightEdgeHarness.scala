@@ -121,8 +121,6 @@ object FlightEdgeHarness:
         new ColumnCatalog.MapCatalog(Map.empty)
       ),
       protectedWriteGuard: ProtectedWriteGuard = ProtectedWriteGuard.disabled,
-      lockdownFor: PoolSupervisor => PoolKey => Boolean = _ => _ => false,
-      deniedBuckets: PoolSupervisor => () => Set[String] = _ => () => Set.empty,
       journal: EventJournal = EventJournal.noop,
       spawnNodes: Boolean = false,
       /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
@@ -191,8 +189,6 @@ object FlightEdgeHarness:
       stmtInstruments = si,
       columnPolicyRewriter = wiring.columnPolicyRewriter,
       journal = wiring.journal,
-      lockdownFor = wiring.lockdownFor(sup),
-      deniedBuckets = wiring.deniedBuckets(sup),
       protectedWriteGuard = wiring.protectedWriteGuard,
       metadataFilterRewriter = wiring.metadataFilterRewriter
     )

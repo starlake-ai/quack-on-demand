@@ -63,6 +63,13 @@ object BootPreflight extends LazyLogging:
     "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
       "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."
 
+  /** The refusal for the removed node lockdown switch, verbatim in the boot error. */
+  val RemovedNodeLockdownMessage: String =
+    "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
+      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
+      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
+
   /** A removed enforcement switch: its environment variable, its configuration path, the refusal.
     */
   private final case class RemovedSwitch(envVar: String, path: String, message: String)
@@ -74,16 +81,17 @@ object BootPreflight extends LazyLogging:
       "quack-flightsql.acl.filteredMetadata",
       RemovedAclFilteredMetadataMessage
     ),
-    RemovedSwitch("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", RemovedAclDialectMessage)
+    RemovedSwitch("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", RemovedAclDialectMessage),
+    RemovedSwitch("QOD_NODE_LOCKDOWN", "quack-flightsql.nodeLockdown", RemovedNodeLockdownMessage)
   )
 
   /** Pure gate (Phase D decisions 28 and 31): the switches the node made obsolete. Refuses when the
     * environment holds one's variable at all, whatever its value, the empty string included, or
     * when the loaded configuration holds its path (an operator's own config file, or a `-D` system
-    * property): with the `quack-flightsql.acl` block gone, pureconfig would ignore either silently,
-    * and an operator who turned enforcement or the listing filter off would believe it still off.
-    * The first switch found wins. `Main.bootManager` runs it right after [[checkRemovedApiKey]],
-    * before any I/O.
+    * property): with the `quack-flightsql.acl` and `quack-flightsql.nodeLockdown` blocks gone,
+    * pureconfig would ignore either silently, and an operator who turned enforcement or the listing
+    * filter off, or lockdown on, would believe it still so. The first switch found wins.
+    * `Main.bootManager` runs it right after [[checkRemovedApiKey]], before any I/O.
     */
   def checkRemovedSwitches(
       env: String => Option[String],

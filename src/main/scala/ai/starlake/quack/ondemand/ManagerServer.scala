@@ -961,9 +961,6 @@ final class ManagerServer(
       PoolEndpoints.setPoolTemplate.serverLogic { case (req, token) =>
         pools.setPodTemplate(req, token)(scopeOfToken)
       },
-      PoolEndpoints.setPoolLockdown.serverLogic { case (req, token) =>
-        pools.setLockdown(req, token)(scopeOfToken)
-      },
       PoolEndpoints.setPoolAutoscale.serverLogic { case (req, token) =>
         pools.setPoolAutoscale(req, token)(scopeOfToken)
       },

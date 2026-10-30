@@ -134,7 +134,6 @@ CASES = [
             "roleDistribution": {"writeonly": 1, "readonly": 1, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
             "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "inherit",
         },
     ),
     (
@@ -154,20 +153,6 @@ CASES = [
             "cohorts": [
                 {"placement": {"nodeSelector": {}, "tolerations": []}, "distribution": {"writeonly": 1, "readonly": 1, "dual": 0}},
             ],
-            "lockdown": "inherit",
-        },
-    ),
-    (
-        ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--size", "2", "--lockdown", "off"],
-        "POST",
-        "/api/pool/create",
-        {},
-        {
-            "tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "size": 2,
-            "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
-            "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
-            "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "off",
         },
     ),
     (
@@ -183,7 +168,7 @@ CASES = [
             "roleDistribution": {"writeonly": 0, "readonly": 0, "dual": 0},
             "idleTimeoutSec": -1, "maxConcurrentPerNode": 0, "disabled": False,
             "cpu": "", "memory": "", "podTemplateYaml": "", "startSuspended": False,
-            "lockdown": "inherit", "minNodes": 1, "maxNodes": 4,
+            "minNodes": 1, "maxNodes": 4,
         },
     ),
     (
@@ -229,11 +214,6 @@ CASES = [
         ["pool", "set-resources", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--cpu", "2", "--memory", "4Gi"],
         "POST", "/api/pool/setResources", {},
         {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "cpu": "2", "memory": "4Gi"},
-    ),
-    (
-        ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--lockdown", "on"],
-        "POST", "/api/pool/setLockdown", {},
-        {"tenant": "acme", "tenantDb": "tpch1", "pool": "bi", "lockdown": "on"},
     ),
     (
         ["pool", "set-autoscale", "--tenant", "acme", "--db", "tpch1", "--pool", "bi", "--min-nodes", "1", "--max-nodes", "4"],
@@ -815,3 +795,18 @@ def test_profile_s3_add_needs_exactly_one_secret_source_and_no_blank(runner):
     blank = runner.invoke(app, S3_ADD + ["--secret-stdin"], input="  \n")
     assert blank.exit_code != 0 and "blank" in blank.output
     assert not route.called
+
+
+@respx.mock
+def test_pool_lockdown_is_gone(runner):
+    # Phase D: every node enforces on every pool. The per-pool override's flag and command are gone,
+    # and neither reaches the manager.
+    create = respx.post(f"{BASE}/api/pool/create").mock(return_value=httpx.Response(200, json={}))
+    gone = respx.post(f"{BASE}/api/pool/setLockdown").mock(return_value=httpx.Response(200, json={}))
+    flag = runner.invoke(app, ["pool", "create", "--tenant", "acme", "--db", "tpch1", "--pool", "bi",
+                               "--size", "1", "--dual", "1", "--lockdown", "off"])
+    assert flag.exit_code == 2
+    cmd = runner.invoke(app, ["pool", "set-lockdown", "--tenant", "acme", "--db", "tpch1", "--pool",
+                              "bi", "--lockdown", "on"])
+    assert cmd.exit_code == 2
+    assert not create.called and not gone.called

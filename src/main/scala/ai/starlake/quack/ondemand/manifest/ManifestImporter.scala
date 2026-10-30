@@ -7,7 +7,6 @@ import ai.starlake.quack.model.{
   FederatedSecret,
   FederatedSource,
   FederatedSourceType,
-  LockdownTriState,
   Names,
   NodePlacement,
   NodeToleration,
@@ -186,12 +185,6 @@ object ManifestImporter extends LazyLogging:
       t.pools.foreach { p =>
         if !dbNames.contains(p.tenantDb) then
           errs += s"tenant '${t.name}' pool '${p.name}': tenantDb '${p.tenantDb}' not declared under tenant"
-        // Reject an invalid lockdown tri-state the same way other enum-ish
-        // manifest fields are rejected: accumulate a validation error rather
-        // than throwing at apply time.
-        LockdownTriState.parse(p.lockdown).left.foreach { msg =>
-          errs += s"tenant '${t.name}' pool '${p.name}': $msg"
-        }
         // Reject a malformed demand scale-out band (one-sided, inverted,
         // below the write-capable floor, over the hard cap, or outside the
         // declared size) the same way -- accumulate rather than throw. The
@@ -654,9 +647,6 @@ object ManifestImporter extends LazyLogging:
               cpu = mp.cpu,
               memory = mp.memory,
               podTemplateYaml = mp.podTemplateYaml,
-              // validate() already rejected any non-tri-state value, so this
-              // parse cannot fail here; None (inherit) on the impossible miss.
-              lockdown = LockdownTriState.parse(mp.lockdown).getOrElse(None),
               minNodes = mp.minNodes,
               maxNodes = mp.maxNodes
             )

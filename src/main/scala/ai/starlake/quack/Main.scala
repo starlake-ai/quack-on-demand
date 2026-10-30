@@ -12,7 +12,6 @@ import ai.starlake.quack.edge.config.{
   GoogleAuthConfig,
   JwtAuthConfig,
   KeycloakAuthConfig,
-  NodeLockdownConfig,
   OpaConfig
 }
 import ai.starlake.quack.boot.{
@@ -242,8 +241,7 @@ object Main extends IOApp with LazyLogging:
     val opaCfg   = OpaConfig
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
       .fold(err => throw new IllegalArgumentException(err), identity)
-    val lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
-    val metricsCfg  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+    val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     withEmbeddedControlPlane(mgrCfg, authCfg) { (resolved, resolvedAuth) =>
       bootManager(
         resolved,
@@ -251,7 +249,6 @@ object Main extends IOApp with LazyLogging:
         resolvedAuth,
         metricsCfg,
         opaCfg,
-        lockdownCfg = lockdownCfg,
         modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
         quackCfg = Some(quackCfg)
       )
@@ -266,7 +263,6 @@ object Main extends IOApp with LazyLogging:
         * must load and validate it, so a bad QOD_ACL_MODE / QOD_OPA_URL fails boot everywhere.
         */
       opaCfg: OpaConfig,
-      lockdownCfg: NodeLockdownConfig = NodeLockdownConfig(enabled = false),
       modules: List[ai.starlake.quack.spi.ManagerModule] = Nil,
       /** The native Quack front door block; loaded from `quack-native` when the caller does not
         * pass one (demo and serve overlays set their system properties before this runs).
@@ -283,8 +279,8 @@ object Main extends IOApp with LazyLogging:
     // read the configuration alone. A removed QOD_API_KEY refuses boot before HA validation, so an
     // upgrade that still sets the key stops with the reason.
     BootPreflight.checkRemovedApiKey(env, rawConfig).left.foreach(msg => sys.error(msg))
-    // Then a removed switch (QOD_ACL_ENABLED, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT): the node
-    // enforces always and the listing filter is always mounted.
+    // Then a removed switch (QOD_ACL_ENABLED, QOD_ACL_FILTERED_METADATA, QOD_ACL_DIALECT,
+    // QOD_NODE_LOCKDOWN): the node enforces always and the listing filter is always mounted.
     BootPreflight.checkRemovedSwitches(env, rawConfig).left.foreach(msg => sys.error(msg))
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
@@ -395,7 +391,6 @@ object Main extends IOApp with LazyLogging:
       authCfg,
       metricsCfg,
       opaCfg,
-      lockdownCfg,
       modules,
       quackCfgResolved,
       qodNodeBin
@@ -410,7 +405,6 @@ object Main extends IOApp with LazyLogging:
       authCfg: AuthenticationConfig,
       metricsCfg: MetricsConfig,
       opaCfg: OpaConfig,
-      lockdownCfg: NodeLockdownConfig,
       modules: List[ai.starlake.quack.spi.ManagerModule],
       quackCfgResolved: QuackNativeConfig,
       qodNodeBin: Option[java.nio.file.Path]
@@ -701,7 +695,6 @@ object Main extends IOApp with LazyLogging:
       locks = poolLocks,
       publish = publisher,
       events = supEvents,
-      lockdownEnabled = lockdownCfg.enabled,
       managedStore = Option.when(mgrCfg.managedObjectStore.enabled)(mgrCfg.managedObjectStore),
       sharedPolicyVersions = Some(policyVersions),
       sharedUserS3 = Some(userS3)
@@ -1044,12 +1037,6 @@ object Main extends IOApp with LazyLogging:
     // where it cannot load.
     val client  = new QuackHttpClient(arrowAllocator, nodeLeaseSec = mgrCfg.nodeLeaseSec)
     val adapter = new QuackHttpAdapter(client, tracker, nodeKeys)
-    if lockdownCfg.enabled then logger.info("node lockdown: enabled")
-    else
-      logger.warn(
-        "node lockdown: disabled; tenants of unlocked pools can read node credentials " +
-          "(set QOD_NODE_LOCKDOWN=true to enforce)"
-      )
 
     // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
     // so the pool's default schema exists before wrapWithDefaultSchema ever
@@ -1428,16 +1415,6 @@ object Main extends IOApp with LazyLogging:
         events = routerEvents,
         resumeHoldTimeout =
           scala.concurrent.duration.DurationLong(edgeCfg.resumeHoldTimeoutSec).seconds,
-        lockdownFor = sup.effectiveLockdown,
-        // DuckLake buckets are never directly addressable from tenant SQL under lockdown:
-        // every tenant-db dataPath bucket plus the managed root bucket (static config).
-        deniedBuckets = () =>
-          sup.duckLakeBuckets() ++
-            Option
-              .when(mgrCfg.managedObjectStore.enabled)(
-                mgrCfg.managedObjectStore.bucket.toLowerCase(Locale.ROOT)
-              )
-              .toSet,
         routingRefs = routingRefsCache,
         refsConfigFor = refsConfigFor,
         locality = localityTracker,
@@ -2139,8 +2116,6 @@ object Main extends IOApp with LazyLogging:
                     quack = quackDoor.map(_ =>
                       (quackCfgResolved.host, quackCfgResolved.port, quackCfgResolved.tlsEnabled)
                     ),
-                    nodeLockdown = lockdownCfg.enabled,
-                    unlockedPools = sup.unlockedPoolCount,
                     aclMode = opaCfg.defaultMode,
                     opaTenants = sup.listTenants().count(_.acl.isOpa(opaCfg.defaultMode)),
                     cliConfigFile = sys.env.get("QOD_CONFIG_FILE").filter(_.nonEmpty)

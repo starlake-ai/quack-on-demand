@@ -245,7 +245,6 @@ def test_provision_spec_holds_the_three_create_requests():
             "memory": "",
             "podTemplateYaml": "",
             "startSuspended": False,
-            "lockdown": "inherit",
         },
     }
 

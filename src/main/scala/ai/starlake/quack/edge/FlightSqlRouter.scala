@@ -59,12 +59,6 @@ final class FlightSqlRouter(
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
-    /** Read by nothing since the gateway's lockdown screen went (spec Section 7); removed with
-      * per-pool lockdown.
-      */
-    val lockdownFor: PoolKey => Boolean = _ => false,
-    /** Read by nothing since the gateway's lockdown screen went; removed with per-pool lockdown. */
-    val deniedBuckets: () => Set[String] = () => Set.empty,
     val routingRefs: ai.starlake.quack.route.RoutingRefsCache =
       new ai.starlake.quack.route.RoutingRefsCache(),
     val refsConfigFor: PoolKey => ai.starlake.acl.model.Config = _ =>

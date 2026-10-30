@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.edge.adapter.{EngineStatsTracker, NodeLoadTracker}
-import ai.starlake.quack.model.{AutoscaleBand, LockdownTriState, PoolKey, QuantitySyntax}
+import ai.starlake.quack.model.{AutoscaleBand, PoolKey, QuantitySyntax}
 import ai.starlake.quack.ondemand.{PoolState, PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.initsql.{InitSqlChecker, InitSqlTrust}
@@ -67,7 +67,7 @@ final class PoolHandlers(
   private def respond(key: PoolKey, liveness: Map[String, String]): Option[PoolResponse] =
     sup.get(key).map { p =>
       val poolEntityCohorts = sup.poolId(key).flatMap(sup.poolEntity).map(_.cohorts).getOrElse(Nil)
-      // Same pool-row resolution as the lockdown fields below; None on a fixed-size pool.
+      // From the pool row; None on a fixed-size pool.
       val band = sup.autoscaleBand(key)
       PoolResponse(
         tenant = key.tenant,
@@ -110,10 +110,6 @@ final class PoolHandlers(
         initSql = p.initSql,
         cpu = p.cpu,
         memory = p.memory,
-        lockdown = LockdownTriState.render(
-          sup.poolId(key).flatMap(sup.poolEntity).flatMap(_.lockdown)
-        ),
-        lockdownEffective = sup.effectiveLockdown(key),
         minNodes = band.map(_._1),
         maxNodes = band.map(_._2),
         pending = sup.pendingCount(key),
@@ -134,9 +130,8 @@ final class PoolHandlers(
 
   /** The one pool create path, shared by `POST /api/pool/create` and the boot-time
     * `ServeProvisionHook` (which passes `SessionScope.Superuser` and `AuditActor.System`): the
-    * tenant-scope gate and the superuser-only lockdown and pod-template gates on the caller's
-    * resolved scope, the shape checks, the create (quota-gated unless the scope is a superuser's),
-    * and its audit rows.
+    * tenant-scope gate and the superuser-only pod-template gate on the caller's resolved scope, the
+    * shape checks, the create (quota-gated unless the scope is a superuser's), and its audit rows.
     */
   def createPoolAs(
       req: CreatePoolRequest,
@@ -149,53 +144,35 @@ final class PoolHandlers(
         IO.pure(Left(err))
       case None =>
         val gateBypass = SuperuserCheck.forScope(scope).isEmpty
-        // Per-pool lockdown override is a superuser-only mutation (same rule as
-        // POST /api/pool/setLockdown). Gate it at create time BEFORE any state
-        // change so a tenant admin cannot slip "lockdown": "on"|"off" past the
-        // TenantScopeCheck. "inherit" (the default) stays open to tenant admins.
-        // Deliberate quirk: this compares the raw string, before
-        // LockdownTriState.parse runs in createPoolInner, so a tenant admin
-        // sending an INVALID value (e.g. "banana") also gets 403
-        // superuser_required rather than 400 invalid -- fail-closed on any
-        // non-"inherit" string, not just the two valid overrides.
-        val lockdownGate =
-          if req.lockdown != "inherit" then SuperuserCheck.forScope(scope) else None
-        lockdownGate match
-          case Some(err) =>
-            actor.controlPlane(audit, AuditActions.PoolCreate, "denied", tenant = Some(req.tenant))
-            IO.pure(Left(err))
-          case None =>
-            if req.podTemplateYaml.nonEmpty then
-              SuperuserCheck.forScope(scope) match
-                case Some(err) =>
-                  actor.controlPlane(
-                    audit,
-                    AuditActions.PoolCreate,
-                    "denied",
-                    tenant = Some(req.tenant)
-                  )
-                  IO.pure(Left(err))
-                case None =>
-                  if !podTemplateEnabled then
-                    IO.pure(
-                      Left(
-                        (
-                          StatusCode.BadRequest,
-                          ErrorResponse(
-                            "feature_disabled",
-                            "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
-                          )
-                        )
+        if req.podTemplateYaml.nonEmpty then
+          SuperuserCheck.forScope(scope) match
+            case Some(err) =>
+              actor.controlPlane(
+                audit,
+                AuditActions.PoolCreate,
+                "denied",
+                tenant = Some(req.tenant)
+              )
+              IO.pure(Left(err))
+            case None =>
+              if !podTemplateEnabled then
+                IO.pure(
+                  Left(
+                    (
+                      StatusCode.BadRequest,
+                      ErrorResponse(
+                        "feature_disabled",
+                        "pod templates are disabled (QOD_POD_TEMPLATE_ENABLED=false)"
                       )
                     )
-                  else
-                    QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
-                      case Left(msg) =>
-                        IO.pure(
-                          Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg)))
-                        )
-                      case Right(()) => createPoolInner(req, actor, gateBypass)
-            else createPoolInner(req, actor, gateBypass)
+                  )
+                )
+              else
+                QuantitySyntax.validPodTemplate(req.podTemplateYaml) match
+                  case Left(msg) =>
+                    IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid_template", msg))))
+                  case Right(()) => createPoolInner(req, actor, gateBypass)
+        else createPoolInner(req, actor, gateBypass)
 
   private def createPoolInner(
       req: CreatePoolRequest,
@@ -219,162 +196,157 @@ final class PoolHandlers(
     val initSqlRefusal = req.initSql.flatMap(sql =>
       InitSqlTrust.markerRefusal(sql).orElse(InitSqlTrust.sizeRefusal(sql, gateBypass))
     )
-    LockdownTriState.parse(req.lockdown) match
-      case Left(msg) =>
-        IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
-      case Right(lockdownValue) =>
-        if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
+    if req.cpu.nonEmpty && !QuantitySyntax.validCpu(req.cpu) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+          )
+        )
+      )
+    else if !req.roleDistribution.isValidFor(req.size) then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid_distribution", "role counts do not sum to size")
+          )
+        )
+      )
+    else if initSqlRefusal.isDefined then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("init_sql_refused", initSqlRefusal.getOrElse(""))
+          )
+        )
+      )
+    else if bandErr.isDefined then
+      IO.pure(
+        Left(
+          (
+            StatusCode.BadRequest,
+            ErrorResponse("invalid_band", bandErr.getOrElse("invalid autoscale band"))
+          )
+        )
+      )
+    else
+      val key = PoolKey(req.tenant, req.tenantDb, req.pool)
+      sup.getTenant(req.tenant) match
+        case None =>
           IO.pure(
             Left(
               (
-                StatusCode.BadRequest,
-                ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
+                StatusCode.NotFound,
+                ErrorResponse("tenant_not_found", s"tenant '${req.tenant}' is not registered")
               )
             )
           )
-        else if req.memory.nonEmpty && !QuantitySyntax.validMemory(req.memory) then
+        case Some(_) if sup.findTenantDb(req.tenant, req.tenantDb).isEmpty =>
           IO.pure(
             Left(
               (
-                StatusCode.BadRequest,
-                ErrorResponse("invalid", "cpu/memory must be Kubernetes quantities")
-              )
-            )
-          )
-        else if !req.roleDistribution.isValidFor(req.size) then
-          IO.pure(
-            Left(
-              (
-                StatusCode.BadRequest,
-                ErrorResponse("invalid_distribution", "role counts do not sum to size")
-              )
-            )
-          )
-        else if initSqlRefusal.isDefined then
-          IO.pure(
-            Left(
-              (
-                StatusCode.BadRequest,
-                ErrorResponse("init_sql_refused", initSqlRefusal.getOrElse(""))
-              )
-            )
-          )
-        else if bandErr.isDefined then
-          IO.pure(
-            Left(
-              (
-                StatusCode.BadRequest,
-                ErrorResponse("invalid_band", bandErr.getOrElse("invalid autoscale band"))
-              )
-            )
-          )
-        else
-          val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-          sup.getTenant(req.tenant) match
-            case None =>
-              IO.pure(
-                Left(
-                  (
-                    StatusCode.NotFound,
-                    ErrorResponse("tenant_not_found", s"tenant '${req.tenant}' is not registered")
-                  )
+                StatusCode.NotFound,
+                ErrorResponse(
+                  "tenant_db_not_found",
+                  s"tenant-db '${req.tenant}/${req.tenantDb}' is not registered"
                 )
               )
-            case Some(_) if sup.findTenantDb(req.tenant, req.tenantDb).isEmpty =>
-              IO.pure(
-                Left(
-                  (
-                    StatusCode.NotFound,
-                    ErrorResponse(
-                      "tenant_db_not_found",
-                      s"tenant-db '${req.tenant}/${req.tenantDb}' is not registered"
-                    )
-                  )
-                )
-              )
+            )
+          )
+        case Some(_) =>
+          sup.get(key) match
             case Some(_) =>
-              sup.get(key) match
-                case Some(_) =>
-                  IO.pure(
-                    Left(
-                      (StatusCode.Conflict, ErrorResponse("exists", s"pool $key already exists"))
+              IO.pure(
+                Left(
+                  (StatusCode.Conflict, ErrorResponse("exists", s"pool $key already exists"))
+                )
+              )
+            case None =>
+              // A tenant admin's initSql is judged by the tenant initSql allowlist now that every
+              // cheap check passed; a superuser's is not.
+              InitSqlChecker
+                .writeCheck(initSqlChecker, gateBypass, req.initSql.getOrElse(""), None)
+                .flatMap {
+                  case Left(message) =>
+                    IO.pure(
+                      Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message)))
                     )
-                  )
-                case None =>
-                  // A tenant admin's initSql is judged by the tenant initSql allowlist now that every
-                  // cheap check passed; a superuser's is not.
-                  InitSqlChecker
-                    .writeCheck(initSqlChecker, gateBypass, req.initSql.getOrElse(""), None)
-                    .flatMap {
-                      case Left(message) =>
-                        IO.pure(
-                          Left((StatusCode.BadRequest, ErrorResponse("init_sql_refused", message)))
+                  case Right(warning) =>
+                    val cohorts = req.cohorts.map(PoolCohortDto.toModel)
+                    sup
+                      .createPool(
+                        key,
+                        req.roleDistribution,
+                        maxConcurrentPerNode = req.maxConcurrentPerNode,
+                        cohorts = cohorts,
+                        disabled = req.disabled,
+                        startSuspended = req.startSuspended,
+                        initSql = req.initSql.getOrElse(""),
+                        initSqlTrusted = gateBypass,
+                        cpu = req.cpu,
+                        memory = req.memory,
+                        podTemplateYaml = req.podTemplateYaml,
+                        minNodes = req.minNodes,
+                        maxNodes = req.maxNodes,
+                        // -1 is the DTO's "not provided" sentinel: inherit the manager-wide
+                        // hibernation default. 0 opts the pool out; positive sets its window.
+                        idleTimeoutSec = Some(req.idleTimeoutSec).filter(_ >= 0),
+                        gateBypass = gateBypass
+                      )
+                      .map(_ =>
+                        actor.controlPlane(
+                          audit,
+                          AuditActions.PoolCreate,
+                          "ok",
+                          tenant = Some(req.tenant),
+                          target = Some(key.toString),
+                          detail = Map("size" -> req.size.toString)
                         )
-                      case Right(warning) =>
-                        val cohorts = req.cohorts.map(PoolCohortDto.toModel)
-                        sup
-                          .createPool(
-                            key,
-                            req.roleDistribution,
-                            maxConcurrentPerNode = req.maxConcurrentPerNode,
-                            cohorts = cohorts,
-                            disabled = req.disabled,
-                            startSuspended = req.startSuspended,
-                            initSql = req.initSql.getOrElse(""),
-                            initSqlTrusted = gateBypass,
-                            cpu = req.cpu,
-                            memory = req.memory,
-                            podTemplateYaml = req.podTemplateYaml,
-                            lockdown = lockdownValue,
-                            minNodes = req.minNodes,
-                            maxNodes = req.maxNodes,
-                            // -1 is the DTO's "not provided" sentinel: inherit the manager-wide
-                            // hibernation default. 0 opts the pool out; positive sets its window.
-                            idleTimeoutSec = Some(req.idleTimeoutSec).filter(_ >= 0),
-                            gateBypass = gateBypass
-                          )
-                          .map(_ =>
-                            actor.controlPlane(
-                              audit,
-                              AuditActions.PoolCreate,
-                              "ok",
-                              tenant = Some(req.tenant),
-                              target = Some(key.toString),
-                              detail = Map("size" -> req.size.toString)
-                            )
-                            Right(
-                              respond(key, Map.empty).getOrElse(
-                                PoolResponse(
-                                  req.tenant,
-                                  req.tenantDb,
-                                  req.pool,
-                                  Nil,
-                                  "ready",
-                                  Map.empty
-                                )
-                              )
+                        Right(
+                          respond(key, Map.empty).getOrElse(
+                            PoolResponse(
+                              req.tenant,
+                              req.tenantDb,
+                              req.pool,
+                              Nil,
+                              "ready",
+                              Map.empty
                             )
                           )
-                          .handleError {
-                            case q: ai.starlake.quack.spi.QuotaExceededException =>
-                              Left(
-                                (
-                                  StatusCode.TooManyRequests,
-                                  ErrorResponse("quota_exceeded", q.reason)
-                                )
-                              )
-                            case t =>
-                              // The supervisor logs nothing when the first node fails to start.
-                              logger.error(s"pool create for $key failed", t)
-                              Left(
-                                (
-                                  StatusCode.InternalServerError,
-                                  ErrorResponse("start_failed", t.getMessage)
-                                )
-                              )
-                          }
-                          .map(_.map(_.copy(initSqlWarning = warning)))
-                    }
+                        )
+                      )
+                      .handleError {
+                        case q: ai.starlake.quack.spi.QuotaExceededException =>
+                          Left(
+                            (
+                              StatusCode.TooManyRequests,
+                              ErrorResponse("quota_exceeded", q.reason)
+                            )
+                          )
+                        case t =>
+                          // The supervisor logs nothing when the first node fails to start.
+                          logger.error(s"pool create for $key failed", t)
+                          Left(
+                            (
+                              StatusCode.InternalServerError,
+                              ErrorResponse("start_failed", t.getMessage)
+                            )
+                          )
+                      }
+                      .map(_.map(_.copy(initSqlWarning = warning)))
+                }
 
   def scalePool(req: ScalePoolRequest, apiKey: Option[String])(
       scopeOf: SessionScope.Resolver
@@ -841,85 +813,6 @@ final class PoolHandlers(
                         )
                       )
               }
-
-  def setLockdown(req: SetPoolLockdownRequest, apiKey: Option[String])(
-      scopeOf: SessionScope.Resolver
-  ): Out[PoolResponse] =
-    SuperuserCheck.reject(apiKey)(scopeOf) match
-      case Some(err) =>
-        audit.rest(
-          apiKey,
-          "control-plane",
-          AuditActions.PoolSetLockdown,
-          "denied",
-          tenant = Some(req.tenant)
-        )
-        IO.pure(Left(err))
-      case None =>
-        LockdownTriState.parse(req.lockdown) match
-          case Left(msg) =>
-            IO.pure(Left((StatusCode.BadRequest, ErrorResponse("invalid", msg))))
-          case Right(value) =>
-            val key = PoolKey(req.tenant, req.tenantDb, req.pool)
-            sup.setPoolLockdown(key, value).flatMap {
-              case Left(err: SupervisorError.NotFound) =>
-                IO.pure(Left((StatusCode.NotFound, ErrorResponse("not_found", err.message))))
-              case Left(err) =>
-                IO.pure(Left((StatusCode.Conflict, ErrorResponse("update_failed", err.message))))
-              case Right(_) =>
-                // Restart every node so the spawn-time engine layer catches up
-                // immediately (same posture as database/update metastore edits).
-                // Per-node failures are tolerated: the flag is persisted and the
-                // edge LockdownScreen still enforces the restriction per
-                // statement. Reconcile heals DEAD nodes, not a live straggler
-                // that failed to restart -- such a node keeps its stale engine
-                // SQL until it next respawns (scale, crash-recovery, or a manual
-                // restart). A failed restart is logged (not just swallowed) so an
-                // operator can spot the straggler instead of discovering the stale
-                // SQL later; the request itself must still succeed either way.
-                val nodeIds = sup.get(key).map(_.nodes.map(_.nodeId)).getOrElse(Nil)
-                import cats.syntax.all.*
-                nodeIds
-                  .traverse_ { id =>
-                    sup.restartNode(key, id).attempt.flatMap {
-                      case Right(Right(_))  => IO.unit
-                      case Right(Left(err)) =>
-                        IO.delay(
-                          logger.warn(
-                            s"setLockdown: restart of $key/$id failed, node keeps its stale " +
-                              s"engine SQL until it next respawns: ${err.message}"
-                          )
-                        )
-                      case Left(t) =>
-                        IO.delay(
-                          logger.warn(
-                            s"setLockdown: restart of $key/$id raised ${t.getClass.getSimpleName}, " +
-                              s"node keeps its stale engine SQL until it next respawns: ${t.getMessage}"
-                          )
-                        )
-                    }
-                  }
-                  .map { _ =>
-                    audit.rest(
-                      apiKey,
-                      "control-plane",
-                      AuditActions.PoolSetLockdown,
-                      "ok",
-                      tenant = Some(req.tenant),
-                      target = Some(key.toString),
-                      detail = Map("lockdown" -> req.lockdown)
-                    )
-                    respond(key, Map.empty) match
-                      case Some(r) => Right(r)
-                      case None    =>
-                        Left(
-                          (
-                            StatusCode.NotFound,
-                            ErrorResponse("not_found", s"pool $key disappeared after update")
-                          )
-                        )
-                  }
-            }
 
   /** Sets or clears the pool's demand scale-out band. Both bounds absent clears it back to a fixed
     * size; a declared band is validated against the pool's CURRENT distribution and size, so an

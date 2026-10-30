@@ -131,11 +131,8 @@ final case class ManifestPool(
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = "",
-    // Per-pool node-lockdown override, tri-state STRING encoding: "inherit"
-    // (default) | "on" | "off". Decoded to Pool.lockdown (Option[Boolean]) via
-    // LockdownTriState.parse on import. Defaulted so pre-lockdown YAMLs decode
-    // unchanged as "inherit" (= no override).
-    lockdown: String = "inherit",
+    // `lockdown` (the per-pool node-lockdown override) was removed in 0.10.2: an earlier export's
+    // member decodes and is ignored (this codec does not decode strictly).
     // Owner-declared demand scale-out band, round-tripped verbatim from
     // Pool.minNodes/maxNodes. Both None (the default) decode as a fixed-size
     // pool, so pre-autoscale YAMLs decode unchanged. Set together or not at

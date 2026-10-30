@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.manifest
 
-import ai.starlake.quack.model.{FederatedSecret, LockdownTriState, TenantDb}
+import ai.starlake.quack.model.{FederatedSecret, TenantDb}
 import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
   ControlPlaneSnapshot,
@@ -206,7 +206,6 @@ object ManifestExporter extends LazyLogging:
           cpu = p.cpu,
           memory = p.memory,
           podTemplateYaml = p.podTemplateYaml,
-          lockdown = LockdownTriState.render(p.lockdown),
           minNodes = p.minNodes,
           maxNodes = p.maxNodes,
           initSqlTrusted = Some(p.initSqlTrusted)

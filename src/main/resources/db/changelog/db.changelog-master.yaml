@@ -113,3 +113,5 @@ databaseChangeLog:
       file: db/changelog/0053-init-sql-trust.yaml
   - include:
       file: db/changelog/0054-data-path-policy-version.yaml
+  - include:
+      file: db/changelog/0055-drop-pool-lockdown.yaml

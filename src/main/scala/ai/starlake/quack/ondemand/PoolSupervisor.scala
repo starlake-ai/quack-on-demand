@@ -135,10 +135,6 @@ final class PoolSupervisor(
     locks: ai.starlake.quack.ondemand.ha.PoolLocker = ai.starlake.quack.ondemand.ha.PoolLocker.noop,
     publish: ai.starlake.quack.ondemand.ha.StateChangePublisher =
       ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
-    /** QOD_NODE_LOCKDOWN, from Main via `lockdownCfg.enabled`: the global default the per-pool
-      * lockdown tri-state inherits.
-      */
-    lockdownEnabled: Boolean = false,
     /** Managed object storage (QOD_MANAGED_STORE_*), from Main; `None` when the config block is
       * disabled. Present-and-enabled is the precondition for `createTenantDb(managedStorage =
       * true)`: it supplies the bucket the per-incarnation prefix is carved from, the credentials
@@ -1667,18 +1663,6 @@ final class PoolSupervisor(
       .map(t => tenantDbs.values.filter(_.tenantId == t.id).toList.sortBy(_.name))
       .getOrElse(Nil)
 
-  /** Bucket keys of every DuckLake dataPath the control plane knows: all tenant-db dataPaths
-    * (explicit or metastore-carried) plus the default-metastore root. Feeds the edge
-    * LockdownScreen's bucket denial; Main unions in the managed-store root bucket. Derived on
-    * demand from the in-memory maps, so HA replicas stay fresh through the existing topology
-    * snapshot refresh.
-    */
-  def duckLakeBuckets(): Set[String] =
-    val paths =
-      tenantDbs.values.flatMap(td => List(td.dataPath) ++ td.metastore.get("dataPath")) ++
-        defaultMetastore.get("dataPath")
-    paths.flatMap(ai.starlake.quack.model.BucketKeys.of).toSet
-
   /** Every data path a node of this control plane may hold data at. Per tenant-db: the data path
     * its nodes get ([[effectiveMetastoreFor]], the spawn's own derivation, so a DuckLake row with
     * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
@@ -1690,8 +1674,8 @@ final class PoolSupervisor(
     * name beginning with the file's. Then the default metastore's own path. Branch rows are
     * tenant-db rows. Feeds the location checker's data-folder deny set
     * (edge.authz.location.LiveLocationRules), which adds the managed prefixes still within their
-    * retention window. In memory, like [[duckLakeBuckets]], so HA replicas stay fresh through the
-    * topology refresh; derived again only after a tenant-db change (the same list until then).
+    * retention window. In memory, so HA replicas stay fresh through the topology refresh; derived
+    * again only after a tenant-db change (the same list until then).
     */
   def dataPaths(): List[String] =
     val version   = tenantDbsVersion.get()
@@ -2515,8 +2499,6 @@ final class PoolSupervisor(
       cpu: String = "",
       memory: String = "",
       podTemplateYaml: String = "",
-      // Per-pool lockdown override persisted at create time. None = inherit.
-      lockdown: Option[Boolean] = None,
       // Owner-declared scale-out band, persisted at create time. Both None = fixed size.
       minNodes: Option[Int] = None,
       maxNodes: Option[Int] = None,
@@ -2611,7 +2593,6 @@ final class PoolSupervisor(
                   cpu = cpu,
                   memory = memory,
                   podTemplateYaml = podTemplateYaml,
-                  lockdown = lockdown,
                   minNodes = minNodes,
                   maxNodes = maxNodes,
                   idleTimeoutSec = idleTimeoutSec
@@ -2620,9 +2601,8 @@ final class PoolSupervisor(
                   poolRows.put(poolEntity.id, poolEntity)
                   poolIdByKey.put(key, poolEntity.id)
                 } *> IO.defer {
-                  // Deferred: specFromState resolves effectiveLockdown(key) via poolRows, which the
-                  // IO.delay above only populates once this chain runs. A non-deferred block would
-                  // evaluate specs eagerly, before that put, and fall back to the global flag.
+                  // Deferred: the specs are built once the IO.delay above has put the pool row and
+                  // its id.
                   // Walk cohorts in order; empty `cohorts` falls back to one placement-less cohort
                   // carrying `dist`.
                   val plan: List[(ai.starlake.quack.model.Role, NodePlacement)] =
@@ -2705,18 +2685,8 @@ final class PoolSupervisor(
       }
     }
 
-  /** Single resolution point for the per-pool lockdown tri-state. None on the pool row (or no row
-    * at all: maintenance nodes, races during create) falls back to the manager-global flag. Feeds
-    * BOTH the edge screen (FlightSqlRouter.lockdownFor) and the spawn-time engine SQL.
-    */
-  def effectiveLockdown(key: PoolKey): Boolean =
-    poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.lockdown).getOrElse(lockdownEnabled)
-
-  /** Pools whose effective lockdown is off, for the boot banner. */
-  def unlockedPoolCount: Int = poolRows.values.count(!_.lockdown.getOrElse(lockdownEnabled))
-
   /** The owner-declared scale-out band, resolved from the persisted row (the band stays out of
-    * PoolState on purpose, like lockdown). None = pool unknown OR fixed size.
+    * PoolState on purpose). None = pool unknown OR fixed size.
     */
   def autoscaleBand(key: PoolKey): Option[(Int, Int)] =
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(p => p.minNodes.zip(p.maxNodes))
@@ -2729,9 +2699,9 @@ final class PoolSupervisor(
     poolIdByKey.get(key).flatMap(poolRows.get).flatMap(_.idleTimeoutSec)
 
   /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
-    * lock), mirroring [[setPoolLockdown]]. Does NOT validate the band shape (min < max, size inside
-    * the band, hardCap): that is the handler's job via `AutoscaleBand.validate`. Some sets the
-    * band, None clears it back to fixed size.
+    * lock). Does NOT validate the band shape (min < max, size inside the band, hardCap): that is
+    * the handler's job via `AutoscaleBand.validate`. Some sets the band, None clears it back to
+    * fixed size.
     */
   def setPoolAutoscale(
       key: PoolKey,
@@ -2752,39 +2722,6 @@ final class PoolSupervisor(
                   )
                 case Some(p) =>
                   val updated = p.copy(minNodes = band.map(_._1), maxNodes = band.map(_._2))
-                  store.upsertPool(updated)
-                  poolRows.put(updated.id, updated)
-                  publish.topologyChanged()
-                  Right(updated)
-        }
-      }
-    }
-
-  /** Persists under the pool's advisory lock so the write serializes with reconcile's respawn (same
-    * lock): either the persist lands before reconcile builds a NodeSpec off
-    * `effectiveLockdown(key)` (new node picks up the fresh value), or after (the caller's later
-    * restart loop, run by [[ai.starlake.quack.ondemand.api.PoolHandlers.setLockdown]] AFTER this
-    * IO, catches it up). No node is registered mid-write on a half-applied flag.
-    */
-  def setPoolLockdown(
-      key: PoolKey,
-      lockdown: Option[Boolean]
-  ): IO[Either[SupervisorError, Pool]] =
-    locks.withLock(key) {
-      IO.blocking {
-        withCacheRecovery("setPoolLockdown") {
-          pools.get(key) match
-            case None    => Left(SupervisorError.NotFound(s"pool not found: $key"))
-            case Some(_) =>
-              poolIdByKey.get(key).flatMap(poolRows.get) match
-                case None =>
-                  Left(
-                    SupervisorError.Internal(
-                      s"pool entity missing for $key (control-plane out of sync)"
-                    )
-                  )
-                case Some(p) =>
-                  val updated = p.copy(lockdown = lockdown)
                   store.upsertPool(updated)
                   poolRows.put(updated.id, updated)
                   publish.topologyChanged()
@@ -4258,8 +4195,8 @@ final class PoolSupervisor(
                     // The credential was validated by a TENANT-scoped authority (per-tenant
                     // OIDC, or the tenant arm of the auth chain), which can only speak for
                     // that tenant's principals. Binding it to a tenant-IS-NULL superuser row
-                    // would hand out the empty EffectiveSet that bypasses ACL, RLS/CLS, the
-                    // protected-write guard and lockdown -- a tenant admin minting a token
+                    // would hand out the empty EffectiveSet that bypasses ACL, RLS/CLS and the
+                    // protected-write guard -- a tenant admin minting a token
                     // with the seeded superuser's email on an IdP they control must land
                     // here. Same message as an unknown user so the refusal is not an
                     // existence oracle; the real reason goes to the log.

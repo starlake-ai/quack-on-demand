@@ -20,7 +20,6 @@ import ai.starlake.quack.ondemand.api.{
   SetPoolAutoscaleRequest,
   SetPoolDisabledRequest,
   SetPoolInitSqlRequest,
-  SetPoolLockdownRequest,
   SetPoolResourcesRequest,
   SetPoolTemplateRequest,
   StopPoolRequest,
@@ -89,7 +88,6 @@ final class McpAdminTools(
     setPoolResourcesTool,
     setPoolInitSqlTool,
     setPoolPodTemplateTool,
-    setPoolLockdownTool,
     setPoolAutoscaleTool,
     setNodeMaxConcurrentTool,
     createDatabaseTool,
@@ -612,7 +610,6 @@ final class McpAdminTools(
       "init_sql"                -> strProp(initSqlHelp("SQL run on each node at boot.")),
       "cpu"                     -> strProp("K8s CPU quantity, e.g. '500m'."),
       "memory"                  -> strProp("K8s memory quantity, e.g. '2Gi'."),
-      "lockdown"                -> strProp("inherit | on | off (default inherit)."),
       "min_nodes"               -> intProp("Autoscale floor."),
       "max_nodes"               -> intProp("Autoscale ceiling."),
       tenantProp
@@ -642,7 +639,6 @@ final class McpAdminTools(
                 initSql = args("init_sql").flatMap(_.asString),
                 cpu = str(args, "cpu").getOrElse(""),
                 memory = str(args, "memory").getOrElse(""),
-                lockdown = str(args, "lockdown").getOrElse("inherit"),
                 minNodes = int(args, "min_nodes"),
                 maxNodes = int(args, "max_nodes")
               ),
@@ -802,32 +798,6 @@ final class McpAdminTools(
                 pool,
                 str(args, "pod_template_yaml").getOrElse("")
               ),
-              keyOf(principal)
-            )(scopeOf)
-            .map(res => bridge(res).map(_.asJson))
-  )
-
-  private val setPoolLockdownTool = McpToolDef(
-    name = "set_pool_lockdown",
-    description = "Set a pool's node-lockdown override: inherit | on | off (superuser only).",
-    inputSchema = objectSchema(
-      required = List("database", "pool", "lockdown"),
-      props = "database" -> strProp("Database (tenant-db) name."),
-      "pool"     -> strProp("Pool name."),
-      "lockdown" -> strProp("inherit | on | off."),
-      tenantProp
-    ),
-    adminOnly = true,
-    run = (principal, args) =>
-      (for
-        target   <- poolTarget(principal, args)
-        lockdown <- required(args, "lockdown")
-      yield (target, lockdown)) match
-        case Left(err)                                   => IO.pure(Left(err))
-        case Right(((tenant, database, pool), lockdown)) =>
-          pools
-            .setLockdown(
-              SetPoolLockdownRequest(tenant, database, pool, lockdown),
               keyOf(principal)
             )(scopeOf)
             .map(res => bridge(res).map(_.asJson))

@@ -156,18 +156,6 @@ object PoolEndpoints:
       .in(authToken)
       .out(jsonBody[PoolResponse])
 
-  val setPoolLockdown: PublicEndpoint[
-    (SetPoolLockdownRequest, Option[String]),
-    (sttp.model.StatusCode, ErrorResponse),
-    PoolResponse,
-    Any
-  ] =
-    base.post
-      .in("pool" / "setLockdown")
-      .in(jsonBody[SetPoolLockdownRequest])
-      .in(authToken)
-      .out(jsonBody[PoolResponse])
-
   val setPoolAutoscale: PublicEndpoint[
     (SetPoolAutoscaleRequest, Option[String]),
     (sttp.model.StatusCode, ErrorResponse),

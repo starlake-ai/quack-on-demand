@@ -197,16 +197,6 @@ postgres:
   existingSecret: ""       # PROD: reference an externally-managed Secret containing the key below
   existingSecretKey: pgPassword
 
-# --- Tenant SQL screening -----------------------------------------------------
-# Node lockdown (QOD_NODE_LOCKDOWN) is ON in this chart, unlike the manager's
-# own first-run default. It stops non-superusers from running ATTACH, INSTALL
-# and LOAD and changing protected settings. Every node refuses a tenant user's
-# read of a local path outside the tenant's authorized folders whatever this
-# says, the mounted secrets (/var/run/qod-secrets) included. Pools can still
-# opt out one by one (POST /api/pool/setLockdown).
-security:
-  nodeLockdown: true
-
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB
 # Quack server, NOT the manager - they're separate processes. Built from

@@ -5,24 +5,6 @@ import pureconfig.*
 
 import scala.annotation.meta.field
 
-/** Node-lockdown knob (QOD_NODE_LOCKDOWN). When enabled, every statement from a non-superuser
-  * caller is screened by [[ai.starlake.quack.edge.sql.LockdownScreen]] before the ACL validation
-  * gate, denying ATTACH/DETACH/INSTALL/LOAD, protected settings, and local-path file functions.
-  */
-case class NodeLockdownConfig(
-    @field @ConfigField(
-      envVar = "QOD_NODE_LOCKDOWN",
-      description =
-        "Deny ATTACH/DETACH/INSTALL/LOAD and other node-escape statements for non-superuser callers."
-    )
-    enabled: Boolean
-)
-
-object NodeLockdownConfig:
-  given ConfigReader[NodeLockdownConfig] = ConfigReader.forProduct1(
-    "enabled"
-  )(NodeLockdownConfig.apply)
-
 /** Manager-wide OPA defaults for tenants that don't set their own
   * [[ai.starlake.quack.model.TenantAcl]]. `defaultMode` picks the authorization engine (QoD RBAC
   * grants vs. the tenant's OPA) when a tenant leaves its own mode unset; `url` is the fallback OPA

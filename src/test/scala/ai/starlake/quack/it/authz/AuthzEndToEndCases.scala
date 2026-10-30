@@ -26,7 +26,7 @@ import scala.util.Try
   *     (`sql` sources `rosql`, read-only, and `rwsql`, writable, each a local DuckDB file attached
   *     READ_WRITE, and `pgro`, a read-only typed Postgres source; pool `rofed`), duckdb-file
   *     `aliased` (catalog alias `e2e_alias_<run>`, pool `aliased`) and, with rustfs up, DuckLake
-  *     `s3lake` (data in the spec's bucket, pool `s3lake` with node lockdown on); authorized folder
+  *     `s3lake` (data in the spec's bucket, pool `s3lake`); authorized folder
   *     `<root>/acme_<run>/shared/`;
   *   - tenant globex_<run>: two DuckLake database rows, no pool, whose data folders lie inside
   *     acme's authorized folder and inside Alice's S3 credential scope;
@@ -192,17 +192,11 @@ abstract class AuthzEndToEndCases(
     if kind == "ducklake" then stack.catalogDatabases += td
     td
 
-  private def createPool(
-      tenant: String,
-      tenantDb: String,
-      pool: String,
-      lockdown: String = "inherit"
-  ): Unit =
+  private def createPool(tenant: String, tenantDb: String, pool: String): Unit =
     stack.post(
       "/api/pool/create",
       s"""{"tenant":"$tenant","tenantDb":"$tenantDb","pool":"$pool","size":1,
-         |"roleDistribution":{"writeonly":0,"readonly":0,"dual":1},
-         |"lockdown":"$lockdown"}""".stripMargin
+         |"roleDistribution":{"writeonly":0,"readonly":0,"dual":1}}""".stripMargin
     )
 
   private def grant(
@@ -284,9 +278,7 @@ abstract class AuthzEndToEndCases(
     createPool(Acme, fed, "fed")
     createPool(Acme, rofed, "rofed")
     createPool(Acme, aliased, "aliased")
-    // Node lockdown on an object-store data path disables the local file system on the node: the
-    // users' connection secrets are then installed and looked up after it (T4-X1).
-    if s3Ready then createPool(Acme, s3lake, "s3lake", lockdown = "on")
+    if s3Ready then createPool(Acme, s3lake, "s3lake")
     roleId = createRole("e2e_reader")
     // Owner of the Postgres schema e2e (CREATE INDEX there): `*.*.*` covers only the tenant's own
     // database catalogs, never a federated one.
@@ -876,11 +868,11 @@ abstract class AuthzEndToEndCases(
     }
   }
 
-  "a user's credential on a lockdown node" should "be installed and used after the node's lockdown" in {
+  "a user's credential on an object-store pool" should "sign their own reads beside the pool's data secret" in {
     ready()
     requireS3()
-    // The s3lake pool's node runs with the local file system disabled (an object-store data path
-    // under lockdown); Alice's connection secret is registered and looked up after it.
+    // The s3lake pool's data lives in the spec's bucket, under the node's data-path secret; Alice's
+    // own connection secret signs her read of another bucket.
     doors.foreach { d =>
       withClue(s"[$d] ") {
         val mark = fake.requests.size
@@ -891,12 +883,14 @@ abstract class AuthzEndToEndCases(
       }
     }
     allowed("alice", "s3lake", s"SELECT v FROM $s3lake.main.t", Some(List("3")))
-    // On a lockdown pool the gateway's bucket denial refuses a bucket holding DuckLake data first,
-    // whatever the ACL flag; the node refuses the data folder too (the lake pool case above).
+    // The pool's own DuckLake data prefix would be signed with the node's data-path secret, never
+    // with her credential: this node refuses the read on that ground (the lake pool's node refuses
+    // the same prefix as a database data folder, above).
     refused(
       "alice",
       "s3lake",
-      s"SELECT * FROM read_parquet('s3://$Bucket/acme_lake/**/*.parquet')"
+      s"SELECT * FROM read_parquet('s3://$Bucket/acme_lake/**/*.parquet')",
+      node = "would be signed with this node's own S3 keys"
     )
   }
 

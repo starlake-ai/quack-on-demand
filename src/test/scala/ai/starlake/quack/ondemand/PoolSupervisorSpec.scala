@@ -101,26 +101,22 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
 
   /** Supervisor + tenant `acme` + tenant-db `acme_default` carrying the
     * test metastore. Pool tests can call `createPool(key, ...)` directly. */
-  private def freshSupervisor(lockdownEnabled: Boolean = false) =
+  private def freshSupervisor() =
     val sup = new PoolSupervisor(
       fakeBackend(),
       new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      lockdownEnabled = lockdownEnabled
+      new InMemoryControlPlaneStore()
     )
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "").unsafeRunSync()
     sup
 
-  private def freshSupervisorWithBackend(
-      lockdownEnabled: Boolean = false
-  ): (PoolSupervisor, CapturingBackend) =
+  private def freshSupervisorWithBackend(): (PoolSupervisor, CapturingBackend) =
     val b   = new CapturingBackend
     val sup = new PoolSupervisor(
       b,
       new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      lockdownEnabled = lockdownEnabled
+      new InMemoryControlPlaneStore()
     )
     (sup, b)
 
@@ -130,65 +126,12 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
       : (PoolSupervisor, CapturingBackend, InMemoryControlPlaneStore) =
     val b   = new CapturingBackend
     val st  = new InMemoryControlPlaneStore()
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, st, lockdownEnabled = false)
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, st)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
       .createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
       .unsafeRunSync()
     (sup, b, st)
-
-  // ---------- duckLakeBuckets ----------
-
-  "PoolSupervisor.duckLakeBuckets" should "collect bucket keys from tenant-db dataPaths and the default metastore" in:
-    val sup = new PoolSupervisor(
-      fakeBackend(),
-      new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      defaultMetastore = Map("dataPath" -> "s3://root-lake/ducklake")
-    )
-    sup.createTenant(Tenant("acme")).unsafeRunSync()
-    // DuckDbFile kind: carries a dataPath without the DuckLake Postgres provisioning
-    // this unit test cannot run; bucket derivation is kind-agnostic.
-    sup
-      .createTenantDb(
-        "acme",
-        "sales",
-        TenantDbKind.DuckDbFile,
-        Map("dbName" -> "acme_sales", "schemaName" -> "main"),
-        dataPath = "s3://acme-lake/acme_sales-a1b2c3d4/duck.db"
-      )
-      .unsafeRunSync()
-      .isRight shouldBe true
-    // Metastore-carried dataPath contributes too; the local file dataPath carries no bucket.
-    sup
-      .createTenantDb(
-        "acme",
-        "dev",
-        TenantDbKind.DuckDbFile,
-        Map("dbName" -> "acme_dev", "schemaName" -> "main", "dataPath" -> "gs://ops-lake/x"),
-        dataPath = "/var/data/dev/duck.db"
-      )
-      .unsafeRunSync()
-      .isRight shouldBe true
-    sup.duckLakeBuckets() shouldBe Set("acme-lake", "ops-lake", "root-lake")
-
-  it should "drop a bucket when its tenant-db is deleted" in:
-    val sup = freshSupervisor()
-    sup
-      .createTenantDb(
-        "acme",
-        "gone",
-        TenantDbKind.DuckDbFile,
-        Map("dbName" -> "acme_gone", "schemaName" -> "main"),
-        dataPath = "s3://gone-lake/acme_gone-ffffffff/duck.db"
-      )
-      .unsafeRunSync()
-      .isRight shouldBe true
-    sup.duckLakeBuckets() shouldBe Set("gone-lake")
-    val dbName =
-      sup.listTenantDbsByTenant("acme").find(_.dataPath.startsWith("s3://gone-lake")).get.name
-    sup.deleteTenantDb("acme", dbName).unsafeRunSync() shouldBe Right(())
-    sup.duckLakeBuckets() shouldBe Set.empty
 
   "PoolSupervisor.dataPaths" should "list tenant-db, metastore and default data paths, and drop a deleted one" in:
     val sup = new PoolSupervisor(
@@ -358,55 +301,6 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     intercept[IllegalStateException](
       sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
     )
-
-  // ---- effectiveLockdown: per-pool tri-state override against the global flag ----
-
-  "PoolSupervisor.effectiveLockdown" should "resolve the tri-state against the global flag" in:
-    val supOn  = freshSupervisor(lockdownEnabled = true)
-    val supOff = freshSupervisor(lockdownEnabled = false)
-    supOn.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    supOff.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    supOn.effectiveLockdown(key) shouldBe true    // inherit + global on
-    supOff.effectiveLockdown(key) shouldBe false  // inherit + global off
-    supOn.setPoolLockdown(key, Some(false)).unsafeRunSync().isRight shouldBe true
-    supOff.setPoolLockdown(key, Some(true)).unsafeRunSync().isRight shouldBe true
-    supOn.effectiveLockdown(key) shouldBe false   // off override beats global on
-    supOff.effectiveLockdown(key) shouldBe true   // on override beats global off
-    // Unknown pool falls back to the global flag (maintenance-node path).
-    supOn.effectiveLockdown(PoolKey("acme", "acme_default", "nope")) shouldBe true
-
-  it should "persist under the per-pool advisory lock so it serializes with reconcile's respawn" in:
-    // Regression: setPoolLockdown used to call store.upsertPool directly,
-    // never going through `locks.withLock`. A real PgPoolLocker never
-    // serialized that write against reconcile's respawn pass (which reads
-    // effectiveLockdown while building the fresh NodeSpec under the SAME
-    // lock), so a respawn racing the REST call could register a node off the
-    // pre-update value. A true cross-process race needs a real Postgres
-    // PgPoolLocker (see TwoSupervisorConcurrencySpec for that pattern) --
-    // here we only assert the write now routes through whichever PoolLocker
-    // the supervisor is wired with, and that it still returns the updated
-    // Pool.
-    var lockCalls = 0
-    val locker = new PoolLocker:
-      def withLock[A](k: PoolKey)(io: IO[A]): IO[A] =
-        IO.delay { lockCalls += 1 } *> io
-    val sup = new PoolSupervisor(
-      fakeBackend(),
-      new NodeLoadTracker,
-      new InMemoryControlPlaneStore(),
-      locks = locker
-    )
-    sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, dataPath = "")
-      .unsafeRunSync()
-    sup.createPool(key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-
-    val before = lockCalls
-    val result = sup.setPoolLockdown(key, Some(true)).unsafeRunSync()
-    result.isRight shouldBe true
-    result.toOption.get.lockdown shouldBe Some(true)
-    (lockCalls - before) shouldBe 1
-    sup.effectiveLockdown(key) shouldBe true
 
   "a spawned node" should "carry no engine lockdown block: qod-node enforces on every pool" in:
     val (sup, backend) = freshSupervisorWithBackend()

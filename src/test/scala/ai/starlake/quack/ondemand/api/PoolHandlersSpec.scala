@@ -471,43 +471,9 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.map(_._1) shouldBe Some(StatusCode.BadRequest)
     out.left.toOption.map(_._2.error) shouldBe Some("invalid")
 
-  // CRITICAL 1 (lockdown): createPool must guard a per-pool lockdown override.
-  // Setting lockdown != "inherit" is a superuser-only mutation (same rule as
-  // POST /api/pool/setLockdown); a tenant admin passing it must be rejected
-  // before any pool is created. "inherit" (the default) stays open.
-
-  "createPool with a lockdown override" should "return 403 for a tenant-admin and create no pool" in:
-    val tracker = new NodeLoadTracker
-    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
-    sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    val h   = new PoolHandlers(sup, tracker)
-    val out = h
-      .createPool(
-        req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(lockdown = "off"),
-        Some("tok")
-      )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
-      .unsafeRunSync()
-    out.left.toOption.map(_._1) shouldBe Some(StatusCode.Forbidden)
-    out.left.toOption.map(_._2.error) shouldBe Some("superuser_required")
-    sup.get(ai.starlake.quack.model.PoolKey("acme", "acme_default", "sales")) shouldBe None
-
-  it should "succeed for a superuser passing lockdown off" in:
-    val tracker = new NodeLoadTracker
-    val sup     = new PoolSupervisor(stubBackend, tracker, new InMemoryControlPlaneStore())
-    sup.createTenant(Tenant("acme")).unsafeRunSync()
-    sup.createTenantDb("acme", "default", TenantDbKind.InMemory, Map.empty, "").unsafeRunSync()
-    val h   = new PoolHandlers(sup, tracker)
-    val out = h
-      .createPool(
-        req(size = 1, dist = RoleDistribution(0, 0, 1)).copy(lockdown = "off"),
-        Some("tok")
-      )(_ => SessionScope.Superuser)
-      .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    out.toOption.map(_.lockdown) shouldBe Some("off")
-
-  it should "let a tenant admin create with the default inherit lockdown" in:
+  // Phase D: no per-pool lockdown, so no lockdown gate. A tenant admin creates a pool as before (the
+  // pod-template gate still refuses a template), and the reply carries no lockdown field.
+  "createPool" should "let a tenant admin create a pool, with no lockdown in the reply" in:
     val h   = freshHandlers
     val out = h
       .createPool(
@@ -516,7 +482,7 @@ class PoolHandlersSpec extends AnyFlatSpec with Matchers:
       )(_ => SessionScope(superuser = false, manageableTenants = Set("acme")))
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
-    out.toOption.map(_.lockdown) shouldBe Some("inherit")
+    out.toOption.map(_.productElementNames.exists(_.startsWith("lockdown"))) shouldBe Some(false)
 
   // Task 5: pool suspend / resume REST surface
 

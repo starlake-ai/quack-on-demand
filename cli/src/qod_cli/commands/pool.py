@@ -49,7 +49,6 @@ def list_(ctx: typer.Context):
         "initSql": "--init-sql",
         "startSuspended": "--start-suspended",
         "cohorts": "--cohort",
-        "lockdown": "--lockdown",
         "minNodes": "--min-nodes",
         "maxNodes": "--max-nodes",
     },
@@ -78,11 +77,6 @@ def create(
         "When supplied, cohort counts must sum to --size and roles must sum to "
         "--writeonly/--readonly/--dual.",
     ),
-    lockdown: str = typer.Option(
-        "inherit",
-        "--lockdown",
-        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag.",
-    ),
     min_nodes: Optional[int] = typer.Option(None, "--min-nodes", help="Autoscale floor (set with --max-nodes)"),
     max_nodes: Optional[int] = typer.Option(None, "--max-nodes", help="Autoscale ceiling (set with --min-nodes)"),
 ):
@@ -97,7 +91,6 @@ def create(
         "memory": memory,
         "podTemplateYaml": pod_template_file.read() if pod_template_file else "",
         "startSuspended": start_suspended,
-        "lockdown": lockdown,
     }
     if init_sql is not None:
         body["initSql"] = init_sql
@@ -242,26 +235,6 @@ def set_autoscale(
     if max_nodes is not None:
         body["maxNodes"] = max_nodes
     call(ctx, "POST", "/api/pool/setAutoscale", body=body)
-
-
-@app.command("set-lockdown")
-@covers(
-    "POST",
-    "/api/pool/setLockdown",
-    {"tenant": "--tenant", "tenantDb": "--db", "pool": "--pool", "lockdown": "--lockdown"},
-)
-def set_lockdown(
-    ctx: typer.Context,
-    tenant: str = TENANT,
-    db: str = DB,
-    pool: str = POOL,
-    lockdown: str = typer.Option(
-        ...,
-        "--lockdown",
-        help="inherit|on|off - per-pool node-lockdown override; inherit follows the global QOD_NODE_LOCKDOWN flag. Superuser only.",
-    ),
-):
-    call(ctx, "POST", "/api/pool/setLockdown", body={**_key(tenant, db, pool), "lockdown": lockdown})
 
 
 @app.command("set-pod-template")

@@ -44,7 +44,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private def setup(
       stub: () => QuackResponse = defaultStub,
       events: ManagerEventSink = ManagerEventSink.noop,
-      lockdownFor: PoolKey => Boolean = _ => false,
       adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
   ) =
     val backend = new QuackBackend:
@@ -102,7 +101,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         adapter,
         stmtInstruments = si,
         events = events,
-        lockdownFor = lockdownFor,
         adminExecutor = adminExecutor,
         metadataFilterRewriter = mountedFilter
       )
@@ -971,7 +969,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       stub: () => QuackResponse = defaultStub,
       protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
         ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled,
-      lockdownFor: PoolKey => Boolean = _ => false,
       attachedCatalogsOf: PoolKey => Set[String] = _ => Set.empty
   ) =
     val backend = new ai.starlake.quack.ondemand.runtime.QuackBackend:
@@ -1032,7 +1029,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       columnPolicyRewriter = rewriter,
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard = protectedWriteGuard,
-      lockdownFor = lockdownFor,
       attachedCatalogsOf = attachedCatalogsOf
     )
     (router, () => capturedSql, node)
@@ -2277,77 +2273,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     r.isLeft shouldBe true
     // The existing "pool is empty" error must surface immediately - no 60s hold.
     (System.nanoTime() - t0) should be < 2_000_000_000L
-
-  // ---- node lockdown (QOD_NODE_LOCKDOWN) ----
-
-  "lockdown" should "admit ATTACH for a superuser caller" in:
-    val (base, _, _) = setup()
-    val router       = new FlightSqlRouter(
-      base.supervisor,
-      base.sessions,
-      base.tracker,
-      base.adapter,
-      stmtInstruments = si,
-      lockdownFor = _ => true,
-      metadataFilterRewriter = mountedFilter
-    )
-    // Quarantine the only node so a statement that clears the lockdown screen
-    // proceeds to routing and fails there (Unavailable) rather than being
-    // denied by the screen -- proof the screen was never consulted.
-    val nodeId = router.supervisor.list().head.nodes.head.nodeId
-    router.tracker.setHealthy(nodeId, false)
-    val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
-      tenantUser.copy(tenant = None),
-      Nil,
-      Nil,
-      Nil,
-      Nil,
-      Nil
-    )
-    val out = router
-      .execute(
-        "lockdown-2",
-        "root",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(superuserEff)
-      )
-      .unsafeRunSync()
-    out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
-
-  it should "not consult the screen when disabled" in:
-    val (router, _, _) = setup() // lockdownFor defaults to `_ => false`
-    val out            = router
-      .execute(
-        "lockdown-3",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    // ATTACH isn't a real DuckDB statement against the stub node, but the point of
-    // this test is only that it is NOT denied by the lockdown screen: today's
-    // behavior (routes to the stub node and gets an Ok/whatever the stub returns)
-    // is unchanged.
-    out.swap.toOption.foreach(_ shouldNot be(a[RouterFailure.AccessDenied]))
-
-  it should "resolve lockdown per pool: sibling pool with the override off is admitted" in:
-    // lockdownFor answers true only for a pool this session does NOT target,
-    // so the ATTACH that the locked-pool test sees denied must pass the
-    // lockdown screen here (it may still fail later for other reasons; the
-    // assertion is only "not a lockdown denial").
-    val (router, _, _) = setup(lockdownFor = k => k.pool == "some-other-pool")
-    val out            = router
-      .execute(
-        "lockdown-4",
-        "alice",
-        poolKey,
-        "ATTACH 'x.db' AS y",
-        effectiveSet = Some(effWithPolicies(Nil))
-      )
-      .unsafeRunSync()
-    out.swap.toOption.map(_.reason).getOrElse("") should not startWith "access denied: lockdown:"
 
   // ---- cache-aware placement (milestone-2 edge integration) ----
 

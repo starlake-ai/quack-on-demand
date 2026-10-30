@@ -324,7 +324,12 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       "quack-flightsql.acl.filteredMetadata",
       BootPreflight.RemovedAclFilteredMetadataMessage
     ),
-    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage)
+    ("QOD_ACL_DIALECT", "quack-flightsql.acl.dialect", BootPreflight.RemovedAclDialectMessage),
+    (
+      "QOD_NODE_LOCKDOWN",
+      "quack-flightsql.nodeLockdown",
+      BootPreflight.RemovedNodeLockdownMessage
+    )
   )
 
   "checkRemovedSwitches" should "refuse each removed variable set to any value, empty included" in {
@@ -375,4 +380,48 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
     for (name, _, message) <- removedSwitches do
       val err = intercept[RuntimeException](bootUntilHaRefusal(switchEnv(name, "true")))
       withClue(name)(err.getMessage shouldBe message)
+  }
+
+  it should "refuse QOD_NODE_LOCKDOWN set to any value, empty included" in
+    List("true", "false", "").foreach { v =>
+      withClue(s"QOD_NODE_LOCKDOWN='$v' ")(
+        BootPreflight.checkRemovedSwitches(
+          switchEnv("QOD_NODE_LOCKDOWN", v),
+          ConfigFactory.empty()
+        ) shouldBe
+          Left(BootPreflight.RemovedNodeLockdownMessage)
+      )
+    }
+
+  it should "refuse the quack-flightsql.nodeLockdown block in the loaded configuration" in
+    List("enabled = true", "enabled = false", "").foreach { body =>
+      val raw = ConfigFactory.parseString(s"quack-flightsql.nodeLockdown { $body }")
+      withClue(s"{ $body } ")(
+        BootPreflight.checkRemovedSwitches(noEnv, raw) shouldBe
+          Left(BootPreflight.RemovedNodeLockdownMessage)
+      )
+    }
+
+  it should "accept the extension policy variables that replaced lockdown's SETs" in
+    List(
+      "QOD_NODE_ALLOW_COMMUNITY_EXTENSIONS",
+      "QOD_NODE_ALLOW_UNSIGNED_EXTENSIONS",
+      "QOD_NODE_AUTOINSTALL_KNOWN_EXTENSIONS"
+    ).foreach { name =>
+      BootPreflight.checkRemovedSwitches(switchEnv(name, "true"), ConfigFactory.empty()) shouldBe
+        Right(())
+    }
+
+  it should "carry the lockdown removal message verbatim" in {
+    BootPreflight.RemovedNodeLockdownMessage shouldBe
+      "QOD_NODE_LOCKDOWN (quack-flightsql.nodeLockdown) was removed: qod-node now refuses ATTACH, " +
+      "INSTALL, LOAD, protected settings and unauthorized files to non-superusers on every pool, " +
+      "always, and the extension settings follow quack-on-demand.nodeExtensions. Unset " +
+      "QOD_NODE_LOCKDOWN."
+  }
+
+  "Main.bootManager" should "refuse a set QOD_NODE_LOCKDOWN before HA validation" in {
+    val err =
+      intercept[RuntimeException](bootUntilHaRefusal(switchEnv("QOD_NODE_LOCKDOWN", "false")))
+    err.getMessage shouldBe BootPreflight.RemovedNodeLockdownMessage
   }

@@ -53,11 +53,11 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         20900,
         "0.0.0.0",
         31338,
-        tlsEnabled = true,
-        nodeLockdown = true
+        tlsEnabled = true
       )
     b should include("http://localhost:20900/ui")
     b should include("SQL ACL       : ENFORCED on every node")
+    (b should not).include("NODE LOCKDOWN")
     b should include("grpc+tls://localhost:31338")
     b should include("Client connection strings: https://docs.starlake.ai/qod/connecting/clients")
     (b should not).include("jdbc:arrow-flight-sql")
@@ -73,8 +73,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         20900,
         "myhost",
         31338,
-        tlsEnabled = false,
-        nodeLockdown = true
+        tlsEnabled = false
       )
     b should include("grpc://myhost:31338")
     (b should not).include("QOD_ACL_ENABLED")
@@ -92,7 +91,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         "myhost",
         31338,
         tlsEnabled = false,
-        nodeLockdown = true,
         aclMode = mode,
         opaTenants = opa
       )
@@ -115,7 +113,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      nodeLockdown = true,
       aclMode = "opa",
       opaTenants = 0
     )
@@ -133,7 +130,6 @@ class BannerSpec extends AnyFlatSpec with Matchers:
       "myhost",
       31338,
       tlsEnabled = false,
-      nodeLockdown = true,
       cliConfigFile = Some("/home/u/.config/qod/config.toml")
     )
     withCli should include(
@@ -146,56 +142,7 @@ class BannerSpec extends AnyFlatSpec with Matchers:
         20900,
         "myhost",
         31338,
-        tlsEnabled = false,
-        nodeLockdown = true
+        tlsEnabled = false
       )
     (bare should not).include("qod config")
-  }
-
-  "startup node lockdown line" should "say ENABLED when lockdown is on everywhere" in {
-    val b = Banner.startup(
-      meta,
-      "myhost",
-      20900,
-      "myhost",
-      31338,
-      tlsEnabled = false,
-      nodeLockdown = true
-    )
-    b should include(
-      "NODE LOCKDOWN : ENABLED (tenants cannot ATTACH/INSTALL/LOAD, read local files or node credentials)"
-    )
-    (b should not).include("QOD_NODE_LOCKDOWN")
-  }
-
-  it should "warn that tenants can read node credentials when lockdown is off by default" in {
-    val b = Banner.startup(
-      meta,
-      "myhost",
-      20900,
-      "myhost",
-      31338,
-      tlsEnabled = false,
-      nodeLockdown = false,
-      unlockedPools = 3
-    )
-    b should include("NODE LOCKDOWN : DISABLED (3 pool(s) unlocked)")
-    b should include("read local files and node credentials")
-    b should include("set QOD_NODE_LOCKDOWN=true to enforce")
-  }
-
-  it should "name the pools that opted out when lockdown is on by default" in {
-    val b = Banner.startup(
-      meta,
-      "myhost",
-      20900,
-      "myhost",
-      31338,
-      tlsEnabled = false,
-      nodeLockdown = true,
-      unlockedPools = 2
-    )
-    b should include("NODE LOCKDOWN : ENABLED, but 2 pool(s) opted out")
-    b should include("read local files and node credentials")
-    (b should not).include("cannot ATTACH")
   }

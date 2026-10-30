@@ -76,8 +76,6 @@ final case class CreatePoolRequest(
     cpu: String = "",
     memory: String = "",
     podTemplateYaml: String = "",
-    // Per-pool node-lockdown override: "inherit" (default) | "on" | "off". See LockdownTriState.
-    lockdown: String = "inherit",
     /** Owner-declared demand scale-out band. Both bounds must be set together (one-sided is refused
       * with 400 `invalid_band`); both absent = fixed size, the pool never autoscales. Validated by
       * [[ai.starlake.quack.model.AutoscaleBand.validate]] against the requested distribution/size
@@ -151,8 +149,6 @@ final case class PoolResponse(
     initSql: String = "",               // operator-authored init SQL; empty when none was supplied
     cpu: String = "",                   // Kubernetes cpu request=limit; empty when unset
     memory: String = "",                // Kubernetes memory request=limit; empty when unset
-    lockdown: String = "inherit",       // stored tri-state override
-    lockdownEffective: Boolean = false, // tri-state resolved against the global flag
     // Owner-declared demand scale-out band; both None on a fixed-size pool.
     minNodes: Option[Int] = None,
     maxNodes: Option[Int] = None,
@@ -199,14 +195,6 @@ final case class SetPoolTemplateRequest(
     tenantDb: String,
     pool: String,
     podTemplateYaml: String
-)
-
-final case class SetPoolLockdownRequest(
-    tenant: String,
-    tenantDb: String,
-    pool: String,
-    // "inherit" | "on" | "off" - see [[ai.starlake.quack.model.LockdownTriState]]
-    lockdown: String
 )
 
 /** Sets or clears the pool's demand scale-out band. Both bounds Some = set (validated against the
@@ -1771,7 +1759,6 @@ object Dtos:
   given Codec[SetPoolResourcesRequest]      = deriveCodec
   given Codec[SetPoolInitSqlRequest]        = deriveCodec
   given Codec[SetPoolTemplateRequest]       = deriveCodec
-  given Codec[SetPoolLockdownRequest]       = deriveCodec
   given Codec[SetPoolAutoscaleRequest]      = ConfiguredCodec.derived
   given Codec[PoolListResponse]             = deriveCodec
   given Codec[ProfilePool]                  = deriveCodec

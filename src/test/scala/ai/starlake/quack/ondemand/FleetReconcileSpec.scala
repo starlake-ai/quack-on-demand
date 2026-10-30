@@ -74,7 +74,7 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
   private def fixture(): (FleetLikeBackend, PoolSupervisor, InMemoryControlPlaneStore, PoolKey) =
     val b   = new FleetLikeBackend
     val st  = new InMemoryControlPlaneStore()
-    val sup = new PoolSupervisor(b, new NodeLoadTracker, st, lockdownEnabled = false)
+    val sup = new PoolSupervisor(b, new NodeLoadTracker, st)
     sup.createTenant(Tenant("acme")).unsafeRunSync()
     sup
       .createTenantDb("acme", "db", TenantDbKind.InMemory, Map.empty, dataPath = "")
@@ -315,7 +315,6 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend,
         tracker,
         cp,
-        lockdownEnabled = false,
         locks = locker,
         federationBlobOf = _ => IO(fedBlob)
       )

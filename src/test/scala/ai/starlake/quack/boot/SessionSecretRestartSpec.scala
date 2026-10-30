@@ -1,7 +1,7 @@
 package ai.starlake.quack.boot
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{AuthenticationConfig, NodeLockdownConfig, OpaConfig}
+import ai.starlake.quack.edge.config.{AuthenticationConfig, OpaConfig}
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -164,7 +164,6 @@ class SessionSecretRestartSpec extends AnyFlatSpec with Matchers with BeforeAndA
         authCfg,
         source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig],
         opa,
-        lockdownCfg = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig],
         quackCfg = Some(source.at("quack-native").loadOrThrow[QuackNativeConfig])
       )
       .attempt

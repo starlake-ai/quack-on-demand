@@ -97,7 +97,6 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
         cpu = "2",
         memory = "8Gi",
         podTemplateYaml = "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n",
-        lockdown = Some(true),
         // writeonly + dual = 2 write-capable nodes, so the floor must be >= 2.
         minNodes = Some(2),
         maxNodes = Some(4)
@@ -197,9 +196,6 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     restoredPool.cpu shouldBe "2"
     restoredPool.memory shouldBe "8Gi"
     restoredPool.podTemplateYaml shouldBe "apiVersion: v1\nkind: Pod\nspec:\n  nodeName: n1\n"
-    // The per-pool lockdown override ("on") must survive the export -> import
-    // cycle: a manifest import must not silently wipe a superuser's override.
-    restoredPool.lockdown shouldBe Some(true)
     // Same guarantee for the scale-to-zero flag: an import must not wake a
     // suspended pool back up by resetting it to false.
     restoredPool.suspended shouldBe true
@@ -673,64 +669,40 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
   }
 
   // ------------------------------------------------------------------
-  // Test 7: a pool manifest that OMITS the lockdown field imports as the
-  // default "inherit" (Pool.lockdown == None), so a pre-lockdown YAML never
-  // acquires a spurious override.
+  // Test 7: per-pool lockdown was removed (Phase D). A manifest an earlier
+  // release exported carries `lockdown` on its pools: it imports with the
+  // field ignored, whatever its value, and an export carries none.
   // ------------------------------------------------------------------
 
-  it should "import a pool that omits lockdown as inherit (no override)" in {
-    val yaml =
-      """apiVersion: quack-on-demand/v1
-        |kind: ConfigManifest
-        |exportedAt: '2026-06-05T12:00:00Z'
-        |exportedFrom: { managerVersion: x, hostname: y }
-        |tenants:
-        |  - name: tpch
-        |    tenantDbs:
-        |      - name: tpch_tpch1
-        |    pools:
-        |      - name: sales
-        |        tenantDb: tpch_tpch1
-        |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
-        |""".stripMargin
-    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
-    parsed.tenants.head.pools.head.lockdown shouldBe "inherit"
-
-    val dst = new InMemoryControlPlaneStore()
-    ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
-
-    val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
-    val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
-    dst.listPools(db.id).find(_.name == "sales").get.lockdown shouldBe None
-  }
-
-  // ------------------------------------------------------------------
-  // Test 8: an invalid lockdown tri-state is rejected by validation rather
-  // than silently coerced.
-  // ------------------------------------------------------------------
-
-  it should "reject a pool manifest with an invalid lockdown value" in {
-    val yaml =
-      """apiVersion: quack-on-demand/v1
-        |kind: ConfigManifest
-        |exportedAt: '2026-06-05T12:00:00Z'
-        |exportedFrom: { managerVersion: x, hostname: y }
-        |tenants:
-        |  - name: tpch
-        |    tenantDbs:
-        |      - name: tpch_tpch1
-        |    pools:
-        |      - name: sales
-        |        tenantDb: tpch_tpch1
-        |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
-        |        lockdown: banana
-        |""".stripMargin
-    val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
-    val dst    = new InMemoryControlPlaneStore()
-    val result = ManifestImporter.apply(parsed, dst, requireEncryption = false)
-    result.isLeft shouldBe true
-    result.left.toOption.get.exists(_.contains("lockdown")) shouldBe true
-  }
+  it should "import a pool that carries the removed lockdown field, ignoring it" in
+    List("on", "off", "inherit", "banana").foreach { value =>
+      val yaml =
+        s"""apiVersion: quack-on-demand/v1
+           |kind: ConfigManifest
+           |exportedAt: '2026-06-05T12:00:00Z'
+           |exportedFrom: { managerVersion: x, hostname: y }
+           |tenants:
+           |  - name: tpch
+           |    tenantDbs:
+           |      - name: tpch_tpch1
+           |    pools:
+           |      - name: sales
+           |        tenantDb: tpch_tpch1
+           |        roleDistribution: { writeonly: 0, readonly: 0, dual: 1 }
+           |        lockdown: $value
+           |""".stripMargin
+      withClue(s"lockdown: $value ") {
+        val parsed = parser.parse(yaml).flatMap(_.as[ConfigManifest]).fold(throw _, identity)
+        val dst    = new InMemoryControlPlaneStore()
+        ManifestImporter.apply(parsed, dst, requireEncryption = false) shouldBe Right(())
+        val tenantId = dst.listTenants().find(_.displayName == "tpch").map(_.id).get
+        val db       = dst.listTenantDbs(tenantId).find(_.name == "tpch_tpch1").get
+        dst.listPools(db.id).map(_.name) shouldBe List("sales")
+        Yaml.pretty(
+          exportOk(ManifestExporter.build(dst, ExportedAt, AdminVersion, Hostname)).asJson
+        ) should not include "lockdown"
+      }
+    }
 
   // ------------------------------------------------------------------
   // Test 9: a pool manifest that OMITS the suspended field imports as

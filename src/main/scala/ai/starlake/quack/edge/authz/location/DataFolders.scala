@@ -11,7 +11,7 @@ object DataFolders:
 
   /** Schemes whose URLs a tenant `s3://` secret with another endpoint can reach (S3-compatible
     * APIs, GCS interop, Azure containers named like buckets): all read as `s3://<bucket>/<key>/`,
-    * the family-blind matching of `ai.starlake.quack.model.BucketKeys`.
+    * family-blind.
     */
   private val ObjectSchemes =
     List("s3://", "s3a://", "s3n://", "r2://", "gs://", "gcs://", "az://", "azure://")

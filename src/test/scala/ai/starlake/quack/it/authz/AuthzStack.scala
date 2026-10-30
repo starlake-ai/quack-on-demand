@@ -1,7 +1,7 @@
 package ai.starlake.quack.it.authz
 
 import ai.starlake.quack.{FlightConfig, Main, ManagerConfig, QuackNativeConfig}
-import ai.starlake.quack.edge.config.{AuthenticationConfig, NodeLockdownConfig}
+import ai.starlake.quack.edge.config.AuthenticationConfig
 import ai.starlake.quack.observability.metrics.MetricsConfig
 import ai.starlake.quack.observability.metrics.MetricsConfigCodec.given
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -122,7 +122,6 @@ final class AuthzStack(
     val edgeCfg  = source.at("quack-flightsql").loadOrThrow[FlightConfig]
     val quackCfg = source.at("quack-native").loadOrThrow[QuackNativeConfig]
     val authCfg  = source.at("quack-flightsql.auth").loadOrThrow[AuthenticationConfig]
-    val lockdown = source.at("quack-flightsql.nodeLockdown").loadOrThrow[NodeLockdownConfig]
     val metrics  = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
     val opa      = ai.starlake.quack.edge.config.OpaConfig
       .validate(
@@ -137,7 +136,6 @@ final class AuthzStack(
         authCfg,
         metrics,
         opa,
-        lockdownCfg = lockdown,
         quackCfg = Some(quackCfg)
       )
       .attempt

@@ -100,7 +100,6 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `sessionJwtSecret` / `existingSessionJwtSecret` | `""` | Optional at any replica count (`QOD_SESSION_JWT_SECRET`). Empty: the first manager generates the secret and stores it in the control-plane database, and every restart and replica reads it. Set one only when another service must verify the sessions; a pre-existing Secret MUST carry the value under the key `sessionJwtSecret`. |
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.user` | `""` (REQUIRED) | A dedicated non-superuser role with `CREATEDB` that owns the control-plane database. See [Tenant isolation](#tenant-isolation). |
-| `security.nodeLockdown` | `true` | `QOD_NODE_LOCKDOWN`. Keeps tenant users away from the node's mounted secrets. See [Tenant isolation](#tenant-isolation). |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
@@ -191,9 +190,9 @@ helm upgrade qod charts/quack-on-demand \
 
 Each node pod mounts its secrets read-only at `/var/run/qod-secrets` for its whole life: the DuckLake catalog's Postgres password, the encryption key of an encrypted database, the object-store keys and the federation SQL. A DuckLake database created without its own metastore credentials uses `postgres.user` / `postgres.password`, which are also the control plane's login. So whoever reads that file from a node can connect to the control-plane database (every tenant's password hashes, tokens and catalog passwords) and to every other tenant's catalog, including the per-file encryption keys; if `postgres.user` is a Postgres superuser, they also reach the database server itself (`COPY ... TO PROGRAM`, `pg_read_file`).
 
-Two chart defaults bound that exposure:
+Two things bound that exposure:
 
-- **`security.nodeLockdown: true`.** Non-superuser SQL cannot read local files (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, so a tenant user cannot read the mounted files. The manager's own default is off; the chart turns it on. A pool can opt out with `POST /api/pool/setLockdown`; every node still refuses a tenant user's read of a local path outside the tenant's authorized folders, the mounted files included.
+- **Every node enforces.** Non-superuser SQL cannot read a local path outside the tenant's authorized folders (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, on every pool and whatever the configuration, so a tenant user cannot read the mounted files.
 - **`postgres.user` has no default.** Use a dedicated role that is not a Postgres superuser, for example `CREATE ROLE qod LOGIN CREATEDB PASSWORD '...'; CREATE DATABASE qod OWNER qod;`.
 
 QoD superusers are never screened and can always read the files. Isolating each node to its own catalog needs one Postgres role per catalog database, which is not implemented yet.

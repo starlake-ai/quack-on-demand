@@ -98,7 +98,6 @@ def pool_body(tenant: str, db_full: str, pool: str, size: int) -> dict:
         "memory": "",
         "podTemplateYaml": "",
         "startSuspended": False,
-        "lockdown": "inherit",
     }
 
 

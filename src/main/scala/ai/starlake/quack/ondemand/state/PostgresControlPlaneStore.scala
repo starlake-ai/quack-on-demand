@@ -550,9 +550,9 @@ final class PostgresControlPlaneStore(
         |  (id, tenant_id, tenant_db_id, name, size,
         |   dist_writeonly, dist_readonly, dist_dual,
         |   max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |   cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes,
+        |   cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes,
         |   init_sql_trusted)
-        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        |VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)
         |ON CONFLICT (id) DO UPDATE SET
         |  tenant_id               = EXCLUDED.tenant_id,
         |  tenant_db_id            = EXCLUDED.tenant_db_id,
@@ -570,7 +570,6 @@ final class PostgresControlPlaneStore(
         |  memory                  = EXCLUDED.memory,
         |  pod_template_yaml       = EXCLUDED.pod_template_yaml,
         |  suspended               = EXCLUDED.suspended,
-        |  lockdown                = EXCLUDED.lockdown,
         |  min_nodes               = EXCLUDED.min_nodes,
         |  max_nodes               = EXCLUDED.max_nodes,
         |  init_sql_trusted        = EXCLUDED.init_sql_trusted""".stripMargin
@@ -595,16 +594,13 @@ final class PostgresControlPlaneStore(
       ps.setString(15, p.memory)
       ps.setString(16, p.podTemplateYaml)
       ps.setBoolean(17, p.suspended)
-      p.lockdown match
-        case Some(v) => ps.setBoolean(18, v)
-        case None    => ps.setNull(18, Types.BOOLEAN)
       p.minNodes match
+        case Some(v) => ps.setInt(18, v)
+        case None    => ps.setNull(18, Types.INTEGER)
+      p.maxNodes match
         case Some(v) => ps.setInt(19, v)
         case None    => ps.setNull(19, Types.INTEGER)
-      p.maxNodes match
-        case Some(v) => ps.setInt(20, v)
-        case None    => ps.setNull(20, Types.INTEGER)
-      ps.setBoolean(21, p.initSqlTrusted)
+      ps.setBoolean(20, p.initSqlTrusted)
       ps.executeUpdate()
     finally ps.close()
   }
@@ -614,7 +610,7 @@ final class PostgresControlPlaneStore(
       """SELECT id, tenant_id, tenant_db_id, name, size,
         |       dist_writeonly, dist_readonly, dist_dual,
         |       max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql,
-        |       cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes,
+        |       cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes,
         |       init_sql_trusted
         |FROM qodstate_pool WHERE tenant_db_id = ? ORDER BY name""".stripMargin
     )
@@ -651,9 +647,6 @@ final class PostgresControlPlaneStore(
       cpu = Option(rs.getString("cpu")).getOrElse(""),
       memory = Option(rs.getString("memory")).getOrElse(""),
       podTemplateYaml = Option(rs.getString("pod_template_yaml")).getOrElse(""),
-      // Column added in changeset 0024; NULL = inherit the global flag.
-      lockdown =
-        Option(rs.getObject("lockdown")).map(_.asInstanceOf[java.lang.Boolean].booleanValue),
       // Columns added in changeset 0025; NULL = fixed-size pool (no band).
       minNodes = Option(rs.getObject("min_nodes")).map(_.asInstanceOf[Number].intValue),
       maxNodes = Option(rs.getObject("max_nodes")).map(_.asInstanceOf[Number].intValue),
@@ -1805,7 +1798,7 @@ final class PostgresControlPlaneStore(
       ),
       pools = selectAll(
         c,
-        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, lockdown, min_nodes, max_nodes, init_sql_trusted FROM qodstate_pool ORDER BY name",
+        "SELECT id, tenant_id, tenant_db_id, name, size, dist_writeonly, dist_readonly, dist_dual, max_concurrent_per_node, idle_timeout_sec, disabled, cohorts, init_sql, cpu, memory, pod_template_yaml, suspended, min_nodes, max_nodes, init_sql_trusted FROM qodstate_pool ORDER BY name",
         readPool
       ),
       nodes = selectAll(
