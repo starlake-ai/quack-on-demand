@@ -585,12 +585,88 @@ final class PoolSupervisor(
   private[ondemand] def effectiveMetastoreForTest(td: TenantDb): Map[String, String] =
     effectiveMetastoreFor(td)
 
+  /** The versions lock (Phase C re-review I4-R1). A local mutation holds one permit across its
+    * store write, its cache update and the refresh that publishes the versions and credentials
+    * vouching for it ([[mutation]]); [[restore]] takes every permit across its read, snapshot,
+    * cache swap and publish, so it never swaps the caches to a snapshot read before a local commit
+    * while that commit's refresh publishes the newer version over them. Not fair: a mutation nested
+    * in another gets its permit at once even while a restore waits, so a waiting restore never
+    * deadlocks a mutation that already holds one.
+    */
+  private val versionsLock =
+    new java.util.concurrent.Semaphore(PoolSupervisor.VersionsLockPermits, false)
+
+  /** How many [[mutation]]s of this supervisor the current thread is inside. */
+  private val mutationDepth: ThreadLocal[Int] = ThreadLocal.withInitial(() => 0)
+
+  /** A [[restore]] was skipped (the lock not had in time) or deferred (asked for inside a
+    * mutation): the next local mutation to give its last permit back runs it.
+    */
+  private val restoreOwed = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** `body` as one local mutation, holding one permit of [[versionsLock]]. Once the outermost
+    * mutation of this thread has given its permit back, it runs a [[restore]] still owed.
+    */
+  private def mutation[A](body: => A): A =
+    versionsLock.acquireUninterruptibly()
+    mutationDepth.set(mutationDepth.get() + 1)
+    try body
+    finally
+      mutationDepth.set(mutationDepth.get() - 1)
+      versionsLock.release()
+      if mutationDepth.get() == 0 && restoreOwed.compareAndSet(true, false) then
+        try restore()
+        catch
+          case scala.util.control.NonFatal(e) =>
+            logger.error(
+              s"restore: the restore owed to a local mutation failed: ${e.getMessage}",
+              e
+            )
+
+  /** Rebuild every cache from the store, under every permit of [[versionsLock]], and never without
+    * them (amendment A7): a restore never publishes a version over caches a local mutation is still
+    * changing. Asked for on a thread inside a mutation of this supervisor (a failing nested
+    * mutation's recovery, a NOTIFY handled on the writer's thread), it is deferred to the moment
+    * the outermost one gives its permit back, which waiting here would deadlock. One that cannot
+    * have every permit within [[PoolSupervisor.RestoreLockWaitMs]] (a local mutation running that
+    * long) is skipped with a WARN: the next NOTIFY, snapshot refresh or local mutation runs it. A
+    * stall is bounded, never a hang.
+    */
   def restore(): Unit =
+    if mutationDepth.get() > 0 then
+      restoreOwed.set(true)
+      logger.debug("restore: asked for inside a local mutation; runs once it is done")
+    else
+      val all  = PoolSupervisor.VersionsLockPermits
+      val held =
+        try
+          versionsLock.tryAcquire(
+            all,
+            PoolSupervisor.RestoreLockWaitMs,
+            java.util.concurrent.TimeUnit.MILLISECONDS
+          )
+        catch
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+            false
+      if held then
+        try restoreUnlocked()
+        finally versionsLock.release(all)
+      else
+        restoreOwed.set(true)
+        logger.warn(
+          "restore: a local mutation held the versions lock past " +
+            s"${PoolSupervisor.RestoreLockWaitMs} ms; skipped, the next NOTIFY, snapshot refresh " +
+            "or local mutation runs it"
+        )
+
+  private def restoreUnlocked(): Unit =
     // Read before the snapshot and published once the caches are rebuilt: a version (and a
     // credential digest) must never vouch for state older than itself. A peer's commit between the
     // reads would otherwise publish its new version over the deny sets, ACL modes and grants of
     // before it, and a node would cache that decision under the new version for 60 s; read first,
     // the version is the older one, and the commit's own NOTIFY runs the restore that moves it.
+    // This replica's own commits stay out of that window through the versions lock.
     val versions    = policyVersions.read()
     val credentials = userS3.read()
     val snap        = store.snapshot()
@@ -752,47 +828,39 @@ final class PoolSupervisor(
   /** Wraps a mutator body so a failure after the store write leaves the caches consistent with the
     * store instead of half-applied. All caches (`tenants`, `tenantDbs`, `poolRows`, `pools`,
     * `poolIdByKey`, `rbacResolver`, tracker quarantine flags, effective-set cache) are DERIVED
-    * state, fully rebuildable from `store.snapshot()` via [[restore]]. On any exception this
-    * best-effort restore()s then rethrows the ORIGINAL exception unchanged (a rebuild failure is
-    * logged and swallowed). `restore()` acquires no lock and never spawns / calls `backend` /
+    * state, fully rebuildable from `store.snapshot()` via [[restore]]. The body is one local
+    * [[mutation]] (one permit of the versions lock). On any exception this best-effort restore()s,
+    * once the permit is given back, then rethrows the ORIGINAL exception unchanged (a rebuild
+    * failure is logged and swallowed); a mutation nested in another leaves that restore to the
+    * outermost one ([[restore]] defers it). `restore()` never spawns / calls `backend` /
     * broadcasts, so it is safe to run under a held `locks.withLock`.
     */
   private def withCacheRecovery[A](op: String)(body: => A): A =
-    try body
+    try mutation(body)
     catch
       case t: Throwable =>
-        try restore()
-        catch
-          case rebuildError: Throwable =>
-            logger.error(
-              s"withCacheRecovery[$op]: cache rebuild after failed mutation also failed: " +
-                s"${rebuildError.getMessage}",
-              rebuildError
-            )
-        logger.warn(
-          s"withCacheRecovery[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
-        )
+        recover("withCacheRecovery", op, t)
         throw t
 
   /** [[withCacheRecovery]] for an IO body: recovery runs in the same IO chain (under whatever lock
-    * the IO was built with, e.g. `locks.withLock`), then the original error is re-raised.
+    * the IO was built with, e.g. `locks.withLock`), then the original error is re-raised. The body
+    * holds no permit of the versions lock unless it takes one itself ([[mutation]]): the pool
+    * lifecycle bodies publish no version and can run for a node's whole start.
     */
   private def withCacheRecoveryIO[A](op: String)(io: IO[A]): IO[A] =
-    io.onError { case t =>
-      IO {
-        try restore()
-        catch
-          case rebuildError: Throwable =>
-            logger.error(
-              s"withCacheRecoveryIO[$op]: cache rebuild after failed mutation also failed: " +
-                s"${rebuildError.getMessage}",
-              rebuildError
-            )
-        logger.warn(
-          s"withCacheRecoveryIO[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}"
+    io.onError { case t => IO(recover("withCacheRecoveryIO", op, t)) }
+
+  /** The caches rebuilt from the store after `op` failed with `t`, and the WARN saying so. */
+  private def recover(wrapper: String, op: String, t: Throwable): Unit =
+    try restore()
+    catch
+      case rebuildError: Throwable =>
+        logger.error(
+          s"$wrapper[$op]: cache rebuild after failed mutation also failed: " +
+            s"${rebuildError.getMessage}",
+          rebuildError
         )
-      }
-    }
+    logger.warn(s"$wrapper[$op]: mutation failed, caches rebuilt from store: ${t.getMessage}")
 
   /** Initialize the DuckLake catalog for every `kind=ducklake` tenant-db, one controlled session
     * per tenant-db so concurrent node ATTACHes don't race on the `ducklake_metadata` CREATE TABLE.
@@ -2378,8 +2446,10 @@ final class PoolSupervisor(
                   merged.objectStore != td.objectStore ||
                   merged.initSql != td.initSql ||
                   merged.initSqlTrusted != td.initSqlTrusted
+              // The one IO mutator that changes a decision input (the data-folder deny set): its
+              // store block holds a permit of the versions lock, as every withCacheRecovery body.
               val refresh = withCacheRecoveryIO("updateTenantDb") {
-                IO.blocking {
+                IO.blocking(mutation {
                   store.upsertTenantDb(merged)
                   putTenantDbRow(merged)
                   if merged.metastore != td.metastore || merged.dataPath != td.dataPath then
@@ -2410,7 +2480,7 @@ final class PoolSupervisor(
                     try onTenantDbChanged(tenantName.toLowerCase(Locale.ROOT), merged.name)
                     catch case _: Throwable => ()
                   publish.topologyChanged()
-                }
+                })
               }
               val restarts =
                 if !nodeAffecting then IO.pure((List.empty[String], List.empty[(String, String)]))
@@ -4392,6 +4462,12 @@ object PoolSupervisor:
     */
   val NodeStartupGrace: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(120).seconds
+
+  /** The permits of the versions lock: one per local mutation, every one for a restore. */
+  val VersionsLockPermits: Int = 1 << 20
+
+  /** How long a restore waits for running local mutations before it skips (amendment A7). */
+  val RestoreLockWaitMs: Long = 5_000L
 
   /** Two fragments of the manager's own SQL as one `extraSetupSql` (a merge node's federation blob
     * and its branch attach), `first` FIRST, with a forced newline between two non-empty fragments.
