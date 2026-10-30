@@ -1091,6 +1091,31 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       prepare(fx, connId, "SELECT 3") shouldBe prepareResp(false)
       lastPrepareNode(fx) shouldBe first
 
+  "a computed location inside a transaction" should
+    "be refused, never computed, when the transaction's link is on another node" in:
+      // The router routes the evaluation to the transaction's pinned node, while the link the front
+      // door holds says it is on another (as after the router dropped its pin). A statement of the
+      // transaction is never computed outside it: refused before anything is sent (CONTRACT
+      // Addendum 4 item 25a; Phase C review T19 N4).
+      val fx     = setup()
+      val connId = connect(fx)
+      prepare(fx, connId, "BEGIN") shouldBe prepareResp(false)
+      val node      = txNode(fx, connId)
+      val session   = fx.sessions.get(connId).get
+      val (_, link) = session.txLink.get().get
+      session.txLink.set(Some(("quack-elsewhere", link)))
+      val posted   = fx.transport.posted.size
+      val prepared = fx.transport.prepared.size
+      errorText(
+        prepare(fx, connId, "SELECT * FROM read_csv('s3://acme-etl/in/' || 'x.csv')")
+      ) shouldBe
+        "computing the file location: permanent failure: the client transaction's node " +
+        s"connection is on quack-elsewhere, not $node: a statement of the transaction is never " +
+        "computed outside it"
+      // Nothing reached a node: no evaluation, no statement, no fresh link.
+      fx.transport.prepared.size shouldBe prepared
+      fx.transport.posted.size shouldBe posted
+
   // The DuckDB 2.0 client's catalog sync (duckdb-quack QuackSchemaSet / QuackTableSet
   // GetLoadQuery, abridged): two statements the client joins on node-local oids.
   private val SchemaSync =
