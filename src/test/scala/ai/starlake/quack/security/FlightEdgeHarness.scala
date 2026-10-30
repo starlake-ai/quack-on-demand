@@ -125,8 +125,8 @@ object FlightEdgeHarness:
       deniedBuckets: PoolSupervisor => () => Set[String] = _ => () => Set.empty,
       journal: EventJournal = EventJournal.noop,
       spawnNodes: Boolean = false,
-      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false)
+      /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
+      metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter
   )
 
   /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port.
@@ -149,7 +149,7 @@ object FlightEdgeHarness:
       store: InMemoryControlPlaneStore,
       enableProviders: Boolean = true,
       tls: Boolean = false,
-      wiring: RouterWiring = RouterWiring(),
+      wiring: RouterWiring,
       authService: Option[AuthenticationService] = None
   ): Harness =
     val port = ephemeralPort()

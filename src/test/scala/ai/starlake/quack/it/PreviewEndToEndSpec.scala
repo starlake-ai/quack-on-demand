@@ -2,6 +2,7 @@ package ai.starlake.quack.it
 
 import ai.starlake.quack.edge.FlightSqlRouter
 import ai.starlake.quack.edge.adapter.{NodeLoadTracker, QuackHttpAdapter, QuackHttpClient}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.ArrowRowsDecoder
@@ -156,7 +157,13 @@ class PreviewEndToEndSpec
           val client   = new QuackHttpClient(allocator)
           val adapter  = new QuackHttpAdapter(client, tracker, keys)
           val sessions = new ai.starlake.quack.edge.SessionRegistry
-          val router   = new FlightSqlRouter(sup, sessions, tracker, adapter)
+          val router   = new FlightSqlRouter(
+            sup,
+            sessions,
+            tracker,
+            adapter,
+            metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+          )
           test(router, poolKey)
     finally
       try sup.list().foreach(ps => sup.deletePool(ps.key, force = true).unsafeRunSync())

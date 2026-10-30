@@ -1,5 +1,6 @@
 package ai.starlake.quack.security
 
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.ondemand.telemetry.EventJournal
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
@@ -48,7 +49,8 @@ class OpaFlightEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         opa = Some(opa),
         nodeQuery = duckNode(OrdersSetup),
         journal = new EventJournal(audit),
-        spawnNodes = true
+        spawnNodes = true,
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
       )
     )
     Booted(h, audit)

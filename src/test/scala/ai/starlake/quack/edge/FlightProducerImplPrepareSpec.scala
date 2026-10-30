@@ -2,6 +2,7 @@ package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.admin.AdminStatementExecutor
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -73,9 +74,17 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
           sessions,
           tracker,
           adapter,
-          adminExecutor = Some(new AdminStatementExecutor(sup))
+          adminExecutor = Some(new AdminStatementExecutor(sup)),
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
         )
-      else new FlightSqlRouter(sup, sessions, tracker, adapter)
+      else
+        new FlightSqlRouter(
+          sup,
+          sessions,
+          tracker,
+          adapter,
+          metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+        )
     val producer = new FlightProducerImpl(router)
 
     val peer          = s"peer-${java.util.UUID.randomUUID()}"

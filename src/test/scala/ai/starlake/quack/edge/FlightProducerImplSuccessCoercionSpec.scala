@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -84,8 +85,14 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         queryResponse(sql)
-    val adapter  = new QuackHttpAdapter(client, tracker)
-    val router   = new FlightSqlRouter(sup, new SessionRegistry, tracker, adapter)
+    val adapter = new QuackHttpAdapter(client, tracker)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+    )
     val producer = new FlightProducerImpl(router)
 
     val peer = s"peer-${java.util.UUID.randomUUID()}"

@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RoleDistribution, RunningNode, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -46,7 +47,13 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
       ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, tracker)
-    val router  = new FlightSqlRouter(sup, new SessionRegistry, tracker, adapter)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+    )
     new FlightProducerImpl(router)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:

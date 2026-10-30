@@ -86,7 +86,10 @@ enum MetadataFilterOutcome:
   * traversal blind spot is denied even though the walk leaves cross-catalog metadata alone on
   * purpose (rare, fail-closed, and the validator would have grant-gated that reference anyway).
   */
-final class MetadataFilterRewriter(enabled: Boolean = true):
+final class MetadataFilterRewriter(
+    /** False only in specs isolating the node: production (`Main`) always mounts it enabled. */
+    enabled: Boolean
+):
 
   import MetadataFilterOutcome._
   import MetadataFilterRewriter._

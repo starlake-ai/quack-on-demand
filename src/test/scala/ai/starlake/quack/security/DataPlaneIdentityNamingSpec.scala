@@ -1,6 +1,7 @@
 // src/test/scala/ai/starlake/quack/security/DataPlaneIdentityNamingSpec.scala
 package ai.starlake.quack.security
 
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.{EdgeHandshake, HandshakeBound, HandshakeFailure}
 import ai.starlake.quack.edge.adapter.QuackTransport
 import ai.starlake.quack.edge.auth.{
@@ -249,7 +250,13 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
       stubIdp(idp)
       val fix  = seed(idp)
       val auth = authService(fix, idp)
-      val h    = FlightEdgeHarness.boot(fix.store, authService = Some(auth))
+      val h    = FlightEdgeHarness.boot(
+        fix.store,
+        authService = Some(auth),
+        wiring = FlightEdgeHarness.RouterWiring(metadataFilterRewriter =
+          new MetadataFilterRewriter(enabled = true)
+        )
+      )
       try body(World(fix, idp, h, auth, new ConcurrentLinkedQueue[AuthzRequest]()))
       finally h.shutdown()
     finally idp.shutdown()

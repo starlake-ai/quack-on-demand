@@ -385,10 +385,12 @@ def test_serve_falls_back_to_the_default_pg_data_dir_on_an_empty_env_value(
 
 
 def test_serve_passes_a_persisted_acl_switch_through_for_the_manager_to_refuse(
-    runner, wired, tmp_path
+    runner, wired, tmp_path, monkeypatch
 ):
     # A QOD_ACL_ENABLED persisted by an older `qod setup --set` reaches the manager untouched: its
-    # boot refusal names the variable. serve neither rewrites nor warns about it.
+    # boot refusal names the variable. serve neither rewrites nor warns about it. The shell's own
+    # value would win over the persisted one (serve merges os.environ last), so unset it.
+    monkeypatch.delenv("QOD_ACL_ENABLED", raising=False)
     from qod_cli.config import save_start_env
 
     save_start_env({"QOD_ACL_ENABLED": "false"})

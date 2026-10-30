@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -91,7 +92,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       sessions,
       tracker,
       adapter,
-      journal = journal
+      journal = journal,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     (router, journal, store)
 
@@ -207,7 +209,13 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop
-    val router = new FlightSqlRouter(sup, sessions, tracker, adapter)
+    val router = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+    )
     val result = router
       .execute("aud-5", "alice", poolKey, "INSERT INTO acme.public.t VALUES (1)")
       .unsafeRunSync()

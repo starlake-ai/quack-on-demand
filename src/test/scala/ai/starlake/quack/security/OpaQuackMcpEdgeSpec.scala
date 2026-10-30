@@ -1,6 +1,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.boot.RoutedExecutor
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.{EdgeHandshake, QueryResult, RouterFailure}
 import ai.starlake.quack.edge.adapter.{QuackTestFixtures, QuackTransport}
 import ai.starlake.quack.edge.quack.{QuackFrontDoor, QuackSessionRegistry, QuackWire}
@@ -54,7 +55,8 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       wiring = FlightEdgeHarness.RouterWiring(
         opa = Some(opa),
         nodeQuery = duckNode(OrdersSetup),
-        spawnNodes = true
+        spawnNodes = true,
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
       )
     )
     try body(h, fix)

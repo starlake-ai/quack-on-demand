@@ -77,13 +77,14 @@ final class FlightSqlRouter(
       new ai.starlake.quack.route.PlacementDirectory(),
     val cacheAwareRouting: Boolean = true,
     val loadCapFactor: Double = 2.0,
-    /** System-catalog filter, always mounted by `Main` (Phase D decision 31). Disabled by default,
-      * so a test construction site that does not wire it narrows nothing. Appended at the TAIL
-      * deliberately: `Main` passes the leading arguments positionally, so a mid-list insertion
-      * would silently shift `registry` / `journal`.
+    /** System-catalog filter: narrows a tenant user's catalog listings to the granted objects, and
+      * its `narrows` gates the COPY-of-a-listing refusal (D-m1). Required, not defaulted (Phase D
+      * decision 31): a default would let a construction site that forgets it narrow nothing. `Main`
+      * mounts it always; only a spec isolating the node passes an unmounted one. At the TAIL
+      * because `Main` passes the leading arguments positionally, so a mid-list insertion would
+      * silently shift `registry` / `journal`; every caller names it.
       */
-    val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-      new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
+    val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter,
     /** Protected-write guard: denies a non-SELECT statement whose read side exposes a CLS-masked or
       * RLS-protected table (closes the write-wrapping bypass where a masked or filtered read
       * launders into a CTAS / INSERT ... SELECT). Inert by default so a construction site that does

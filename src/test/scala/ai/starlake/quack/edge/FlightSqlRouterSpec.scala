@@ -30,6 +30,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private val poolKey: PoolKey = PoolKey("acme", "acme_default", "sales")
 
+  /** The metadata filter as `Main` mounts it: every router here is built with it. */
+  private def mountedFilter = new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true)
+
   private val mmReg = new SimpleMeterRegistry
   private val si    = new StatementInstruments(mmReg)
 
@@ -100,7 +103,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         stmtInstruments = si,
         events = events,
         lockdownFor = lockdownFor,
-        adminExecutor = adminExecutor
+        adminExecutor = adminExecutor,
+        metadataFilterRewriter = mountedFilter
       )
     (router, sessions, node)
 
@@ -113,7 +117,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter
     )
     // no effectiveSet: claimed, parsed, then denied by the executor - never forwarded
     val out = withAdmin.execute("c-adm", "alice", poolKey, "CREATE ROLE r1").unsafeRunSync()
@@ -130,7 +135,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter
     )
     withAdmin
       .execute("c-adm2", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
@@ -150,7 +156,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter
     )
     // SHOW TABLES is not an admin form: routed to the node stub, returns Right
     withAdmin.execute("c-2", "alice", poolKey, "SHOW TABLES").unsafeRunSync() shouldBe
@@ -169,7 +176,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.adapter,
       stmtInstruments = si,
       adminExecutor =
-        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor))
+        Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(router.supervisor)),
+      metadataFilterRewriter = mountedFilter
     )
     withAdmin
       .execute(
@@ -190,7 +198,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter
     )
     val tenantId = router.supervisor.getTenant(poolKey.tenant).get.id
     router.supervisor.createRole(tenantId, "analyst").unsafeRunSync()
@@ -222,7 +231,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter
     )
     val superuserEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
       ai.starlake.quack.ondemand.state.RbacUser("u-root", None, "root", kind = "admin"),
@@ -256,7 +266,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter
     )
     // No effectiveSet: claimed, parsed, then denied by the executor (admin_required).
     withAdmin
@@ -277,7 +288,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       router.tracker,
       router.adapter,
       stmtInstruments = si,
-      adminExecutor = Some(exec)
+      adminExecutor = Some(exec),
+      metadataFilterRewriter = mountedFilter
     )
     withAdmin
       .execute("c-adm-hist-malformed", "alice", poolKey, "GRANT FROBNICATE ON t TO ROLE r")
@@ -355,7 +367,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.adapter,
       stmtInstruments = si,
       refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
-      routingInstruments = ri
+      routingInstruments = ri,
+      metadataFilterRewriter = mountedFilter
     )
     // Same SELECT twice on the single-node pool: the table is new on the first pass and a
     // repeat (staying on the same node) on the second.
@@ -569,7 +582,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker)
+      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker),
+      metadataFilterRewriter = mountedFilter
     )
 
   private def freshSupervisorAndBackend(): PoolSupervisor =
@@ -678,7 +692,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         IO.pure(TestArrow.okResponse())
     val adapter  = new QuackHttpAdapter(client, tracker)
     val sessions = new SessionRegistry
-    val router   = new FlightSqlRouter(sup, sessions, tracker, adapter, stmtInstruments = si)
+    val router   = new FlightSqlRouter(
+      sup,
+      sessions,
+      tracker,
+      adapter,
+      stmtInstruments = si,
+      metadataFilterRewriter = mountedFilter
+    )
     (router, sessions, sup.get(key).get.nodes, key)
 
   it should "honor preferredNode when no transaction pin overrides" in:
@@ -878,7 +899,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup2,
       new SessionRegistry,
       new NodeLoadTracker,
-      adapter
+      adapter,
+      metadataFilterRewriter = mountedFilter
     )
     router.execute("skew-1", "alice", key, "SELECT 1 FROM t").unsafeRunSync()
 
@@ -936,16 +958,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
 
   /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter. Returns
-    * (router, lastSqlSentToBackend ref, node). `metadataFilter` defaults to today's
-    * router defaults, so the CLS call sites below are unaffected.
+    * (router, lastSqlSentToBackend ref, node). `metadataFilter` is the mounted filter, as `Main`
+    * mounts it.
     */
   private def setupWithRewriter(
       rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
         new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
           new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
         ),
-      metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
-        new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
+      metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter = mountedFilter,
       readers: Int = 1,
       stub: () => QuackResponse = defaultStub,
       protectedWriteGuard: ai.starlake.quack.edge.policy.ProtectedWriteGuard =
@@ -1636,7 +1657,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter
     )
     val result = router.execute("reg-1", "alice", poolKey, "SELECT 1").unsafeRunSync()
     val qr     = result.toOption.get
@@ -1653,7 +1675,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter
     )
     val result = router
       .execute("reg-pat", "alice", poolKey, "SELECT 1", patId = Some("pat-abc"))
@@ -1672,7 +1695,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      registry = registry
+      registry = registry,
+      metadataFilterRewriter = mountedFilter
     )
     router.execute("reg-2", "alice", poolKey, "SELECT boom").unsafeRunSync().isLeft shouldBe true
     registry.list() shouldBe Nil
@@ -1730,7 +1754,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val adapter2  = new QuackHttpAdapter(client2, tkr)
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
-    val router2   = new FlightSqlRouter(sup2, sessions2, tkr, adapter2, registry = registry2)
+    val router2   = new FlightSqlRouter(
+      sup2,
+      sessions2,
+      tkr,
+      adapter2,
+      registry = registry2,
+      metadataFilterRewriter = mountedFilter
+    )
 
     val result =
       router2
@@ -1796,7 +1827,13 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         ) =
           IO.pure(stub())
     val router2 =
-      new FlightSqlRouter(sup2, new SessionRegistry, tkr, new QuackHttpAdapter(client2, tkr))
+      new FlightSqlRouter(
+        sup2,
+        new SessionRegistry,
+        tkr,
+        new QuackHttpAdapter(client2, tkr),
+        metadataFilterRewriter = mountedFilter
+      )
     router2.execute("retry-authz", "alice", pk2, "SELECT 1").unsafeRunSync() match
       case Left(f: RouterFailure.Unavailable) => f.reason should include("retry failed")
       case other                              => fail(s"expected Unavailable, got $other")
@@ -1887,7 +1924,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = si,
-      stampWrites = stampWrites
+      stampWrites = stampWrites,
+      metadataFilterRewriter = mountedFilter
     )
     (router, sessions, sup, calls)
 
@@ -2059,7 +2097,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = si,
-      stampWrites = true
+      stampWrites = true,
+      metadataFilterRewriter = mountedFilter
     )
 
     val result =
@@ -2187,7 +2226,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       adapter,
       stmtInstruments = si,
       resumeHoldTimeout = resumeHoldTimeout,
-      resumePollInterval = resumePollInterval
+      resumePollInterval = resumePollInterval,
+      metadataFilterRewriter = mountedFilter
     )
     (router, sup)
 
@@ -2248,7 +2288,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      lockdownFor = _ => true
+      lockdownFor = _ => true,
+      metadataFilterRewriter = mountedFilter
     )
     // Quarantine the only node so a statement that clears the lockdown screen
     // proceeds to routing and fails there (Unavailable) rather than being
@@ -2388,7 +2429,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       refsConfigFor = _ => ai.starlake.acl.model.Config.forDuckDB(Some("db"), Some("main")),
       routingInstruments = ri,
       placement = dir,
-      cacheAwareRouting = cacheAware
+      cacheAwareRouting = cacheAware,
+      metadataFilterRewriter = mountedFilter
     )
     (router, reg, dir, sup.get(poolKey).get.nodes)
 
@@ -2507,21 +2549,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Right[?, ?]]
     capturedSql() should include("table_schema = 'tpch1' AND table_name = 'customer'")
 
-  it should "leave the statement untouched when the filter is disabled" in:
-    val (router, capturedSql, _) = setupWithRewriter()
-    val out                      = router
-      .execute(
-        "meta-2",
-        "alice",
-        poolKey,
-        "SELECT table_name FROM information_schema.tables",
-        effectiveSet = customerOnly
-      )
-      .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("FROM information_schema.tables")
-    capturedSql() should not include "table_schema = 'tpch1'"
-
   it should "leave a superuser's information_schema read unfiltered" in:
     val root = ai.starlake.quack.ondemand.state.RbacUser("u-0", None, "root", "admin")
     val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
@@ -2638,20 +2665,20 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         narrowingCaptured() shouldBe ""
       }
     }
-    // The filter leaves these listings alone (a superuser; the filter off), so the COPY is the
-    // node's to judge.
-    val (open, openCaptured, _) = setupWithRewriter()
+    // The filter leaves these listings alone (a superuser; a *.*.* ALL holder), so the COPY is
+    // the node's to judge.
+    val everyTable = Some(effWithGrants(List(grant("*", "*", "*", "ALL"))))
     unread.foreach { sql =>
       withClue(sql) {
         narrowing
           .execute("copy-unread-su", "alice", poolKey, sql, Some(superuserSet))
           .unsafeRunSync() shouldBe a[Right[?, ?]]
-        open
-          .execute("copy-unread-off", "alice", poolKey, sql, effectiveSet = tableGrants)
+        narrowing
+          .execute("copy-unread-all", "alice", poolKey, sql, effectiveSet = everyTable)
           .unsafeRunSync() shouldBe a[Right[?, ?]]
       }
     }
-    openCaptured() should include("COPY")
+    narrowingCaptured() should include("COPY")
 
   it should "filter a metadata read hiding behind the first statement of a read batch" in:
     // A single parse reads only the first statement, so the second used to reach the node
@@ -3058,7 +3085,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       base.tracker,
       base.adapter,
       stmtInstruments = si,
-      attachedCatalogsOf = _ => throw new StackOverflowError()
+      attachedCatalogsOf = _ => throw new StackOverflowError(),
+      metadataFilterRewriter = mountedFilter
     )
     onWorkerStack(router.execute("deep-2", "alice", poolKey, "SELECT 1").unsafeRunSync()) match
       case Right(out) =>

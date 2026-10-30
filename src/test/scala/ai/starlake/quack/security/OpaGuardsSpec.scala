@@ -1,6 +1,7 @@
 package ai.starlake.quack.security
 
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.policy.ProtectedWriteGuard
 import ai.starlake.quack.ondemand.state.{RbacRole, RoleColumnPolicy}
 import com.github.tomakehurst.wiremock.WireMockServer
@@ -56,7 +57,8 @@ class OpaGuardsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         columnPolicyRewriter = new ColumnPolicyRewriter(catalog, enabled = true),
         protectedWriteGuard =
           new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true),
-        spawnNodes = true
+        spawnNodes = true,
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
       )
     )
     try body(h)

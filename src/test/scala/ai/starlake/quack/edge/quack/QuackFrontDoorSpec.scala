@@ -5,6 +5,7 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.authz.HandleInspector
 import ai.starlake.quack.edge.config.AuthenticationConfig
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
@@ -268,7 +269,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       events = sink,
       adminExecutor =
         if withAdmin then Some(new ai.starlake.quack.edge.admin.AdminStatementExecutor(sup))
-        else None
+        else None,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     val user      = RbacUser("u-1", if superuser then None else Some("t-1"), "alice", kind = "user")
     val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)

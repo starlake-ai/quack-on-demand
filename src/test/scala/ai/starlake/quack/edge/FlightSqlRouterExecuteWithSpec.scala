@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter.*
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -77,7 +78,8 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
-      journal = journal
+      journal = journal,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     Fixture(router, journal, store, sup.get(poolKey).get.nodes)
 

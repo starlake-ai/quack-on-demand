@@ -363,8 +363,9 @@ class BootPreflightRefusalsSpec extends AnyFlatSpec with Matchers:
       "off. Unset QOD_ACL_ENABLED."
     BootPreflight.RemovedAclFilteredMetadataMessage shouldBe
       "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
-      "user's catalog listings are always narrowed to the objects the user is granted, and " +
-      "nothing switches that off. Unset QOD_ACL_FILTERED_METADATA."
+      "user's catalog listings are narrowed to the objects the user is granted. To give a " +
+      "principal unfiltered listings, grant it RO on information_schema. Unset " +
+      "QOD_ACL_FILTERED_METADATA."
     BootPreflight.RemovedAclDialectMessage shouldBe
       "QOD_ACL_DIALECT (quack-flightsql.acl.dialect) was removed: the manager reads SQL in the " +
       "DuckDB dialect only, and nothing selects another. Unset QOD_ACL_DIALECT."

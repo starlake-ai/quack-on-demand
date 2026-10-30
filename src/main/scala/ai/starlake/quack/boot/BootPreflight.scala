@@ -54,8 +54,9 @@ object BootPreflight extends LazyLogging:
   /** The refusal for the removed metadata filter switch, verbatim in the boot error. */
   val RemovedAclFilteredMetadataMessage: String =
     "QOD_ACL_FILTERED_METADATA (quack-flightsql.acl.filteredMetadata) was removed: a tenant " +
-      "user's catalog listings are always narrowed to the objects the user is granted, and " +
-      "nothing switches that off. Unset QOD_ACL_FILTERED_METADATA."
+      "user's catalog listings are narrowed to the objects the user is granted. To give a " +
+      "principal unfiltered listings, grant it RO on information_schema. Unset " +
+      "QOD_ACL_FILTERED_METADATA."
 
   /** The refusal for the removed parser dialect knob, verbatim in the boot error. */
   val RemovedAclDialectMessage: String =

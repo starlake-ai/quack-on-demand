@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.admin
 
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.{FlightSqlRouter, SessionRegistry}
 import ai.starlake.quack.edge.adapter.{
   NodeLoadTracker,
@@ -57,7 +58,8 @@ class AdminSqlEndToEndSpec extends AnyFlatSpec with Matchers:
       tracker,
       adapter,
       stmtInstruments = new StatementInstruments(new SimpleMeterRegistry),
-      adminExecutor = Some(new AdminStatementExecutor(sup))
+      adminExecutor = Some(new AdminStatementExecutor(sup)),
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
     (sup, store, router)
 

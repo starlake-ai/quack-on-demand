@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.runtime.QuackBackend
@@ -55,7 +56,13 @@ class StreamArrowCancelSpec extends AnyFlatSpec with Matchers:
       ) =
         IO.pure(TestArrow.okResponse())
     val adapter = new QuackHttpAdapter(client, tracker)
-    val router  = new FlightSqlRouter(sup, new SessionRegistry, tracker, adapter)
+    val router  = new FlightSqlRouter(
+      sup,
+      new SessionRegistry,
+      tracker,
+      adapter,
+      metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+    )
     new FlightProducerImpl(router)
 
   /** Counts putNext calls and total rows; flips to cancelled after `cancelAfter` batches. */
