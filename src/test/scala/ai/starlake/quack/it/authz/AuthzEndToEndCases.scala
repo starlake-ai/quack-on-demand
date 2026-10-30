@@ -16,9 +16,8 @@ import scala.util.Try
 
 /** The in-engine authorization cases of spec Section 10 and decisions 15-23, on a real manager and
   * real qod-node, through both front doors (FlightSQL; the native front door when a DuckDB 2.0 CLI
-  * is on PATH). Concrete specs pick the stack: [[nodeOnly]] true boots it with the ACL off, so the
-  * node is the only layer judging grants, views and files, and every such refusal must carry the
-  * node's `QoD: ` prefix; false boots it with the ACL on, both layers enforcing.
+  * is on PATH). The node is the only layer judging grants, views, files, settings and catalogs, so
+  * every refusal carries the node's `QoD: ` prefix.
   *
   * World (`run` is random per spec, so two stacks or two runs never share a name):
   *   - tenant acme_<run>: DuckLake `lake` (data under `<root>/acme_<run>/shared/lake/`, pool
@@ -53,9 +52,6 @@ abstract class AuthzEndToEndCases(
 ) extends AnyFlatSpec
     with Matchers
     with BeforeAndAfterAll:
-
-  /** True: the ACL is off and the node alone judges grants, views and files. */
-  protected def nodeOnly: Boolean
 
   private val run    = java.lang.Long.toHexString(System.nanoTime() & 0xffffffL)
   private val Acme   = s"acme_${stackName}_$run"
@@ -588,26 +584,22 @@ abstract class AuthzEndToEndCases(
       }
     }
 
-  /** `sql` as `user` on `pool` is refused through every door. `node`: the refusal the node gives,
-    * asserted when only the node can be refusing: on the node-only stack, unless `gatewayFirst` (a
-    * statement the gateway refuses whatever the ACL flag: node-wide and extension settings,
-    * `SET GLOBAL`, which NodeSettingScreen screens for every non-superuser until Phase D, and DDL
-    * the engine itself may refuse at bind), and on both stacks when `alwaysNode` (a statement the
-    * gateway admits by design).
+  /** `sql` as `user` on `pool` is refused through every door, by the node: the error carries the
+    * node's `QoD: ` prefix and `node`. `anyRefusal`: only the refusal is asserted, for a statement
+    * DuckDB itself may refuse while binding, before any verdict (DDL in the system catalog).
     */
   private def refused(
       user: String,
       pool: String,
       sql: String,
       node: String = "QoD: ",
-      alwaysNode: Boolean = false,
-      gatewayFirst: Boolean = false
+      anyRefusal: Boolean = false
   ) =
     doors.foreach { d =>
       withClue(s"[$d] $user: $sql -> ") {
         as(d, user, pool, sql) match
           case Left(err) =>
-            if (nodeOnly && !gatewayFirst) || alwaysNode then
+            if !anyRefusal then
               err should include("QoD: ")
               err should include(node)
           case Right(r) => fail(s"expected a refusal, got rows $r")
@@ -705,7 +697,7 @@ abstract class AuthzEndToEndCases(
 
   "a symlink the path names inside an authorized folder" should "not lead out of it" in {
     ready()
-    // The node resolves the link before judging; on the local runtime the gateway does too. Only a
+    // The node resolves the link before judging. Only a
     // link the path names: one below a glob segment or a COPY PARTITION_BY / OVERWRITE target is not
     // judged (CONTRACT item 33), and keeping tenant folders free of links is the operator's.
     refused(
@@ -726,9 +718,8 @@ abstract class AuthzEndToEndCases(
       doors.foreach { d =>
         withClue(s"[$d] $sql -> ") {
           as(d, "alice", "lake", sql) match
-            case Left(err) =>
-              if nodeOnly then err should (include("does not exist") or include("QoD: "))
-            case Right(r) => fail(s"expected a refusal, got rows $r")
+            case Left(err) => err should (include("does not exist") or include("QoD: "))
+            case Right(r)  => fail(s"expected a refusal, got rows $r")
         }
       }
     }
@@ -742,13 +733,11 @@ abstract class AuthzEndToEndCases(
       "SELECT * FROM query('SELECT count(*) FROM read_csv(''/etc/hosts'')')",
       node = "outside the tenant's authorized locations"
     )
-    // A computed query() argument: the gateway's DuckLake-internals screen refuses it first,
-    // whatever the ACL flag (it cannot screen the text for catalog internals).
+    // A computed query() argument: the node cannot read its text, so it refuses it.
     refused(
       "alice",
       "lake",
-      "SELECT * FROM query('SELECT * FROM ' || 'orders')",
-      gatewayFirst = true
+      "SELECT * FROM query('SELECT * FROM ' || 'orders')"
     )
   }
 
@@ -907,8 +896,7 @@ abstract class AuthzEndToEndCases(
     refused(
       "alice",
       "s3lake",
-      s"SELECT * FROM read_parquet('s3://$Bucket/acme_lake/**/*.parquet')",
-      gatewayFirst = true
+      s"SELECT * FROM read_parquet('s3://$Bucket/acme_lake/**/*.parquet')"
     )
   }
 
@@ -926,15 +914,13 @@ abstract class AuthzEndToEndCases(
       "DROP SECRET IF EXISTS mine",
       node = "secrets are reserved to superusers"
     )
-    // s3_* settings are GLOBAL by default: the gateway's NodeSettingScreen refuses an unscoped SET of
-    // one first, whatever the ACL flag; the node's screen refuses it too (Task 8).
-    refused("alice", "lake", "SET s3_endpoint = 'evil.example.com'", gatewayFirst = true)
-    refused("alice", "lake", "SET enable_external_file_cache = true", gatewayFirst = true)
+    // s3_* settings and the external file cache are reserved to superusers on the node (Task 8).
+    refused("alice", "lake", "SET s3_endpoint = 'evil.example.com'")
+    refused("alice", "lake", "SET enable_external_file_cache = true")
     refused(
       "alice",
       "lake",
-      s"ATTACH 's3://$Bucket/x.duckdb' AS x (READ_ONLY)",
-      gatewayFirst = true
+      s"ATTACH 's3://$Bucket/x.duckdb' AS x (READ_ONLY)"
     )
   }
 
@@ -973,7 +959,7 @@ abstract class AuthzEndToEndCases(
       "SET allow_community_extensions = true",
       "SET allow_unsigned_extensions = true",
       "SET autoinstall_known_extensions = true"
-    ).foreach(sql => refused("alice", "lake", sql, gatewayFirst = true))
+    ).foreach(sql => refused("alice", "lake", sql))
     stack.flight(
       "SELECT current_setting('allow_community_extensions'), " +
         "current_setting('allow_unsigned_extensions'), " +
@@ -988,8 +974,8 @@ abstract class AuthzEndToEndCases(
 
   "an optimizer-disabling or global setting" should "be refused" in {
     ready()
-    refused("alice", "lake", "SET disabled_optimizers = 'filter_pushdown'", gatewayFirst = true)
-    refused("alice", "lake", "SET GLOBAL TimeZone = 'UTC'", gatewayFirst = true)
+    refused("alice", "lake", "SET disabled_optimizers = 'filter_pushdown'")
+    refused("alice", "lake", "SET GLOBAL TimeZone = 'UTC'")
   }
 
   // ---------- grants, views (decisions 3-4) ----------
@@ -1022,9 +1008,8 @@ abstract class AuthzEndToEndCases(
 
   "a plain view" should "need grants on its base tables" in {
     ready()
-    // alice holds RO on the view only: the gateway's check passes on the name, the node reads the
-    // expanded plan, so the refusal is the node's on both stacks.
-    refused("alice", "lake", s"SELECT * FROM $lake.main.v_secret", alwaysNode = true)
+    // alice holds RO on the view only: the node reads the expanded plan and refuses the base table.
+    refused("alice", "lake", s"SELECT * FROM $lake.main.v_secret")
   }
 
   "a secure view" should "be covered by its own read grant" in {
@@ -1045,21 +1030,19 @@ abstract class AuthzEndToEndCases(
 
   it should "refuse current_setting() inside its boundary, and a session variable steering it" in {
     ready()
-    // Local refusals of the describer (Task 9): the gateway never sees the body.
+    // Local refusals of the describer (Task 9).
     refused(
       "alice",
       "files",
       s"SELECT * FROM $files.main.sv_setting",
-      node = "current_setting() inside a secure view",
-      alwaysNode = true
+      node = "current_setting() inside a secure view"
     )
     // getvariable() folds to a constant at bind, so the describer refuses any boundary while the
     // session holds a user variable; without one the body's getvariable('h') is NULL.
     refused(
       "alice",
       "files",
-      s"SET VARIABLE h = 7; SELECT * FROM $files.main.sv_var",
-      alwaysNode = true
+      s"SET VARIABLE h = 7; SELECT * FROM $files.main.sv_var"
     )
     allowed("alice", "files", s"SELECT count(*) FROM $files.main.sv_var", Some(List("0")))
   }
@@ -1073,12 +1056,12 @@ abstract class AuthzEndToEndCases(
 
   "DDL in the system catalog" should "be refused under *.*.* ALL" in {
     ready()
-    refused("bob", "lake", "CREATE TABLE system.main.qod_e2e (a INTEGER)", gatewayFirst = true)
+    refused("bob", "lake", "CREATE TABLE system.main.qod_e2e (a INTEGER)", anyRefusal = true)
     refused(
       "bob",
       "lake",
       "CREATE VIEW system.main.qod_e2e_v AS SELECT 1 AS a",
-      gatewayFirst = true
+      anyRefusal = true
     )
   }
 
@@ -1092,8 +1075,7 @@ abstract class AuthzEndToEndCases(
       "alice",
       "lake",
       "SELECT stem('running', 'porter')",
-      node = "function stem is not classified",
-      alwaysNode = true
+      node = "function stem is not classified"
     )
   }
 
@@ -1138,23 +1120,20 @@ abstract class AuthzEndToEndCases(
         "alice",
         "lake",
         "SELECT levenshtein('kitten', 'sitting')",
-        node = shadowed,
-        alwaysNode = true
+        node = shadowed
       )
       refused(
         "alice",
         "lake",
         s"SELECT $lake.main.levenshtein('kitten', 'sitting')",
-        node = shadowed,
-        alwaysNode = true
+        node = shadowed
       )
-      // The view the gateway admits on its own grant: its body binds to the macro now.
+      // The view alice is granted: its body binds to the macro now.
       refused(
         "alice",
         "lake",
         s"SELECT d FROM $lake.main.v_lev",
-        node = shadowed,
-        alwaysNode = true
+        node = shadowed
       )
       allowed(
         "alice",
@@ -1177,13 +1156,12 @@ abstract class AuthzEndToEndCases(
     try
       val shadowed =
         s"function list_append is not classified: it resolves to $lake.main.list_append"
-      refused("alice", "lake", "SELECT array_append([1], 2)", node = shadowed, alwaysNode = true)
+      refused("alice", "lake", "SELECT array_append([1], 2)", node = shadowed)
       refused(
         "alice",
         "lake",
         "SELECT system.main.array_append([1], 2)",
-        node = shadowed,
-        alwaysNode = true
+        node = shadowed
       )
     finally admin("lake", s"DROP MACRO $lake.main.list_append")
     allowed("alice", "lake", "SELECT len(array_append([1], 2))", Some(List("2")))
@@ -1202,8 +1180,7 @@ abstract class AuthzEndToEndCases(
         "alice",
         "lake",
         s"INSERT INTO $lake.main.dflt (a) VALUES (2)",
-        node = s"function lower is not classified: it resolves to $lake.main.lower",
-        alwaysNode = true
+        node = s"function lower is not classified: it resolves to $lake.main.lower"
       )
     finally admin("lake", s"DROP MACRO $lake.main.lower")
     // A read binds a table's generated columns. DuckLake has none (it refuses them, as it does CHECK
@@ -1218,8 +1195,7 @@ abstract class AuthzEndToEndCases(
         "alice",
         "files",
         s"SELECT g FROM $files.main.gen",
-        node = s"function lower is not classified: it resolves to $files.main.lower",
-        alwaysNode = true
+        node = s"function lower is not classified: it resolves to $files.main.lower"
       )
     finally admin("files", s"DROP MACRO $files.main.lower")
     allowed("alice", "files", s"SELECT g FROM $files.main.gen", Some(List("AB")))
@@ -1238,8 +1214,7 @@ abstract class AuthzEndToEndCases(
       "alice",
       "lake",
       s"SELECT z FROM $lake.main.v_q",
-      node = "function current_setting is superuser-only",
-      alwaysNode = true
+      node = "function current_setting is superuser-only"
     )
   }
 
@@ -1256,8 +1231,7 @@ abstract class AuthzEndToEndCases(
       "alice",
       "lake",
       s"SELECT z FROM $lake.main.v_set",
-      node = "function current_setting is superuser-only",
-      alwaysNode = true
+      node = "function current_setting is superuser-only"
     )
     // An extension function loaded at runtime, which no classification lists (fts, as the unclassified
     // function case loads it).
@@ -1269,8 +1243,7 @@ abstract class AuthzEndToEndCases(
       "alice",
       "lake",
       s"SELECT s FROM $lake.main.v_stem",
-      node = "function stem is not classified",
-      alwaysNode = true
+      node = "function stem is not classified"
     )
   }
 
@@ -1512,9 +1485,8 @@ abstract class AuthzEndToEndCases(
 
   "a revoke" should "take effect on the next statement, past the node's cached verdict" in {
     ready()
-    // The plain view is admitted by the gateway on its own grant; only the node sees the base
-    // table, so after the revoke only a new policy version keeps the node from reusing the allow
-    // it cached for this very plan.
+    // alice is granted the plain view, not its base table; after the revoke only a new policy
+    // version keeps the node from reusing the allow it cached for this very plan.
     val sql         = s"SELECT x FROM $lake.main.v_secret"
     val secretGrant = grant(lake, "main", "secret", "RO")
     allowed("alice", "lake", sql, Some(List("42")))
@@ -1526,12 +1498,12 @@ abstract class AuthzEndToEndCases(
     }
     stack.post("/api/role/permission/revoke", obj("id" -> s(secretGrant)))
     val revoked = stack.relay.decideCalls
-    refused("alice", "lake", sql, alwaysNode = true)
+    refused("alice", "lake", sql)
     withClue("decision calls after the revoke (a new policy version): ") {
       stack.relay.decideCalls should be > revoked
     }
-    // A plain table: on the node-only stack only the node's policy version stands between the revoke
-    // and the allow it cached for this plan; on the layered stack the gateway refuses it as well.
+    // A plain table: only the node's policy version stands between the revoke and the allow it
+    // cached for this plan.
     stack.post("/api/role/permission/revoke", obj("id" -> s(ordersGrant)))
     try refused("alice", "lake", s"SELECT count(*) FROM $lake.main.orders")
     finally ordersGrant = grant(lake, "main", "orders", "RO")
@@ -1586,8 +1558,7 @@ abstract class AuthzEndToEndCases(
     stack.mcp(pat, s"SELECT 1; INSERT INTO $lake.main.events VALUES (101, 'pat')", lake) match
       case Left(err) => err should include("QoD: ")
       case Right(t)  => fail(s"the branch-only token wrote on the main pool: $t")
-    // A read-only token's plain INSERT: on the node-only stack the gateway checks no grant, so the
-    // node's attenuated set refuses it; on the layered stack the gateway refuses it first.
+    // A read-only token's plain INSERT: the node's attenuated set refuses it.
     val ro = stack
       .post(
         "/api/auth/pat/create",
@@ -1603,10 +1574,9 @@ abstract class AuthzEndToEndCases(
       .get[String]("token")
       .fold(e => throw e, identity)
     stack.mcp(ro, s"INSERT INTO $lake.main.events VALUES (101, 'ro')", lake) match
-      case Left(err) => if nodeOnly then err should include("QoD: ")
+      case Left(err) => err should include("QoD: ")
       case Right(t)  => fail(s"the read-only token wrote: $t")
-    // Nor a file, into a folder alice may write to: the gateway admits the target and gates only
-    // branchOnly, so on both stacks the node's verb ceiling refuses it.
+    // Nor a file, into a folder alice may write to: the node's verb ceiling refuses it.
     val roOut = outDir.resolve(s"ro-$run.csv")
     stack.mcp(ro, s"COPY (SELECT 1 AS id) TO '$roOut' (HEADER)", lake) match
       case Left(err) => err should include("denied by token verb ceiling on file writes")
