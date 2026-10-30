@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.quack.edge.authz.{FailureText, PolicyVersions}
+import ai.starlake.quack.edge.authz.{FailureText, PolicyClock}
 import ai.starlake.quack.ondemand.rbac.{
   AuthorizedHandshake,
   AuthzRequest,
@@ -17,17 +17,18 @@ import scala.util.control.NonFatal
 /** The grants a data-plane session (a FlightSQL connection, a native front door session) runs its
   * statements under. They are resolved by the handshake's gates and follow the tenant's policy
   * version: before a statement's handle is minted, a session whose tenant moved past the version
-  * its set was resolved under runs the same gates again (the user, the pool access, QoD grants or
-  * the tenant's OPA, the effective set through the supervisor's cache that every RBAC mutation and
-  * restore invalidates). The one mechanism both doors use: a revoke reaches an open session on its
-  * next statement, not at its reconnect.
+  * its set was resolved under, or whose replica's policy generation moved (a local change whose
+  * version read failed, a restore), runs the same gates again (the user, the pool access, QoD
+  * grants or the tenant's OPA, the effective set through the supervisor's cache that every RBAC
+  * mutation and restore invalidates). The one mechanism both doors use: a revoke reaches an open
+  * session on its next statement, not at its reconnect.
   */
 sealed trait SessionGrants:
 
   /** The effective set the next statement runs under, resolved again first when the tenant's
-    * version moved. Left: the gates now refuse the session (`AccessDenied`, naming the lost
-    * access), or could not run (`Unavailable`, retryable); never the set of before. May block on
-    * the control plane: [[currentIO]] from an IO.
+    * version or the replica's policy generation moved. Left: the gates now refuse the session
+    * (`AccessDenied`, naming the lost access), or could not run (`Unavailable`, retryable); never
+    * the set of before. May block on the control plane: [[currentIO]] from an IO.
     */
   def current(): Either[RouterFailure, EffectiveSet]
 
@@ -54,12 +55,13 @@ object SessionGrants extends LazyLogging:
   def authorize(
       request: AuthzRequest,
       gates: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
-      versions: PolicyVersions
+      versions: PolicyClock
   ): Either[HandshakeDenial, (AuthorizedHandshake, SessionGrants)] =
     // The gates resolve the tenant case-insensitively, by its lower-case id: the key the versions
     // are under. Read before the gates, so a change landing while they run is newer than the set.
-    val guessed = request.tenant.toLowerCase(Locale.ROOT)
-    val before  = versions.current(guessed)
+    val guessed    = request.tenant.toLowerCase(Locale.ROOT)
+    val before     = versions.current(guessed)
+    val generation = versions.generation
     gates(request).map { auth =>
       val set = auth.effectiveSet
       if set.user.tenant.isEmpty || set.system then (auth, Fixed(set))
@@ -67,7 +69,8 @@ object SessionGrants extends LazyLogging:
         val tenant = auth.poolKey.tenant
         // A version read under another key vouches for nothing: the first statement resolves again.
         val version = if tenant == guessed then before else Long.MinValue
-        (auth, new Following(request, tenant, set.user.id, gates, versions, Snapshot(version, set)))
+        val snap    = Snapshot(version, generation, set)
+        (auth, new Following(request, tenant, set.user.id, gates, versions, snap))
     }
 
   private final case class Fixed(set: EffectiveSet) extends SessionGrants:
@@ -75,8 +78,11 @@ object SessionGrants extends LazyLogging:
     def currentIO: IO[Either[RouterFailure, EffectiveSet]] = IO.pure(Right(set))
     def lastAdmitted: EffectiveSet                         = set
 
-  /** A set and the tenant version read before the gates resolved it. */
-  private final case class Snapshot(version: Long, set: EffectiveSet)
+  /** A set, and the tenant version and replica policy generation read before the gates resolved it.
+    * It stands while neither moved past it.
+    */
+  private final case class Snapshot(version: Long, generation: Long, set: EffectiveSet):
+    def covers(v: Long, g: Long): Boolean = v <= version && g <= generation
 
   /** A tenant principal's grants. `userId` is the row the handshake bound: the gates finding
     * another row under the same name (the user deleted and created again) refuse the session, whose
@@ -87,7 +93,7 @@ object SessionGrants extends LazyLogging:
       tenant: String,
       userId: String,
       gates: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
-      versions: PolicyVersions,
+      versions: PolicyClock,
       initial: Snapshot
   ) extends SessionGrants:
 
@@ -95,22 +101,26 @@ object SessionGrants extends LazyLogging:
 
     def lastAdmitted: EffectiveSet = state.get().set
 
+    // The version, then the generation: a local change moves the generation before it publishes
+    // the version, so a version read here never runs ahead of the generation read after it.
     def current(): Either[RouterFailure, EffectiveSet] =
       val now  = versions.current(tenant)
+      val gen  = versions.generation
       val snap = state.get()
-      if now <= snap.version then Right(snap.set) else resolve(now)
+      if snap.covers(now, gen) then Right(snap.set) else resolve(now, gen)
 
     def currentIO: IO[Either[RouterFailure, EffectiveSet]] = IO.defer {
       val now  = versions.current(tenant)
+      val gen  = versions.generation
       val snap = state.get()
-      if now <= snap.version then IO.pure(Right(snap.set)) else IO.blocking(resolve(now))
+      if snap.covers(now, gen) then IO.pure(Right(snap.set)) else IO.blocking(resolve(now, gen))
     }
 
-    /** The gates again, `version` read before them. Only an admitted set is kept, and never over
-      * one resolved under a newer version; a refusal keeps nothing, so every later statement asks
-      * the gates again until they admit it.
+    /** The gates again, `version` and `generation` read before them. Only an admitted set is kept,
+      * and never over one resolved under a newer version and generation; a refusal keeps nothing,
+      * so every later statement asks the gates again until they admit it.
       */
-    private def resolve(version: Long): Either[RouterFailure, EffectiveSet] =
+    private def resolve(version: Long, generation: Long): Either[RouterFailure, EffectiveSet] =
       val outcome =
         try gates(request)
         catch
@@ -129,8 +139,15 @@ object SessionGrants extends LazyLogging:
             )
           )
         case Right(auth) =>
-          val set = auth.effectiveSet
-          state.updateAndGet(old => if old.version >= version then old else Snapshot(version, set))
+          val set   = auth.effectiveSet
+          val fresh = Snapshot(version, generation, set)
+          state.updateAndGet { old =>
+            if old.covers(version, generation) then old
+            else if fresh.covers(old.version, old.generation) then fresh
+            // Two resolutions read each other's newer half: kept under the older of each, so the
+            // next statement resolves again rather than trusting either.
+            else Snapshot(math.min(old.version, version), math.min(old.generation, generation), set)
+          }
           Right(set)
         case Left(HandshakeDenial.Denied(msg)) =>
           Left(RouterFailure.AccessDenied(s"permission denied: $msg"))

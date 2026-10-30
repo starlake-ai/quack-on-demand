@@ -31,8 +31,18 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
   import QuackWire.*
   import SecurityFixtures.*
 
+  /** The control plane, whose policy-version read fails once `versionsDown` is set. */
+  private final class Store extends ai.starlake.quack.ondemand.state.InMemoryControlPlaneStore:
+    @volatile var versionsDown                       = false
+    override def policyVersions(): Map[String, Long] =
+      if versionsDown then throw new java.sql.SQLException("down", "08006")
+      else super.policyVersions()
+
   private def withHarness[A](body: (FlightEdgeHarness.Harness, Fixture) => A): A =
-    val fix = freshStore()
+    withStore(new Store)(body)
+
+  private def withStore[A](store: Store)(body: (FlightEdgeHarness.Harness, Fixture) => A): A =
+    val fix = freshStore(store)
     val h   = FlightEdgeHarness.boot(
       fix.store,
       wiring = FlightEdgeHarness.RouterWiring(
@@ -176,7 +186,9 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
   private def door(
       h: FlightEdgeHarness.Harness,
       fix: Fixture,
-      t: NodeTransport = new NodeTransport
+      t: NodeTransport = new NodeTransport,
+      gateRuns: java.util.concurrent.atomic.AtomicInteger =
+        new java.util.concurrent.atomic.AtomicInteger(0)
   ): QuackFrontDoor =
     val sup       = h.supervisor
     val handshake = new EdgeHandshake(
@@ -184,7 +196,10 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       lookupPool = (tn, p) =>
         sup.findPoolKeyByTenantAndPoolName(tn, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
-      authorize = req => sup.authorizeHandshakeDetailed(req),
+      authorize = req =>
+        gateRuns.incrementAndGet()
+        sup.authorizeHandshakeDetailed(req)
+      ,
       versions = sup.policyVersions,
       edge = "quack"
     )
@@ -319,4 +334,49 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       messageType(prepare(d, connId, "SELECT 34")) shouldBe Type.PrepareResponse
       t.connectionOf("SELECT 34") should not be txConn
       t.statements.map(_._2).exists(_.contains("SELECT 33")) shouldBe false
+    }
+
+  it should "follow a local revoke whose policy-version read failed" in {
+    val store = new Store
+    withStore(store) { (h, fix) =>
+      val d      = door(h, fix)
+      val connId = connect(d)
+      messageType(prepare(d, connId, "SELECT 41")) shouldBe Type.PrepareResponse
+      store.versionsDown = true
+      val (_, events) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+        .logged(classOf[ai.starlake.quack.edge.authz.PolicyVersionCache].getName)(
+          revokePool(h, fix)
+        )
+      withClue("the failed read after the revoke, logged: ") {
+        events.map(e => (e.getLevel.toString, e.getFormattedMessage)) shouldBe List(
+          "ERROR" -> ("policy versions: reading them after a local policy change failed, " +
+            "keeping the last values until the next refresh: SQLException (SQLState 08006)")
+        )
+      }
+      val refused = prepare(d, connId, "SELECT 42")
+      messageType(refused) shouldBe Type.ErrorResponse
+      decodeErrorMessage(refused).toOption.get should
+        include(s"has no access to pool '$TenantId/$PoolName'")
+    }
+  }
+
+  it should "resolve its grants again once per restore, not once per statement" in
+    withHarness { (h, fix) =>
+      // HA runs restore() on every snapshot refresh: each one moves the policy generation.
+      val runs   = new java.util.concurrent.atomic.AtomicInteger(0)
+      val d      = door(h, fix, gateRuns = runs)
+      val connId = connect(d)
+      messageType(prepare(d, connId, "SELECT 51")) shouldBe Type.PrepareResponse
+      val atHandshake = runs.get()
+      h.supervisor.restore()
+      (52 to 56).foreach { i =>
+        messageType(prepare(d, connId, s"SELECT $i")) shouldBe Type.PrepareResponse
+      }
+      runs.get() shouldBe atHandshake + 1
+      h.supervisor.restore()
+      h.supervisor.restore()
+      (57 to 60).foreach { i =>
+        messageType(prepare(d, connId, s"SELECT $i")) shouldBe Type.PrepareResponse
+      }
+      runs.get() shouldBe atHandshake + 2
     }

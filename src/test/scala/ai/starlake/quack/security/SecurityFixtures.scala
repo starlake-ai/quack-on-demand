@@ -104,8 +104,7 @@ object SecurityFixtures:
     * No separate `UserStore` wrapper is required: the in-memory implementation holds password
     * hashes internally alongside the user row.
     */
-  def freshStore(): Fixture =
-    val s = new InMemoryControlPlaneStore()
+  def freshStore(s: InMemoryControlPlaneStore = new InMemoryControlPlaneStore()): Fixture =
 
     // Tenant
     s.upsertTenant(

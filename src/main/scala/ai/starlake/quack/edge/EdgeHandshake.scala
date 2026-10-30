@@ -59,9 +59,9 @@ final case class HandshakeBound(
   *   principal can never bind to a tenant-IS-NULL superuser row. A `HandshakeDenial.Unavailable`
   *   (OPA unreachable) becomes `HandshakeFailure.Unavailable`.
   * @param versions
-  *   each tenant's policy version: a bound session's grants are resolved again through `authorize`
-  *   once its tenant's version moves ([[SessionGrants]]). Required: a source that never moves would
-  *   keep every session on its handshake's grants.
+  *   each tenant's policy version and the replica's policy generation: a bound session's grants are
+  *   resolved again through `authorize` once either moves ([[SessionGrants]]). Required: a source
+  *   that never moves would keep every session on its handshake's grants.
   * @param edge
   *   the front door's name (`flightsql`, `quack`), carried into the OPA input's `client.edge`.
   */
@@ -70,7 +70,7 @@ final class EdgeHandshake(
     lookupPool: (String, String) => Either[String, String],
     resolveTenant: String => Option[Tenant],
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
-    versions: ai.starlake.quack.edge.authz.PolicyVersions,
+    versions: ai.starlake.quack.edge.authz.PolicyClock,
     edge: String = "flightsql"
 ) extends LazyLogging:
 

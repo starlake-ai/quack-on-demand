@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.quack.edge.authz.PolicyVersions
+import ai.starlake.quack.edge.authz.PolicyClock
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.rbac.{
   AuthorizedHandshake,
@@ -34,10 +34,13 @@ class SessionGrantsSpec extends AnyFlatSpec with Matchers:
   // The wire spelling of the tenant: the versions are keyed by the canonical id the gates resolve.
   private val req = AuthzRequest("ACME", "bi", "alice", superuserAdmissible = false, edge = "test")
 
-  private final class Versions extends PolicyVersions:
+  private final class Versions extends PolicyClock:
     val of                              = TrieMap("acme" -> 1L)
+    @volatile var gen                   = 0L
     def current(tenantId: String): Long = of.getOrElse(tenantId, 0L)
+    def generation: Long                = gen
     def bump(): Unit                    = of.update("acme", current("acme") + 1)
+    def advance(): Unit                 = gen += 1
 
   /** The gates: answers `next()` and counts its calls. */
   private final class Gates(var next: () => Either[HandshakeDenial, AuthorizedHandshake]):
@@ -71,6 +74,35 @@ class SessionGrantsSpec extends AnyFlatSpec with Matchers:
     g.current().map(_.claims("tag")) shouldBe Right("r")
     g.currentIO.unsafeRunSync().map(_.claims("tag")) shouldBe Right("r")
     gates.calls shouldBe 2
+  }
+
+  it should "be resolved again, once, after the generation moved while the version held" in {
+    // A local change whose version read failed: only the generation moved.
+    val v     = new Versions
+    val gates = new Gates(() => ok(set(alice, "h")))
+    val g     = open(gates, v)
+    (1 to 3).foreach(_ => g.current().map(_.claims("tag")) shouldBe Right("h"))
+    gates.calls shouldBe 1
+    gates.next = () => ok(set(alice, "r"))
+    v.advance()
+    // One resolution per move, not one per statement.
+    (1 to 3).foreach(_ => g.current().map(_.claims("tag")) shouldBe Right("r"))
+    g.currentIO.unsafeRunSync().map(_.claims("tag")) shouldBe Right("r")
+    gates.calls shouldBe 2
+  }
+
+  it should "read the generation before resolving, so a move during the resolution resolves again" in {
+    val v     = new Versions
+    val gates = new Gates(() => ok(set(alice, "h")))
+    val g     = open(gates, v)
+    gates.next = () =>
+      v.advance()
+      ok(set(alice, "before"))
+    v.advance()
+    g.current().map(_.claims("tag")) shouldBe Right("before")
+    gates.next = () => ok(set(alice, "after"))
+    g.current().map(_.claims("tag")) shouldBe Right("after")
+    gates.calls shouldBe 3
   }
 
   it should "read the version before resolving, so a bump during the resolution resolves again" in {

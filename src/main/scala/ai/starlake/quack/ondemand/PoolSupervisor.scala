@@ -284,7 +284,9 @@ final class PoolSupervisor(
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
 
-  /** A cached set and the [[effectiveGeneration]] read before it was computed. */
+  /** A cached set and the policy generation (`policyVersions.generation`) read before it was
+    * computed.
+    */
   private final case class CachedEffective(
       generation: Long,
       set: ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -303,14 +305,6 @@ final class PoolSupervisor(
       .maximumSize(10_000L)
       .build[EffectiveCacheKey, CachedEffective]()
 
-  /** Moved by every invalidation before it drops the cache and publishes the policy versions. A set
-    * is served from the cache only under the generation it was computed in: one computed from
-    * grants read before an RBAC mutation, and written after that mutation's invalidation, is never
-    * served (a session resolving again under the mutation's new version would keep it until the
-    * next change; [[ai.starlake.quack.edge.SessionGrants]]).
-    */
-  private val effectiveGeneration = new java.util.concurrent.atomic.AtomicLong(0L)
-
   /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
     * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
     * broadcasting from those paths would echo forever across replicas. Every RBAC mutator (the
@@ -318,7 +312,7 @@ final class PoolSupervisor(
     * after a change carry the new version and the new credential digest.
     */
   private def invalidateEffectiveCacheLocal(): Unit =
-    invalidateEffectiveCacheLocal(policyVersions.read(), userS3.read())
+    invalidateEffectiveCacheLocal(policyVersions.readAfterMutation(), userS3.read())
 
   /** [[invalidateEffectiveCacheLocal]] publishing versions and credentials read earlier: restore()
     * reads them before its snapshot, so neither vouches for state older than itself.
@@ -327,7 +321,13 @@ final class PoolSupervisor(
       versions: Option[Map[String, Long]],
       credentials: ai.starlake.quack.edge.authz.UserS3CredentialCache.Loaded
   ): Unit =
-    effectiveGeneration.incrementAndGet()
+    // The policy generation moves first, before the cache is dropped and the versions published.
+    // A set is served from the cache only under the generation it was computed in: one computed
+    // from grants read before an RBAC mutation, and written after that mutation's invalidation, is
+    // never served (a session resolving again under the mutation's new version would keep it until
+    // the next change). Open sessions follow the generation too (SessionGrants), so a mutation
+    // whose version read failed still reaches this replica's own sessions.
+    policyVersions.advance()
     effectiveCache.invalidateAll()
     policyVersions.publish(versions)
     userS3.publish(credentials)
@@ -2056,8 +2056,11 @@ final class PoolSupervisor(
               // (setTenantAuth / setTenantDisabled) can never revert each other.
               store.updateTenantAcl(updated.id, acl)
               tenants.put(updated.id, updated)
-              // The ACL columns bump the tenant's policy version (Liquibase 0050).
-              policyVersions.refresh()
+              // The ACL columns bump the tenant's policy version (Liquibase 0050). The generation
+              // moves first: open sessions re-run their pool gate (QoD grants or OPA) even when
+              // the version read fails.
+              policyVersions.advance()
+              policyVersions.publish(policyVersions.readAfterMutation())
               publish.topologyChanged()
               Right(updated)
     }
@@ -4408,7 +4411,7 @@ final class PoolSupervisor(
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
     val key        = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
-    val generation = effectiveGeneration.get()
+    val generation = policyVersions.generation
     val cached     = effectiveCache.getIfPresent(key)
     if cached != null && cached.generation == generation then Some(cached.set)
     else

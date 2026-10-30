@@ -52,7 +52,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = raw =>
         if raw == "acme" then Some(Tenant("acme", "Acme Corporation")) else None,
       authorize = _ => authorizeResult.left.map(HandshakeDenial.Denied(_)),
-      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
     )
 
   "authenticate" should "bind a validated basic credential to its pool" in:
@@ -107,7 +107,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         seen = Some(r)
         Left(HandshakeDenial.Unavailable("connection refused"))
       },
-      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero,
       edge = "quack"
     )
     hs.authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false) shouldBe
@@ -136,7 +136,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       resolveTenant = _ => Some(Tenant("acme")),
       authorize = _ =>
         Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
-      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+      versions = ai.starlake.quack.edge.authz.PolicyClock.zero
     )
     for (bearer, basic, superuser) <- List(
         (None, Some(("alice", "pw")), false),

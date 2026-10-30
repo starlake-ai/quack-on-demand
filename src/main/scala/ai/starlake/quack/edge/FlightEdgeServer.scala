@@ -38,10 +38,10 @@ final class FlightEdgeServer(
     // argument contract; HandshakeDenial.Unavailable (OPA unreachable)
     // surfaces as UNAVAILABLE.
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
-    // Each tenant's policy version: a bound session's grants are resolved again through
-    // `authorize` once its tenant's version moves (SessionGrants), so a revoke reaches an open
-    // connection on its next statement. Required: see EdgeHandshake.
-    versions: ai.starlake.quack.edge.authz.PolicyVersions,
+    // Each tenant's policy version and the replica's policy generation: a bound session's grants
+    // are resolved again through `authorize` once either moves (SessionGrants), so a revoke reaches
+    // an open connection on its next statement. Required: see EdgeHandshake.
+    versions: ai.starlake.quack.edge.authz.PolicyClock,
     // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
     // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
     // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
