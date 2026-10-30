@@ -321,19 +321,36 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
   it should "say Connection: close when it refuses a request whose body it left unread" in {
     // A chunked body is refused unread, and Ember then closes the connection: the answer must not
     // invite a pooling client to reuse it (Phase C ledger T5-R4). An announced small body is read
-    // first, and a GET has none: both keep the connection.
+    // first, and a GET has none: both keep the connection. Each answer is followed by a second
+    // request on the same socket, which only a kept connection serves: what a pooling client
+    // relies on when it trusts the header.
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
     try
       val uri  = java.net.URI.create(h.baseUrl)
       val json = s"""{"tenant":"${SecurityFixtures.TenantId}"}"""
-      def answer(request: String): (Int, Map[String, String]) =
+      val next = "GET /api/tenant/list HTTP/1.1\r\nHost: localhost\r\n\r\n"
+      // The status and headers of the answer to `request`, and whether the same socket then
+      // served `next` (false when the server closed it: the write or the read fails, or the read
+      // ends at once). A read timeout is no answer either way and fails the case.
+      def answer(request: String): (Int, Map[String, String], Boolean) =
         val sock = new java.net.Socket(uri.getHost, uri.getPort)
         try
           sock.setSoTimeout(10000)
-          sock.getOutputStream.write(request.getBytes(UTF_8))
-          sock.getOutputStream.flush()
-          rawResponse(new java.io.BufferedInputStream(sock.getInputStream))
+          val in              = new java.io.BufferedInputStream(sock.getInputStream)
+          def send(r: String) =
+            sock.getOutputStream.write(r.getBytes(UTF_8))
+            sock.getOutputStream.flush()
+          send(request)
+          val (status, headers) = rawResponse(in)
+          val reused            =
+            try
+              send(next)
+              rawResponse(in)._1 > 0
+            catch
+              case e: java.net.SocketTimeoutException => throw e
+              case _: java.io.IOException             => false
+          (status, headers, reused)
         finally sock.close()
       val post = "POST /api/tenant/location/list HTTP/1.1\r\nHost: localhost\r\n" +
         "Content-Type: application/json\r\n"
@@ -342,12 +359,15 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
           s"${Integer.toHexString(json.length)}\r\n$json\r\n0\r\n\r\n"
       )
       chunked._1 shouldBe 401
+      withClue("the connection after a chunked refusal: ")(chunked._3 shouldBe false)
       chunked._2.get("connection").map(_.toLowerCase) shouldBe Some("close")
       val announced = answer(post + s"Content-Length: ${json.length}\r\n\r\n$json")
       announced._1 shouldBe 401
+      withClue("the connection after an announced body's refusal: ")(announced._3 shouldBe true)
       announced._2.get("connection").map(_.toLowerCase) should not be Some("close")
-      val get = answer("GET /api/tenant/list HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      val get = answer(next)
       get._1 shouldBe 401
+      withClue("the connection after a GET's refusal: ")(get._3 shouldBe true)
       get._2.get("connection").map(_.toLowerCase) should not be Some("close")
     finally h.shutdown()
   }
