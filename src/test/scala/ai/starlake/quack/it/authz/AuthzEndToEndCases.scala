@@ -1589,41 +1589,50 @@ abstract class AuthzEndToEndCases(
       .hcursor
       .get[String]("id")
       .fold(e => throw e, identity)
+    // Every pool grant made for frank, revoked or not: the finally removes what is left.
+    val grants              = scala.collection.mutable.ListBuffer.empty[String]
     def poolGrant(): String =
-      stack
+      val id = stack
         .post("/api/pool/permission/grant", obj("tenant" -> s(Acme), "userId" -> s(frankId)))
         .hcursor
         .get[String]("id")
         .fold(e => throw e, identity)
+      grants += id
+      id
     def revoke(id: String): Unit =
       stack.post("/api/pool/permission/revoke", obj("id" -> s(id))); ()
-    val sql   = s"SELECT count(*) FROM $lake.main.orders"
-    val lost  = "has no access to pool"
-    val first = poolGrant()
-    val held  = stack.heldFlight("frank", frankPw, Acme, "lake")
+    val sql  = s"SELECT count(*) FROM $lake.main.orders"
+    val lost = "has no access to pool"
     try
-      withClue("[Flight] one connection, before the revoke: ") {
-        held.run(sql) shouldBe Right(List("10"))
-      }
-      revoke(first)
-      withClue("[Flight] the same connection, after the revoke: ") {
-        held.run(sql) match
-          case Left(err) => err should include(lost)
-          case Right(r)  => fail(s"expected a refusal, got rows $r")
-      }
-    finally held.close()
-    if AuthzStack.cliPresent then
-      val second = poolGrant()
-      val out    = stack.heldDoor("frank", frankPw, Acme, "lake", List(sql, sql)) {
-        case 0 => revoke(second)
-        case _ => ()
-      }
-      withClue("[Native] one session, before the revoke and after it: ") {
-        out(0) shouldBe Right(List("10"))
-        out(1) match
-          case Left(err) => err should include(lost)
-          case Right(r)  => fail(s"expected a refusal, got rows $r")
-      }
+      val first = poolGrant()
+      val held  = stack.heldFlight("frank", frankPw, Acme, "lake")
+      try
+        withClue("[Flight] one connection, before the revoke: ") {
+          held.run(sql) shouldBe Right(List("10"))
+        }
+        revoke(first)
+        withClue("[Flight] the same connection, after the revoke: ") {
+          held.run(sql) match
+            case Left(err) => err should include(lost)
+            case Right(r)  => fail(s"expected a refusal, got rows $r")
+        }
+      finally held.close()
+      if AuthzStack.cliPresent then
+        val second = poolGrant()
+        val out    = stack.heldDoor("frank", frankPw, Acme, "lake", List(sql, sql)) {
+          case 0 => revoke(second)
+          case _ => ()
+        }
+        withClue("[Native] one session, before the revoke and after it: ") {
+          out(0) shouldBe Right(List("10"))
+          out(1) match
+            case Left(err) => err should include(lost)
+            case Right(r)  => fail(s"expected a refusal, got rows $r")
+        }
+    finally
+      // Status only: a grant the case already revoked answers an error, which is expected here.
+      grants.foreach(id => stack.postStatus("/api/pool/permission/revoke", obj("id" -> s(id))))
+      stack.postStatus("/api/user/delete", obj("id" -> s(frankId)))
   }
 
   "a dead decision replica" should "give a retryable error, and the retry pass" in {

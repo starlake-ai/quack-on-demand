@@ -92,7 +92,27 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
     private val session = bearer.getCredentialCallOption
 
     def run(sql: String): Either[FlightRuntimeException, Unit] = exec(sql, session)
-    def close(): Unit                                          = raw.close()
+
+    /** A prepared statement of this session. */
+    def prepare(sql: String): FlightSqlClient.PreparedStatement = fsql.prepare(sql, session)
+
+    /** Execute: the prepared query's endpoint, then its stream. */
+    def execute(p: FlightSqlClient.PreparedStatement): Either[FlightRuntimeException, Unit] =
+      try
+        val info   = p.execute(session)
+        val stream = fsql.getStream(info.getEndpoints.get(0).getTicket, session)
+        try while stream.next() do ()
+        finally stream.close()
+        Right(())
+      catch case e: FlightRuntimeException => Left(e)
+
+    /** Update: the prepared statement's DoPut. */
+    def update(p: FlightSqlClient.PreparedStatement): Either[FlightRuntimeException, Unit] =
+      try
+        p.executeUpdate(session)
+        Right(())
+      catch case e: FlightRuntimeException => Left(e)
+    def close(): Unit = raw.close()
 
   "a FlightSQL session held open" should
     "be refused on its next statement once its pool is revoked, and allowed once re-granted" in
@@ -127,6 +147,28 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
         case Right(_) => fail("a disabled user's session ran its next statement")
     finally held.close()
   }
+
+  it should "refuse a prepared statement made before a revoke, executed or updated after it" in
+    withHarness { (h, fix) =>
+      val held = new HeldFlight(h)
+      try
+        val query  = held.prepare("SELECT 5")
+        val insert = held.prepare("INSERT INTO t VALUES (1)")
+        held.execute(query) shouldBe Right(())
+        held.update(insert) shouldBe Right(())
+        revokePool(h, fix)
+        def refused(what: String, out: Either[FlightRuntimeException, Unit]): Unit =
+          withClue(s"$what of a statement prepared before the revoke: ") {
+            out match
+              case Left(e) =>
+                e.status().code() shouldBe FlightStatusCode.UNAUTHORIZED
+                e.getMessage should include(s"has no access to pool '$TenantId/$PoolName'")
+              case Right(_) => fail("it ran")
+          }
+        refused("Execute", held.execute(query))
+        refused("Update", held.update(insert))
+      finally held.close()
+    }
 
   // ---------------------------------------------------------------------------------------------
   // Native Quack front door: one CONNECTION_REQUEST, every statement on its connection id

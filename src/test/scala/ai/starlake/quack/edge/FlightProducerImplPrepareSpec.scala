@@ -652,12 +652,12 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       .build()
     val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
     ConnectionContext.bind(
-        otherPeer,
-        poolKey,
-        s"conn-${java.util.UUID.randomUUID()}",
-        "mallory",
-        grants = None
-      )
+      otherPeer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "mallory",
+      grants = None
+    )
     val ack = new RecordingPutListener
     producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(otherPeer), null, ack).run()
     ack.completed shouldBe false
