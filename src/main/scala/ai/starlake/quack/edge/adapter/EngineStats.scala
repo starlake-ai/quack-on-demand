@@ -59,7 +59,8 @@ object EngineStats:
 
 /** Latest [[EngineStats]] sample per node, written by the HealthProbe's scrape and read by
   * MetricsBindings on scrape. A node with no successful sample yet simply has no entry - the gauges
-  * skip it rather than publish a misleading zero.
+  * skip it rather than publish a misleading zero. The probe [[retain]]s it to the nodes it listed
+  * after every tick, so a removed node's sample goes with it on every replica.
   */
 final class EngineStatsTracker:
   private val state = TrieMap.empty[String, EngineStats]
@@ -69,3 +70,9 @@ final class EngineStatsTracker:
   def snapshot(nodeId: String): Option[EngineStats] = state.get(nodeId)
 
   def remove(nodeId: String): Unit = { state.remove(nodeId); () }
+
+  /** Forget every node not in `live`. */
+  def retain(live: Set[String]): Unit = state.keys.filterNot(live.contains).foreach(state.remove)
+
+  /** Visible for tests. */
+  private[adapter] def nodeCount: Int = state.size

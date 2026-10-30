@@ -26,6 +26,15 @@ class EngineStatsSpec extends AnyFlatSpec with Matchers:
     val reader = TestArrow.readerFor("SELECT 'a', 'b', 'c', 'd'")
     EngineStats.fromReader(reader) shouldBe None
 
+  "EngineStatsTracker.retain" should "forget every node not listed and keep the listed ones" in:
+    val t = new EngineStatsTracker
+    t.update("gone", EngineStats(1L, 0L, 0L, 0L))
+    t.update("live", EngineStats(2L, 0L, 0L, 0L))
+    t.retain(Set("live", "never-sampled"))
+    t.snapshot("gone") shouldBe None
+    t.snapshot("live") shouldBe Some(EngineStats(2L, 0L, 0L, 0L))
+    t.nodeCount shouldBe 1
+
   "EngineStatsTracker" should "store, overwrite, and remove samples per node" in:
     val t = new EngineStatsTracker
     t.snapshot("n1") shouldBe None

@@ -1052,8 +1052,9 @@ object Main extends IOApp with LazyLogging:
     // The first successful probe of a node also runs CREATE SCHEMA IF NOT EXISTS
     // so the pool's default schema exists before wrapWithDefaultSchema ever
     // prepends `USE <db>.<schema>`. Self-healing: a failed first probe is not
-    // recorded, so the next tick retries the (idempotent) CREATE.
-    val schemaInited = new java.util.concurrent.ConcurrentHashMap[String, Unit]()
+    // recorded, so the next tick retries the (idempotent) CREATE. The probe prunes it to the nodes
+    // it listed after every tick (afterTick below).
+    val schemaInited = new ai.starlake.quack.edge.adapter.SchemaInitFlags
 
     // A node that refuses the manager's session handles (a key from another node-key secret, a
     // clock out of bounds) fails every statement Transient and stays unhealthy: its probe names the
@@ -1131,7 +1132,7 @@ object Main extends IOApp with LazyLogging:
       tracker,
       n => {
         val initSql =
-          if schemaInited.containsKey(n.nodeId) then None
+          if schemaInited.done(n.nodeId) then None
           else
             sup.get(n.poolKey).flatMap { st =>
               Option(TenantDb.catalogAlias(st.metastore)).filter(_.nonEmpty).map { db =>
@@ -1150,7 +1151,7 @@ object Main extends IOApp with LazyLogging:
         val wasHealthy = tracker.snapshot(n.nodeId).healthy
         adapter.probe(n, probeSql).map { verdict =>
           val ok = verdict.healthy
-          if ok && initSql.isDefined then schemaInited.put(n.nodeId, ())
+          if ok && initSql.isDefined then schemaInited.markDone(n.nodeId)
           handleRefusals.warning(n.nodeId, verdict).foreach(w => logger.warn(w))
           // An encrypted database that fails its probe is most likely a key mismatch, which looks
           // exactly like the orphaned-node-port failure. Name the likely cause once per
@@ -1176,6 +1177,11 @@ object Main extends IOApp with LazyLogging:
         }
       },
       scala.concurrent.duration.DurationInt(mgrCfg.healthCheckIntervalSec).seconds,
+      // The per-node maps only the probe writes follow the nodes it lists, on every replica.
+      afterTick = live => {
+        engineStatsTracker.retain(live)
+        schemaInited.retain(live)
+      },
       // Piggyback the engine-stats scrape, the Iceberg attach verifier and the node's
       // authorization counters (decision 26: after the probe and its canary, on a connection of
       // their own) on each healthy tick; all are fail-soft (HealthProbe swallows onHealthy errors,

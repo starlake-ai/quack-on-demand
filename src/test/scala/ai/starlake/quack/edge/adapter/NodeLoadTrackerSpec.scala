@@ -38,3 +38,12 @@ class NodeLoadTrackerSpec extends AnyFlatSpec with Matchers:
     val all = t.snapshotAll
     all("n1").inFlight shouldBe 1
     all("n2").inFlight shouldBe 2
+
+  it should "drop a removed node's latency ring with its load, keeping the other nodes'" in:
+    val t = new NodeLoadTracker
+    t.onStart("gone"); t.onFinish("gone", 100)
+    t.onStart("live"); t.onFinish("live", 40)
+    t.remove("gone")
+    t.latencyPercentiles("gone") shouldBe ((0.0, 0.0, 0.0))
+    t.trackedNodes shouldBe Set("live")
+    t.latencyPercentiles("live")._1 shouldBe 40.0

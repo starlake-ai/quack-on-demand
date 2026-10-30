@@ -51,7 +51,14 @@ final class NodeLoadTracker(alpha: Double = 0.3, latencyWindow: Int = 256):
   def setQuarantined(nodeId: String, quarantined: Boolean): Unit =
     ref(nodeId).updateAndGet(_.copy(quarantined = quarantined))
 
-  def remove(nodeId: String): Unit = { state.remove(nodeId); () }
+  /** Forget the node: its load and its latency ring. */
+  def remove(nodeId: String): Unit =
+    state.remove(nodeId)
+    percentiles.remove(nodeId)
+    ()
+
+  /** Visible for tests: every node id either map still holds. */
+  private[adapter] def trackedNodes: Set[String] = state.keySet.toSet ++ percentiles.keySet
 
   def snapshot(nodeId: String): NodeLoad = ref(nodeId).get()
 
