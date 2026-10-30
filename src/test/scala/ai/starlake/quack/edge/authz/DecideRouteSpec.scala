@@ -4,7 +4,7 @@ import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource
 import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode, Tenant, TenantAcl}
-import ai.starlake.quack.observability.metrics.OpaInstruments
+import ai.starlake.quack.observability.metrics.{AuthzInstruments, OpaInstruments}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
@@ -12,6 +12,7 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.circe.{HCursor, Json}
 import io.circe.parser.parse
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.http4s.{Header, MediaType, Method, Request, Status, Uri}
 import org.http4s.headers.`Content-Type`
 import org.http4s.implicits.*
@@ -112,6 +113,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       opaCacheTtlSec: Int = 0,
       usePath: String = UsePath
   ):
+    val registry = new SimpleMeterRegistry
     val clock    = new AtomicLong(1_761_200_000_000L)
     val minted   = new MintedHandles(clock = () => clock.get())
     val dryRuns  = new DryRunResults(clock = () => clock.get())
@@ -158,7 +160,15 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       functionClass = (_, _, name, _) => Option.when(name == "read_parquet")(FunctionClass.File),
       settingClass = _ => None
     )
-    val route = new DecideRoute(keys, minted, decider, dryRuns, _ => usePath, () => clock.get())
+    val route = new DecideRoute(
+      keys,
+      minted,
+      decider,
+      dryRuns,
+      _ => usePath,
+      new AuthzInstruments(registry),
+      () => clock.get()
+    )
 
     def handle(p: NodePrincipal = AliceP): String = keys.handle(Node, p)
 
@@ -194,6 +204,15 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
         mac shouldBe NodeHandles.hex(NodeHandles.hmac(key, bytes))
         parse(new String(bytes, UTF_8)).toOption.get.hcursor
       case other => fail(s"not a verdict: $other")
+
+  /** How many decisions of `kind` with `outcome` the fixture's route counted for tenant acme. */
+  private def decisions(f: Fixture, kind: String, outcome: String, mode: String = "qod"): Double =
+    Option(
+      f.registry
+        .find("qod_authz_decisions_total")
+        .tags("tenant", "acme", "kind", kind, "outcome", outcome, "mode", mode)
+        .counter()
+    ).fold(0.0)(_.count())
 
   /** The router's USE prelude as the describer sends it, to `path` at `scope`, with `objects` and
     * the `settings` after it beside it.
@@ -354,6 +373,55 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       (Status.Unauthorized, "handle does not match its minted context", Some(MediaType.text.plain))
   }
 
+  "the decision metrics" should "count every decision by tenant, kind, outcome and mode, and time it" in {
+    val f = new Fixture()
+    f.call(request(f.handle(), "plan", plan(List(read("orders")))))._1 shouldBe Status.Ok
+    f.call(request(f.handle(), "plan", plan(List(read("customers")))))._1 shouldBe Status.Ok
+    f.call(request(f.handle(), "screen", EmptyScreen))._1 shouldBe Status.Ok
+    f.call(request(f.handle(Root), "plan", plan(List(read("customers")))))._1 shouldBe Status.Ok
+    decisions(f, "plan", "allow") shouldBe 2.0
+    decisions(f, "plan", "refuse") shouldBe 1.0
+    decisions(f, "screen", "allow") shouldBe 1.0
+    f.registry
+      .find("qod_authz_decide_duration_ms")
+      .tag("kind", "plan")
+      .summary()
+      .count() shouldBe 3L
+    f.registry.find("qod_authz_decide_duration_ms").tag("kind", "screen").summary().count() shouldBe
+      1L
+  }
+
+  it should "count an unavailable decision, an expired context and an unreadable tenant included" in {
+    val f = new Fixture(throwTenants = true)
+    f.call(request(f.handle(), "plan", plan(List(read("orders")))))._1 shouldBe
+      Status.ServiceUnavailable
+    // The tenant cannot be read: its mode is the manager default (qod).
+    decisions(f, "plan", "unavailable") shouldBe 1.0
+    val g = new Fixture()
+    g.call(request(new Fixture().handle(), "plan", plan()))._1 shouldBe Status.ServiceUnavailable
+    decisions(g, "plan", "unavailable") shouldBe 1.0
+  }
+
+  it should "label an OPA tenant's decisions mode=opa" in {
+    val f = new Fixture(opaTenant = true)
+    f.call(request(f.handle(), "plan", plan()))._1 shouldBe Status.Ok
+    decisions(f, "plan", "allow", "opa") shouldBe 1.0
+    decisions(f, "plan", "allow") shouldBe 0.0
+  }
+
+  it should "not count a call refused before a decision, or malformed" in {
+    val f    = new Fixture()
+    val body = request(f.handle(), "plan", plan(List(read("orders"))))
+    f.call(body, signature = Some("0" * 64))._1 shouldBe Status.Unauthorized
+    f.call("not json".getBytes(UTF_8))._1 shouldBe Status.BadRequest
+    val text = f.handle()
+    val h    = NodeHandles.verify(text, Key, Node.nodeId, f.clock.get()).toOption.get
+    f.minted.put(h.nonce, AliceP.context.get, "f" * 64, f.clock.get() + 60_000L)
+    f.call(request(text, "plan", plan(List(read("orders")))))._1 shouldBe Status.Unauthorized
+    f.registry.find("qod_authz_decisions_total").counters().size() shouldBe 0
+    f.registry.find("qod_authz_decide_duration_ms").summaries().size() shouldBe 0
+  }
+
   "a dry run's handle" should "never get an allow: a plan the rules allow is refused, retryably" in {
     val f             = new Fixture()
     val text          = f.handle(AliceDry)
@@ -368,6 +436,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     // A tenant on QoD grants: OPA is never asked, nothing is recorded.
     f.dryRuns.take(f.nonceOf(text)) shouldBe None
     f.opaPosts.get() shouldBe 0
+    f.registry.find("qod_authz_decisions_total").counters().size() shouldBe 0
+    f.registry.find("qod_authz_decide_duration_ms").summaries().size() shouldBe 0
   }
 
   it should "keep the rules' reason when they refuse" in {
@@ -451,6 +521,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     v.get[String]("decision") shouldBe Right("allow")
     v.get[Boolean]("retryable") shouldBe Right(false)
     v.get[Long]("expiresAt") shouldBe Right(f.clock.get())
+    f.registry.find("qod_authz_decisions_total").counters().size() shouldBe 0
+    f.registry.find("qod_authz_decide_duration_ms").summaries().size() shouldBe 0
   }
 
   "isUsePrelude" should "hold for exactly one session schema setting to the pool's path" in {

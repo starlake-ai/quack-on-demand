@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.model.PoolKey
+import ai.starlake.quack.observability.metrics.AuthzInstruments
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.parser.parse
@@ -36,6 +37,10 @@ import scala.util.control.NonFatal
   * included), 400 for a malformed request, 413 past [[DecideRoute.MaxBodyBytes]]. The log never
   * holds the body, the handle, the signature, a verdict or a key; a node's repeated refusals go to
   * DEBUG ([[NodeCalls.RefusalLog]]).
+  *
+  * Every decision (allow, refuse, unavailable) is counted in `qod_authz_decisions_total` and timed
+  * in `qod_authz_decide_duration_ms` ([[AuthzInstruments]]); a call refused before a decision (401)
+  * or malformed (400, 413) is not a decision.
   */
 final class DecideRoute(
     keys: NodeKeys,
@@ -43,6 +48,7 @@ final class DecideRoute(
     decider: AuthzDecider,
     dryRuns: DryRunResults,
     paths: PoolKey => String,
+    instruments: AuthzInstruments,
     clock: () => Long = () => System.currentTimeMillis()
 ) extends LazyLogging:
   import DecideRoute.*
@@ -85,11 +91,13 @@ final class DecideRoute(
       h: VerifiedHandle,
       r: DecideRequest
   ): (Status, String) =
+    val started  = System.nanoTime()
     val p        = h.principal
     val needsCtx = !(p.superuser || p.system)
     val entry    = if needsCtx then minted.get(h.nonce) else None
     if needsCtx && entry.isEmpty then
       logger.info(s"authz decide: no context for a handle of ${p.name} on node '$nodeId'")
+      record(h, r.kind, Decision.Unavailable(AuthzDecider.ContextExpired), started)
       (Status.ServiceUnavailable, AuthzDecider.ContextExpired)
     else if entry.exists(e => !consistent(h, e)) then
       refused(nodeId, "handle does not match its minted context")
@@ -126,6 +134,9 @@ final class DecideRoute(
           case NonFatal(e) =>
             logger.warn(s"authz decide: $brief failed (${e.getClass.getSimpleName})")
             (Decision.Unavailable(DecisionFailed), 0L)
+      // A dry run (decision 25), plan or screen, is not traffic: never counted.
+      if !entry.exists(_.context.purpose == DecidePurpose.DryRun) then
+        record(h, r.kind, decision, started)
       decision match
         case Decision.Unavailable(reason) =>
           logger.warn(s"authz decide: $brief unavailable: $reason")
@@ -178,6 +189,29 @@ final class DecideRoute(
       e.context.poolKey
     ) == h.pool &&
       e.ctx == h.ctx
+
+  /** One decision in `qod_authz_decisions_total` and `qod_authz_decide_duration_ms`: the tenant of
+    * the handle's pool (`tenant/tenantDb/pool`, whatever the principal), the call's kind, its
+    * outcome and the tenant's mode, timed from `startedNanos`.
+    */
+  private def record(
+      h: VerifiedHandle,
+      kind: String,
+      decision: Decision,
+      startedNanos: Long
+  ): Unit =
+    val tenant  = h.pool.takeWhile(_ != '/')
+    val outcome = decision match
+      case Decision.Allow          => "allow"
+      case Decision.Refuse(_)      => "refuse"
+      case Decision.Unavailable(_) => "unavailable"
+    instruments.record(
+      tenant,
+      kind,
+      outcome,
+      decider.mode(tenant),
+      (System.nanoTime() - startedNanos) / 1e6
+    )
 
   private def parsed(body: Array[Byte]): Either[String, DecideRequest] =
     parse(new String(body, StandardCharsets.UTF_8)) match

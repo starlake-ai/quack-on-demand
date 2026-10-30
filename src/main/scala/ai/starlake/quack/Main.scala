@@ -1209,7 +1209,8 @@ object Main extends IOApp with LazyLogging:
           authzDecider,
           dryRunResults,
           // The USE prelude a dry run lets run: the path NodeKeys carries in every handle.
-          key => usePaths.get()(key)
+          key => usePaths.get()(key),
+          new ai.starlake.quack.observability.metrics.AuthzInstruments(metricsReg.composite)
         )
       // Runs after sup.restore() (tenants are loaded by then): an OPA-mode tenant with no URL
       // anywhere has every decision refused, which is fail-closed but worth shouting about.

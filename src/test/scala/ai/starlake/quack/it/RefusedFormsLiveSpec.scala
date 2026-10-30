@@ -17,7 +17,7 @@ import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
 import ai.starlake.quack.edge.quack.*
 import ai.starlake.quack.model.*
-import ai.starlake.quack.observability.metrics.OpaInstruments
+import ai.starlake.quack.observability.metrics.{AuthzInstruments, OpaInstruments}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
 import ai.starlake.quack.ondemand.runtime.{LiveQodNode, QodNodeTestBinary, QuackBackend}
@@ -206,7 +206,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         minted,
         decider,
         new DryRunResults(),
-        key => Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse("")
+        key => Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse(""),
+        AuthzInstruments.noop
       ).routes.orNotFound
       decide.createContext(
         "/",

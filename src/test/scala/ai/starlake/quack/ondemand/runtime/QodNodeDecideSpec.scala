@@ -17,7 +17,7 @@ import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
 import ai.starlake.quack.edge.FlightSqlRouter
 import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolState
-import ai.starlake.quack.observability.metrics.OpaInstruments
+import ai.starlake.quack.observability.metrics.{AuthzInstruments, OpaInstruments}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
 import cats.effect.IO
@@ -133,7 +133,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         minted,
         decider,
         new DryRunResults(),
-        key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse("")
+        key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
+        AuthzInstruments.noop
       ).routes.orNotFound
       server.createContext(
         "/",

@@ -133,6 +133,15 @@ final class AuthzDecider(
       math.max(opaCfg.cacheTtlSec * 1000L, MinOpaLifetimeMs)
     else GrantLifetimeMs
 
+  /** The tenant's authorization mode as the decision metrics label it: `opa` or `qod`. A tenant the
+    * control plane cannot read is labelled as one it does not hold: the manager-wide default mode.
+    */
+  def mode(tenantId: String): String =
+    val opaMode =
+      try isOpa(tenantId)
+      catch case NonFatal(_) => TenantAcl().isOpa(opaCfg.defaultMode)
+    if opaMode then "opa" else "qod"
+
   private def judged(p: DecidePrincipal)(rules: DecideContext => Step): Decision =
     if p.principal.superuser || p.principal.system then Decision.Allow
     else
