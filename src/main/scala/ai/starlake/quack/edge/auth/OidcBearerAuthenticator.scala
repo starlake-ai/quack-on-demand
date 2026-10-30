@@ -104,6 +104,27 @@ class OidcBearerAuthenticator(
       .orElse(Option(claims.getStringClaim("email")))
       .orElse(Option(claims.getSubject))
 
+  private val closes = new java.util.concurrent.atomic.AtomicInteger(0)
+
+  /** Releases the JWK source (its refresh-ahead cache owns an executor). Idempotent: only the first
+    * call closes it. The [[TenantOidcRegistry]] closes a per-tenant authenticator once a newer one
+    * replaced it or its tenant lost its override.
+    */
+  override def close(): Unit =
+    if closes.getAndIncrement() == 0 then
+      jwkSource match
+        case c: java.io.Closeable =>
+          try c.close()
+          catch
+            case e: Exception => logger.debug(s"$providerName: JWK source close: ${e.getMessage}")
+        case _ => ()
+
+  /** True once [[close]] ran. */
+  def isClosed: Boolean = closes.get() > 0
+
+  /** Visible for tests: how many times [[close]] was called (the registry must call it once). */
+  private[auth] def closeCount: Int = closes.get()
+
   private def flattenClaims(claims: JWTClaimsSet): Map[String, String] =
     import scala.jdk.CollectionConverters.*
     claims.getClaims.asScala.collect {

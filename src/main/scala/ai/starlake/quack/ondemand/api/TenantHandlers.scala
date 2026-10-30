@@ -13,7 +13,9 @@ import sttp.model.StatusCode
 /** `onAuthChanged` is called after every successful `setTenantAuth` so the edge's
   * [[ai.starlake.quack.edge.auth.TenantOidcRegistry TenantOidcRegistry]] can drop its cached
   * per-tenant authenticator and rebuild from the updated `qodstate_tenant.authConfig` on the next
-  * handshake. Optional so unit tests that don't need the registry can pass a no-op.
+  * handshake on the replica that served the write (peers rebuild once their tenant mirror carries
+  * the new settings). Required: a construction that forgot it would leave the serving replica on
+  * the old issuer until the next refresh.
   *
   * `opa` is the manager's single [[ai.starlake.quack.edge.opa.OpaAuthorizer OpaAuthorizer]] (used
   * only by the `opaTest` dry run; None answers `opa_not_wired`), `opaCfg` the manager-wide OPA
@@ -22,7 +24,7 @@ import sttp.model.StatusCode
   */
 final class TenantHandlers(
     sup: PoolSupervisor,
-    onAuthChanged: String => Unit = _ => (),
+    onAuthChanged: String => Unit,
     audit: AuditRecorder = AuditRecorder.noop,
     opa: Option[OpaAuthorizer] = None,
     opaCfg: OpaConfig = OpaConfig.default,

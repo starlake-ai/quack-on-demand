@@ -91,7 +91,7 @@ class ServeProvisionHookSpec extends AnyFlatSpec with Matchers:
     sup.restore()
     val telemetry     = new RecordingTelemetryStore
     val audit         = new AuditRecorder(telemetry, _ => None)
-    val tenants       = new TenantHandlers(sup, audit = audit)
+    val tenants       = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
     val tenantDbs     = new TenantDbHandlers(sup, audit = audit, requireEncryption = false)
     val pools         = new PoolHandlers(sup, new NodeLoadTracker, audit = audit)
     val dir: Path     = Files.createTempDirectory("qod-serve-provision")

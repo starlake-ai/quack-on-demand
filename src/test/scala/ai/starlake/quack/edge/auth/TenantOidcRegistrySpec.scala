@@ -5,6 +5,8 @@ import ai.starlake.quack.ondemand.auth.ParkedSecretRefs
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import scala.jdk.CollectionConverters.*
+
 /** Unit coverage for [[TenantOidcRegistry]]: dispatch by provider, `None` when a provider's public
   * fields are incomplete, no client secret involved, cache hits and invalidation. Building an
   * [[OidcBearerAuthenticator]] opens no connection (its JWKS source fetches lazily), so these tests
@@ -116,20 +118,16 @@ class TenantOidcRegistrySpec extends AnyFlatSpec with Matchers:
 
   // -- cache + invalidate ----------------------------------------------------
 
-  it should "cache the resolved authenticator across repeated lookups" in:
-    var loads = 0
-    val r     = new TenantOidcRegistry(
-      loadTenant = _ => {
-        loads += 1
-        Some(tenant("t-5", cfg = Map("clientId" -> GoogleClientId)))
-      },
-      roleClaim = "role"
-    )
+  it should "reuse the cached authenticator while the tenant's settings are unchanged" in:
+    // Every lookup reads the tenant again (the supervisor's in-memory mirror) to compare its
+    // public auth fields with the ones the cached authenticator was built from; an unchanged
+    // tenant gets the SAME instance, never a rebuild per handshake.
+    val r      = registryOf(Some(tenant("t-5", cfg = Map("clientId" -> GoogleClientId))))
     val first  = r.forTenant("t-5")
     val second = r.forTenant("t-5")
     first shouldBe defined
-    second shouldBe first
-    loads shouldBe 1
+    second.get should be theSameInstanceAs first.get
+    first.get.isClosed shouldBe false
 
   it should "drop the cached entry on invalidate, forcing a reload" in:
     var loads = 0
@@ -145,12 +143,161 @@ class TenantOidcRegistrySpec extends AnyFlatSpec with Matchers:
     r.forTenant("t-6") shouldBe defined
     loads shouldBe 2
 
-  it should "also cache the negative result so subsequent lookups don't re-read" in:
-    var loads = 0
-    val r     = new TenantOidcRegistry(
-      loadTenant = _ => { loads += 1; None },
-      roleClaim = "role"
+  it should "keep no entry for a tenant that does not exist" in:
+    // A handshake names its tenant: an unknown id must not leave an entry behind, or a client
+    // naming random tenants would grow the map without bound.
+    val r = registryOf(None)
+    r.forTenant("t-7") shouldBe None
+    r.forTenant("t-8") shouldBe None
+    r.cacheSize shouldBe 0
+
+  // -- settings changed on another replica (HA) --------------------------------
+
+  /** The supervisor's tenant mirror, shared by two replicas' registries the way every replica's
+    * `restore()` refreshes its own copy from the same control-plane rows.
+    */
+  private final class TenantMirror(initial: Tenant*):
+    private val rows =
+      new java.util.concurrent.ConcurrentHashMap[String, Tenant]()
+    initial.foreach(t => rows.put(t.id, t))
+    def load(id: String): Option[Tenant] = Option(rows.get(id))
+    def put(t: Tenant): Unit             = { rows.put(t.id, t); () }
+    def delete(id: String): Unit         = { rows.remove(id); () }
+    def registry(): TenantOidcRegistry   = new TenantOidcRegistry(load, "role")
+
+  private def keycloak(id: String, realm: String): Tenant =
+    tenant(
+      id,
+      provider = "keycloak",
+      cfg = Map(
+        "baseUrl"  -> "https://keycloak.example.com",
+        "realm"    -> realm,
+        "clientId" -> "quack-flightsql"
+      )
     )
-    r.forTenant("t-7") shouldBe None
-    r.forTenant("t-7") shouldBe None
-    loads shouldBe 1
+
+  it should "rebuild on a peer replica once the shared tenant rows carry new auth settings" in:
+    val mirror    = new TenantMirror(keycloak("t-ha", "old"))
+    val serving   = mirror.registry()
+    val peer      = mirror.registry()
+    val oldOnPeer = peer.forTenant("t-ha").get
+    oldOnPeer.expectedIssuer shouldBe "https://keycloak.example.com/realms/old"
+    serving.forTenant("t-ha") shouldBe defined
+
+    // setTenantAuth on the serving replica: the row changes, the serving replica invalidates its
+    // own entry; the peer only sees the row through its next restore().
+    mirror.put(keycloak("t-ha", "new"))
+    serving.invalidate("t-ha")
+
+    val newOnPeer = peer.forTenant("t-ha").get
+    newOnPeer.expectedIssuer shouldBe "https://keycloak.example.com/realms/new"
+    newOnPeer should not be theSameInstanceAs(oldOnPeer)
+    oldOnPeer.isClosed shouldBe true
+    newOnPeer.isClosed shouldBe false
+    // ...and the new one is then reused.
+    peer.forTenant("t-ha").get should be theSameInstanceAs newOnPeer
+
+  it should "rebuild when the provider changes even if the shared keys are equal" in:
+    val mirror = new TenantMirror(tenant("t-pv", cfg = Map("clientId" -> GoogleClientId)))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-pv").get
+    before.providerName shouldBe "google"
+    mirror.put(
+      tenant(
+        "t-pv",
+        provider = "aws",
+        cfg = Map("clientId" -> GoogleClientId, "region" -> "eu-west-1", "userPoolId" -> "p")
+      )
+    )
+    r.forTenant("t-pv").map(_.providerName) shouldBe Some("aws-cognito")
+    before.isClosed shouldBe true
+
+  it should "keep the cached instance when only a non-auth field of the tenant changes" in:
+    val mirror = new TenantMirror(keycloak("t-same", "r"))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-same").get
+    mirror.put(
+      keycloak("t-same", "r").copy(
+        displayName = "renamed",
+        authConfig = keycloak("t-same", "r").authConfig + ("hd" -> "example.com")
+      )
+    )
+    r.forTenant("t-same").get should be theSameInstanceAs before
+    before.isClosed shouldBe false
+
+  it should "fall back to None and close the old authenticator once the tenant is deleted" in:
+    val mirror = new TenantMirror(keycloak("t-del", "r"))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-del").get
+    mirror.delete("t-del")
+    r.forTenant("t-del") shouldBe None
+    before.isClosed shouldBe true
+    r.cacheSize shouldBe 0
+
+  it should "fall back to None and close the old one when the provider becomes unsupported" in:
+    val mirror = new TenantMirror(keycloak("t-db", "r"))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-db").get
+    mirror.put(keycloak("t-db", "r").copy(authProvider = "db"))
+    r.forTenant("t-db") shouldBe None
+    before.isClosed shouldBe true
+
+  it should "fall back to None and close the old one when a required public field is cleared" in:
+    val mirror = new TenantMirror(keycloak("t-empty", "r"))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-empty").get
+    mirror.put(keycloak("t-empty", "r").copy(authConfig = Map("baseUrl" -> "x", "realm" -> "r")))
+    r.forTenant("t-empty") shouldBe None
+    before.isClosed shouldBe true
+    // A provider configured again builds afresh.
+    mirror.put(keycloak("t-empty", "back"))
+    r.forTenant("t-empty").map(_.expectedIssuer) shouldBe
+      Some("https://keycloak.example.com/realms/back")
+
+  it should "close the entry invalidate drops" in:
+    val mirror = new TenantMirror(keycloak("t-inv", "r"))
+    val r      = mirror.registry()
+    val before = r.forTenant("t-inv").get
+    r.invalidate("t-inv")
+    before.isClosed shouldBe true
+    r.forTenant("t-inv").get should not be theSameInstanceAs(before)
+
+  it should "never hand out a closed authenticator to a lookup made after a swap returned" in:
+    // Handshakes race a settings flip: every lookup that STARTS after the flip's own lookup
+    // returned must get the new issuer, open; every instance is closed at most once, and only
+    // the superseded ones are closed.
+    val mirror   = new TenantMirror(keycloak("t-race", "r0"))
+    val r        = mirror.registry()
+    val pool     = java.util.concurrent.Executors.newFixedThreadPool(8)
+    val seen     = java.util.concurrent.ConcurrentHashMap.newKeySet[OidcBearerAuthenticator]()
+    val failures = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    try
+      (1 to 40).foreach { round =>
+        val realm   = s"r$round"
+        val stop    = new java.util.concurrent.atomic.AtomicBoolean(false)
+        val readers = (1 to 6).map { _ =>
+          pool.submit(
+            new Runnable:
+              def run(): Unit =
+                while !stop.get() do r.forTenant("t-race").foreach(seen.add)
+          )
+        }
+        mirror.put(keycloak("t-race", realm))
+        val swapped = r.forTenant("t-race").get
+        // From here on every lookup starts after the swap returned.
+        (1 to 50).foreach { _ =>
+          val a = r.forTenant("t-race").get
+          if a.isClosed then failures.add(s"round $round: closed instance handed out")
+          if !a.expectedIssuer.endsWith(s"/realms/$realm") then
+            failures.add(s"round $round: stale issuer ${a.expectedIssuer}")
+        }
+        stop.set(true)
+        readers.foreach(_.get())
+        swapped.expectedIssuer should endWith(s"/realms/$realm")
+      }
+    finally pool.shutdownNow()
+    failures.asScala.toList shouldBe Nil
+    val current = r.forTenant("t-race").get
+    seen.asScala.filterNot(_ eq current).foreach(_.isClosed shouldBe true)
+    seen.asScala.foreach(a => a.closeCount should be <= 1)
+    current.isClosed shouldBe false

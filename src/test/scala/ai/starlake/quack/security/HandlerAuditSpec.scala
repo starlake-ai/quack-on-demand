@@ -149,7 +149,7 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       val fix   = SecurityFixtures.freshStore()
       val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
       sup.restore()
-      val tenants = new TenantHandlers(sup, audit = audit)
+      val tenants = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
       val req     = SetTenantAuthRequest(
         SecurityFixtures.TenantId,
         "keycloak",
@@ -168,13 +168,46 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       e.detail shouldBe Map("authProvider" -> "keycloak", "clientKey" -> "changed")
     }
 
+  it should "tell onAuthChanged the tenant after a stored write, and not after a refused one" in {
+    val fix = SecurityFixtures.freshStore()
+    val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
+    sup.restore()
+    val changed = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val tenants = new TenantHandlers(
+      sup,
+      onAuthChanged = id => { changed.add(id); () },
+      audit = AuditRecorder.noop
+    )
+    val refused = SetTenantAuthRequest(
+      SecurityFixtures.TenantId,
+      "keycloak",
+      Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientSecretRef" -> "env:X"),
+      clientSecret = Some("kc-s3cr3t")
+    )
+    val tenantAdmin =
+      SessionScope(superuser = false, manageableTenants = Set(SecurityFixtures.TenantId))
+    tenants.setTenantAuth(refused, Some("alice-session"))(_ => tenantAdmin).unsafeRunSync()
+    changed.isEmpty shouldBe true
+    val stored = SetTenantAuthRequest(
+      SecurityFixtures.TenantId,
+      "keycloak",
+      Map("issuerUrl" -> "https://idp.example.com/realms/acme", "clientId" -> "qod"),
+      clientSecret = None
+    )
+    tenants
+      .setTenantAuth(stored, Some(RootSessionTok))(_ => SessionScope.Superuser)
+      .unsafeRunSync()
+      .isRight shouldBe true
+    changed.toArray.toList shouldBe List(SecurityFixtures.TenantId)
+  }
+
   it should "audit denied with the refusal code when a write rule refuses it, storing nothing" in {
     val store = new RecordingTelemetryStore
     val audit = new AuditRecorder(store, _ => None)
     val fix   = SecurityFixtures.freshStore()
     val sup   = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
     sup.restore()
-    val tenants = new TenantHandlers(sup, audit = audit)
+    val tenants = new TenantHandlers(sup, onAuthChanged = _ => (), audit = audit)
     val req     = SetTenantAuthRequest(
       SecurityFixtures.TenantId,
       "keycloak",
@@ -218,8 +251,12 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     )
     val sup = new PoolSupervisor(stubBackend, new NodeLoadTracker, fix.store)
     sup.restore()
-    val tenants = new TenantHandlers(sup, audit = new AuditRecorder(store, rootLookup))
-    val req     = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
+    val tenants = new TenantHandlers(
+      sup,
+      onAuthChanged = _ => (),
+      audit = new AuditRecorder(store, rootLookup)
+    )
+    val req = SetTenantAuthRequest(SecurityFixtures.TenantId, "keycloak", config, clientSecret)
     tenants
       .setTenantAuth(req, Some(RootSessionTok))(_ => SessionScope.Superuser)
       .unsafeRunSync()

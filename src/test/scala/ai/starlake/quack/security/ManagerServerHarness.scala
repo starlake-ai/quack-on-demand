@@ -462,7 +462,13 @@ object ManagerServerHarness:
       new NodeHandlers(sup, tracker, store, ai.starlake.quack.ondemand.ha.StateChangePublisher.noop)
     // audit: tenant/setAuth's refusal and success rows (and every other tenant action) reach the
     // spec's recorder; the default noop recorder keeps every other spec's boot unchanged.
-    val tenants   = new TenantHandlers(sup, audit = audit, opa = opa, nodeRun = opaNodeRun)
+    val tenants = new TenantHandlers(
+      sup,
+      onAuthChanged = _ => (),
+      audit = audit,
+      opa = opa,
+      nodeRun = opaNodeRun
+    )
     val tenantDbs =
       new TenantDbHandlers(sup, federatedStore = None, catalog = None, requireEncryption = false)
     val health = new HealthHandler(sup)

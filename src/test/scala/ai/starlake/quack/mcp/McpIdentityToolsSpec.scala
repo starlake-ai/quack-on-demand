@@ -85,7 +85,7 @@ class McpIdentityToolsSpec extends AnyFlatSpec with Matchers:
 
     val userStore   = makeDuckDbUserStore()
     val users       = new UserHandlers(sup, userStore)
-    val tenants     = new TenantHandlers(sup)
+    val tenants     = new TenantHandlers(sup, onAuthChanged = _ => ())
     val groups      = new GroupHandlers(sup, users)
     val roles       = new RoleHandlers(sup, users)
     val memberships = new MembershipHandlers(sup, users)
