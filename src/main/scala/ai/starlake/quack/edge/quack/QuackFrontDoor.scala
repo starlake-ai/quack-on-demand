@@ -243,9 +243,34 @@ final class QuackFrontDoor(
     // The session's grants as of now: resolved again first when its tenant's policy version moved
     // (SessionGrants), so a revoke reaches this open session on this statement.
     s.bound.grants.currentIO.flatMap {
-      case Left(fail) => IO.pure(encodeError(fail.reason))
       case Right(eff) => relayGranted(s, f, prep, reopenTx, cq, catalogRead, eff)
+      case Left(fail) =>
+        // A ROLLBACK reads and writes no data: a session the grants now refuse can always end the
+        // transaction it holds (open, or fenced: the reopened ROLLBACK of `fenced` comes here).
+        val endsTx = router.classifier.classify(prep.sql) == StatementKind.Rollback &&
+          (s.txLink.get().isDefined || s.txAborted.get().isDefined)
+        if endsTx then
+          relayGranted(s, f, prep, reopenTx, cq, catalogRead, s.bound.grants.lastAdmitted)
+        else grantsRefused(s, prep.sql, fail)
     }
+
+  /** The answer to a statement the session's grants now refuse ([[SessionGrants]]). Inside a client
+    * transaction the node transaction is ended first ([[abortTx]]: the node rolls it back), so no
+    * later statement, re-granted or not, runs on it or commits it. A refused COMMIT ends the
+    * client's transaction too (DuckDB ends a transaction whose COMMIT fails), so it leaves no
+    * fence; any other statement fences the session until its ROLLBACK, which the grants never
+    * refuse (`relayPrepare`).
+    */
+  private def grantsRefused(s: QuackSession, sql: String, fail: RouterFailure): IO[Array[Byte]] =
+    s.txLink.get() match
+      case None =>
+        IO.pure(encodeError(fail.reason))
+      case Some((_, link)) if router.classifier.classify(sql) == StatementKind.Commit =>
+        val answer = QuackFrontDoor.grantsRefusedCommitMessage(fail.reason)
+        (abortTx(s, link, answer) *> IO(s.txAborted.set(None))).as(encodeError(answer))
+      case Some((_, link)) =>
+        val answer = QuackFrontDoor.grantsRefusedTxMessage(fail.reason)
+        abortTx(s, link, answer).as(encodeError(answer))
 
   private def relayGranted(
       s: QuackSession,
@@ -609,13 +634,15 @@ final class QuackFrontDoor(
     val cq = f.header.clientQueryId
     s.bound.grants.currentIO
       .flatMap {
-        case Left(fail) => IO.pure(Left(fail))
+        case Left(fail) => grantsRefused(s, prep.sql, fail).map(Left(_))
         case Right(eff) =>
-          router.execute(s.connectionId, s.bound.user, s.bound.poolKey, prep.sql, Some(eff))
+          router
+            .execute(s.connectionId, s.bound.user, s.bound.poolKey, prep.sql, Some(eff))
+            .map(_.left.map(fail => encodeError(fail.reason)))
       }
       .flatMap {
-        case Left(fail) => IO.pure(encodeError(fail.reason))
-        case Right(qr)  =>
+        case Left(answer) => IO.pure(answer)
+        case Right(qr)    =>
           IO.blocking {
             try readStrings(qr.rows)
             finally qr.close()
@@ -854,6 +881,18 @@ object QuackFrontDoor:
       toks.indices.exists { i =>
         name(toks(i)).exists(_.toLowerCase(Locale.ROOT).startsWith("duckdb_")) && !qualifies(i)
       }
+
+  /** Answer to a statement inside a client transaction that the session's grants now refuse
+    * (`reason`), and to every statement after it until ROLLBACK: the transaction was ended.
+    */
+  def grantsRefusedTxMessage(reason: String): String =
+    s"transaction aborted: $reason; ROLLBACK to continue"
+
+  /** Answer to a client's COMMIT that the session's grants now refuse (`reason`): it was never
+    * sent, and the node rolled the transaction back with its connection.
+    */
+  def grantsRefusedCommitMessage(reason: String): String =
+    s"$reason; the transaction was rolled back, nothing was committed"
 
   /** Answer to every statement a client sends inside a transaction an admin kill tore down. */
   val TxKilledMessage: String =

@@ -127,21 +127,40 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
     * order: what the node's decisions would be asked under.
     */
   private final class NodeTransport extends QuackTransport:
-    @volatile var contexts: Vector[String]                 = Vector.empty
+    @volatile var contexts: Vector[String] = Vector.empty
+
+    /** Every statement (handles left out) with the node connection it ran on, in order. */
+    @volatile var statements: Vector[(String, String)] = Vector.empty
+
+    /** The node connections the front door DISCONNECTed, in order. */
+    @volatile var disconnected: Vector[String] = Vector.empty
+    private val opened                         = new java.util.concurrent.atomic.AtomicInteger(0)
+
     def post(uri: URI, body: Array[Byte]): IO[Array[Byte]] = IO {
       val f = frame(body).toOption.get
       f.header.msgType match
-        case Type.ConnectionRequest => QuackTestFixtures.serializeSampleConnectionResponse("NODE1")
-        case Type.PrepareRequest    =>
+        case Type.ConnectionRequest =>
+          QuackTestFixtures.serializeSampleConnectionResponse(s"NODE${opened.incrementAndGet()}")
+        case Type.PrepareRequest =>
           val sql = decodePrepareRequest(f).toOption.map(_.sql).getOrElse("")
           if sql.startsWith(Prelude) then contexts = contexts :+ contextOf(sql)
+          else statements = statements :+ (f.header.connectionId -> sql)
           QuackTestFixtures.serializeSamplePrepareResponse(
             java.math.BigInteger.valueOf(5L),
             false,
             true
           )
+        case Type.Disconnect =>
+          disconnected = disconnected :+ f.header.connectionId
+          encodeSuccess()
         case _ => encodeSuccess()
     }
+
+    /** The node connection the last statement whose text contains `sql` ran on. */
+    def connectionOf(sql: String): String =
+      statements.reverseIterator
+        .collectFirst { case (c, text) if text.contains(sql) => c }
+        .getOrElse(fail(s"no statement containing '$sql' reached a node: $statements"))
 
   private val Prelude = "CALL system.main.qod_session('"
 
@@ -221,4 +240,83 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       withClue("the handle of the statement after the revoke, on the transaction's link: ") {
         t.contexts.last should not be before
       }
+    }
+
+  it should "end its open transaction when a refused COMMIT ends the client's, so a re-granted " +
+    "statement never runs on it" in withHarness { (h, fix) =>
+      val t      = new NodeTransport
+      val d      = door(h, fix, t)
+      val connId = connect(d)
+      messageType(prepare(d, connId, "BEGIN")) shouldBe Type.PrepareResponse
+      messageType(prepare(d, connId, "SELECT 11")) shouldBe Type.PrepareResponse
+      val txConn = t.connectionOf("SELECT 11")
+      revokePool(h, fix)
+      val commit = prepare(d, connId, "COMMIT")
+      messageType(commit) shouldBe Type.ErrorResponse
+      decodeErrorMessage(commit).toOption.get should
+        include(s"has no access to pool '$TenantId/$PoolName'")
+      withClue("the refused COMMIT ended the node transaction: ") {
+        t.disconnected should contain(txConn)
+      }
+      regrantPool(h, fix)
+      // The client ended its transaction with the failed COMMIT: this statement is autocommit.
+      messageType(prepare(d, connId, "SELECT 12")) shouldBe Type.PrepareResponse
+      withClue("the statement after the re-grant, outside the ended transaction: ") {
+        t.connectionOf("SELECT 12") should not be txConn
+      }
+      t.statements
+        .collect { case (c, sql) if c == txConn => sql }
+        .exists(_.contains("COMMIT")) shouldBe
+        false
+    }
+
+  it should "admit a ROLLBACK its refused grants would refuse, and end the transaction with it" in
+    withHarness { (h, fix) =>
+      val t      = new NodeTransport
+      val d      = door(h, fix, t)
+      val connId = connect(d)
+      messageType(prepare(d, connId, "BEGIN")) shouldBe Type.PrepareResponse
+      messageType(prepare(d, connId, "SELECT 21")) shouldBe Type.PrepareResponse
+      val txConn = t.connectionOf("SELECT 21")
+      revokePool(h, fix)
+      val rollback = prepare(d, connId, "ROLLBACK")
+      withClue(decodeErrorMessage(rollback)) {
+        messageType(rollback) shouldBe Type.PrepareResponse
+      }
+      t.connectionOf("ROLLBACK") shouldBe txConn
+      withClue("the ROLLBACK released the transaction's connection: ") {
+        t.disconnected should contain(txConn)
+      }
+      // Anything else is still refused.
+      messageType(prepare(d, connId, "SELECT 22")) shouldBe Type.ErrorResponse
+    }
+
+  it should "fence a transaction whose statement the grants refused, and lift the fence with a " +
+    "ROLLBACK the grants still refuse" in withHarness { (h, fix) =>
+      val t      = new NodeTransport
+      val d      = door(h, fix, t)
+      val connId = connect(d)
+      messageType(prepare(d, connId, "BEGIN")) shouldBe Type.PrepareResponse
+      messageType(prepare(d, connId, "SELECT 31")) shouldBe Type.PrepareResponse
+      val txConn = t.connectionOf("SELECT 31")
+      revokePool(h, fix)
+      val refused = prepare(d, connId, "SELECT 32")
+      messageType(refused) shouldBe Type.ErrorResponse
+      decodeErrorMessage(refused).toOption.get should
+        include(s"has no access to pool '$TenantId/$PoolName'")
+      decodeErrorMessage(refused).toOption.get should include("ROLLBACK to continue")
+      t.disconnected should contain(txConn)
+      // The client still believes it is inside its transaction: the fence answers until ROLLBACK.
+      val fenced = prepare(d, connId, "SELECT 33")
+      messageType(fenced) shouldBe Type.ErrorResponse
+      decodeErrorMessage(fenced).toOption.get should include("ROLLBACK to continue")
+      val rollback = prepare(d, connId, "ROLLBACK")
+      withClue(decodeErrorMessage(rollback)) {
+        messageType(rollback) shouldBe Type.PrepareResponse
+      }
+      t.connectionOf("ROLLBACK") should not be txConn
+      regrantPool(h, fix)
+      messageType(prepare(d, connId, "SELECT 34")) shouldBe Type.PrepareResponse
+      t.connectionOf("SELECT 34") should not be txConn
+      t.statements.map(_._2).exists(_.contains("SELECT 33")) shouldBe false
     }

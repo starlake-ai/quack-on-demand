@@ -34,6 +34,12 @@ sealed trait SessionGrants:
   /** [[current]] as an IO, shifted to the blocking pool only when the gates run again. */
   def currentIO: IO[Either[RouterFailure, EffectiveSet]]
 
+  /** The set the gates last admitted, never resolved again. Only for a ROLLBACK that ends the
+    * transaction of a session [[current]] now refuses: it reads and writes no data, and without it
+    * the client could not end the transaction it believes it is in. Never for anything else.
+    */
+  def lastAdmitted: EffectiveSet
+
 object SessionGrants extends LazyLogging:
 
   /** Grants never resolved again: a superuser's (no tenant, no grants to follow) and the system
@@ -67,6 +73,7 @@ object SessionGrants extends LazyLogging:
   private final case class Fixed(set: EffectiveSet) extends SessionGrants:
     def current(): Either[RouterFailure, EffectiveSet]     = Right(set)
     def currentIO: IO[Either[RouterFailure, EffectiveSet]] = IO.pure(Right(set))
+    def lastAdmitted: EffectiveSet                         = set
 
   /** A set and the tenant version read before the gates resolved it. */
   private final case class Snapshot(version: Long, set: EffectiveSet)
@@ -85,6 +92,8 @@ object SessionGrants extends LazyLogging:
   ) extends SessionGrants:
 
     private val state = new AtomicReference(initial)
+
+    def lastAdmitted: EffectiveSet = state.get().set
 
     def current(): Either[RouterFailure, EffectiveSet] =
       val now  = versions.current(tenant)
