@@ -58,7 +58,7 @@ def split_statements(text: str) -> list[tuple[int, str]]:
         elif c == "-" and i + 1 < n and text[i + 1] == "-":
             # A line comment ends at a line feed OR at a bare carriage return: that is what
             # DuckDB 1.5.4 does, and what the manager's own scanners (SqlTrivia.stripLeading,
-            # SqlCommentStripper, LockdownScreen.splitStatements) agree on. Scanning to a line
+            # SqlCommentStripper, StatementHead.split) agree on. Scanning to a line
             # feed alone meant a CR-terminated comment stayed open to end of file, so every
             # remaining `;` stopped splitting and the rest of the script was submitted as one
             # statement with wrong line numbers.

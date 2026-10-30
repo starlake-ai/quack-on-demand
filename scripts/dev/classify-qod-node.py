@@ -56,8 +56,8 @@ ADMITTED_TABLE_FUNCTIONS = REPO / "native/qod-node/admitted-table-functions.txt"
 LISTING_TABLE = {"duckdb_columns", "duckdb_schemas", "duckdb_tables", "duckdb_views"}
 
 # Their arguments name the files or URLs they read: admitted on authorized locations only (decisions
-# 15 and 18). FileAccessScreen.FileFunctions minus the readers that follow file names found inside
-# the file (ducklake_scan, the Iceberg path readers) and sql_auto_complete (SQL text, not a location).
+# 15 and 18). Every table function that opens a caller-named file, minus the readers that follow file
+# names found inside the file (ducklake_scan, the Iceberg path readers) and sql_auto_complete (SQL text).
 FILE_TABLE = {
     "avro_metadata", "glob", "parquet_bloom_probe", "parquet_file_metadata", "parquet_full_metadata",
     "parquet_kv_metadata", "parquet_metadata", "parquet_scan", "parquet_schema", "read_avro", "read_blob",
