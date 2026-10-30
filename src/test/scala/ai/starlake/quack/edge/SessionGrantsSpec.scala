@@ -175,6 +175,42 @@ class SessionGrantsSpec extends AnyFlatSpec with Matchers:
       case other                              => fail(s"expected UNAVAILABLE, got $other")
   }
 
+  it should "give a refused session's ROLLBACK its principal with no grants at all" in {
+    import ai.starlake.quack.ondemand.state.{
+      PoolPermission,
+      RbacGroup,
+      RbacRole,
+      RoleColumnPolicy,
+      RolePermission,
+      RoleRowPolicy
+    }
+    val full = set(alice, "h").copy(
+      roles = List(RbacRole("r-1", "acme", "reader")),
+      groups = List(RbacGroup("g-1", "acme", "analysts")),
+      permissions = List(RolePermission("p-1", "r-1", "*", "*", "*", "ALL")),
+      poolPerms = List(PoolPermission("pp-1", "acme", userId = Some("u-1"))),
+      columnPolicies = List(RoleColumnPolicy("c-1", "r-1", "*", "*", "t", "c", "deny", None)),
+      rowPolicies = List(RoleRowPolicy("w-1", "r-1", "*", "*", "t", "x = 1"))
+    )
+    val v     = new Versions
+    val gates = new Gates(() => ok(full))
+    val g     = open(gates, v)
+    gates.next = () => Left(HandshakeDenial.Denied("user 'alice' has no access to pool 'acme/bi'"))
+    v.bump()
+    g.current().isLeft shouldBe true
+    val rb = g.rollbackOnly
+    rb.user shouldBe alice
+    rb.claims shouldBe full.claims
+    rb.roles shouldBe Nil
+    rb.groups shouldBe Nil
+    rb.permissions shouldBe Nil
+    rb.poolPerms shouldBe Nil
+    rb.columnPolicies shouldBe Nil
+    rb.rowPolicies shouldBe Nil
+    rb.verbCeiling shouldBe Some(Set.empty)
+    rb.system shouldBe false
+  }
+
   "a superuser's or the system principal's grants" should "never be resolved again" in
     List(set(root, "su"), set(alice, "sys").copy(system = true)).foreach { s =>
       val v     = new Versions

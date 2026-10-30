@@ -335,18 +335,61 @@ class SessionGrantsDoorSpec extends AnyFlatSpec with Matchers:
       messageType(prepare(d, connId, "BEGIN")) shouldBe Type.PrepareResponse
       messageType(prepare(d, connId, "SELECT 21")) shouldBe Type.PrepareResponse
       val txConn = t.connectionOf("SELECT 21")
+      val before = t.contexts.last
       revokePool(h, fix)
       val rollback = prepare(d, connId, "ROLLBACK")
       withClue(decodeErrorMessage(rollback)) {
         messageType(rollback) shouldBe Type.PrepareResponse
       }
       t.connectionOf("ROLLBACK") shouldBe txConn
+      withClue("the ROLLBACK's handle carries no grants, never the set of before the revoke: ") {
+        t.contexts.last should not be before
+      }
       withClue("the ROLLBACK released the transaction's connection: ") {
         t.disconnected should contain(txConn)
       }
       // Anything else is still refused.
       messageType(prepare(d, connId, "SELECT 22")) shouldBe Type.ErrorResponse
     }
+
+  // A batch led by a transaction end classifies as that end (its first statement): the exemption
+  // above must never carry the statements after it.
+  List(
+    "ROLLBACK; SELECT 71"                          -> "SELECT 71",
+    "ABORT; INSERT INTO t VALUES (72)"             -> "VALUES (72)",
+    "/* c */ ROLLBACK; DELETE FROM t WHERE x = 73" -> "x = 73",
+    "ROLLBACK;\n-- c\nDROP TABLE t74"              -> "t74"
+  ).foreach { (batch, tail) =>
+    it should s"refuse the batch '${batch.replace("\n", " ")}' its refused grants would admit as " +
+      "a ROLLBACK, and end its open transaction" in withHarness { (h, fix) =>
+        val t      = new NodeTransport
+        val d      = door(h, fix, t)
+        val connId = connect(d)
+        messageType(prepare(d, connId, "BEGIN")) shouldBe Type.PrepareResponse
+        messageType(prepare(d, connId, "SELECT 70")) shouldBe Type.PrepareResponse
+        val txConn = t.connectionOf("SELECT 70")
+        revokePool(h, fix)
+        val refused = prepare(d, connId, batch)
+        withClue("the batch's answer: ") {
+          messageType(refused) shouldBe Type.ErrorResponse
+        }
+        decodeErrorMessage(refused).toOption.get should
+          include(s"has no access to pool '$TenantId/$PoolName'")
+        decodeErrorMessage(refused).toOption.get should include("ROLLBACK to continue")
+        withClue("no part of the batch reached a node: ") {
+          t.statements.map(_._2).exists(_.contains(tail)) shouldBe false
+        }
+        withClue("the refused batch ended the node transaction: ") {
+          t.disconnected should contain(txConn)
+        }
+        // A lone ROLLBACK still lifts the fence the refusal left, on a fresh connection.
+        val rollback = prepare(d, connId, "ROLLBACK")
+        withClue(decodeErrorMessage(rollback)) {
+          messageType(rollback) shouldBe Type.PrepareResponse
+        }
+        t.connectionOf("ROLLBACK") should not be txConn
+      }
+  }
 
   it should "fence a transaction whose statement the grants refused, and lift the fence with a " +
     "ROLLBACK the grants still refuse" in withHarness { (h, fix) =>

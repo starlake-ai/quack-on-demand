@@ -35,11 +35,13 @@ sealed trait SessionGrants:
   /** [[current]] as an IO, shifted to the blocking pool only when the gates run again. */
   def currentIO: IO[Either[RouterFailure, EffectiveSet]]
 
-  /** The set the gates last admitted, never resolved again. Only for a ROLLBACK that ends the
-    * transaction of a session [[current]] now refuses: it reads and writes no data, and without it
-    * the client could not end the transaction it believes it is in. Never for anything else.
+  /** The set a lone ROLLBACK runs under when [[current]] refuses the session: without it the client
+    * could not end the transaction it believes it is in. The principal the gates last admitted
+    * (user, claims, token restriction) with every grant stripped ([[SessionGrants.stripped]]), so
+    * whatever runs under it reaches no table, at the manager or at the node. Never resolved again,
+    * and never the set the session had before the refusal.
     */
-  def lastAdmitted: EffectiveSet
+  def rollbackOnly: EffectiveSet
 
 object SessionGrants extends LazyLogging:
 
@@ -47,6 +49,22 @@ object SessionGrants extends LazyLogging:
     * principal's. Also what a spec binds when it builds a session without a handshake.
     */
   def fixed(set: EffectiveSet): SessionGrants = Fixed(set)
+
+  /** `set` with no grants: the same principal and user, no role, group, table permission, column or
+    * row policy, or pool grant, and a verb ceiling admitting no verb (the OPA arm never reads
+    * permissions, and refuses any access outside the ceiling before asking OPA). A statement that
+    * names no object, a ROLLBACK, still runs under it.
+    */
+  def stripped(set: EffectiveSet): EffectiveSet =
+    set.copy(
+      roles = Nil,
+      groups = Nil,
+      permissions = Nil,
+      poolPerms = Nil,
+      columnPolicies = Nil,
+      rowPolicies = Nil,
+      verbCeiling = Some(Set.empty)
+    )
 
   /** The handshake's gates for `request`, the tenant's version read first: Right with the
     * authorization and the session's grants, or the gates' refusal. `versions` and `gates` are kept
@@ -76,7 +94,7 @@ object SessionGrants extends LazyLogging:
   private final case class Fixed(set: EffectiveSet) extends SessionGrants:
     def current(): Either[RouterFailure, EffectiveSet]     = Right(set)
     def currentIO: IO[Either[RouterFailure, EffectiveSet]] = IO.pure(Right(set))
-    def lastAdmitted: EffectiveSet                         = set
+    def rollbackOnly: EffectiveSet                         = stripped(set)
 
   /** A set, and the tenant version and replica policy generation read before the gates resolved it.
     * It stands while neither moved past it.
@@ -99,7 +117,7 @@ object SessionGrants extends LazyLogging:
 
     private val state = new AtomicReference(initial)
 
-    def lastAdmitted: EffectiveSet = state.get().set
+    def rollbackOnly: EffectiveSet = stripped(state.get().set)
 
     // The version, then the generation: a local change moves the generation before it publishes
     // the version, so a version read here never runs ahead of the generation read after it.

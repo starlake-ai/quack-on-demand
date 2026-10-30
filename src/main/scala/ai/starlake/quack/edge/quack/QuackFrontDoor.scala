@@ -247,10 +247,14 @@ final class QuackFrontDoor(
       case Left(fail) =>
         // A ROLLBACK reads and writes no data: a session the grants now refuse can always end the
         // transaction it holds (open, or fenced: the reopened ROLLBACK of `fenced` comes here).
-        val endsTx = router.classifier.classify(prep.sql) == StatementKind.Rollback &&
+        // Only a lone one: the classifier reads the first statement, so `ROLLBACK; DELETE ...`
+        // classifies as a ROLLBACK and would carry the DELETE. And it runs under no grants at all
+        // (`rollbackOnly`), never the set of before, so nothing past this check reaches a table.
+        val endsTx = !FlightSqlRouter.isMultiStatement(prep.sql) &&
+          router.classifier.classify(prep.sql) == StatementKind.Rollback &&
           (s.txLink.get().isDefined || s.txAborted.get().isDefined)
         if endsTx then
-          relayGranted(s, f, prep, reopenTx, cq, catalogRead, s.bound.grants.lastAdmitted)
+          relayGranted(s, f, prep, reopenTx, cq, catalogRead, s.bound.grants.rollbackOnly)
         else grantsRefused(s, prep.sql, fail)
     }
 
@@ -258,8 +262,8 @@ final class QuackFrontDoor(
     * transaction the node transaction is ended first ([[abortTx]]: the node rolls it back), so no
     * later statement, re-granted or not, runs on it or commits it. A refused COMMIT ends the
     * client's transaction too (DuckDB ends a transaction whose COMMIT fails), so it leaves no
-    * fence; any other statement fences the session until its ROLLBACK, which the grants never
-    * refuse (`relayPrepare`).
+    * fence; any other statement, a batch led by a ROLLBACK included, fences the session until its
+    * lone ROLLBACK, which the grants never refuse (`relayPrepare`).
     */
   private def grantsRefused(s: QuackSession, sql: String, fail: RouterFailure): IO[Array[Byte]] =
     s.txLink.get() match
