@@ -143,6 +143,20 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
     )
     decodeErrorMessage(v3) shouldBe Right("boom")
 
+  "decodeErrorText" should "word a node error as DuckDB does, its type before its message" in:
+    // the v3 error above: exception type Catalog, message boom
+    val v3 = hex(
+      "0100640300ffffffffffffffffff01ffff" +
+        "010004626f6f6d" +
+        "020007436174616c6f67" +
+        "030002" + "000001610100017a" + "ffff" + "000001620100017b" + "ffff" +
+        "040001" +
+        "ffff"
+    )
+    decodeErrorText(v3) shouldBe Right("Catalog Error: boom")
+    // no type: the message alone
+    decodeErrorText(encodeError("Authentication failed")) shouldBe Right("Authentication failed")
+
   "encodeSuccess" should "match the captured SUCCESS_RESPONSE" in:
     toHex(encodeSuccess()) shouldBe toHex(success)
 

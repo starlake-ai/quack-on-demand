@@ -1069,8 +1069,7 @@ abstract class AuthzEndToEndCases(
     ready()
     val sql = "CREATE TEMP TABLE tt AS SELECT 1 AS a; SELECT a FROM tt"
     allowed("bob", "lake", sql, Some(List("1")))
-    // With the ACL on the gateway still wants a Ddl grant for alice (Task 12, contract issues).
-    if nodeOnly then allowed("alice", "lake", sql, Some(List("1")))
+    allowed("alice", "lake", sql, Some(List("1")))
   }
 
   "DDL in the system catalog" should "be refused under *.*.* ALL" in {
@@ -1282,16 +1281,13 @@ abstract class AuthzEndToEndCases(
   private def asAdmin(pool: String, sql: String): Either[String, List[String]] =
     stack.flight(sql, "admin", "admin", Acme, pool, superuser = true)
 
-  /** A refused write into the read-only catalog `alias`. Until the gateway's CatalogWriteScreen
-    * goes (Phase D Task 4) it refuses first ("catalog '<alias>' is read-only on this deployment");
-    * from then on the node does ("QoD: catalog <alias> is read-only", QodNodeReadOnlySpec).
+  /** A refused write into the read-only catalog `alias`: the node's refusal, for every principal
+    * (decision 24, QodNodeReadOnlySpec).
     */
   private def refusedAsReadOnly(out: Either[String, List[String]], alias: String): Unit =
     out match
-      case Left(err) =>
-        err should include(alias)
-        err should include("is read-only")
-      case Right(r) => fail(s"expected a read-only refusal, got rows $r")
+      case Left(err) => err should include(s"QoD: catalog $alias is read-only")
+      case Right(r)  => fail(s"expected a read-only refusal, got rows $r")
 
   "a read-only sql source" should "refuse a superuser's writes and DDL, its file attached READ_WRITE" in {
     ready()
@@ -1350,30 +1346,22 @@ abstract class AuthzEndToEndCases(
     // `*.*.* ALL` covers DuckDB's built-in memory catalog on the memory database's own pool (Task 6
     // I1), never on another pool, where memory is instance-wide.
     admin("fed", "CREATE OR REPLACE TABLE memory.main.mt_admin AS SELECT 1 AS a")
-    if nodeOnly then
-      doors.foreach { d =>
-        withClue(s"[$d] ") {
-          as(d, "bob", "fed", s"CREATE TABLE memory.main.mt_$d AS SELECT 1 AS a") shouldBe
-            a[Right[?, ?]]
-          as(d, "bob", "fed", s"INSERT INTO memory.main.mt_$d VALUES (2)") shouldBe a[Right[?, ?]]
-          as(d, "bob", "fed", s"SELECT count(*) FROM memory.main.mt_$d") shouldBe Right(List("2"))
-        }
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        as(d, "bob", "fed", s"CREATE TABLE memory.main.mt_$d AS SELECT 1 AS a") shouldBe
+          a[Right[?, ?]]
+        as(d, "bob", "fed", s"INSERT INTO memory.main.mt_$d VALUES (2)") shouldBe a[Right[?, ?]]
+        as(d, "bob", "fed", s"SELECT count(*) FROM memory.main.mt_$d") shouldBe Right(List("2"))
       }
-    else
-      // Phase D gap (Task 6 I1): the gateway's validator covers a wildcard catalog grant with the
-      // tenant-db names alone, so it refuses what the node would admit.
-      refused("bob", "fed", "SELECT count(*) FROM memory.main.mt_admin")
+    }
     refused("alice", "fed", "SELECT count(*) FROM memory.main.mt_admin")
     refused("bob", "lake", "CREATE TABLE memory.main.not_here AS SELECT 1 AS a")
   }
 
   "a database with a custom catalog alias" should "be judged under the alias it is attached as" in {
     ready()
-    // A wildcard grant reaches the alias on the node; on the layered stack the gateway refuses it
-    // first (the Phase D gap of the memory case).
-    if nodeOnly then
-      allowed("bob", "aliased", s"SELECT v FROM $Alias.main.aliased_t", Some(List("5")))
-    else refused("bob", "aliased", s"SELECT v FROM $Alias.main.aliased_t")
+    // A wildcard grant reaches the alias on the node.
+    allowed("bob", "aliased", s"SELECT v FROM $Alias.main.aliased_t", Some(List("5")))
     allowed("alice", "aliased", s"SELECT v FROM $Alias.main.aliased_t", Some(List("5")))
     // The USE prelude of the pool names the alias too.
     allowed("alice", "aliased", "SELECT v FROM aliased_t", Some(List("5")))

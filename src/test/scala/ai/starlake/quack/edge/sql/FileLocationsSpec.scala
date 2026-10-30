@@ -5,14 +5,13 @@ import org.scalatest.matchers.should.Matchers
 
 import java.nio.file.{Files, Paths}
 
-/** The two file-access shapes the gateway reads completely (Task 12): a reader call's locations and
-  * a lone COPY's location and table side. Anything else answers None, which keeps the statement
-  * refused.
+/** The lone COPY the gateway reads completely ([[FileLocations]]), and the location argument reader
+  * of FunctionCalls. Anything else answers None.
   */
 class FileLocationsSpec extends AnyFlatSpec with Matchers:
 
   private def readerCall(sql: String): FunctionCalls.Call =
-    FunctionCalls.scan(sql).calls.find(c => FileLocations.Readers(c.name)).get
+    FunctionCalls.scan(sql).calls.find(_.name.startsWith("read_")).get
 
   private def locations(sql: String): Option[List[String]] =
     FunctionCalls.locationArguments(readerCall(sql))
@@ -285,11 +284,4 @@ class FileLocationsSpec extends AnyFlatSpec with Matchers:
     FileLocations.CopyNonPathOptions shouldBe names("kCopyNonPathOptions")
     FileLocations.CoreCopyFormats shouldBe names("kCoreCopyFormats")
     FileLocations.CopyFileNameOptions shouldBe names("kCopyFileNameOptions")
-  }
-
-  "Readers" should "be the file functions of class File, and only those" in {
-    FileLocations.Readers should contain allOf ("read_parquet", "read_csv", "glob", "read_text")
-    List("sql_auto_complete", "ducklake_scan", "iceberg_scan", "iceberg_metadata", "read_xlsx")
-      .foreach(n => withClue(n)(FileLocations.Readers should not contain n))
-    FileLocations.Readers.subsetOf(FileAccessScreen.FileFunctions) shouldBe true
   }

@@ -5,9 +5,9 @@ import ai.starlake.quack.ondemand.state.RolePermission
 
 import java.util.Locale
 
-/** How role permissions cover one access: the grant matching of [[PostgresAclValidator]], shared
-  * with the node decision pipeline (`edge.authz.AuthzDecider`), which matches what DuckDB resolved
-  * for a statement instead of what the SQL parser extracted.
+/** How role permissions cover one access: the grant matching of the node decision pipeline
+  * (`edge.authz.AuthzDecider`), which matches what DuckDB resolved for a statement (the gateway's
+  * statement validator, which matched what the SQL parser extracted, went with spec decision 29).
   */
 object GrantMatch:
 

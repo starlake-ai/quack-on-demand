@@ -16,7 +16,6 @@ import ai.starlake.quack.edge.config.OpaConfig
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaClient, OpaDecisionCache}
 import ai.starlake.quack.edge.quack.*
-import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator}
 import ai.starlake.quack.model.*
 import ai.starlake.quack.observability.metrics.OpaInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -46,10 +45,9 @@ import scala.sys.process.{Process, ProcessLogger}
   * alice reads `t` and the secure view `sv` (over `secret`, which she cannot read), bob reads only
   * `other`.
   *
-  * Two routers serve the same node: `gated` runs the gateway's ACL gate with the metadata filter
-  * mounted, as Main wires it with the ACL on; `open` runs no gate (the ACL off), so what it refuses
-  * the node refused. Cancelled without a qod-node build; the native front door cases also without a
-  * DuckDB 2.0 CLI on PATH.
+  * Two routers serve the same node: `gated` mounts the metadata filter, `open` does not; the node
+  * decides every refusal through the manager's decision route. Cancelled without a qod-node build;
+  * the native front door cases also without a DuckDB 2.0 CLI on PATH.
   */
 class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
@@ -229,28 +227,16 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
           finally exchange.close()
       )
       decide.start()
-      val client = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator())
-      def router(validator: StatementValidator, filter: Boolean) = new FlightSqlRouter(
+      val client                  = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator())
+      def router(filter: Boolean) = new FlightSqlRouter(
         sup,
         new SessionRegistry,
         tracker,
         new QuackHttpAdapter(client, tracker, keys),
-        validator = validator,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter),
-        locationRulesFor = (_, _) => Some(rules),
-        resolveLocalPath = path =>
-          ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = filter)
       )
-      gated = router(
-        new PostgresAclValidator(
-          defaultDatabase = "acme_db",
-          defaultSchema = "tpch1",
-          tenantCatalogs = t => if t == "acme" then Set("acme_db") else Set.empty,
-          filteredMetadata = true
-        ),
-        filter = true
-      )
-      open = router(StatementValidator.allowAll, filter = false)
+      gated = router(filter = true)
+      open = router(filter = false)
       gatedPort = door(gated)
       openPort = door(open)
 
@@ -433,7 +419,7 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     val (rc, _, err) = native(openPort, "bob", "DESCRIBE t")
     rc should not be 0
     err should include("lacks grants on acme_db.tpch1.t:read")
-    // With the gateway's gate, the gateway refuses first, for the same missing grant.
+    // Through the filtered router too, the node refuses for the same missing grant.
     flight(gated, "bob", "PRAGMA table_info('t')") match
       case Left(m) => m should include("lacks grants on acme_db.tpch1.t")
       case other   => fail(s"expected a refusal, got $other")
@@ -632,24 +618,18 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       case other   => fail(s"expected the node's refusal, got $other")
   }
 
-  it should "be refused unchanged when it names a column, a subquery, a superuser function or a parameter" in {
+  it should "be refused unchanged when it names a column, a subquery, a superuser function or a parameter" in
+    // The superuser function too: no gateway screen answers first since spec decision 29.
     List(
       "SELECT * FROM t, read_csv(t.v || '.csv')",
       s"SELECT * FROM read_csv((SELECT '$files/in/20260115.csv'))",
-      "SELECT * FROM read_csv(? || '.csv')"
+      "SELECT * FROM read_csv(? || '.csv')",
+      "SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')"
     ).foreach { sql =>
       flight(open, "alice", sql) match
         case Left(m) => withClue(sql)(m should include("read_csv needs a literal file name"))
         case other   => fail(s"expected the node's refusal of $sql, got $other")
     }
-    flight(
-      open,
-      "alice",
-      s"SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')"
-    ) match
-      case Left(m) => m should include("current_setting")
-      case other   => fail(s"expected a refusal, got $other")
-  }
 
   it should "write a COPY to the location it computes" in {
     val out = s"$files/out/20260115.csv"
@@ -711,19 +691,20 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
     finally w.close()
   }
 
-  it should "answer a gateway refusal of the evaluation and leave the transaction open (item 25a)" in {
+  it should "answer the node's refusal of the evaluation as a denial (item 25a)" in {
     assume(nodeReady, "no qod-node binary (QOD_NODE_BIN or a local build)")
     val w = Wire(gatedPort, "carol")
     try
       w.run("BEGIN TRANSACTION").isRight shouldBe true
       w.run("SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')") match
         case Left(m) =>
-          m should startWith("computing the file location: access denied: node: current_setting")
-        case other => fail(s"expected the gateway's refusal, got $other")
-      w.run("INSERT INTO t2 (id) VALUES (100)").isRight shouldBe true
-      w.run("COMMIT").isRight shouldBe true
+          m should startWith("computing the file location: access denied: ")
+          m should include("QoD: current_setting is reserved to superusers")
+        case other => fail(s"expected the node's refusal, got $other")
+      // whatever the refusal did to the node's transaction, ROLLBACK recovers the session
+      w.run("ROLLBACK").isRight shouldBe true
+      w.run("SELECT count(*) FROM t2").isRight shouldBe true
     finally w.close()
-    flight(open, "carol", "SELECT count(*) FROM t2 WHERE id = 100") shouldBe Right(List("1"))
   }
 
   it should "abort the transaction on a value no file location may be (item 25b)" in {

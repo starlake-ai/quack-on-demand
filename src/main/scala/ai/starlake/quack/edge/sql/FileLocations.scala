@@ -1,111 +1,28 @@
 package ai.starlake.quack.edge.sql
 
-import ai.starlake.quack.edge.authz.{FunctionClass, FunctionClasses}
-import ai.starlake.quack.edge.authz.location.{LocationChecker, LocationRules}
 import ai.starlake.sql.SqlLexer
 
 import java.util.Locale
-import scala.util.control.NonFatal
 
-/** The file locations a tenant principal's statement may name at the gateway: those its tenant
-  * authorized, judged by the decision pipeline's own [[LocationChecker]] (Task 5), so the two
-  * layers apply one rule. [[FileAdmission.Closed]] admits nothing: every principal without a
-  * tenant's rules gets it, and every parameter that carries one defaults to it.
-  */
-final case class FileAdmission(admits: String => Boolean)
-
-object FileAdmission:
-
-  val Closed: FileAdmission = FileAdmission(_ => false)
-
-  /** `rules` judged by the decider's checker. `resolveLocal` is the node's resolution of a local
-    * path (`LocalRealPath.resolve` on the local runtime, where the rules hold real paths; the path
-    * as given elsewhere), applied only to an absolute path with clean segments: resolving a
-    * relative one, or one with an empty, `.` or `..` segment, would hide what the node refuses. A
-    * path it cannot resolve (None: a link that leads nowhere, an unreadable folder) is refused, as
-    * the node refuses it, and so is any failure while judging.
-    */
-  def of(
-      rules: LocationRules,
-      resolveLocal: String => Option[String] = Some(_)
-  ): FileAdmission =
-    FileAdmission { location =>
-      try
-        val judged = if resolvable(location) then resolveLocal(location) else Some(location)
-        judged.exists(LocationChecker.check(_, rules).isRight)
-      catch case NonFatal(_) => false
-    }
-
-  private def resolvable(location: String): Boolean =
-    location.startsWith("/") && !location.contains('\\') && !location.contains('%') && {
-      val segments = location.drop(1).split("/", -1).toList
-      val inner    = if location.endsWith("/") then segments.dropRight(1) else segments
-      inner.nonEmpty && inner.forall(seg => seg.nonEmpty && seg != "." && seg != "..")
-    }
-
-/** The two file-access shapes the gateway's file screens admit for a tenant principal (decisions 15
-  * and 18 of docs/superpowers/specs/2026-10-23-in-engine-authorization-design.md), each read
-  * completely from DuckDB 2.0's own tokens:
-  *
-  *   - a call of a [[Readers]] function in the statement's own text (never inside a string literal
-  *     body) whose argument list [[FunctionCalls.locationArguments]] reads;
-  *   - a COPY that is the whole submission, unwrapped, from or to one VARCHAR literal, its options
-  *     judged by qod-node's own COPY option rule ([[copy]]).
-  *
-  * Both layers enforce until Phase D deletes these screens: the node judges the same statement on
-  * what DuckDB's own parser read, resolving a local path's symlinks first, so the gateway admits
-  * only what it reads completely. Everything else a file screen refused stays refused: a file in a
-  * table position (the node turns replacement scans off for such a principal, decision 16),
-  * `query()`'s literal, a COPY behind EXPLAIN or PREPARE or inside a batch, EXPORT, IMPORT, ATTACH
-  * and LOAD.
+/** The lone COPY the gateway reads completely from DuckDB 2.0's own tokens: a COPY that is the
+  * whole submission, unwrapped, from or to one VARCHAR literal, its options judged by qod-node's
+  * own COPY option rule ([[copy]]). The router's metadata filter step reads it
+  * (`FlightSqlRouter.copyListingRefusal`): the filter cannot read a COPY, so a lone COPY is judged
+  * on its stand-in, and every other COPY ([[unreadCopy]]) is refused to a principal the filter
+  * narrows. Locations are the node's to judge (decisions 15 and 18).
   */
 private[quack] object FileLocations:
 
-  /** The readers a location admits: the [[FileAccessScreen.FileFunctions]] of class `File` (Task
-    * 2), the set the decider checks locations for. The rest stay refused at the gateway as on the
-    * node: `sql_auto_complete` (its argument is SQL text), `ducklake_scan` and the Iceberg path
-    * readers (they read further files the location check never sees), and the readers of extensions
-    * no node loads (unclassified).
-    */
-  val Readers: Set[String] = FileAccessScreen.FileFunctions.filter { name =>
-    FunctionClasses.of("system", "main", name, "table").contains(FunctionClass.File)
-  }
-
-  /** A lone COPY: the `location` it names, whether it writes there (`TO`), and the statement the
-    * access check parses in its place to judge the table side by grants: `INSERT INTO <table>
-    * SELECT 1` for `FROM` (a write into the table), `SELECT * FROM <table>` for `<table> TO`, the
-    * query itself for `(<query>) TO`.
+  /** A lone COPY: the `location` it names, whether it writes there (`TO`), and its table side as a
+    * statement the metadata filter can read: `INSERT INTO <table> SELECT 1` for `FROM`,
+    * `SELECT * FROM <table>` for `<table> TO`, the query itself for `(<query>) TO`.
     */
   final case class CopyUse(location: String, write: Boolean, tableSide: String)
-
-  /** True when `call` (found by `scan`) is a [[Readers]] call of the statement's own text whose
-    * every location `admission` admits.
-    */
-  def admitted(
-      call: FunctionCalls.Call,
-      scan: FunctionCalls.Scan,
-      admission: FileAdmission
-  ): Boolean =
-    Readers(call.name) && scan.texts.headOption.contains(call.text) &&
-      FunctionCalls.locationArguments(call).exists(_.forall(admission.admits))
-
-  /** The reader names every call of which in `sql` [[admitted]] admits: the access check sets their
-    * "table function" markers aside, since the location rule, not a grant, decides them.
-    */
-  def admittedReaderNames(sql: String, admission: FileAdmission): Set[String] =
-    val scan           = FunctionCalls.scan(sql)
-    val (yes, refused) = scan.calls.partition(c => admitted(c, scan, admission))
-    yes.map(_.name).toSet -- refused.map(_.name)
-
-  /** What the access check parses for `sql`: the table side of an admitted COPY, else `sql`. */
-  def extractable(sql: String, admission: FileAdmission): String =
-    copy(sql).filter(c => admission.admits(c.location)).fold(sql)(_.tableSide)
 
   /** The [[CopyUse]] of `sql` when it is exactly one statement `COPY <table> [(cols)] FROM|TO
     * '<loc>' [options]` or `COPY (<query>) TO '<loc>' [options]`, options being `(...)` or `WITH
     * (...)` that pass qod-node's COPY option rule ([[optionsAdmitted]]), so that no option names a
-    * path of its own (a `FILENAME_PATTERN '../x'` would write beside the location checked). None
-    * for any other statement or shape.
+    * path of its own. None for any other statement or shape.
     */
   def copy(sql: String): Option[CopyUse] =
     StatementHead.split(sql) match

@@ -6,7 +6,6 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.quack.*
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
-import ai.starlake.quack.edge.sql.PostgresAclValidator
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
@@ -37,17 +36,17 @@ import scala.sys.process.{Process, ProcessLogger}
   * only, so the `duckdb` on PATH, the client, must be a 2.0 build. Cancelled when it is missing or
   * older, or without a qod-node build, like the other real-node specs.
   *
-  * The front door runs the REAL ACL gate: `PostgresAclValidator` with the metadata filter mounted,
-  * and alice holds narrow grants (RW on `customer`, RO on `ids`, nothing on `secret`) PLUS a column
-  * mask on `customer.c_name` and a row policy on `secret`, so the CLS and RLS rewriters run on
-  * every statement too. A stand-in validator that admitted everything used to hide that the
-  * client's attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`) was denied for
-  * every ordinary principal (issue #114), and a policy-free principal then hid that the CLS
+  * The node decides alice's plans through a stand-in decision endpoint that applies her narrow
+  * grants (RW on `customer`, RO on `ids`, nothing on `secret`), and the front door runs the
+  * metadata filter, a column mask on `customer.c_name` and a row policy on `secret`, so the CLS and
+  * RLS rewriters run on every statement too. A stand-in that admitted everything used to hide that
+  * the client's attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`) was denied
+  * for every ordinary principal (issue #114), and a policy-free principal then hid that the CLS
   * rewriter denied the same sync for anyone holding a column policy (the issue's second report).
   *
   * A 2.0 client sends `BEGIN TRANSACTION` when it first touches the attached catalog, and ships an
   * INSERT as `INSERT ... SELECT * FROM scan_data_from_quack_client(...)` followed by SEND_DATA
-  * messages, so every attach case also runs those through the gate.
+  * messages, so every attach case also runs those through the node's decision.
   *
   * The Python cases provision their DuckDB through `uv`: a 2.0 pre-release wheel whose bundled
   * quack extension is the nodes' own commit ([[Python20]]), and a 1.5 release that the front door
@@ -84,8 +83,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private val Token     = "tenant=acme&pool=sales&user=alice&password=x"
 
   // The node's keys are the ones the router mints its session handles with. alice is an ordinary
-  // principal: the node decides her plans through the decision endpoint, here a stand-in that allows
-  // them (the gateway's own ACL gate still runs in front of it).
+  // principal: the node decides her plans through the decision endpoint, here a stand-in that
+  // applies her grants (aliceRefusal).
   private val secret = ai.starlake.quack.edge.authz.NodeKeys.randomSecret()
   private val decide = ai.starlake.quack.ondemand.runtime.StubDecideServer.start(secret)
   private val keys   = new ai.starlake.quack.edge.authz.NodeKeys(
@@ -158,14 +157,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
-    // The real RBAC gate, as Main wires it: grant-checked per statement, with the metadata filter
-    // mounted from the same flag so catalog reads are narrowed instead of denied.
-    val validator = new PostgresAclValidator(
-      defaultDatabase = "acme_db",
-      defaultSchema = "tpch1",
-      tenantCatalogs = t => if t == "t-1" then Set("acme_db") else Set.empty,
-      filteredMetadata = true
-    )
+    // alice's grants as the node pipeline judges them, through the stand-in decision endpoint.
+    decide.decide = (_, d) => aliceRefusal(d).toLeft(())
     val client = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator())
     // The column catalog the CLS resolver needs, mirroring the node's tables.
     val columns = new ColumnCatalog.MapCatalog(
@@ -180,7 +173,6 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker, keys),
-      validator = validator,
       columnPolicyRewriter = new ColumnPolicyRewriter(columns),
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
     )
@@ -261,6 +253,31 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private def endpoint = s"quack:127.0.0.1:$doorPort"
   private def attach   = s"ATTACH '$endpoint' AS q (TYPE quack, TOKEN '$Token');"
 
+  /** The refusal the node pipeline gives alice for description `d` (QoD grants: RW on customer, RO
+    * on ids, nothing else in acme_db; objects of other catalogs, system and temp, need no grant
+    * here), or None.
+    */
+  private def aliceRefusal(d: io.circe.Json): Option[String] =
+    d.hcursor
+      .downField("objects")
+      .values
+      .getOrElse(Nil)
+      .iterator
+      .flatMap { o =>
+        val c       = o.hcursor
+        val catalog = c.get[String]("catalog").getOrElse("")
+        val schema  = c.get[String]("schema").getOrElse("")
+        val name    = c.get[String]("name").getOrElse("")
+        val verb    = c.get[String]("access").getOrElse("") match
+          case "read"                         => "Read"
+          case "insert" | "update" | "delete" => "Write"
+          case _                              => "Ddl"
+        val granted = catalog != "acme_db" ||
+          (schema == "tpch1" && (name == "customer" || (name == "ids" && verb == "Read")))
+        Option.unless(granted)(s"user:alice lacks grants on acme_db.$schema.$name:$verb")
+      }
+      .nextOption()
+
   "quack_query through the front door" should "route a granted statement and record it" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
     val (rc, out, err) =
@@ -291,8 +308,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   it should "refuse a schema change batched ahead of a bare table name" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
     // alice reads acme_db.tpch1.ids (60000 rows); acme_db.other.ids (7 rows) is not hers. Each
-    // batch runs after the router's `USE acme_db.tpch1` prelude, so before the fix the node read
-    // the 7-row table while the ACL had checked the granted one.
+    // batch runs after the router's `USE acme_db.tpch1` prelude, and the node judges the
+    // table it resolves: the 7-row one, which alice holds no grant on.
     List(
       "SET search_path=''acme_db.other''; SELECT count(*) FROM ids",
       "SET schema=''other''; SELECT count(*) FROM ids",
@@ -303,7 +320,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       withClue(s"$inner -> rc=$rc out=$out err=$err") {
         out should not be "7"
         rc should not be 0
-        err should include("own statement")
+        err should include("access denied")
       }
     }
     // Sent on its own, the same SET is still accepted (and dies with the statement's connection).

@@ -101,7 +101,7 @@ final class ProtectedWriteGuard(
   /** The first two-part name headed by an attached catalog, in any statement. The policy match keys
     * it on the session catalog with the head as its schema, while DuckDB reads the head as the
     * catalog and the table from the current schema: the protected table a bare name reads. Refused
-    * whatever the table, like the ACL gate does, since which table DuckDB binds is not known here.
+    * whatever the table, since which table DuckDB binds is not known here.
     */
   private def ambiguousName(results: List[StatementResult]): Option[String] =
     results.iterator
@@ -285,8 +285,7 @@ object ProtectedWriteGuard:
     )
 
   /** The refusal of a two-part name headed by an attached catalog, worded once for every step that
-    * refuses it (this guard, [[RewriteScope]], and until the gateway screens go, the ACL gate and
-    * the read-only catalog screen).
+    * refuses it (this guard and [[RewriteScope]]).
     */
   def ambiguousNameReason(a: DenyReason.AmbiguousCatalogRef): String =
     s"ambiguous two-part name '${a.tableName}': '${a.catalog}' is an attached catalog; " +

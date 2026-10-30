@@ -1,15 +1,6 @@
 package ai.starlake.quack.edge
 
-import ai.starlake.acl.model.TableRef
-import ai.starlake.acl.parser.{TableAccess, Verb}
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -78,8 +69,7 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     * journal, store) so the test can call drainNow() and then assert on store.events.
     */
   private def setupWithJournal(
-      stub: () => QuackResponse = defaultStub,
-      validator: StatementValidator = StatementValidator.allowAll
+      stub: () => QuackResponse = defaultStub
   ): (FlightSqlRouter, EventJournal, RecordingTelemetryStore) =
     val sup     = buildSupervisor()
     val store   = new RecordingTelemetryStore
@@ -101,7 +91,6 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
       sessions,
       tracker,
       adapter,
-      validator = validator,
       journal = journal
     )
     (router, journal, store)
@@ -169,46 +158,6 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     router.execute("aud-3", "alice", poolKey, "SELECT 1").unsafeRunSync()
     journal.drainNow()
     store.events shouldBe empty
-  }
-
-  it should "emit data-denial/sql.denied/denied with canonical:verb in detail(denied)" in {
-    val access  = TableAccess(TableRef("cat", "sch", "tbl"), Verb.Write)
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set(access))
-    val (router, journal, store) = setupWithJournal(validator = denying)
-    router
-      .execute("aud-4", "alice", poolKey, "INSERT INTO cat.sch.tbl VALUES (1)")
-      .unsafeRunSync()
-    journal.drainNow()
-    store.events should have size 1
-    val e = store.events.head
-    e.family shouldBe "data-denial"
-    e.action shouldBe "sql.denied"
-    e.outcome shouldBe "denied"
-    e.actor shouldBe "alice"
-    e.tenant shouldBe Some("acme")
-    e.origin shouldBe "flightsql"
-    e.detail("denied") shouldBe "cat.sch.tbl:Write"
-  }
-
-  it should "thread patId into the data-denial audit event too" in {
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set.empty)
-    val (router, journal, store) = setupWithJournal(validator = denying)
-    router
-      .execute(
-        "aud-4b",
-        "alice",
-        poolKey,
-        "INSERT INTO cat.sch.tbl VALUES (1)",
-        patId = Some("pat-8")
-      )
-      .unsafeRunSync()
-    journal.drainNow()
-    store.events should have size 1
-    store.events.head.patId shouldBe Some("pat-8")
   }
 
   it should "emit data-denial/sql.denied/denied for a node's authorization refusal" in {

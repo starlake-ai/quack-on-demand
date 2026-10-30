@@ -1,27 +1,9 @@
 package ai.starlake.quack.edge
 
 import java.util.Locale
-import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.authz.DecidePurpose
-import ai.starlake.quack.edge.sql.{
-  AccessGate,
-  Allowed,
-  CatalogInternalsScreen,
-  CatalogWriteScreen,
-  CheckpointScreen,
-  ComputedLocations,
-  Denied,
-  FileAdmission,
-  LockdownScreen,
-  NodeSettingScreen,
-  NodeStateScreen,
-  RefusedForms,
-  StatementValidator,
-  TriggerScreen,
-  ValidationContext,
-  ValidatorUnavailable
-}
+import ai.starlake.quack.edge.sql.{ComputedLocations, RefusedForms}
 import ai.starlake.quack.model.{PoolKey, SqlLiterals, StatementKind, TenantDb}
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
@@ -61,7 +43,6 @@ final class FlightSqlRouter(
     val sessions: SessionRegistry,
     val tracker: NodeLoadTracker,
     val adapter: QuackHttpAdapter,
-    val validator: StatementValidator = StatementValidator.allowAll,
     val history: StatementHistoryStore = new StatementHistoryStore(),
     val stmtInstruments: StatementInstruments = StatementInstruments.noop,
     val classifier: StatementClassifier = StatementClassifier.default,
@@ -75,14 +56,14 @@ final class FlightSqlRouter(
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
     val attachedCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
-    val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = _ => Set.empty,
     val events: ManagerEventSink = ManagerEventSink.noop,
     val resumeHoldTimeout: FiniteDuration = 60.seconds,
     val resumePollInterval: FiniteDuration = 250.millis,
-    val lockdownFor: PoolKey => Boolean = _ => false,
-    /** Bucket keys holding DuckLake data (all tenant-db dataPaths + the managed root bucket),
-      * denied outright by the lockdown screen; consulted only on the lockdown branch.
+    /** Read by nothing since the gateway's lockdown screen went (spec Section 7); removed with
+      * per-pool lockdown.
       */
+    val lockdownFor: PoolKey => Boolean = _ => false,
+    /** Read by nothing since the gateway's lockdown screen went; removed with per-pool lockdown. */
     val deniedBuckets: () => Set[String] = () => Set.empty,
     val routingRefs: ai.starlake.quack.route.RoutingRefsCache =
       new ai.starlake.quack.route.RoutingRefsCache(),
@@ -96,11 +77,10 @@ final class FlightSqlRouter(
       new ai.starlake.quack.route.PlacementDirectory(),
     val cacheAwareRouting: Boolean = true,
     val loadCapFactor: Double = 2.0,
-    /** System-catalog filter, mounted from the same flag as the ACL validator's implicit admit
-      * (`quack-flightsql.acl.filteredMetadata`). Disabled by default so a construction site that
-      * does not wire it keeps the grant-required posture rather than an admit-without-filter one.
-      * Appended at the TAIL deliberately: `Main` passes the leading arguments positionally, so a
-      * mid-list insertion would silently shift `registry` / `journal`.
+    /** System-catalog filter, mounted from `BootFactories.metadataFilterMounted`. Disabled by
+      * default, so a construction site that does not wire it narrows nothing. Appended at the TAIL
+      * deliberately: `Main` passes the leading arguments positionally, so a mid-list insertion
+      * would silently shift `registry` / `journal`.
       */
     val metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter =
       new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = false),
@@ -119,21 +99,7 @@ final class FlightSqlRouter(
       * `metadataFilterRewriter` / `protectedWriteGuard`: `Main` passes the leading arguments
       * positionally.
       */
-    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None,
-    /** The authorized locations of a principal (Task 12, by tenant id and user id): its own S3
-      * credential scopes and its tenant's folders (decision 23), what the file screens let it read
-      * and write by path, judged by the decider's own LocationChecker. None (the default) admits
-      * nothing, so a construction site that does not wire it keeps every file access refused. TAIL
-      * param for the same reason as `metadataFilterRewriter`.
-      */
-    val locationRulesFor: (String, String) => Option[
-      ai.starlake.quack.edge.authz.location.LocationRules
-    ] = (_, _) => None,
-    /** How a node resolves a local path before its location is judged: `LocalRealPath.resolve` when
-      * nodes run on this host (local runtime; None, a path the node refuses, is refused), else the
-      * path as given (the manager cannot see the nodes' filesystem). TAIL param.
-      */
-    val resolveLocalPath: String => Option[String] = Some(_)
+    val adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None
 ):
 
   /** Record a statement outcome into history, metrics, and (selectively) the audit journal:
@@ -149,7 +115,6 @@ final class FlightSqlRouter(
       status: String,
       error: Option[String],
       kind: StatementKind,
-      deniedRefs: Set[TableAccess] = Set.empty,
       realm: String = "tenant",
       prepareDurationMs: Option[Long] = None,
       /** The acting personal-access-token id, when the resolved principal authenticated with one.
@@ -162,10 +127,6 @@ final class FlightSqlRouter(
         * Quack front door. Recorded on the denial and write audit events.
         */
       source: String = "flightsql",
-      /** Extra denial-audit details merged into the "data-denial" event, e.g. the OPA validator's
-        * `authz_source` / `opa_decision_id`. Ignored on every other status.
-        */
-      auditMeta: Map[String, String] = Map.empty,
       /** What the manager put into the statement that ran, merged into its denial and write events
         * (the computed file locations it substituted, `locations`). Never a reserved key.
         */
@@ -231,15 +192,10 @@ final class FlightSqlRouter(
           None,
           "denied",
           source,
-          // QoD's own audit keys always win: a validator-supplied key of a reserved name is
-          // dropped, never allowed to overwrite (or forge) the recorded sql / reason.
-          (auditMeta ++ detail).removedAll(FlightSqlRouter.ReservedAuditKeys) ++
+          // QoD's own audit keys always win: a detail key of a reserved name is dropped, never
+          // allowed to overwrite (or forge) the recorded sql / reason.
+          detail.removedAll(FlightSqlRouter.ReservedAuditKeys) ++
             Map("sql" -> recordedSql.take(500)) ++
-            Option
-              .when(deniedRefs.nonEmpty)(
-                "denied" -> deniedRefs.map(a => s"${a.table.canonical}:${a.verb}").mkString(",")
-              )
-              .toMap ++
             recordedError.map("reason" -> _.take(500)).toMap,
           patId
         )
@@ -375,12 +331,8 @@ final class FlightSqlRouter(
         * input differently.
         */
       source: String = "flightsql",
-      /** OPA `client.edge`, forwarded to [[executeWith]]'s `ValidationContext.edge` ONLY. Empty
-        * (the default) means "same as `source`" -- resolved in [[executeWith]], not here: a
-        * parameter default cannot reference a sibling parameter of the same list in Scala. Main's
-        * routed executor passes `edge = "mcp"` while leaving `source` at its own default so REST
-        * preview / data diff / restore / undrop / branch counts keep reporting "flightsql" for
-        * metering and audit.
+      /** Read by nothing: every statement is the node's to decide, and the node's OPA input carries
+        * client.edge `node`. Kept so callers need no change.
         */
       edge: String = ""
   ): IO[Either[RouterFailure, QueryResult]] =
@@ -524,11 +476,11 @@ final class FlightSqlRouter(
       (routed.left.toOption, nonces.toArray(Array.empty[String]).toList)
     }.guarantee(IO(sessions.close(connectionId)))
 
-  /** Run a statement through the whole pipeline (session, lockdown, ACL, protected-write guard,
-    * CLS, RLS, metadata filter, pool resume, pin and placement, kill registry, history and audit,
-    * transient retry) around a caller-supplied node call. This is the transport-neutral core:
-    * [[execute]] passes the Arrow adapter, the native Quack front door passes a relay that opens
-    * its own node connection and returns the node's raw response bytes.
+  /** Run a statement through the whole pipeline (session, client-scan refusal, protected-write
+    * guard, CLS, RLS, metadata filter, pool resume, pin and placement, kill registry, history and
+    * audit, transient retry) around a caller-supplied node call. This is the transport-neutral
+    * core: [[execute]] passes the Arrow adapter, the native Quack front door passes a relay that
+    * opens its own node connection and returns the node's raw response bytes.
     *
     * `send` receives the routed node, the fully rewritten and `USE`-prefixed SQL, the author
     * stamping prelude when one applies, whether load should be booked (false for probes), and the
@@ -536,15 +488,13 @@ final class FlightSqlRouter(
     * renderer, so callers that want it go through [[execute]].
     *
     * `source` is the audit origin recorded on denial and write events and on the SessionOpened
-    * module event (`"flightsql"` or `"quack"`). `edge` is the OPA `client.edge` value used ONLY for
-    * `ValidationContext.edge`; empty (the default) means "same as `source`" and is otherwise
-    * independent of it (see `execute`'s scaladoc).
+    * module event (`"flightsql"` or `"quack"`). `edge` is read by nothing (see `execute`).
     *
     * `clientDataScans` is set by the native Quack front door alone, the one caller that relays
     * SEND_DATA on the statement's node connection; it lets a DuckDB 2.0 client's
-    * scan_data_from_quack_client INSERT through the ACL gate and the protected-write guard
-    * (`ValidationContext.clientDataScans`). It is deliberately not derived from `source` or `edge`,
-    * which are audit and OPA labels. Every other caller leaves it false.
+    * scan_data_from_quack_client INSERT past [[FlightSqlRouter.clientDataScanRefusal]] and the
+    * protected-write guard. It is deliberately not derived from `source` or `edge`. Every other
+    * caller leaves it false.
     */
   def executeWith[A](
       connectionId: String,
@@ -679,7 +629,7 @@ final class FlightSqlRouter(
       }
     // Task 19: a statement the node refuses whose answer an ordinary statement gets, for a tenant
     // principal only (a superuser's statement runs as written). The rewrite is what runs from here
-    // on, through every screen, as if the client had written it; history records the client's.
+    // on, through every gateway step, as if the client had written it; history records the client's.
     val form =
       if !FlightSqlRouter.rewritable(effectiveSet) then None
       else
@@ -699,7 +649,7 @@ final class FlightSqlRouter(
     form match
       case None =>
         // Task 19 part D: a file location the statement computes, evaluated by the node as the
-        // principal and put in its place as a literal, which every screen then judges.
+        // principal and put in its place as a literal, which the node then judges.
         val locations =
           if !FlightSqlRouter.rewritable(effectiveSet) || evaluate.isEmpty then Nil
           else TooDeep.orElse(List.empty[ComputedLocations.Location])(ComputedLocations.find(sql))
@@ -907,7 +857,7 @@ final class FlightSqlRouter(
     * per-pool dbName/schemaName overrides, so they resolve to what the node actually sees at
     * execution time.
     */
-  private def defaultsOf(poolKey: PoolKey): (Option[String], Option[String]) =
+  private[edge] def defaultsOf(poolKey: PoolKey): (Option[String], Option[String]) =
     val maybeState = supervisor.get(poolKey)
     val poolMeta   = maybeState.map(_.metastore).getOrElse(Map.empty)
     val kindWire   = maybeState.map(_.kindWire).getOrElse("ducklake")
@@ -1000,7 +950,6 @@ final class FlightSqlRouter(
       internal: Boolean,
       detail: Map[String, String]
   ): IO[Either[RouterFailure, Routed[A]]] =
-    val resolvedEdge = if edge.isEmpty then source else edge
     // Probes (recordExecution=false) must not emit, matching every other telemetry surface.
     val s    = openSession(connectionId, user, poolKey, recordExecution, source)
     val kind = classifier.classify(sql)
@@ -1014,37 +963,14 @@ final class FlightSqlRouter(
     val kindWire                 = maybeState.map(_.kindWire).getOrElse("ducklake")
     val (defaultDb, defaultSchm) = defaultsOf(poolKey)
 
-    // The file locations the principal may name (Task 12), read only when a file screen asks.
-    val fileAdmission =
-      FlightSqlRouter.fileAdmissionFor(effectiveSet, locationRulesFor, resolveLocalPath)
-    val ctx = ValidationContext(
-      username = user,
-      database = poolKey.toString,
-      statement = sql,
-      peer = connectionId,
-      defaultDatabase = defaultDb,
-      defaultSchema = defaultSchm,
-      effectiveSet = effectiveSet,
-      attachedCatalogs = attachedCatalogsOf(poolKey),
-      poolKey = Some(poolKey),
-      edge = resolvedEdge,
-      clientDataScans = clientDataScans,
-      statementClass = kind match
-        case StatementKind.Ddl => "DDL"
-        case StatementKind.Dml => "WRITE"
-        case _                 => "READ",
-      fileAdmission = fileAdmission
-    )
-    // No-op for probes. deniedRefs is non-empty only on the ACL denial arm and
-    // feeds the journal event's "denied" key.
+    val attachedCatalogs = attachedCatalogsOf(poolKey)
+    // No-op for probes.
     def maybeRecord(
         nodeId: String,
         durationMs: Long,
         status: String,
         error: Option[String],
-        deniedRefs: Set[TableAccess] = Set.empty,
-        prepMs: Option[Long] = prepareDurationMs,
-        auditMeta: Map[String, String] = Map.empty
+        prepMs: Option[Long] = prepareDurationMs
     ): Unit =
       if recordExecution then
         val realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant"
@@ -1057,127 +983,17 @@ final class FlightSqlRouter(
           status,
           error,
           kind,
-          deniedRefs,
           realm,
           prepMs,
           patId,
           source,
-          auditMeta,
           detail
         )
 
-    // Node lockdown, resolved per pool (tri-state: pool override else global default).
-    // Runs BEFORE the ACL gate so a denied statement never reaches the SQL parser;
-    // effectiveSet = None screens as non-superuser (fail closed).
-    val isSuperuser    = effectiveSet.exists(_.user.tenant.isEmpty)
-    val lockedDown     = lockdownFor(poolKey)
-    val lockdownDenial =
-      if lockedDown && !isSuperuser then LockdownScreen.screen(sql, deniedBuckets(), fileAdmission)
-      else None
-    // Superuser-only, whatever the ACL mode and the grants, and nobody's under lockdown (the
-    // screens' scaladocs have the why): the DuckLake metadata catalog and the key-returning
-    // DuckLake functions, CHECKPOINT and the DuckLake maintenance calls, the settings and calls
-    // that act on the whole shared node, and the introspection that shows node state
-    // (credentials, paths, other sessions).
-    val restrictedDenial =
-      if isSuperuser && !lockedDown then None
-      else
-        CatalogInternalsScreen
-          .screen(sql)
-          .map(r => s"catalog: $r")
-          .orElse(NodeSettingScreen.screenNodeWide(sql).map(r => s"node: $r"))
-          .orElse(CheckpointScreen.find(sql).map(r => s"catalog: $r"))
-          .orElse(NodeStateScreen.find(sql).map(r => s"node: $r"))
-
-    // Trigger DDL is reserved to superusers and the pool tenant's admins, whatever the ACL mode
-    // and the lockdown flag (TriggerScreen's scaladoc has the why). The screen runs first so the
-    // tenant lookup is paid only by a statement that actually is trigger DDL.
-    val triggerDenial =
-      TriggerScreen.screen(sql).filterNot { _ =>
-        val poolTenantId =
-          supervisor
-            .getTenant(poolKey.tenant)
-            .orElse(supervisor.getTenantById(poolKey.tenant))
-            .map(_.id)
-        TriggerScreen.mayManageTriggers(effectiveSet, poolTenantId)
-      }
-    // Parser / credential settings, IMPORT DATABASE / import_database, shell_history() and string
-    // literals nested too deeply to screen are refused for every caller, superusers included,
-    // whatever the ACL mode and the lockdown flag: one session switching how the node parses
-    // desyncs the ACL for every session on it, one unredacting its HTTP logs exposes the node's
-    // credentials, and an import replays SQL the edge never reads (NodeSettingScreen's scaladoc).
-    // The SQL-running passthrough calls (postgres_execute / postgres_query, ...) are not refused
-    // here: CatalogReachingCalls denies them to tenant principals when the ACL validates (through
-    // AccessGate) and to policy holders (through the protected-write guard), LockdownScreen to
-    // non-superusers under lockdown, and CatalogWriteScreen to every caller when the target catalog
-    // is read-only or computed.
-    val settingDenial                 = NodeSettingScreen.screen(sql)
-    val preGateDenial: Option[String] =
-      lockdownDenial
-        .map(r => s"lockdown: $r")
-        .orElse(triggerDenial.map(r => s"trigger: $r"))
-        .orElse(settingDenial.map(r => s"node: $r"))
-        .orElse(restrictedDenial)
-
-    val aclCheck: Either[RouterFailure, Unit] = preGateDenial match
-      case Some(reason) =>
-        maybeRecord(
-          nodeId = "-",
-          durationMs = 0,
-          status = "denied",
-          error = Some(reason)
-        )
-        Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-      case None =>
-        // A dry run (decision 25) skips the statement validator: the node judges it and never runs
-        // it (its plan verdicts are never an allow), and the validator would ask the tenant's OPA
-        // through the decision cache, which a dry run must neither read nor fill.
-        val validated =
-          if purpose == DecidePurpose.DryRun then Allowed else validator.validate(ctx)
-        validated match
-          case Denied(reason, deniedRefs, meta) =>
-            maybeRecord(
-              nodeId = "-",
-              durationMs = 0,
-              status = "denied",
-              error = Some(reason),
-              deniedRefs = deniedRefs,
-              auditMeta = meta
-            )
-            Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-          case ValidatorUnavailable(reason) =>
-            maybeRecord(nodeId = "-", durationMs = 0, status = "transient", error = Some(reason))
-            Left(RouterFailure.Unavailable(s"authorization service unavailable: $reason"))
-          case Allowed => Right(())
-
-    // Per-catalog read-only screen. Runs AFTER the ACL gate so a principal that lacks the grant
-    // is refused for the honest reason first, and BEFORE the CLS/RLS rewriters so a denied write
-    // never reaches a rewrite. Inert (and unparsed) when the pool has no read-only catalog. The
-    // screen re-splits and re-classifies `sql` itself per statement -- it does NOT reuse the
-    // whole-submission `kind` computed above, which describes only the first statement of a batch
-    // -- see CatalogWriteScreen's scaladoc for the exact rule.
-    val catalogDenial: Either[RouterFailure, Unit] = aclCheck.flatMap { _ =>
-      val readOnly = readOnlyCatalogsOf(poolKey)
-      if readOnly.isEmpty then Right(())
-      else
-        val parserCfg = ai.starlake.acl.model.Config.forDuckDB(
-          ctx.defaultDatabase,
-          ctx.defaultSchema,
-          ctx.attachedCatalogs
-        )
-        CatalogWriteScreen.screen(sql, classifier.classify, readOnly, parserCfg) match
-          case None         => Right(())
-          case Some(reason) =>
-            maybeRecord(
-              nodeId = "-",
-              durationMs = 0,
-              status = "denied",
-              error = Some("read_only_catalog: " + reason)
-            )
-            Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-    }
-
-    // A client data scan only the native front door can feed (clientDataScanRefusal).
+    // Table access, functions, settings, files and OPA are the node's to decide (spec decision 29).
+    // What the gateway keeps: a client data scan only the native front door can feed, then the
+    // policy steps (protected-write guard, column and row policy rewriters, metadata filter), which
+    // read the statement with the gateway's parser until part 2.
     def clientScan(): Either[RouterFailure, Unit] =
       FlightSqlRouter.clientDataScanRefusal(sql, clientDataScans) match
         case None         => Right(())
@@ -1187,25 +1003,22 @@ final class FlightSqlRouter(
 
     // Column-level security: enforce per-column policies before routing.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
-      defaultDatabase = ctx.defaultDatabase,
-      defaultSchema = ctx.defaultSchema,
-      attachedCatalogs = ctx.attachedCatalogs
+      defaultDatabase = defaultDb,
+      defaultSchema = defaultSchm,
+      attachedCatalogs = attachedCatalogs
     )
 
-    // Protected-write guard: runs AFTER the ACL gate, BEFORE the CLS/RLS rewriters. A
-    // non-SELECT statement whose read side exposes a masked or row-filtered table is
-    // denied outright (the rewriters wrap SELECTs, not the read half of a write, so
-    // without this step a CTAS / INSERT ... SELECT would launder protected values). It also
-    // denies, on every kind, a query() / query_table() style call: its target is a string the
-    // rewriters never see (see CatalogReachingCalls).
-    // effectiveSet = None skips: no RBAC principal is bound, so no policy applies here
-    // (the validator has already denied anything tenant-scoped).
+    // Protected-write guard: runs BEFORE the CLS/RLS rewriters. A non-SELECT statement whose read
+    // side exposes a masked or row-filtered table is denied outright (the rewriters wrap SELECTs,
+    // not the read half of a write, so without this step a CTAS / INSERT ... SELECT would launder
+    // protected values). On every kind it also denies what the rewriters cannot read as DuckDB
+    // does (ProtectedWriteGuard's scaladoc). effectiveSet = None skips: no RBAC principal is bound,
+    // so no policy applies, and no handle can be minted for the statement (NodePrincipal.Unbound).
     def protectedWrite(): Either[RouterFailure, Unit] = effectiveSet match
       case None      => Right(())
       case Some(eff) =>
-        val g0      = System.nanoTime()
-        val outcome =
-          protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans)
+        val g0        = System.nanoTime()
+        val outcome   = protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans)
         val elapsedMs = (System.nanoTime() - g0) / 1_000_000L
         stmtInstruments.recordProtectedWriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1225,7 +1038,7 @@ final class FlightSqlRouter(
 
     def clsRewritten(): Either[RouterFailure, String] = effectiveSet match
       case None =>
-        Right(sql) // no RBAC principal bound; rewriter would deny anything tenant-scoped
+        Right(sql) // no RBAC principal bound: no policy applies
       case Some(eff) =>
         val t0        = System.nanoTime()
         val outcome   = columnPolicyRewriter.rewrite(sql, kind, eff, schemaCtx).unsafeRunSync()
@@ -1258,8 +1071,8 @@ final class FlightSqlRouter(
       case Some(eff) =>
         val r0         = System.nanoTime()
         val schemaCtxR = ai.starlake.quack.edge.rls.SchemaContext(
-          defaultDatabase = ctx.defaultDatabase,
-          defaultSchema = ctx.defaultSchema
+          defaultDatabase = defaultDb,
+          defaultSchema = defaultSchm
         )
         val outcome   = rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR)
         val elapsedMs = (System.nanoTime() - r0) / 1_000_000L
@@ -1302,8 +1115,7 @@ final class FlightSqlRouter(
     // hand them SQL that no longer names the tables their policies key off.
     def metadataFiltered(rewrittenSql: String): Either[RouterFailure, String] =
       effectiveSet match
-        // No RBAC principal bound: the validator has already denied anything tenant-scoped,
-        // so nothing filterable survives to here.
+        // No RBAC principal bound: nothing to filter for.
         case None      => Right(rewrittenSql)
         case Some(eff) =>
           // The filter cannot read a COPY: one it narrows a listing for is refused unless the
@@ -1341,55 +1153,34 @@ final class FlightSqlRouter(
           Left(f)
 
     // Defense in depth behind the three rewriters: each prints a NEW statement, and the node runs
-    // that one, not the one the ACL gate authorized. A rewrite that reaches a table the original
-    // did not (the column policy rewrite once schema-qualified a CTE reference, turning it into a
-    // read of the real table of that name) would run a read nobody checked. So the rewritten
-    // statement must reach nothing beyond the original's tables, verbs and catalog functions, and
-    // is re-validated for the same principal in the same ACL mode; anything else denies.
+    // that one. A rewrite that reaches a table the original did not (the column policy rewrite
+    // once schema-qualified a CTE reference, turning it into a read of the real table of that
+    // name) would read past the policy that covers it. So the rewritten statement must reach
+    // nothing beyond the original's tables, verbs and file reader calls (RewriteScope, parse only:
+    // the node judges the rewritten statement's grants); anything else denies.
     def rewriteRevalidated(rewrittenSql: String): Either[RouterFailure, String] =
       if rewrittenSql == sql then Right(rewrittenSql)
       else
-        def denied(reason: String): Either[RouterFailure, String] =
-          maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-          Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-        val parserCfg = ai.starlake.acl.model.Config.forDuckDB(
-          ctx.defaultDatabase,
-          ctx.defaultSchema,
-          ctx.attachedCatalogs
-        )
-        AccessGate.rewriteReachesBeyond(
+        val parserCfg =
+          ai.starlake.acl.model.Config.forDuckDB(defaultDb, defaultSchm, attachedCatalogs)
+        ai.starlake.quack.edge.policy.RewriteScope.reachesBeyond(
           sql,
           rewrittenSql,
           parserCfg,
-          ctx.defaultDatabase.getOrElse(""),
-          clientDataScans,
-          ctx.fileAdmission
+          defaultDb.getOrElse(""),
+          clientDataScans
         ) match
-          case Some(reason) => denied(s"policy rewrite: $reason")
-          case None         =>
-            // A dry run is judged by the node alone, as at the ACL gate above.
-            val revalidated =
-              if purpose == DecidePurpose.DryRun then Allowed
-              else validator.validate(ctx.copy(statement = rewrittenSql, rewriteOf = Some(sql)))
-            revalidated match
-              case Allowed                      => Right(rewrittenSql)
-              case Denied(reason, _, _)         => denied(s"policy rewrite: $reason")
-              case ValidatorUnavailable(reason) =>
-                maybeRecord(
-                  nodeId = "-",
-                  durationMs = 0,
-                  status = "transient",
-                  error = Some(reason)
-                )
-                Left(RouterFailure.Unavailable(s"authorization service unavailable: $reason"))
+          case None         => Right(rewrittenSql)
+          case Some(reason) =>
+            val denial = s"policy rewrite: $reason"
+            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(denial))
+            Left(RouterFailure.AccessDenied(s"access denied: $denial"))
 
-    // ACL -> catalog read-only screen -> CLS -> RLS -> metadata-filter -> re-validation
-    // pipeline; every denial arm has already journaled itself. Bound to resultIO so one flatTap
-    // below emits exactly one StatementExecuted event on every exit path, including the denial
-    // arms.
+    // client scan -> protected write -> CLS -> RLS -> metadata filter -> rewrite scope; every
+    // denial arm has already journaled itself. Bound to resultIO so one flatTap below emits
+    // exactly one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
-      catalogDenial
-        .flatMap(_ => clientScan())
+      clientScan()
         .flatMap(_ => protectedWrite())
         .flatMap(_ => clsRewritten())
         .flatMap(rlsRewritten)
@@ -1625,12 +1416,12 @@ final class FlightSqlRouter(
     * per node. Skipped for a LONE USE / SET / txn control / ATTACH / DETACH so the operator can
     * escape the default.
     *
-    * Never skipped for a multi-statement submission, whatever its first statement: the validator
-    * qualified every bare name in it against that schema, and a node connection the session keeps
-    * (a client transaction on the native front door, the embedded client's cached session) may
-    * still carry an earlier lone `USE` or `SET search_path`. `BEGIN; SELECT * FROM t` used to run
-    * there with no prelude and read whichever `t` that left current. Prepending is harmless for
-    * such a batch: whatever its own statements select still runs after the prelude.
+    * Never skipped for a multi-statement submission, whatever its first statement: the policy
+    * rewriters qualified every bare name in it against that schema, and a node connection the
+    * session keeps (a client transaction on the native front door, the embedded client's cached
+    * session) may still carry an earlier lone `USE` or `SET search_path`. `BEGIN; SELECT * FROM t`
+    * used to run there with no prelude and read whichever `t` that left current. Prepending is
+    * harmless for such a batch: whatever its own statements select still runs after the prelude.
     *
     * One exception to "prepend": a submission opening with statements that END a transaction
     * (ROLLBACK / ABORT / COMMIT / END) gets the prelude right after that leading run instead,
@@ -1662,7 +1453,7 @@ final class FlightSqlRouter(
             if endsTxFirst then
               // Splice into the ORIGINAL text at the start of the first statement that does not
               // end a transaction (just past its separating `;`), so what reaches the node is
-              // byte for byte what the validator checked, plus the USE.
+              // byte for byte what the gateway read, plus the USE.
               SqlCommentStripper
                 .statementSpans(sql)
                 .find((from, until) =>
@@ -1824,14 +1615,14 @@ object FlightSqlRouter:
     * the pool carries it as its `path` (NodeKeys), and the node judges secure views against it
     * (CONTRACT Addendum 4 item 22), so both read it here.
     *
-    * The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`. `execute` already
-    * builds ValidationContext.defaultSchema from the same field, so reading a different one here
-    * made the ACL validator and the engine disagree about which schema is current for the same
-    * statement: the validator qualified unqualified refs against `defaultSchema` while the engine
-    * ran `USE <db>.<schemaName>`. With the demo's settings (defaultSchema=tpch1, schemaName=main)
-    * that surfaced as issue #112, where a native `quack:` client pushes down a schema-relative name
-    * and the node could not resolve it. Where two schemas hold a same-named table it would instead
-    * let the validator check one table while the engine read the other.
+    * The tenant-db's own `defaultSchema` wins over the metastore's `schemaName`. The gateway's
+    * parser default (`defaultsOf`) reads the same field, so reading a different one here made the
+    * gateway and the engine disagree about which schema is current for the same statement: the
+    * gateway qualified unqualified refs against `defaultSchema` while the engine ran
+    * `USE <db>.<schemaName>`. With the demo's settings (defaultSchema=tpch1, schemaName=main) that
+    * surfaced as issue #112, where a native `quack:` client pushes down a schema-relative name and
+    * the node could not resolve it. Where two schemas hold a same-named table it would instead let
+    * the policies match one table while the engine read the other.
     */
   def usePath(st: ai.starlake.quack.ondemand.PoolState): Option[String] =
     sessionPath(st).map(p => s"${p.catalog}.${p.schema}")
@@ -1852,7 +1643,7 @@ object FlightSqlRouter:
 
   /** Whether the statements of `effectiveSet`'s principal get Task 19's rewrites: a tenant
     * principal's, never a superuser's (its statement runs as written), the system principal's, or a
-    * statement no principal is bound for (which the validator refuses).
+    * statement no principal is bound for (which the node refuses).
     */
   def rewritable(effectiveSet: Option[EffectiveSet]): Boolean =
     effectiveSet.exists(e => e.user.tenant.nonEmpty && !e.system)
@@ -1926,35 +1717,10 @@ object FlightSqlRouter:
     }
     Option.when(cols.nonEmpty && cols.forall(_.isDefined))(cols.flatten)
 
-  /** Audit-detail keys QoD writes itself on the routed path; a validator's `Denied.meta` can never
-    * set them.
+  /** Audit-detail keys QoD writes itself on the routed path; a statement's `detail` can never set
+    * them.
     */
   val ReservedAuditKeys: Set[String] = Set("sql", "denied", "reason", "durationMs")
-
-  /** The file locations the principal of `effectiveSet` may name at the gateway (Task 12): its own
-    * S3 credential scopes and its own tenant's folders (decision 23), never a pool's, so the
-    * gateway and the decider (which judges the handle's principal) ask the same question. Nothing
-    * for a principal without a tenant or rules; a superuser skips the file screens anyway. The
-    * rules are read on the first location a screen asks about, once per statement; a store failure
-    * (`rulesFor` answering None) or an exception reading them admits nothing.
-    */
-  def fileAdmissionFor(
-      effectiveSet: Option[EffectiveSet],
-      rulesFor: (String, String) => Option[ai.starlake.quack.edge.authz.location.LocationRules],
-      resolveLocal: String => Option[String] = Some(_)
-  ): FileAdmission =
-    effectiveSet
-      .filterNot(_.system)
-      .flatMap(eff => eff.user.tenant.map(tenant => (tenant, eff.user.id))) match
-      case None                 => FileAdmission.Closed
-      case Some((tenant, user)) =>
-        lazy val admission =
-          scala.util
-            .Try(rulesFor(tenant, user))
-            .toOption
-            .flatten
-            .fold(FileAdmission.Closed)(rules => FileAdmission.of(rules, resolveLocal))
-        FileAdmission(location => admission.admits(location))
 
   /** Why `sql` may not run for a principal whose catalog reads the edge metadata filter narrows
     * (`narrowed`, [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.narrows]]), or None. The

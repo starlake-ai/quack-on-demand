@@ -1,7 +1,6 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter.*
-import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -39,8 +38,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
   )
 
   private def setup(
-      nodeCount: Int = 1,
-      validator: StatementValidator = StatementValidator.allowAll
+      nodeCount: Int = 1
   ): Fixture =
     val backend = new QuackBackend:
       private val n          = TrieMap.empty[String, RunningNode]
@@ -79,7 +77,6 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
-      validator = validator,
       journal = journal
     )
     Fixture(router, journal, store, sup.get(poolKey).get.nodes)
@@ -204,13 +201,14 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       case Left(RouterFailure.NotFound(m)) => m should include("does not exist")
       case other                           => fail(s"expected NotFound, got $other")
 
-  it should "record a denial under the caller's source and never call the node" in:
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult = Denied("no grant", Set.empty)
-    val fx                                     = setup(validator = denying)
+  it should "record a node's refusal as a denial under the caller's source" in:
+    val fx                                     = setup()
     var calls                                  = 0
-    val send: FlightSqlRouter.NodeSend[String] =
-      (_, _, _, _, _) => IO { calls += 1; NodeOutcome.Ok("never", 1L, () => ()) }
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
+      IO {
+        calls += 1
+        NodeOutcome.Permanent("Permission Error: QoD: user:alice lacks grants on t", 1L)
+      }
     val out = fx.router
       .executeWith(
         "c-6",
@@ -223,9 +221,9 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
-    calls shouldBe 0
+    calls shouldBe 1
     out match
-      case Left(RouterFailure.AccessDenied(m)) => m should include("no grant")
+      case Left(RouterFailure.AccessDenied(m)) => m should include("lacks grants on t")
       case other                               => fail(s"expected AccessDenied, got $other")
     fx.journal.drainNow()
     fx.store.events should have size 1
@@ -298,18 +296,15 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     Nil
   )
 
-  "a dry run's statement" should "reach the node call with a DryRun context, past the validator" in:
-    val denyAll = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("denied by the validator", Set.empty)
-    val fx   = setup(validator = denyAll)
+  "a dry run's statement" should "reach the node call with a DryRun context and record nothing" in:
+    val fx   = setup()
     var seen = List.empty[ai.starlake.quack.edge.authz.NodePrincipal]
     val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, principal) =>
       IO {
         seen = seen :+ principal
         NodeOutcome.Permanent("Permission Error: QoD: dry run", 1L)
       }
-    // Live: the validator refuses before any node call.
+    // Live: the node's refusal is a denial, in the history.
     fx.router
       .executeWith(
         "dr-1",
@@ -322,8 +317,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
       .left
-      .map(_.reason) shouldBe Left("access denied: denied by the validator")
-    seen shouldBe empty
+      .map(_.reason) shouldBe Left("access denied: Permission Error: QoD: dry run")
     // A dry run: the node judges it (here, refuses it as a dry run), under a DryRun context.
     fx.router
       .executeWith(
@@ -339,8 +333,10 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .left
       .map(_.reason) shouldBe Left("access denied: Permission Error: QoD: dry run")
-    seen.map(_.context.map(_.purpose)) shouldBe
-      List(Some(ai.starlake.quack.edge.authz.DecidePurpose.DryRun))
+    seen.map(_.context.map(_.purpose)) shouldBe List(
+      Some(ai.starlake.quack.edge.authz.DecidePurpose.Live),
+      Some(ai.starlake.quack.edge.authz.DecidePurpose.DryRun)
+    )
     // Only the live denial is in the history: a dry run records nothing.
     fx.router.history.snapshot(10).map(_.status) shouldBe List("denied")
 

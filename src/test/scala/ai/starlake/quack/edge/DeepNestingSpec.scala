@@ -4,8 +4,7 @@ import ai.starlake.acl.model.Config
 import ai.starlake.acl.parser.{SqlParser, StatementResult}
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter, SchemaContext}
 import ai.starlake.quack.edge.meta.{MetadataFilterOutcome, MetadataFilterRewriter}
-import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard}
-import ai.starlake.quack.edge.sql.LockdownScreen
+import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard, RewriteScope}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy, RoleRowPolicy}
@@ -73,8 +72,8 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
       all(r.statements) shouldBe a[StatementResult.ParseError]
     }
 
-    test(s"LockdownScreen screens a too-deep $name without overflowing") {
-      value(onWorkerStack(LockdownScreen.screen(sql, Set.empty)))
+    test(s"RewriteScope compares a too-deep $name without overflowing") {
+      value(onWorkerStack(RewriteScope.reachesBeyond(sql, sql + " ", acl, "db", false)))
     }
 
     test(s"RoutingRefs reads no table from a too-deep $name") {

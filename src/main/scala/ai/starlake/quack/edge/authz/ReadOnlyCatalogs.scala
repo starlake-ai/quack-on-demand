@@ -24,8 +24,8 @@ object ReadOnlyCatalogs:
   * nodes until the pool recycles, so its flag keeps applying until then. The source lookup is
   * [[wire]]d once the supervisor exists; until then [[of]] throws, so no handle is minted without
   * the set. A lookup that throws fails its caller the same way: a statement fails rather than run
-  * without its pool's read-only catalogs. The router's `CatalogWriteScreen` reads the same instance
-  * until it goes.
+  * without its pool's read-only catalogs. The node alone enforces the flag (the gateway's read-only
+  * screen went with spec decision 29).
   */
 final class FederatedReadOnlyCatalogs(
     clock: () => Long = () => System.currentTimeMillis(),

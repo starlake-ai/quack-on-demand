@@ -3,18 +3,17 @@ package ai.starlake.quack.edge.policy
 import ai.starlake.quack.edge.sql.StatementHead
 import ai.starlake.sql.{SqlCommentStripper, SqlLexer, SqlTrivia}
 
-/** Refuses a multi-statement submission that changes the session's schema or search path.
+/** Refuses a multi-statement submission that changes the session's schema or search path, for a
+  * principal with column or row policies (the protected-write guard, spec decision 27).
   *
-  * The access check qualifies every unqualified table name against the pool's default schema, and
-  * the router pins that schema on the node with a `USE <db>.<schema>` prelude. A `USE`, `SET
-  * search_path` or `SET schema` INSIDE the submission runs after the prelude, so DuckDB resolves
-  * every later bare name against a schema (or catalog) the check never looked at:
-  * `SET search_path='db.other'; SELECT * FROM t` reads `db.other.t` while `db.def.t` was
-  * authorized. Tracking the change through the batch instead would have to model DuckDB's
-  * resolution exactly, and a multi-entry search path resolves a bare name to the first entry that
-  * HOLDS it, which needs the catalog, not the text. So the statement is refused when it shares a
-  * submission with anything else; sent on its own it is unchanged (control flow, and the next
-  * statement gets the prelude again).
+  * The policy rewriters qualify every unqualified table name against the pool's default schema, and
+  * the router pins that schema on the node with a `USE <db>.<schema>` prelude. A `USE`,
+  * `SET search_path` or `SET schema` INSIDE the submission runs after the prelude, so DuckDB
+  * resolves every later bare name against a schema (or catalog) the policies were not matched
+  * against: `SET search_path='db.other'; SELECT * FROM t` reads `db.other.t` while the row filter
+  * was applied to `db.def.t`. So the statement is refused when it shares a submission with anything
+  * else; sent on its own it is unchanged (control flow, and the next statement gets the prelude
+  * again). Every other principal is judged by the node on what it resolves.
   *
   * Pure and token-based on purpose: it is split by
   * [[ai.starlake.quack.edge.sql.StatementHead.split]] and each statement is read from DuckDB 2.0's

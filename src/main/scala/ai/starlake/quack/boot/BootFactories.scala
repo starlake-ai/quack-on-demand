@@ -5,8 +5,7 @@ import ai.starlake.quack.{ManagerConfig, RuntimeType}
 import ai.starlake.quack.edge.authz.AuthzDecider
 import ai.starlake.quack.edge.authz.location.LocationRulesSource
 import ai.starlake.quack.edge.config.{AclConfig, OpaConfig}
-import ai.starlake.quack.edge.opa.{OpaAuthorizer, OpaValidator}
-import ai.starlake.quack.edge.sql.{PostgresAclValidator, StatementValidator, TenantRoutingValidator}
+import ai.starlake.quack.edge.opa.OpaAuthorizer
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.federation.{
   AwsSecretsManagerResolver,
@@ -182,74 +181,6 @@ object BootFactories extends LazyLogging:
   ): ai.starlake.quack.edge.meta.MetadataFilterRewriter =
     new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = metadataFilterMounted(aclCfg))
 
-  /** SQL ACL validator, routed per tenant. A `qod`-mode tenant goes to the RBAC-backed
-    * PostgresAclValidator (reading the cached EffectiveSet pinned on ConnectionContext at handshake
-    * time), or to allow-all when acl.enabled=false (local-dev workflows). An `opa`-mode tenant goes
-    * to the OpaValidator REGARDLESS of acl.enabled: a tenant that configured Rego is never silently
-    * unenforced.
-    */
-  def aclValidator(
-      aclCfg: AclConfig,
-      mgrCfg: ManagerConfig,
-      sup: PoolSupervisor,
-      opaCfg: OpaConfig,
-      opa: OpaAuthorizer
-  ): StatementValidator =
-    val defaultDb     = mgrCfg.defaultMetastore.dbName
-    val defaultSchema =
-      if mgrCfg.defaultMetastore.schemaName.nonEmpty then mgrCfg.defaultMetastore.schemaName
-      else "main"
-    // ONE value for every arm's implicit metadata admit and the filter mount (Main).
-    val filterMounted              = metadataFilterMounted(aclCfg)
-    val qodArm: StatementValidator =
-      if !aclCfg.enabled then
-        logger.warn("SQL ACL disabled (set quack-flightsql.acl.enabled=true to enforce).")
-        StatementValidator.allowAll
-      else
-        logger.info(
-          s"SQL ACL enabled (RBAC effective-set, defaultDb=$defaultDb, defaultSchema=$defaultSchema, " +
-            s"filteredMetadata=${aclCfg.filteredMetadata})"
-        )
-        new PostgresAclValidator(
-          defaultDatabase = defaultDb,
-          defaultSchema = defaultSchema,
-          dialect = aclCfg.dialect,
-          // Scope wildcard catalog grants to the session's tenant. Maps
-          // qodstate_tenant.id -> the set of tenant_db.name's the tenant
-          // owns; the validator's `catalogMatch` consults this to decide
-          // whether `*.*.*` admits a referenced catalog. Empty set = no
-          // catalog matches via wildcard (fail-closed). Explicit named
-          // grants bypass this and still cross tenants on purpose.
-          tenantCatalogs = tenantCatalogsOf(sup),
-          // Same value that mounts the edge metadata rewriter, so the validator can never
-          // admit an information_schema read the rewriter would then leave unfiltered.
-          filteredMetadata = filterMounted
-        )
-    val opaArm = new OpaValidator(
-      opa,
-      tenantOf = sup.getTenantById,
-      parentPoolsOf = sup.parentPoolNamesOf,
-      defaultDatabase = defaultDb,
-      defaultSchema = defaultSchema,
-      dialect = aclCfg.dialect,
-      // NOT aclCfg.filteredMetadata: on acl.enabled=false the filter is not mounted, and an
-      // implicit admit there would let an opa tenant read the whole catalog with no decision.
-      filteredMetadata = filterMounted
-    )
-    new TenantRoutingValidator(
-      qodArm,
-      opaArm,
-      // An unknown tenant id (deleted mid-session) follows the manager default mode, so under
-      // QOD_ACL_MODE=opa it reaches the OPA arm, which denies it, instead of a possibly allow-all
-      // QoD arm.
-      tenantId =>
-        sup
-          .getTenantById(tenantId)
-          .map(_.acl)
-          .getOrElse(ai.starlake.quack.model.TenantAcl())
-          .isOpa(opaCfg.defaultMode)
-    )
-
   /** The live location rules of the decision pipeline (spec decisions 15, 18 and 23): the
     * supervisor's data paths, tenant locations and users' S3 credential scopes, the store's
     * unpurged managed prefixes, the operator's files root. Real-path resolution only on the local
@@ -270,7 +201,7 @@ object BootFactories extends LazyLogging:
     )
 
   /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog
-    * grant admits for its sessions (PostgresAclValidator, AuthzDecider). Unknown tenant: none.
+    * grant admits for its sessions (AuthzDecider). Unknown tenant: none.
     */
   private def tenantCatalogsOf(sup: PoolSupervisor): String => Set[String] =
     tenantId =>
@@ -279,8 +210,8 @@ object BootFactories extends LazyLogging:
         .map(t => sup.listTenantDbsByTenant(t.id).map(_.name).toSet)
         .getOrElse(Set.empty)
 
-  /** The node decision pipeline (spec Section 6). Always enforced (decision 5): unlike the
-    * gateway's validator it ignores acl.enabled; an opa tenant is judged by its OPA policy.
+  /** The node decision pipeline (spec Section 6). Always enforced (decision 5); an opa tenant is
+    * judged by its OPA policy.
     */
   def authzDecider(
       sup: PoolSupervisor,
@@ -292,8 +223,7 @@ object BootFactories extends LazyLogging:
       tenantOf = sup.getTenantById,
       tenantCatalogs = tenantCatalogsOf(sup),
       // The catalog the pool's node attaches (memory, a catalogAlias or dbName): a wildcard
-      // catalog grant covers it on that pool only. The gateway's validator keeps the tenant-db
-      // names alone.
+      // catalog grant covers it on that pool only.
       poolCatalog = key =>
         sup.get(key).flatMap(st => AuthzDecider.attachedCatalog(st.kindWire, st.metastore)),
       parentPoolsOf = sup.parentPoolNamesOf,

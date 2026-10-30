@@ -5,13 +5,6 @@ import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.authz.HandleInspector
 import ai.starlake.quack.edge.config.AuthenticationConfig
-import ai.starlake.quack.edge.sql.{
-  Allowed,
-  Denied,
-  StatementValidator,
-  ValidationContext,
-  ValidationResult
-}
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
@@ -212,7 +205,6 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
   )
 
   private def setup(
-      validator: StatementValidator = StatementValidator.allowAll,
       superuser: Boolean = false,
       withAdmin: Boolean = false,
       ttlSec: Long = 3600,
@@ -271,7 +263,6 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker),
-      validator = validator,
       journal = journal,
       stampWrites = stamping,
       events = sink,
@@ -434,30 +425,29 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       Type.PrepareRequest
     )
 
-  it should "report a manager-side denial as an ERROR_RESPONSE and never reach a node" in:
-    val denying = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        if ctx.statement.contains("secret") then Denied("no grant on secret", Set.empty)
-        else Allowed
-    val fx     = setup(validator = denying)
+  it should "report a node's authorization refusal as an ERROR_RESPONSE journaled as a denial" in:
+    val fx     = setup()
     val connId = connect(fx)
-    errorText(prepare(fx, connId, "SELECT * FROM secret")) should include("no grant on secret")
-    fx.transport.typesSinceHandshake shouldBe Nil
+    fx.transport.prepareError = Some("Permission Error: QoD: user:alice lacks grants on secret")
+    errorText(prepare(fx, connId, "SELECT * FROM secret")) should include(
+      "QoD: user:alice lacks grants on secret"
+    )
+    fx.transport.prepareError = None
     fx.journal.drainNow()
-    fx.store.events.map(_.origin).toList shouldBe List("quack")
+    fx.store.events.map(e => (e.origin, e.outcome)).toList shouldBe List(("quack", "denied"))
 
-  it should "validate its statements as able to feed a client data scan" in:
-    // The front door is the one edge that relays SEND_DATA, so it alone sets the flag that lets
-    // a DuckDB 2.0 client's scan_data_from_quack_client INSERT through the gate.
-    val seen      = ArrayBuffer.empty[Boolean]
-    val capturing = new StatementValidator:
-      def validate(ctx: ValidationContext): ValidationResult =
-        seen += ctx.clientDataScans
-        Allowed
-    val fx     = setup(validator = capturing)
+  it should "relay a client data scan, which only the front door can feed" in:
+    // The front door is the one edge that relays SEND_DATA, so it alone lets a DuckDB 2.0
+    // client's scan_data_from_quack_client INSERT reach a node (clientDataScanRefusal).
+    val fx     = setup()
     val connId = connect(fx)
-    prepare(fx, connId, "SELECT 1")
-    seen.toList shouldBe List(true)
+    val insert = "INSERT INTO orders SELECT * FROM scan_data_from_quack_client(" +
+      "'0f8e2c3a-1b2c-4d5e-8f90-0123456789ab', NULL::STRUCT(a INTEGER), ordered := true)"
+    prepare(fx, connId, insert) shouldBe prepareResp(false)
+    fx.transport.prepared.toList
+      .map(_.sql)
+      .exists(_.contains("scan_data_from_quack_client")) shouldBe
+      true
 
   it should "answer an unknown connection id like a node does" in:
     val fx = setup()

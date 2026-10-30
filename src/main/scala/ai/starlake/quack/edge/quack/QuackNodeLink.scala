@@ -108,8 +108,9 @@ final class QuackNodeLink(
   /** Run `sql` on this connection after a fresh session handle and keep its result: the
     * PREPARE_RESPONSE, then every FETCH_RESPONSE that carries chunks, as the node sent them, for
     * the manager to decode itself (a SUMMARIZE's columns, Task 19). The node's ERROR_RESPONSE is
-    * `Right(Left(message))`: the node answered, the link is sound. A failed handle is
-    * [[LinkFailure.HandleFailed]] and `sql` was not sent; a result past `maxBytes` is `Permanent`.
+    * `Right(Left(text))`, worded as DuckDB does (`errorText`): the node answered, the link is
+    * sound. A failed handle is [[LinkFailure.HandleFailed]] and `sql` was not sent; a result past
+    * `maxBytes` is `Permanent`.
     */
   def collect(
       sql: String,
@@ -128,7 +129,7 @@ final class QuackNodeLink(
           case Left(f)     => IO.pure(Left(f))
           case Right(resp) =>
             QuackWire.messageType(resp) match
-              case QuackWire.Type.ErrorResponse   => IO.pure(Right(Left(errorMessage(resp))))
+              case QuackWire.Type.ErrorResponse   => IO.pure(Right(Left(errorText(resp))))
               case QuackWire.Type.PrepareResponse =>
                 val more = QuackNodeLink.nativeNeedsMore(resp).getOrElse(false)
                 QuackNodeLink.nativeResultUuid(resp) match
@@ -165,7 +166,7 @@ final class QuackNodeLink(
         case Left(f)     => IO.pure(Left(f))
         case Right(resp) =>
           if QuackWire.messageType(resp) == QuackWire.Type.ErrorResponse then
-            IO.pure(Right(Left(errorMessage(resp))))
+            IO.pure(Right(Left(errorText(resp))))
           else if QuackWire.isTerminalFetch(resp) then IO.pure(Right(Right(kept.reverse)))
           else
             collectFetches(
@@ -252,6 +253,12 @@ final class QuackNodeLink(
 
   private def errorMessage(resp: Array[Byte]): String =
     QuackWire.decodeErrorMessage(resp).getOrElse("node error")
+
+  /** A statement's node error as the router reads it: DuckDB's wording, its exception type first
+    * ([[QuackWire.decodeErrorText]]), so a node's refusal reads as on the Arrow transport.
+    */
+  private def errorText(resp: Array[Byte]): String =
+    QuackWire.decodeErrorText(resp).getOrElse("node error")
 
   /** Best-effort DISCONNECT; a half-dead node must not fail the caller. */
   def close(): IO[Unit] =

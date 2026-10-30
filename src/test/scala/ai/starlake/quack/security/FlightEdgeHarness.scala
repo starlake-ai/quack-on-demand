@@ -6,7 +6,6 @@ import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.policy.ProtectedWriteGuard
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -105,12 +104,9 @@ object FlightEdgeHarness:
       FlightClient.builder(allocator, loc).build()
 
   /** Optional statement-pipeline wiring for specs that run statements through the edge. Every
-    * default is the harness's historical behavior (allow-all validator, no OPA, inert guards, a
-    * one-row stub node, no spawned nodes), so callers that only exercise the handshake are
-    * unaffected.
+    * default is the harness's historical behavior (no OPA, inert guards, a one-row stub node, no
+    * spawned nodes), so callers that only exercise the handshake are unaffected.
     *
-    * @param validator
-    *   built from the harness's supervisor, e.g. `BootFactories.aclValidator(...)`.
     * @param opa
     *   wired into the supervisor through `wireOpa` before the server starts.
     * @param nodeQuery
@@ -119,7 +115,6 @@ object FlightEdgeHarness:
     *   run one reconcile pass after `restore()` so seeded pools get routable (stub) nodes.
     */
   final case class RouterWiring(
-      validator: PoolSupervisor => StatementValidator = _ => StatementValidator.allowAll,
       opa: Option[OpaPoolAccess] = None,
       nodeQuery: String => QuackResponse = _ => TestArrow.okResponse(),
       columnPolicyRewriter: ColumnPolicyRewriter = new ColumnPolicyRewriter(
@@ -192,7 +187,6 @@ object FlightEdgeHarness:
       sessions = sessions,
       tracker = tracker,
       adapter = adapter,
-      validator = wiring.validator(sup),
       history = history,
       stmtInstruments = si,
       columnPolicyRewriter = wiring.columnPolicyRewriter,

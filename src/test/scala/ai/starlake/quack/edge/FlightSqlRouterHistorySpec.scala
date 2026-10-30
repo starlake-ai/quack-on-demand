@@ -1,7 +1,6 @@
 package ai.starlake.quack.edge
 
 import ai.starlake.quack.edge.adapter._
-import ai.starlake.quack.edge.sql.{Denied, StatementValidator, ValidationContext, ValidationResult}
 import ai.starlake.quack.model.{
   NodeSpec,
   PoolKey,
@@ -72,8 +71,7 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     * searchStatements.
     */
   private def setupWithJournal(
-      stub: () => QuackResponse = defaultStub,
-      validator: StatementValidator = StatementValidator.allowAll
+      stub: () => QuackResponse = defaultStub
   ): (FlightSqlRouter, EventJournal, RecordingTelemetryStore) = {
     val sup     = buildSupervisor()
     val store   = new RecordingTelemetryStore
@@ -96,7 +94,6 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
       sessions,
       tracker,
       adapter,
-      validator = validator,
       journal = journal
     )
     (router, journal, store)
@@ -117,23 +114,6 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
       e.status shouldBe "ok"
       e.durationMs should be >= 0L
     }
-
-  it should "persist a denied statement with status denied and nodeId '-'" in {
-    val denying = new StatementValidator {
-      def validate(ctx: ValidationContext): ValidationResult =
-        Denied("insufficient grants", Set.empty)
-    }
-    val (router, journal, store) = setupWithJournal(validator = denying)
-    router.execute("hist-2", "alice", poolKey, "SELECT secret FROM forbidden").unsafeRunSync()
-    journal.drainNow()
-    val rows = store.searchStatements(StatementQuery())
-    rows should have size 1
-    val e = rows.head.event
-    e.status shouldBe "denied"
-    e.nodeId shouldBe "-"
-    e.username shouldBe "alice"
-    e.tenant shouldBe "acme"
-  }
 
   it should "persist a transient node failure with status transient and the error text" in {
     val transientStub: () => QuackResponse =

@@ -1,12 +1,12 @@
 package ai.starlake.sql
 
 /** The ONE lexical reader behind every SQL screen: `SqlCommentStripper.stripComments`,
-  * `LockdownScreen.splitStatements` and `StatementClassifier`'s word reader. Each disagreement
-  * between a screen and DuckDB about where a literal or a comment ends is a bypass (a quote the
-  * screen opens and DuckDB does not hides executable text from the screen), and three sibling
-  * readers with their own character classes is how those disagreements kept regenerating. So this
-  * object ports DuckDB's own front end rather than approximating it, from the DuckDB 2.0 source the
-  * bundled CLI is built from (`src/parser/parser.cpp` `StripUnicodeSpaces` and
+  * `StatementHead.split` and `StatementClassifier`'s word reader. Each disagreement between a
+  * screen and DuckDB about where a literal or a comment ends is a bypass (a quote the screen opens
+  * and DuckDB does not hides executable text from the screen), and three sibling readers with their
+  * own character classes is how those disagreements kept regenerating. So this object ports
+  * DuckDB's own front end rather than approximating it, from the DuckDB 2.0 source the bundled CLI
+  * is built from (`src/parser/parser.cpp` `StripUnicodeSpaces` and
   * `src/parser/peg/tokenizer/base_tokenizer.cpp` `TokenizeInputInternal`, commit b15358c), every
   * rule below confirmed against that CLI:
   *

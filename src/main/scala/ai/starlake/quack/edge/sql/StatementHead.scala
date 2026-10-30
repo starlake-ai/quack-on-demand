@@ -47,7 +47,8 @@ private[quack] object StatementHead:
 
   /** A statement behind EXPLAIN, at ANY distance: EXPLAIN takes ANALYZE / ANALYSE and an option
     * list whose options carry arbitrary expressions. For a screen that refuses a verb wherever it
-    * follows EXPLAIN ([[TriggerScreen]]), accepting the over-deny of a literal spelling it.
+    * follows EXPLAIN (the gateway's trigger screen did, until spec decision 29), accepting the
+    * over-deny of a literal spelling it.
     */
   val ExplainPrefix = "(?s)^(?:explain\\b.*\\b)?"
 

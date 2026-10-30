@@ -20,7 +20,8 @@ import org.scalatest.matchers.should.Matchers
 import java.net.URI
 
 /** OPA allow and deny round-trips on the two other data-plane edges, on the SAME stack the
-  * FlightSQL specs use (the harness's supervisor, OPA wiring and production validator):
+  * FlightSQL specs use (the harness's supervisor and OPA wiring; statements are the node's to
+  * decide):
   *
   *   - the native Quack front door, with the real [[EdgeHandshake]] (in-memory Basic auth, the
   *     supervisor's handshake gate, edge `quack`) in front of a scripted node transport;
@@ -51,7 +52,6 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
     val h   = FlightEdgeHarness.boot(
       fix.store,
       wiring = FlightEdgeHarness.RouterWiring(
-        validator = validator(opa),
         opa = Some(opa),
         nodeQuery = duckNode(OrdersSetup),
         spawnNodes = true
@@ -128,7 +128,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
   private def prepare(d: QuackFrontDoor, connId: String, sql: String): Array[Byte] =
     d.handle(encodePrepareRequest(connId, 3L, PrepareRequest(sql, None, None))).unsafeRunSync()
 
-  "the native Quack front door" should "relay a statement OPA allows for a grant-less user" in:
+  "the native Quack front door" should "relay a statement of a user OPA lets connect" in:
     wm.resetAll()
     stubConnect(wm, allow)
     stubStatement(wm, allow)
@@ -145,27 +145,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         1,
         connectCalls.withRequestBody(matchingJsonPath("$.input.client.edge", equalTo("quack")))
       )
-      wm.verify(
-        1,
-        statementCalls.withRequestBody(matchingJsonPath("$.input.client.edge", equalTo("quack")))
-      )
-    }
-
-  it should "answer an error naming the policy when OPA denies, and never reach the node" in:
-    wm.resetAll()
-    stubConnect(wm, allow)
-    stubStatement(wm, deny("orders is off limits"))
-    withHarness { (h, fix) =>
-      val t    = new NodeTransport
-      val d    = door(h, fix, t)
-      val resp = prepare(d, connect(d), "SELECT * FROM orders")
-      messageType(resp) shouldBe Type.ErrorResponse
-      val msg = decodeErrorMessage(resp).toOption.get
-      msg should include("denied by policy")
-      msg should include("orders is off limits")
-      // Not even a session handle: a denial happens before any node connection is opened.
-      t.prepares shouldBe 0
-      t.preludes shouldBe 0
+      wm.verify(0, statementCalls)
     }
 
   it should "refuse the session when OPA denies the connect" in:
@@ -214,7 +194,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
     )
     executor(h)(bob, poolKey, sql).unsafeRunSync()
 
-  "the MCP routed executor" should "run a statement OPA allows for a grant-less user" in:
+  "the MCP routed executor" should "run a statement of a user OPA lets connect" in:
     wm.resetAll()
     stubConnect(wm, allow)
     stubStatement(wm, allow)
@@ -230,22 +210,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         1,
         connectCalls.withRequestBody(matchingJsonPath("$.input.client.edge", equalTo("mcp")))
       )
-      wm.verify(
-        1,
-        statementCalls.withRequestBody(matchingJsonPath("$.input.client.edge", equalTo("mcp")))
-      )
-    }
-
-  it should "refuse a statement OPA denies with an AccessDenied naming the policy" in:
-    wm.resetAll()
-    stubConnect(wm, allow)
-    stubStatement(wm, deny("orders is off limits"))
-    withHarness { (h, _) =>
-      mcpRun(h, "SELECT * FROM orders") match
-        case Left(RouterFailure.AccessDenied(reason)) =>
-          reason should include("denied by policy")
-          reason should include("orders")
-        case other => fail(s"expected AccessDenied, got $other")
+      wm.verify(0, statementCalls)
     }
 
   it should "map an OPA outage to a retryable Unavailable, not a denial" in:
@@ -282,20 +247,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
   private val roCeiling =
     ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO"))
 
-  "a read-only PAT on an opa tenant" should "be refused a write without asking OPA about it" in:
-    wm.resetAll()
-    stubConnect(wm, allow)
-    stubStatement(wm, allow)
-    withHarness { (h, _) =>
-      patRun(h, roCeiling, "INSERT INTO orders VALUES (3, 'c@x.io')") match
-        case Left(RouterFailure.AccessDenied(reason)) =>
-          reason should include("token verb ceiling")
-          reason should include("orders")
-        case other => fail(s"expected AccessDenied, got $other")
-      wm.verify(0, statementCalls)
-    }
-
-  it should "still run a read OPA allows" in:
+  "a read-only PAT on an opa tenant" should "run a read, asking OPA nothing per statement" in:
     wm.resetAll()
     stubConnect(wm, allow)
     stubStatement(wm, allow)
@@ -303,7 +255,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
       val out = patRun(h, roCeiling, "SELECT * FROM orders")
       out.isRight shouldBe true
       out.toOption.get.close()
-      wm.verify(1, statementCalls)
+      wm.verify(0, statementCalls)
     }
 
   "a role-narrowed PAT on an opa tenant" should "send OPA only the token's roles on connect" in:
@@ -334,10 +286,5 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
           matchingJsonPath("$.input.user.roles", equalToJson("""["analyst"]"""))
         )
       )
-      wm.verify(
-        1,
-        statementCalls.withRequestBody(
-          matchingJsonPath("$.input.user.roles", equalToJson("""["analyst"]"""))
-        )
-      )
+      wm.verify(0, statementCalls)
     }

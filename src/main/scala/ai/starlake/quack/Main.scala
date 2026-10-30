@@ -24,7 +24,6 @@ import ai.starlake.quack.boot.{
   LeaderDuties,
   ManagementAuthWiring
 }
-import ai.starlake.quack.edge.sql.StatementValidator
 import ai.starlake.quack.mail.{LogMailSender, MailSender, SmtpMailSender}
 import ai.starlake.quack.model.{RunningNode, TenantDb}
 import ai.starlake.quack.observability.metrics.{
@@ -1196,7 +1195,7 @@ object Main extends IOApp with LazyLogging:
     ): IO[Unit] =
       val classifier = EdgeRewriters.statementClassifier()
       // ONE OPA authorizer per manager (one HttpClient, one decision cache), shared by the
-      // statement validator below, the handshake and the admin dry-run.
+      // decision pipeline below, the handshake and the admin dry-run.
       val opaAuthorizer = new ai.starlake.quack.edge.opa.OpaAuthorizer(
         opaCfg,
         new ai.starlake.quack.edge.opa.OpaClient(
@@ -1214,8 +1213,6 @@ object Main extends IOApp with LazyLogging:
         mgrCfg.tenantFiles.rootOpt,
         auditRecorder
       )
-      val aclValidator: StatementValidator =
-        BootFactories.aclValidator(aclCfg, mgrCfg, sup, opaCfg, opaAuthorizer)
       // The node decision pipeline and its endpoint (POST /api/internal/authz/decide), sharing
       // the one OPA authorizer.
       val authzDecider =
@@ -1387,11 +1384,8 @@ object Main extends IOApp with LazyLogging:
           result
         }
 
-      // The router's CatalogWriteScreen reads the set the handles carry (one cache, decision 24).
-      val readOnlyCatalogsOf: ai.starlake.quack.model.PoolKey => Set[String] = readOnlyCatalogs.of
-
-      // Mirrors attachedCatalogsOf's metastore resolution so the ACL SQL parser
-      // resolves unqualified table refs the same way the validator does.
+      // Mirrors attachedCatalogsOf's metastore resolution so the routing parser
+      // resolves unqualified table refs the same way the policy steps do.
       val refsConfigFor: ai.starlake.quack.model.PoolKey => ai.starlake.acl.model.Config = key =>
         val ms = sup.effectiveMetastoreFor(key.tenant, key.tenantDb)
         ai.starlake.acl.model.Config.forDuckDB(
@@ -1418,7 +1412,6 @@ object Main extends IOApp with LazyLogging:
         sessions,
         tracker,
         adapter,
-        aclValidator,
         stmtHistory,
         stmtInstruments,
         classifier,
@@ -1428,7 +1421,6 @@ object Main extends IOApp with LazyLogging:
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
         attachedCatalogsOf = attachedCatalogsOf,
-        readOnlyCatalogsOf = readOnlyCatalogsOf,
         // The in-process sinks go FIRST: fanout has no error isolation, so a module
         // sink that throws must not be able to starve the autoscale demand signal or
         // the hibernation activity signal. Invariant: each of poolLoadStats.sink and
@@ -1455,20 +1447,10 @@ object Main extends IOApp with LazyLogging:
         placement = placementDirectory,
         cacheAwareRouting = mgrCfg.routing.cacheAware,
         loadCapFactor = mgrCfg.routing.loadCapFactor,
-        // Same value BootFactories hands every validator arm's implicit admit (QoD and OPA):
-        // see BootFactories.metadataFilterMounted.
+        // Mounted from BootFactories.metadataFilterMounted.
         metadataFilterRewriter = BootFactories.metadataFilterRewriter(aclCfg),
         protectedWriteGuard = protectedWriteGuard,
-        adminExecutor = adminExecutor,
-        // The file screens admit a principal's authorized locations (Task 12), judged by the
-        // decider's own rules; a store failure (Left) admits nothing, as the decider answers 503.
-        locationRulesFor = (tenantId, userId) => locationRules.rulesFor(tenantId, userId).toOption,
-        // The node resolves a local path before its location is judged: the manager can do the
-        // same only when nodes run on its host (BootFactories.locationRules' sameHost).
-        resolveLocalPath =
-          if RuntimeType.isLocal(mgrCfg.runtimeType) then
-            path => ai.starlake.quack.edge.authz.location.LocalRealPath.resolve(path).toOption
-          else Some(_)
+        adminExecutor = adminExecutor
       )
       // The OPA dry run reaches a node through the router (decision 25), so its handler is built
       // after it, sharing the one authorizer and the decision endpoint's dry-run results.

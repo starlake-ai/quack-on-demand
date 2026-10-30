@@ -90,3 +90,88 @@ class CatalogReachingCallsSpec extends AnyFlatSpec with Matchers:
       reading = next
     reading shouldBe CatalogReachingCalls.ReadingTableMacros
   }
+
+  // Formerly in AccessGateSpec: the screen's own reading, which the guard now relies on alone.
+
+  "CatalogReachingCalls" should "find a call behind dollar-quote tags differing only in case" in {
+    // DuckDB 2.0 compares dollar tags case-sensitively: $A$ is not closed by $a$, so the call after
+    // the block-comment opener runs. Folding case before lexing read it as a comment.
+    CatalogReachingCalls.find(
+      "SELECT $A$x$a$ /* $A$, * FROM query_table('orders') -- */"
+    ) shouldBe Some("query_table")
+    // matching tags: the call sits in a comment for DuckDB too
+    CatalogReachingCalls.find(
+      "SELECT $a$x$a$ /* $a$, * FROM query_table('orders') -- */"
+    ) shouldBe None
+  }
+
+  it should "find a call under every DuckDB 2.0 identifier quoting" in {
+    CatalogReachingCalls.find("SELECT * FROM `query_table`('orders')") shouldBe Some("query_table")
+    CatalogReachingCalls.find("SELECT * FROM `QUERY`('SELECT 1')") shouldBe Some("query")
+    CatalogReachingCalls.find("SELECT * FROM \"query_table\"('orders')") shouldBe
+      Some("query_table")
+    CatalogReachingCalls.find("SELECT * FROM `system`.`main`.`query_table`('orders')") shouldBe
+      Some("query_table")
+    CatalogReachingCalls.find("SELECT * FROM main.`query_table` /* c */ ('orders')") shouldBe
+      Some("query_table")
+    CatalogReachingCalls.find("SELECT * FROM `ducklake_snapshots`('cat')") shouldBe
+      Some("ducklake_snapshots")
+    // no parenthesis: a column, not a call
+    CatalogReachingCalls.find("SELECT `query_table`, `query` FROM t") shouldBe None
+    CatalogReachingCalls.find("SELECT \"query\" FROM t") shouldBe None
+  }
+
+  it should "find the node-escaping calls (raw SQL, arbitrary connection, node env)" in {
+    for name <- List(
+        "postgres_query",
+        "postgres_execute",
+        "postgres_scan",
+        "postgres_scan_pushdown",
+        "postgres_attach",
+        "mysql_query",
+        "mysql_execute",
+        "sqlite_query",
+        "sqlite_scan",
+        "sqlite_attach",
+        "quack_query",
+        "quack_query_by_name",
+        "postgres_configure_pool",
+        "create_external_resource",
+        "register_external_resource",
+        "register_external_resource_type",
+        "deregister_external_resource",
+        "destroy_external_resource",
+        "getenv"
+      )
+    do
+      withClue(name) {
+        CatalogReachingCalls.find(s"SELECT * FROM $name('c', 'x')") shouldBe Some(name)
+        CatalogReachingCalls.find(s"SELECT * FROM `$name`('c', 'x')") shouldBe Some(name)
+        CatalogReachingCalls.denyReason(name) should include("cannot authorize")
+      }
+    CatalogReachingCalls.find("SELECT postgres_query, getenv FROM t") shouldBe None
+  }
+
+  it should "fail closed when string literals nest past the scan depth" in {
+    def nest(n: Int): String =
+      if n == 0 then "postgres_query('c', 'x')"
+      else "SELECT '" + nest(n - 1).replace("'", "''") + "'"
+    val deep = nest(9)
+    CatalogReachingCalls.find(deep) shouldBe defined
+    CatalogReachingCalls.denyReason(CatalogReachingCalls.find(deep).get) should
+      include("too deeply")
+  }
+
+  it should "read the SQL-valued setting a SET, RESET or PRAGMA names" in {
+    for sql <- List(
+        "SET pg_staleness_query = 'SELECT 1 ${SCHEMA}'",
+        "SET GLOBAL\"pg_pool_health_check_query\" = 'SELECT 1'",
+        "RESET pg_staleness_query",
+        "PRAGMA quack_authentication_function = 'f'",
+        "EXPLAIN ANALYZE SET quack_authorization_function = 'f'"
+      )
+    do withClue(sql)(CatalogReachingCalls.sqlValuedSetting(sql) shouldBe defined)
+    CatalogReachingCalls.sqlValuedSetting("SET schema = 'pg_staleness_query'") shouldBe None
+    CatalogReachingCalls.sqlValuedSetting("SELECT current_setting('pg_staleness_query')") shouldBe
+      None
+  }

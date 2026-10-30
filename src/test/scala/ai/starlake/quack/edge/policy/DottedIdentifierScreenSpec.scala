@@ -1,7 +1,5 @@
 package ai.starlake.quack.edge.policy
 
-import ai.starlake.quack.edge.sql.{AccessGate, GateOutcome, LockdownScreen}
-
 import ai.starlake.acl.model.Config
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -71,28 +69,6 @@ class DottedIdentifierScreenSpec extends AnyFlatSpec with Matchers:
 
   private val cfg = Config.forDuckDB(Some("lake"), Some("main"), Set("lake"))
 
-  "AccessGate" should "refuse it as not wildcard-coverable, for QoD and OPA alike" in:
-    refusedForms.foreach { sql =>
-      withClue(sql) {
-        AccessGate.evaluate(sql, cfg, "lake", false, clientDataScans = false) match
-          case GateOutcome.Refuse(reason, coverable, _) =>
-            reason shouldBe DottedIdentifierScreen.Reason
-            coverable shouldBe false
-          case other => fail(s"expected Refuse, got $other")
-      }
-    }
-
-  it should "still gate separate quoted parts as the table they name" in:
-    AccessGate.evaluate("SELECT * FROM \"a\".\"b\"", cfg, "lake", false, false) match
-      case GateOutcome.Gated(g, _) => g.map(_.table.canonical) shouldBe Set("lake.a.b")
-      case other                   => fail(s"expected Gated, got $other")
-
-  "LockdownScreen" should "refuse it" in:
-    refusedForms.foreach { sql =>
-      withClue(sql)(LockdownScreen.screen(sql, Set.empty) shouldBe defined)
-    }
-    LockdownScreen.screen("SELECT v AS \"t.v\" FROM \"main\".\"t\"", Set.empty) shouldBe None
-
   // JSqlParser also splits a quoted name at an `@` (an Oracle database link: `"secret@x"` is gated
   // as table `secret`), and keeps an escaped quote doubled (`"secret""x"` is gated as `secret""x`
   // while DuckDB reads `secret"x`). Every other printable ASCII and unicode character was probed in
@@ -125,14 +101,6 @@ class DottedIdentifierScreenSpec extends AnyFlatSpec with Matchers:
     refusedSeparators.foreach { sql =>
       withClue(sql)(DottedIdentifierScreen.find(sql) shouldBe Some(DottedIdentifierScreen.Reason))
     }
-    refusedSeparators.foreach { sql =>
-      withClue(sql) {
-        AccessGate.evaluate(sql, cfg, "lake", false, clientDataScans = false) shouldBe a[
-          GateOutcome.Refuse
-        ]
-        LockdownScreen.screen(sql, Set.empty) shouldBe defined
-      }
-    }
 
   it should "admit them as aliases, literals and URL paths, and the other separators" in:
     admittedSeparators.foreach(sql => withClue(sql)(DottedIdentifierScreen.find(sql) shouldBe None))
@@ -162,16 +130,12 @@ class DottedIdentifierScreenSpec extends AnyFlatSpec with Matchers:
     refusedMisreads.foreach { sql =>
       withClue(sql) {
         DottedIdentifierScreen.find(sql) shouldBe Some(DottedIdentifierScreen.Reason)
-        AccessGate.evaluate(sql, cfg, "lake", false, clientDataScans = false) shouldBe a[
-          GateOutcome.Refuse
-        ]
-        LockdownScreen.screen(sql, Set.empty) shouldBe defined
       }
     }
 
   // Every printable ASCII character, in both quoting styles, inside, before, after and around a
-  // name: the access check either refuses the statement or gates exactly the name DuckDB reads.
-  it should "never let a quoted name be gated as another name" in {
+  // name: the screen refuses the statement, or the parse reads exactly the name DuckDB reads.
+  it should "never let a quoted name be read as another name" in {
     for
       q     <- List('"', '`')
       c     <- (32 to 126).map(_.toChar)
@@ -180,11 +144,11 @@ class DottedIdentifierScreenSpec extends AnyFlatSpec with Matchers:
       val body = if c == q then shape.replace(s"$c", s"$c$c") else shape
       val sql  = s"SELECT * FROM $q$body$q"
       withClue(sql) {
-        AccessGate.evaluate(sql, cfg, "lake", true, clientDataScans = false) match
-          case GateOutcome.Gated(g, _) =>
+        RewriteScope.scopeOf(sql, cfg, "lake", clientDataScans = false) match
+          case RewriteScope.Scope.Reaches(g, _) if g.nonEmpty =>
             g.map(_.table.canonical) shouldBe Set("lake.main." + shape.toLowerCase)
-          case GateOutcome.Refuse(_, _, _) => succeed
-          case other                       => fail(s"expected Gated or Refuse, got $other")
+          case RewriteScope.Scope.Refused(_) => succeed
+          case other                         => fail(s"expected tables or a refusal, got $other")
       }
   }
 

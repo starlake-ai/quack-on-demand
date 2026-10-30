@@ -321,14 +321,25 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       router.history.snapshot(5).headOption.map(r => (r.sql, r.status)) shouldBe
         Some((Computed, "permanent"))
 
-      // A gateway refusal of the evaluation: answered, the transaction left open.
+      // The node's refusal of the evaluation: a denial, answered as such; the statement is never
+      // sent, and the router fences nothing (the node's own answer decides the transaction).
+      val nodeRefusal: String => QuackResponse = sql =>
+        if sql.endsWith(" AS location") then
+          QuackResponse.Failed(
+            QuackError.Permanent(
+              "Permission Error: QoD: function current_setting is superuser-only"
+            )
+          )
+        else TestArrow.okResponse()
       val (refused, refusedSent, refusedFenced, _) = scenario(
-        evaluatesTo("'s3://acme-etl/in/x.csv'"),
+        nodeRefusal,
         "SELECT * FROM read_csv(current_setting('home_directory') || '/x.csv')"
       )
-      refused.left.map(_.reason).left.toOption.get should
-        startWith("computing the file location: access denied: node: current_setting")
-      refusedSent.exists(_.contains("AS location")) shouldBe false
+      refused.left.map(_.reason) shouldBe Left(
+        "computing the file location: access denied: Permission Error: QoD: function " +
+          "current_setting is superuser-only"
+      )
+      refusedSent.exists(_.endsWith("|| '/x.csv')")) shouldBe false
       refusedFenced shouldBe Nil
 
       // A value no literal may stand for: the transaction is fenced with the answer.

@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.Config
+import ai.starlake.acl.parser.Verb
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -110,5 +111,97 @@ class RewriteScopeSpec extends AnyFlatSpec with Matchers:
       cfg,
       "lake",
       clientDataScans = false
+    ) shouldBe a[RewriteScope.Scope.Refused]
+  }
+
+  // The gate's parse rules, which the reach of a statement keeps (formerly AccessGateSpec).
+
+  private val tpch = Config.forDuckDB(Some("tpch"), Some("main"), Set("tpch"))
+
+  private def scope(sql: String, frontDoor: Boolean = false): RewriteScope.Scope =
+    RewriteScope.scopeOf(sql, tpch, "tpch", clientDataScans = frontDoor)
+
+  private def reaches(sql: String, frontDoor: Boolean = false): Set[(String, Verb)] =
+    scope(sql, frontDoor) match
+      case RewriteScope.Scope.Reaches(g, _) => g.map(a => a.table.table -> a.verb)
+      case other                            => fail(s"expected a reach, got $other for: $sql")
+
+  private val ClientScan =
+    "scan_data_from_quack_client('0f8e2c3a-1b2c-4d5e-8f90-0123456789ab', " +
+      "NULL::STRUCT(col0 BIGINT, col1 VARCHAR), ordered := true)"
+
+  "the reach of a statement" should "hold every table a join touches, and mark writes" in {
+    reaches("SELECT * FROM orders o JOIN lineitem l ON o.k = l.k") shouldBe
+      Set("orders" -> Verb.Read, "lineitem" -> Verb.Read)
+    reaches("INSERT INTO orders SELECT * FROM lineitem") shouldBe
+      Set("orders" -> Verb.Write, "lineitem" -> Verb.Read)
+  }
+
+  it should "be empty for control flow, the quack client's transaction statements included" in
+    List("COMMIT", "BEGIN TRANSACTION", "ROLLBACK").foreach { sql =>
+      withClue(sql)(scope(sql) shouldBe RewriteScope.Scope.Reaches(Set.empty, Set.empty))
+    }
+
+  it should "refuse a parse error, an ambiguous name, and a batch that only starts with BEGIN" in {
+    scope("SELECT FROM WHERE (") shouldBe a[RewriteScope.Scope.Refused]
+    RewriteScope.scopeOf(
+      "SELECT * FROM fedpg.orders",
+      Config.forDuckDB(Some("tpch"), Some("main"), Set("tpch", "fedpg")),
+      "tpch",
+      clientDataScans = false
+    ) match
+      case RewriteScope.Scope.Refused(m) => m should include("ambiguous two-part name")
+      case other                         => fail(other.toString)
+    scope("BEGIN TRANSACTION; DROP TABLE orders") shouldBe a[RewriteScope.Scope.Refused]
+  }
+
+  // A subquery in any expression position is a read of the table it names.
+  it should "hold a table read by a subquery in every expression position" in {
+    val other = "tpch.secret.orders"
+    List(
+      "SELECT ARRAY(SELECT o FROM tpch.secret.orders)",
+      "SET VARIABLE x = ARRAY(SELECT o FROM tpch.secret.orders)",
+      "SELECT list_value(ARRAY(SELECT o FROM tpch.secret.orders))",
+      "SELECT coalesce(ARRAY(SELECT o FROM tpch.secret.orders), [])",
+      "SELECT (SELECT o FROM tpch.secret.orders)",
+      "SELECT coalesce((SELECT o FROM tpch.secret.orders), 'x')",
+      "SELECT EXISTS (SELECT 1 FROM tpch.secret.orders)",
+      "SELECT 1 WHERE 'a' IN (SELECT o FROM tpch.secret.orders)",
+      "SELECT 1 WHERE 'a' = ANY (SELECT o FROM tpch.secret.orders)",
+      "SELECT [(SELECT o FROM tpch.secret.orders)]",
+      "SELECT list_transform([1], x -> (SELECT o FROM tpch.secret.orders))",
+      "SELECT * FROM lineitem, LATERAL (SELECT o FROM tpch.secret.orders)",
+      "SELECT CASE WHEN true THEN ARRAY(SELECT o FROM tpch.secret.orders) END",
+      "SELECT 1 GROUP BY ARRAY(SELECT o FROM tpch.secret.orders)"
+    ).foreach { sql =>
+      withClue(sql) {
+        scope(sql) match
+          case RewriteScope.Scope.Reaches(g, _) if g.nonEmpty =>
+            g.map(_.table.canonical) should contain(other)
+          case RewriteScope.Scope.Refused(_) => succeed
+          case nothing                       => fail(s"read nothing: $nothing")
+      }
+    }
+  }
+
+  it should "hold a client-fed INSERT's target only, from the native front door alone" in {
+    reaches(s"INSERT INTO orders SELECT * FROM $ClientScan", frontDoor = true) shouldBe
+      Set("orders" -> Verb.Write)
+    scope(s"INSERT INTO orders SELECT * FROM $ClientScan") match
+      case RewriteScope.Scope.Refused(m) => m should include("scan_data_from_quack_client")
+      case other                         => fail(other.toString)
+    reaches(
+      s"INSERT INTO orders SELECT * FROM $ClientScan WHERE col0 IN (SELECT k FROM lineitem)",
+      frontDoor = true
+    ) shouldBe Set("orders" -> Verb.Write, "lineitem" -> Verb.Read)
+  }
+
+  it should "refuse a client data scan that is not the source of a write, or malformed" in {
+    scope(s"SELECT * FROM $ClientScan", frontDoor = true) shouldBe a[RewriteScope.Scope.Refused]
+    scope(s"SELECT * FROM $ClientScan") shouldBe a[RewriteScope.Scope.Refused]
+    scope(
+      "INSERT INTO orders SELECT * FROM scan_data_from_quack_client('x', NULL::STRUCT(a INT), " +
+        "ordered := true)",
+      frontDoor = true
     ) shouldBe a[RewriteScope.Scope.Refused]
   }

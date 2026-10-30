@@ -481,7 +481,7 @@ final class QuackFrontDoor(
               case Right(resp) =>
                 if messageType(resp) == Type.ErrorResponse then
                   dropLink(link, reused) *> elapsed().map(ms =>
-                    NodeOutcome.Permanent(decodeErrorMessage(resp).getOrElse("node error"), ms)
+                    NodeOutcome.Permanent(decodeErrorText(resp).getOrElse("node error"), ms)
                   )
                 else
                   elapsed().map(ms =>
