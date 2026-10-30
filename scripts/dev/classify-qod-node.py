@@ -24,8 +24,10 @@ Fail closed by construction:
   - a setting is superuser unless SESSION names it; an alias takes its target's class;
   - a built-in macro or table macro (Task 19) is classified from its body: allowed only when every
     call in it, through other macros, is to a function classed allowed (no sequence function, no
-    query() or query_table(), no table read), superuser when any call is to one classed superuser,
-    and otherwise not classified, so the node refuses it in a bind-time slot.
+    query() or query_table(), no table read), superuser when any call is to one classed superuser
+    or, for a scalar macro, to a catalog listing (its value would be another object's definition,
+    outside the metadata filter), and otherwise not classified, so the node refuses it in a
+    bind-time slot.
 Every default applied is printed under "review:": copy those lines into the commit message.
 
 `--macro-classes <dump>` prints the class it computes for each macro of a dump, against the
@@ -432,6 +434,12 @@ def classify_macros(macros, functions, review):
                          r.get("defaults") is not None and
                          all(CONSTANT_DEFAULT.match(d) for d in r["defaults"]) for r in rows)
             if any("superuser" in f for f in found):
+                classes[key] = "superuser"
+                changed = True
+            elif key[2] == "macro" and any("listing" in f for f in found):
+                # A scalar macro over a catalog listing returns another object's definition from inside
+                # the macro, where the gateway's metadata filter never reaches (pg_get_viewdef(o) over
+                # range(..) printed every view's SQL): superusers only (Task 7).
                 classes[key] = "superuser"
                 changed = True
             elif parsed and not any(c[3] in MACRO_REFUSED_CALLS for c in calls) and \

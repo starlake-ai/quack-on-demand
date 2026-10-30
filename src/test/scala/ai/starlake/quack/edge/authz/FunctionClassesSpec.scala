@@ -224,8 +224,10 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       FunctionClasses.Key("main", "duckdb_logs_parsed", "table_macro")
     ) shouldBe
       Some(Superuser)
-    // a listing, unnest, or a table read in the body: not classified, refused in a slot
-    macroClass("pg_catalog", "pg_get_viewdef") shouldBe None
+    // a scalar macro over a catalog listing: its value is another object's definition, read where
+    // the metadata filter never reaches (Task 7)
+    macroClass("pg_catalog", "pg_get_viewdef") shouldBe Some(Superuser)
+    // unnest or a table read in the body: not classified, refused in a slot
     macroClass("main", "generate_subscripts") shouldBe None
     FunctionClasses.all.get(FunctionClasses.Key("main", "histogram", "table_macro")) shouldBe None
   }
@@ -257,6 +259,7 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     // signatures, so its defaults are unknown).
     macroClasses("src/test/resources/authz/macro-dump-fixture.json") shouldBe List(
       "fx_default\tmain\tmacro\tallowed",          // a || b, b := 'x': a constant default
+      "fx_listing\tmain\tmacro\tsuperuser",        // duckdb_tables(): a scalar macro over a listing
       "fx_nested\tmain\tmacro\tallowed",           // fx_pure(a) || lower(a): through another macro
       "fx_overload\tmain\tmacro\tsuperuser",       // one overload calls current_setting
       "fx_pure\tmain\tmacro\tallowed",             // upper(a) || 'x'
@@ -267,7 +270,7 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       "fx_via\tmain\tmacro\tsuperuser",            // fx_setting(a) || 'y': through another macro
       "fx_window\tmain\tmacro\tallowed"            // row_number() OVER ()
     )
-    // Not classified: fx_seq (nextval), fx_reads (a table), fx_listing (duckdb_tables()), fx_query
+    // Not classified: fx_seq (nextval), fx_reads (a table), fx_query
     // (query()), fx_other (memory.main.fx_pure, another catalog's), fx_nonconstant and
     // fx_unknown_defaults (a default parameter not a constant, or unknown).
   }

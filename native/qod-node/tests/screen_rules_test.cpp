@@ -560,7 +560,7 @@ int main() {
 	         // a name the screen cannot resolve to a class: a macro, another catalog's function
 	         {"SELECT 1 LIMIT my_macro()", "QoD: my_macro is not allowed in LIMIT and OFFSET"},
 	         {"SELECT * FROM range(memory.main.upper('a'))", "upper is not allowed in a table function's arguments"},
-	         {"SET threads = pg_get_viewdef(1)", "pg_get_viewdef is not allowed in a SET value"},
+	         {"SET threads = generate_subscripts([1], 1)", "generate_subscripts is not allowed in a SET value"},
 	         // nor is nesting a way around it
 	         {"SELECT * FROM range((SELECT nextval('seq1')))",
 	          "nextval is not allowed in a table function's arguments"},
@@ -620,9 +620,14 @@ int main() {
 	        "a macro over pragma_database_size in a slot");
 	Refused("SELECT format_type(23, 0)", "QoD: format_type is reserved to superusers",
 	        "a macro over duckdb_types() outside the slots");
-	// one whose body reads a listing or a table, or calls what no class admits, stays unclassified
-	Refused("SELECT 1 LIMIT length(pg_get_viewdef(1))", "pg_get_viewdef is not allowed in LIMIT and OFFSET",
+	// a scalar macro over a listing is superuser-class (Task 7), in a slot and anywhere else
+	Refused("SELECT 1 LIMIT length(pg_get_viewdef(1))", "QoD: pg_get_viewdef is reserved to superusers",
+	        "a macro over duckdb_views() in a slot");
+	Refused("SELECT pg_get_viewdef(o) FROM range(3) r(o)", "QoD: pg_get_viewdef is reserved to superusers",
 	        "a macro over duckdb_views()");
+	Refused("SELECT pg_catalog.\"PG_GET_VIEWDEF\"(1)", "QoD: pg_get_viewdef is reserved to superusers",
+	        "a macro over duckdb_views(), quoted and qualified");
+	// one whose body reads a table or calls what no class admits stays unclassified
 	Refused("SELECT * FROM range(len(generate_subscripts([1, 2], 1)))",
 	        "generate_subscripts is not allowed in a table function's arguments", "a macro over unnest");
 	// only the system's own macros: a qualified one elsewhere, or a user's, is not classed
@@ -649,7 +654,7 @@ int main() {
 	for (auto known : {"SELECT 'Ab'.upper()", "SELECT list_transform([1, 2], x -> x + 1)",
 	                   "SELECT system.main.upper('a')", "USE lake.main",
 	                   "CALL ducklake_set_commit_message('lake', 'alice', 'a message')",
-	                   "SELECT generate_subscripts([1, 2], 1)", "SELECT pg_get_viewdef(1)", "SELECT upper(v) FROM t",
+	                   "SELECT generate_subscripts([1, 2], 1)", "SELECT pg_get_expr('x', 1)", "SELECT upper(v) FROM t",
 	                   "SELECT count(*) FROM range(3)", "SELECT row_number() OVER () FROM t"}) {
 		Admitted(known, 0, known);
 	}
