@@ -68,11 +68,13 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     */
   private val expected: Map[String, Expected] = Map(
     // control
-    "control_attach"                 -> superuserOnly("attach"),
-    "control_begin"                  -> Allow,
-    "control_checkpoint"             -> Refuse("function checkpoint is superuser-only"),
-    "control_commit"                 -> Allow,
-    "control_copy_from"              -> Allow, // insert into c, the reader's path authorized
+    "control_attach"     -> superuserOnly("attach"),
+    "control_begin"      -> Allow,
+    "control_checkpoint" -> Refuse("function checkpoint is superuser-only"),
+    "control_commit"     -> Allow,
+    "control_copy_from"  -> Allow, // insert into c, the reader's path authorized
+    // the target's default advances seq1, as an INSERT's does (item 32a's write-target walk)
+    "control_copy_from_default"      -> lacks("memory.main.seq1:update"),
     "control_copy_to"                -> Allow, // an authorized folder, outside the data folder
     "control_deallocate"             -> Allow,
     "control_detach"                 -> superuserOnly("detach"),
