@@ -3,6 +3,7 @@ package ai.starlake.quack.edge
 import java.util.Locale
 import ai.starlake.acl.parser.TableAccess
 import ai.starlake.quack.edge.adapter._
+import ai.starlake.quack.edge.authz.DecidePurpose
 import ai.starlake.quack.edge.sql.{
   AccessGate,
   Allowed,
@@ -459,6 +460,54 @@ final class FlightSqlRouter(
             IO.pure(NodeOutcome.Permanent(m, latency))
         }
 
+  /** The OPA dry run's run (decision 25): `sql` through [[executeWith]] for `effectiveSet`'s
+    * principal on a node of `poolKey`, as a live statement runs (the USE prelude, the policy
+    * rewriters, the node's parse screen and describer), under a decide context marked
+    * [[DecidePurpose.DryRun]]: the decision endpoint never answers its plans an allow (but for the
+    * session's own USE prelude), so it runs nothing. No history row, no load booked, no computed
+    * location evaluated, no pool woken. Answers the router's failure (None only when the node ran
+    * the statement, which a dry run allows for a USE of the session's own path alone) and the nonce
+    * of every handle minted for it, in mint order.
+    */
+  def dryRun(
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: EffectiveSet
+  ): IO[(Option[RouterFailure], List[String])] =
+    val connectionId = s"opa-dry-run-${java.util.UUID.randomUUID()}"
+    val nonces       = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val send: FlightSqlRouter.NodeSend[org.apache.arrow.vector.ipc.ArrowReader] =
+      (node, wrappedSql, prelude, recordLoad, principal) =>
+        adapter
+          .send(
+            node,
+            wrappedSql,
+            principal,
+            session = None,
+            recordLoad = recordLoad,
+            stampPrelude = prelude,
+            onMint = m => {
+              nonces.add(m.nonce)
+              ()
+            }
+          )
+          .map(NodeOutcome.fromQuackResponse)
+    executeWith(
+      connectionId,
+      user,
+      poolKey,
+      sql,
+      Some(effectiveSet),
+      send,
+      source = "dry-run",
+      recordExecution = false,
+      purpose = DecidePurpose.DryRun
+    ).map { routed =>
+      routed.foreach(_.close())
+      (routed.left.toOption, nonces.toArray(Array.empty[String]).toList)
+    }.guarantee(IO(sessions.close(connectionId)))
+
   /** Run a statement through the whole pipeline (session, lockdown, ACL, protected-write guard,
     * CLS, RLS, metadata filter, pool resume, pin and placement, kill registry, history and audit,
     * transient retry) around a caller-supplied node call. This is the transport-neutral core:
@@ -516,7 +565,12 @@ final class FlightSqlRouter(
         * node connection): a failing evaluation leaves the statement unchanged, as outside a
         * transaction.
         */
-      failInTransaction: Option[FlightSqlRouter.TransactionFence] = None
+      failInTransaction: Option[FlightSqlRouter.TransactionFence] = None,
+      /** Why the statement's decisions are taken (decision 25): `DryRun` for the OPA dry run
+        * ([[dryRun]]), whose plan verdicts are never an allow, so it runs nothing, and which never
+        * wakes a suspended pool. Live everywhere else.
+        */
+      purpose: DecidePurpose = DecidePurpose.Live
   ): IO[Either[RouterFailure, Routed[A]]] =
     def run(
         statement: String,
@@ -539,6 +593,7 @@ final class FlightSqlRouter(
         edge,
         clientDataScans,
         softPinOverCapacity,
+        purpose,
         detail = detail
       )
     // The client's statement answered with `failure` before anything ran it: its history row.
@@ -590,7 +645,18 @@ final class FlightSqlRouter(
         (evaluate, locations) match
           case (Some(ev), _ :: _) =>
             openSession(connectionId, user, poolKey, recordExecution, source)
-            literals(connectionId, user, poolKey, locations, effectiveSet, ev, source, edge, patId)
+            literals(
+              connectionId,
+              user,
+              poolKey,
+              locations,
+              effectiveSet,
+              ev,
+              source,
+              edge,
+              patId,
+              purpose
+            )
               .flatMap {
                 case Right(values) =>
                   run(
@@ -622,7 +688,18 @@ final class FlightSqlRouter(
             // The columns are read first, judged like any statement; the summary then runs on the
             // node that answered (a soft pin), so both see the same catalog.
             openSession(connectionId, user, poolKey, recordExecution, source)
-            readBack(connectionId, user, poolKey, columns, effectiveSet, ev, source, edge, patId)
+            readBack(
+              connectionId,
+              user,
+              poolKey,
+              columns,
+              effectiveSet,
+              ev,
+              source,
+              edge,
+              patId,
+              purpose
+            )
               .flatMap {
                 case Left(failure)         => refused(failure)
                 case Right((rows, nodeId)) =>
@@ -644,7 +721,8 @@ final class FlightSqlRouter(
       evaluate: FlightSqlRouter.NodeSend[NodeRows],
       source: String,
       edge: String,
-      patId: Option[String]
+      patId: Option[String],
+      purpose: DecidePurpose
   ): IO[Either[FlightSqlRouter.LocationFailure, List[String]]] =
     val none: Either[FlightSqlRouter.LocationFailure, List[String]] = Right(Nil)
     locations.foldLeft(IO.pure(none)) { (done, location) =>
@@ -660,7 +738,8 @@ final class FlightSqlRouter(
             evaluate,
             source,
             edge,
-            patId
+            patId,
+            purpose
           ).map {
             case Right((rows, _)) =>
               ComputedLocations
@@ -688,7 +767,8 @@ final class FlightSqlRouter(
       evaluate: FlightSqlRouter.NodeSend[NodeRows],
       source: String,
       edge: String,
-      patId: Option[String]
+      patId: Option[String],
+      purpose: DecidePurpose
   ): IO[Either[RouterFailure, (NodeRows, String)]] =
     executeGuarded[NodeRows](
       connectionId,
@@ -706,6 +786,7 @@ final class FlightSqlRouter(
       edge = edge,
       clientDataScans = false,
       softPinOverCapacity = false,
+      purpose = purpose,
       internal = true
     ).flatMap {
       case Left(failure) => IO.pure(Left(failure))
@@ -728,6 +809,7 @@ final class FlightSqlRouter(
       edge: String,
       clientDataScans: Boolean,
       softPinOverCapacity: Boolean,
+      purpose: DecidePurpose,
       internal: Boolean = false,
       detail: Map[String, String] = Map.empty
   ): IO[Either[RouterFailure, Routed[A]]] =
@@ -753,6 +835,7 @@ final class FlightSqlRouter(
         edge,
         clientDataScans,
         softPinOverCapacity,
+        purpose,
         internal,
         detail
       )
@@ -851,6 +934,7 @@ final class FlightSqlRouter(
       edge: String,
       clientDataScans: Boolean,
       softPinOverCapacity: Boolean,
+      purpose: DecidePurpose,
       internal: Boolean,
       detail: Map[String, String]
   ): IO[Either[RouterFailure, Routed[A]]] =
@@ -860,8 +944,7 @@ final class FlightSqlRouter(
     val kind = classifier.classify(sql)
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
-    val principal = ai.starlake.quack.edge.authz.NodePrincipal
-      .of(effectiveSet, poolKey, ai.starlake.quack.edge.authz.DecidePurpose.Live)
+    val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet, poolKey, purpose)
     // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
     // table refs resolve to what the node actually sees at execution time.
     val maybeState               = supervisor.get(poolKey)
@@ -984,7 +1067,12 @@ final class FlightSqlRouter(
         )
         Left(RouterFailure.AccessDenied(s"access denied: $reason"))
       case None =>
-        validator.validate(ctx) match
+        // A dry run (decision 25) skips the statement validator: the node judges it and never runs
+        // it (its plan verdicts are never an allow), and the validator would ask the tenant's OPA
+        // through the decision cache, which a dry run must neither read nor fill.
+        val validated =
+          if purpose == DecidePurpose.DryRun then Allowed else validator.validate(ctx)
+        validated match
           case Denied(reason, deniedRefs, meta) =>
             maybeRecord(
               nodeId = "-",
@@ -1208,7 +1296,11 @@ final class FlightSqlRouter(
         ) match
           case Some(reason) => denied(s"policy rewrite: $reason")
           case None         =>
-            validator.validate(ctx.copy(statement = rewrittenSql, rewriteOf = Some(sql))) match
+            // A dry run is judged by the node alone, as at the ACL gate above.
+            val revalidated =
+              if purpose == DecidePurpose.DryRun then Allowed
+              else validator.validate(ctx.copy(statement = rewrittenSql, rewriteOf = Some(sql)))
+            revalidated match
               case Allowed                      => Right(rewrittenSql)
               case Denied(reason, _, _)         => denied(s"policy rewrite: $reason")
               case ValidatorUnavailable(reason) =>
@@ -1233,7 +1325,7 @@ final class FlightSqlRouter(
         .flatMap(rewriteRevalidated) match
         case Left(f)         => IO.pure(Left(f))
         case Right(finalSql) =>
-          resolveSnapshot(poolKey).flatMap {
+          resolveSnapshot(poolKey, wake = purpose == DecidePurpose.Live).flatMap {
             case Left(f: RouterFailure.NotFound) =>
               if s.txOpen then sessions.invalidatePin(connectionId)
               maybeRecord(nodeId = "-", durationMs = 0, status = "no-pool", error = None)
@@ -1513,11 +1605,17 @@ final class FlightSqlRouter(
   /** Resolve the routing snapshot, waking a suspended (never a disabled) pool first: fire
     * resumePool then poll for a routable node, bounded by resumeHoldTimeout; expiry yields the
     * retryable "pool is resuming" UNAVAILABLE. resumePool errors are swallowed (.attempt):
-    * reconcile retries the spawn and the poll either sees a node or times out.
+    * reconcile retries the spawn and the poll either sees a node or times out. With `wake` false
+    * (the OPA dry run) a suspended pool is answered [[FlightSqlRouter.PoolNotWoken]] instead.
     */
-  private def resolveSnapshot(poolKey: PoolKey): IO[Either[RouterFailure, PoolSnapshot]] =
+  private def resolveSnapshot(
+      poolKey: PoolKey,
+      wake: Boolean
+  ): IO[Either[RouterFailure, PoolSnapshot]] =
     supervisor.get(poolKey) match
       case None => IO.pure(Left(RouterFailure.NotFound(s"pool not found: $poolKey")))
+      case Some(st) if st.suspended && !st.disabled && !wake =>
+        IO.pure(Left(RouterFailure.Unavailable(FlightSqlRouter.PoolNotWoken)))
       case Some(st) if st.suspended && !st.disabled =>
         // IO.defer is load-bearing: without it the snapshot check (and the recursive
         // poll construction) would run eagerly, BEFORE resumePool executes, and the
@@ -1676,6 +1774,11 @@ object FlightSqlRouter:
     * the node ran it: the client's statement then stops there.
     */
   val KilledReason: String = "access denied: the statement was killed"
+
+  /** Why a statement that may not wake its pool (the OPA dry run, decision 25) was not run: the
+    * pool is suspended.
+    */
+  val PoolNotWoken: String = "pool is suspended; a dry run never wakes it"
 
   /** Why a computed file location got no literal: its evaluation failed (`Evaluation`, the
     * gateway's or the node's answer), or the value it yielded is no location (`Rejected`).

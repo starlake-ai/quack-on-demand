@@ -46,7 +46,12 @@ final class NodeKeys(
     * version, the digest of the principal's session context and of its S3 credentials, and the
     * pool's read-only catalogs (none for the system principal: the manager's own statements).
     */
-  def handle(node: RunningNode, principal: NodePrincipal): String =
+  def handle(node: RunningNode, principal: NodePrincipal): String = mint(node, principal).text
+
+  /** [[handle]] with its nonce and expiry: what the OPA dry run collects to find what the decision
+    * endpoint recorded for its statement (decision 25).
+    */
+  def mint(node: RunningNode, principal: NodePrincipal): MintedHandle =
     val ctx = NodeHandles.contextDigest(principal.context)
     val m   = NodeHandles.mint(
       secret,
@@ -70,7 +75,7 @@ final class NodeKeys(
         context  <- principal.context
         registry <- minted
       do registry.put(m.nonce, context, ctx, m.expiresAt)
-    m.text
+    m
 
   /** [[handle]] as the prelude statement the node runs before the statement itself. */
   def prelude(node: RunningNode, principal: NodePrincipal): String =

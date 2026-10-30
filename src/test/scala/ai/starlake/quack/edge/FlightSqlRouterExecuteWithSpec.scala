@@ -229,3 +229,92 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         )
       )
     )
+
+  private val aliceEff = ai.starlake.quack.ondemand.rbac.EffectiveSet(
+    ai.starlake.quack.ondemand.state.RbacUser("u-7", Some("acme"), "alice", "user"),
+    Nil,
+    Nil,
+    Nil,
+    Nil
+  )
+
+  "a dry run's statement" should "reach the node call with a DryRun context, past the validator" in:
+    val denyAll = new StatementValidator:
+      def validate(ctx: ValidationContext): ValidationResult =
+        Denied("denied by the validator", Set.empty)
+    val fx   = setup(validator = denyAll)
+    var seen = List.empty[ai.starlake.quack.edge.authz.NodePrincipal]
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, principal) =>
+      IO {
+        seen = seen :+ principal
+        NodeOutcome.Permanent("Permission Error: QoD: dry run", 1L)
+      }
+    // Live: the validator refuses before any node call.
+    fx.router
+      .executeWith("dr-1", "alice", poolKey, "SELECT 1", Some(aliceEff), send)
+      .unsafeRunSync()
+      .left
+      .map(_.reason) shouldBe Left("access denied: denied by the validator")
+    seen shouldBe empty
+    // A dry run: the node judges it (here, refuses it as a dry run), under a DryRun context.
+    fx.router
+      .executeWith(
+        "dr-2",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        Some(aliceEff),
+        send,
+        recordExecution = false,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.DryRun
+      )
+      .unsafeRunSync()
+      .left
+      .map(_.reason) shouldBe Left("permanent failure: Permission Error: QoD: dry run")
+    seen.map(_.context.map(_.purpose)) shouldBe
+      List(Some(ai.starlake.quack.edge.authz.DecidePurpose.DryRun))
+    // Only the live denial is in the history: a dry run records nothing.
+    fx.router.history.snapshot(10).map(_.status) shouldBe List("denied")
+
+  it should "never wake a suspended pool" in:
+    val fx                                     = setup()
+    var calls                                  = 0
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
+      IO {
+        calls += 1
+        NodeOutcome.Ok("ran", 1L, () => ())
+      }
+    fx.router.supervisor.suspendPool(poolKey, "rest").unsafeRunSync()
+    fx.router
+      .executeWith(
+        "dr-3",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        Some(aliceEff),
+        send,
+        recordExecution = false,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.DryRun
+      )
+      .unsafeRunSync()
+      .left
+      .map(_.reason) shouldBe Left(FlightSqlRouter.PoolNotWoken)
+    calls shouldBe 0
+    fx.router.supervisor.get(poolKey).get.suspended shouldBe true
+
+  "the adapter's authorizer" should "tell onMint each handle it mints, as the prelude carries it" in:
+    val keys    = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val adapter = new QuackHttpAdapter(
+      new QuackHttpClient(TestArrow.sharedAllocator),
+      new NodeLoadTracker,
+      keys
+    )
+    val seen = scala.collection.mutable.ListBuffer.empty[ai.starlake.quack.edge.authz.MintedHandle]
+    val authorize = adapter.authorizer(
+      setup().nodes.head,
+      ai.starlake.quack.edge.authz.NodePrincipal.System,
+      m => { seen += m; () }
+    )
+    val preludes = List(authorize(), authorize())
+    seen.map(m => ai.starlake.quack.edge.authz.NodeHandles.prelude(m.text)).toList shouldBe preludes
+    seen.map(_.nonce).distinct should have size 2

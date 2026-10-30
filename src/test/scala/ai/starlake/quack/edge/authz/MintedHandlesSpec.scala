@@ -94,3 +94,34 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
       NodePrincipal.System
     NodePrincipal.of(None, Pool, DecidePurpose.Live) shouldBe NodePrincipal.Unbound
   }
+
+  "NodeKeys.mint" should "be the handle, with the nonce its context is registered under" in {
+    val m    = new MintedHandles()
+    val keys = new NodeKeys(
+      "s" * 40,
+      "http://127.0.0.1:20900",
+      minted = Some(m),
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
+    val node = RunningNode(
+      "quack-acme-lake-bi-1",
+      Pool,
+      Role.Dual,
+      "127.0.0.1",
+      21900,
+      "tok",
+      None,
+      None,
+      Instant.EPOCH
+    )
+    val minted = keys.mint(node, NodePrincipal.of(Some(Ctx.effective), Pool, DecidePurpose.DryRun))
+    val h      =
+      NodeHandles.verify(
+        minted.text,
+        keys.key(node.nodeId),
+        node.nodeId,
+        System.currentTimeMillis()
+      )
+    h.map(_.nonce) shouldBe Right(minted.nonce)
+    m.get(minted.nonce).map(_.context.purpose) shouldBe Some(DecidePurpose.DryRun)
+  }

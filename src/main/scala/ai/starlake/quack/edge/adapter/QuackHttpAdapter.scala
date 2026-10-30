@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.adapter
 
-import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, NodePrincipal}
+import ai.starlake.quack.edge.authz.{MintedHandle, NodeHandles, NodeKeys, NodePrincipal}
 import ai.starlake.quack.model.RunningNode
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
@@ -32,21 +32,31 @@ final class QuackHttpAdapter(
       principal: NodePrincipal,
       session: Option[String],
       recordLoad: Boolean = true,
-      stampPrelude: Option[String] = None
+      stampPrelude: Option[String] = None,
+      /** Told every handle minted for the call: the OPA dry run collects their nonces. */
+      onMint: MintedHandle => Unit = _ => ()
   ): IO[QuackResponse] =
     // Quack's URI scheme; QuackProtocol maps it to http://host:port/quack.
     val endpoint  = s"quack:${node.host}:${node.port}"
-    val authorize = authorizer(node, principal)
+    val authorize = authorizer(node, principal, onMint)
     val call      = stampPrelude match
       case Some(p) => client.queryStamped(endpoint, node.token, authorize, p, sql)
       case None    => client.query(endpoint, node.token, sql, session, authorize)
     withLoad(node, recordLoad)(call)(NodeOutcome.fromQuackResponse)
 
   /** The prelude producer for statements of `principal` on `node`: a fresh session handle each
-    * call, so a PREPARE sent long after another (a COMMIT) still carries a valid one.
+    * call, so a PREPARE sent long after another (a COMMIT) still carries a valid one. `onMint` is
+    * told each handle minted.
     */
-  def authorizer(node: RunningNode, principal: NodePrincipal): () => String =
-    () => keys.prelude(node, principal)
+  def authorizer(
+      node: RunningNode,
+      principal: NodePrincipal,
+      onMint: MintedHandle => Unit = _ => ()
+  ): () => String =
+    () =>
+      val minted = keys.mint(node, principal)
+      onMint(minted)
+      NodeHandles.prelude(minted.text)
 
   /** Run any node call with the same load, latency and health bookkeeping as [[send]]. This is what
     * the native Quack relay wraps its per-statement node connection in, so both transports feed the
