@@ -10,7 +10,6 @@ import type {
   SetPoolDisabledRequest,
   SetPoolResourcesRequest,
   SetPoolInitSqlRequest,
-  SetPoolLockdownRequest,
   SetTenantAuthRequest,
   SetTenantAclRequest,
   AddTenantLocationRequest,
@@ -281,7 +280,6 @@ export const api = {
   setPoolDisabled:   (req: SetPoolDisabledRequest)  => post<PoolResponse>('/pool/setDisabled', req),
   setPoolResources:  (req: SetPoolResourcesRequest) => post<PoolResponse>('/pool/setResources', req),
   setPoolInitSql:    (req: SetPoolInitSqlRequest)   => post<PoolResponse>('/pool/setInitSql', req),
-  setPoolLockdown:   (req: SetPoolLockdownRequest)  => post<PoolResponse>('/pool/setLockdown', req),
 
   // Fleet backend (QOD_RUNTIME_TYPE=fleet only; other backends 400 fleet_disabled)
   listServers:   () => get<FleetServerListResponse>('/fleet/servers'),

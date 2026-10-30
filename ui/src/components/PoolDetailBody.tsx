@@ -66,7 +66,6 @@ export default function PoolDetailBody({
   const [scaleDual, setScaleDual]   = useState(0);
   const [scaleForce, setScaleForce] = useState(false);
   const [scaleErr, setScaleErr]     = useState<string | null>(null);
-  const [lockdownErr, setLockdownErr] = useState<string | null>(null);
 
   // Pool init SQL edit (pool/setInitSql). null = untouched: nothing is sent, so a save never
   // vouches for (or demotes) a text nobody edited.
@@ -348,23 +347,6 @@ export default function PoolDetailBody({
       else navigate(poolsPath(tenant));
     } catch (e) {
       setSuspendErr(errorMessage(e));
-    }
-  }
-
-  async function handleSetLockdown(next: string) {
-    if (!data) return;
-    const current = data.lockdown ?? 'inherit';
-    if (next === current) return;
-    setLockdownErr(null);
-    if (!window.confirm(
-      `Set lockdown to "${next}" for pool "${tenantDb}/${pool}"?\n\n` +
-      'This restarts every node in the pool. Statements currently running on them will fail.'
-    )) return;
-    try {
-      const r = await api.setPoolLockdown({ tenant, tenantDb, pool, lockdown: next });
-      setData(r);
-    } catch (e) {
-      setLockdownErr(errorMessage(e));
     }
   }
 
@@ -777,32 +759,8 @@ export default function PoolDetailBody({
         <h2 style={{ margin: 0 }}>
           {data.tenant} / {data.tenantDb} / {data.pool}
           {data.suspended && <span className="badge warn" style={{ marginLeft: 8 }}>Hibernated</span>}
-          {(data.lockdownEffective || (data.lockdown ?? 'inherit') !== 'inherit') && (
-            <span className={data.lockdownEffective ? 'badge good' : 'badge warn'} style={{ marginLeft: 8 }}>
-              Lockdown: {data.lockdownEffective ? 'on' : 'off'}
-            </span>
-          )}
-          {(data.lockdown ?? 'inherit') !== 'inherit' && (
-            <span className="subtle" style={{ marginLeft: 4 }}>(override: {data.lockdown})</span>
-          )}
         </h2>
         <div style={{ display: 'flex', gap: '.5rem', flexWrap: 'nowrap', alignItems: 'center' }}>
-          {isSuperuser && (
-            // The global `select` rule (styles.css) sets width: 100%, meant for
-            // stacked form fields; inline it back to auto here so the select
-            // sits sized-to-content in this flex row, matching the Suspend/Wake
-            // button beside it instead of stretching to fill the row.
-            <select
-              value={data.lockdown ?? 'inherit'}
-              onChange={e => void handleSetLockdown(e.target.value)}
-              aria-label="Set pool lockdown"
-              style={{ width: 'auto' }}
-            >
-              <option value="inherit">Lockdown: inherit</option>
-              <option value="on">Lockdown: on</option>
-              <option value="off">Lockdown: off</option>
-            </select>
-          )}
           <button
             type="button"
             onClick={openScale}
@@ -872,7 +830,6 @@ export default function PoolDetailBody({
         </div>
       </header>
       {suspendErr && <div className="login-err" style={{ marginTop: 8 }}>{suspendErr}</div>}
-      {lockdownErr && <div className="login-err" style={{ marginTop: 8 }}>{lockdownErr}</div>}
 
       <Tabs
         tabs={[
