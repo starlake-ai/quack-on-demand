@@ -106,7 +106,7 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     val inLake  = cred("c" * 32, "u-1", "s3://lake/root/salesdb/main/", 30L)
     val cache   = new UserS3CredentialCache(() => List(etl, inLake))
     cache.refresh()
-    val served = new ServedUserS3Credentials(cache, () => folders.get())
+    val served = new ServedUserS3Credentials(cache, () => folders.get(), Nil)
     served.current("u-1").map(_.map(_.id).toSet) shouldBe Right(Set(etl.id, inLake.id))
     served.digest("u-1") shouldBe UserS3Credentials.digestOf(List(etl, inLake))
     // A database created afterwards at an ancestor of the scope.

@@ -106,7 +106,8 @@ class PoolSupervisorUserS3Spec extends AnyFlatSpec with Matchers:
     )
     val served = new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
       f.sup.userS3,
-      () => rules.dataFolders()
+      () => rules.dataFolders(),
+      Nil
     )
     // Registered first, while nothing lies there.
     val under = f.put(f.alice, "s3://lake/root/salesdb/main/").toOption.get

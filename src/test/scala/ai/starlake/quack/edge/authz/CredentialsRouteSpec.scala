@@ -84,7 +84,12 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
   private def sign(body: Array[Byte], key: Array[Byte] = Key): String =
     NodeHandles.hex(NodeHandles.hmac(key, body))
 
-  private final class Fixture:
+  /** `endpoints`: QOD_USER_S3_ALLOWED_ENDPOINTS as UserS3Config.endpoints normalizes it; by default
+    * both endpoints the stored credentials name.
+    */
+  private final class Fixture(
+      endpoints: List[String] = List("http://127.0.0.1:9000", "minio.internal:9000")
+  ):
     val clock  = new AtomicLong(1_761_200_000_000L)
     val issued = new IssuedHandles(clock = () => clock.get())
     val fails  = new AtomicBoolean(false)
@@ -95,7 +100,7 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     cache.refresh()
     // Main's wiring: handles and answers both from the served view over the cache.
     val folders = new AtomicReference[Either[String, List[String]]](Right(Nil))
-    val served  = new ServedUserS3Credentials(cache, () => folders.get())
+    val served  = new ServedUserS3Credentials(cache, () => folders.get(), endpoints)
     val keys    = new NodeKeys(
       Secret,
       "http://127.0.0.1:20900",
@@ -334,4 +339,37 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
     HandleInspector.payload(stale.handle()).hcursor.get[String]("creds") shouldBe
       Right(UserS3Credentials.UnavailableDigest)
     stale.call(body(stale.handle()))._1 shouldBe Status.ServiceUnavailable
+  }
+
+  "a credential whose endpoint the operator no longer allows" should
+    "be left out of the answer and the handle" in {
+      // Added while QOD_USER_S3_ALLOWED_ENDPOINTS listed http://127.0.0.1:9000; the operator
+      // dropped it and restarted. A node handed the credential would sign requests to that host.
+      val f             = new Fixture(endpoints = List("minio.internal:9000"))
+      val handle        = f.handle()
+      val (st, text, _) = f.call(body(handle))
+      st shouldBe Status.Ok
+      val (_, c) = answer(text)
+      val kept   = Creds.filter(_.id == "a" * 32)
+      c.downField("credentials").downN(0).get[String]("id") shouldBe Right("a" * 32)
+      c.downField("credentials").downN(1).focus shouldBe None
+      c.get[String]("creds") shouldBe Right(UserS3Credentials.digestOf(kept))
+      HandleInspector.payload(handle).hcursor.get[String]("creds") shouldBe
+        Right(UserS3Credentials.digestOf(kept))
+      // An endpoint still listed is served.
+      val (_, rootText, _) = f.call(body(f.handle(Root)))
+      answer(rootText)._2.downField("credentials").downN(0).get[String]("id") shouldBe
+        Right("c" * 32)
+    }
+
+  it should "leave only AWS's own endpoint when the operator allows none" in {
+    val f              = new Fixture(endpoints = Nil)
+    val (_, alice, _)  = f.call(body(f.handle()))
+    val (_, aliceJson) = answer(alice)
+    aliceJson.downField("credentials").downN(0).get[String]("id") shouldBe Right("a" * 32)
+    aliceJson.downField("credentials").downN(1).focus shouldBe None
+    val (_, root, _)  = f.call(body(f.handle(Root)))
+    val (_, rootJson) = answer(root)
+    rootJson.get[String]("creds") shouldBe Right("")
+    rootJson.downField("credentials").focus shouldBe Some(Json.arr())
   }

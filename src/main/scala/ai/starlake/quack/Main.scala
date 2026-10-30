@@ -482,13 +482,19 @@ object Main extends IOApp with LazyLogging:
     val userS3 =
       new ai.starlake.quack.edge.authz.UserS3CredentialCache(() => store.listAllUserS3Credentials())
     // What NodeKeys digests and the credentials endpoint serves: the cache without a credential
-    // whose scope now lies at or under a database data folder. The deny set is the location
-    // rules', built after the supervisor (denySet is set there); until then nothing is served.
+    // whose scope now lies at or under a database data folder, nor one whose endpoint
+    // QOD_USER_S3_ALLOWED_ENDPOINTS no longer lists (checked at add, and here again since a
+    // restart may have shortened the list). The deny set is the location rules', built after the
+    // supervisor (denySet is set there); until then nothing is served.
     val denySet = new java.util.concurrent.atomic.AtomicReference[
       () => Either[String, List[String]]
     ](() => Left("the database data folders are not loaded yet"))
     val servedUserS3 =
-      new ai.starlake.quack.edge.authz.ServedUserS3Credentials(userS3, () => denySet.get()())
+      new ai.starlake.quack.edge.authz.ServedUserS3Credentials(
+        userS3,
+        () => denySet.get()(),
+        mgrCfg.userS3.endpoints
+      )
     // The nonces of the handles this replica mints: the credentials endpoint answers only those.
     val issuedHandles = new ai.starlake.quack.edge.authz.IssuedHandles()
     // The authorization context of every handle this replica mints, by nonce: the decision
