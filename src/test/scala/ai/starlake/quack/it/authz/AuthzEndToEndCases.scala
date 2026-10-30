@@ -23,15 +23,17 @@ import scala.util.Try
   * World (`run` is random per spec, so two stacks or two runs never share a name):
   *   - tenant acme_<run>: DuckLake `lake` (data under `<root>/acme_<run>/shared/lake/`, pool
   *     `lake`), duckdb-file `files` (outside the root, pool `files`), memory `fed` (Postgres and,
-  *     when the Iceberg fixture is up, Iceberg federated sources, pool `fed`), duckdb-file
+  *     when the Iceberg fixture is up, Iceberg federated sources, pool `fed`), memory `rofed`
+  *     (`sql` sources `rosql`, read-only, and `rwsql`, writable, each a local DuckDB file attached
+  *     READ_WRITE, and `pgro`, a read-only typed Postgres source; pool `rofed`), duckdb-file
   *     `aliased` (catalog alias `e2e_alias_<run>`, pool `aliased`) and, with rustfs up, DuckLake
   *     `s3lake` (data in the spec's bucket, pool `s3lake` with node lockdown on); authorized folder
   *     `<root>/acme_<run>/shared/`;
   *   - tenant globex_<run>: two DuckLake database rows, no pool, whose data folders lie inside
   *     acme's authorized folder and inside Alice's S3 credential scope;
   *   - alice (acme): role `e2e_reader` (RO lake orders, RW lake events, RO the plain view
-  *     `v_secret`, RO the secure views, RW the federated tables, RO the aliased and s3lake tables),
-  *     group `qod_all_pools`;
+  *     `v_secret`, RO the secure views, RW the federated tables (the read-only `rosql.main.t`
+  *     included), RO the aliased and s3lake tables), group `qod_all_pools`;
   *   - bob, carol, dave (acme): the defaults, `qod_all_tables` (`*.*.* ALL`) and `qod_all_pools`;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
@@ -101,6 +103,7 @@ abstract class AuthzEndToEndCases(
   private var lake: String          = "" // acme's DuckLake tenant-db, also its catalog alias
   private var files: String         = "" // acme's duckdb-file tenant-db
   private var fed: String           = "" // acme's memory tenant-db with the federated sources
+  private var rofed: String         = "" // acme's memory tenant-db with the read-only sources
   private var aliased: String       = "" // acme's duckdb-file tenant-db attached as Alias
   private var s3lake: String        = "" // acme's DuckLake tenant-db in the spec's bucket
   private var ordersGrant: String   = "" // alice's RO grant on lake orders, revoked and restored
@@ -247,6 +250,7 @@ abstract class AuthzEndToEndCases(
     )
     require(files == s"${Acme}_files", s"tenant-db $files is not named as its catalog")
     fed = createDb(Acme, "fed", "memory")
+    rofed = createDb(Acme, "rofed", "memory")
     aliased = createDb(
       Acme,
       "aliased",
@@ -279,9 +283,11 @@ abstract class AuthzEndToEndCases(
     // The tenant's folder before the pools (a local folder needs no node secret).
     stack.post("/api/tenant/location/add", obj("tenant" -> s(Acme), "location" -> s(s"$shared/")))
     provisionFederation()
+    provisionReadOnlyFederation()
     createPool(Acme, lake, "lake")
     createPool(Acme, files, "files")
     createPool(Acme, fed, "fed")
+    createPool(Acme, rofed, "rofed")
     createPool(Acme, aliased, "aliased")
     // Node lockdown on an object-store data path disables the local file system on the node: the
     // users' connection secrets are then installed and looked up after it (T4-X1).
@@ -299,6 +305,9 @@ abstract class AuthzEndToEndCases(
     grant(Alias, "main", "aliased_t", "RO")
     if s3Ready then grant(s3lake, "main", "t", "RO")
     if icebergReady then grant("ice", iceNs, "t", "RW")
+    // A grant opens no read-only catalog (decision 24): alice holds RW on both sql tables.
+    grant("rosql", "main", "t", "RW")
+    grant("rwsql", "main", "t", "RW")
     stack.post(
       "/api/user/create",
       obj(
@@ -443,6 +452,47 @@ abstract class AuthzEndToEndCases(
         )
       )
 
+  /** On `rofed`: `rosql`, a `sql` source attaching a local DuckDB file READ_WRITE but flagged
+    * read-only in QoD, so only QoD's flag protects it (decision 24); `rwsql`, its writable twin;
+    * and `pgro`, a read-only typed Postgres source on the spec's Postgres database. Each sql source
+    * creates its table `t` (one row, 1) on the node's first start. Created by the seeded superuser.
+    */
+  private def provisionReadOnlyFederation(): Unit =
+    val base = s"/api/tenants/$Acme/tenant-dbs/$rofed/federated-sources"
+    List("rosql" -> true, "rwsql" -> false).foreach { (alias, readOnly) =>
+      stack.post(
+        base,
+        obj(
+          "alias"      -> s(alias),
+          "disabled"   -> Json.False,
+          "sourceType" -> s("sql"),
+          "readOnly"   -> Json.fromBoolean(readOnly),
+          "setupSql"   -> s(
+            s"ATTACH '${work.resolve(s"$alias.duckdb")}' AS {{alias}};\n" +
+              "CREATE TABLE IF NOT EXISTS {{alias}}.main.t AS SELECT 1 AS v;"
+          )
+        )
+      )
+    }
+    stack.post(
+      base,
+      obj(
+        "alias"      -> s("pgro"),
+        "disabled"   -> Json.False,
+        "sourceType" -> s("postgres"),
+        "readOnly"   -> Json.True,
+        "connection" -> Json.obj(
+          "host"     -> s(TestPostgres.pgHost),
+          "port"     -> Json.fromInt(TestPostgres.pgPort),
+          "database" -> s(pgDb),
+          "user"     -> s(TestPostgres.pgUser),
+          "password" -> s("{{secret.PG_PWD}}"),
+          "sslMode"  -> s("disable")
+        )
+      )
+    )
+    stack.put(s"$base/pgro/secrets", obj("name" -> s("PG_PWD"), "value" -> s(TestPostgres.pgPass)))
+
   /** `sql` as the system admin, through the superuser header; throws with the error. */
   private def admin(pool: String, sql: String): List[String] =
     stack
@@ -456,7 +506,7 @@ abstract class AuthzEndToEndCases(
     }
 
   private def provisionObjects(): Unit =
-    val pools = List("lake", "files", "fed", "aliased") ++ Option.when(s3Ready)("s3lake")
+    val pools = List("lake", "files", "fed", "aliased", "rofed") ++ Option.when(s3Ready)("s3lake")
     pools.foreach(awaitPool)
     admin(
       "lake",
@@ -1224,6 +1274,73 @@ abstract class AuthzEndToEndCases(
       node = "function stem is not classified",
       alwaysNode = true
     )
+  }
+
+  // ---------- read-only federated catalogs (decision 24) ----------
+
+  /** `sql` as the system admin on `pool`, through the superuser header: rows, or the refusal. */
+  private def asAdmin(pool: String, sql: String): Either[String, List[String]] =
+    stack.flight(sql, "admin", "admin", Acme, pool, superuser = true)
+
+  /** A refused write into the read-only catalog `alias`. Until the gateway's CatalogWriteScreen
+    * goes (Phase D Task 4) it refuses first ("catalog '<alias>' is read-only on this deployment");
+    * from then on the node does ("QoD: catalog <alias> is read-only", QodNodeReadOnlySpec).
+    */
+  private def refusedAsReadOnly(out: Either[String, List[String]], alias: String): Unit =
+    out match
+      case Left(err) =>
+        err should include(alias)
+        err should include("is read-only")
+      case Right(r) => fail(s"expected a read-only refusal, got rows $r")
+
+  "a read-only sql source" should "refuse a superuser's writes and DDL, its file attached READ_WRITE" in {
+    ready()
+    List(
+      "INSERT INTO rosql.main.t VALUES (2)",
+      "UPDATE rosql.main.t SET v = 3",
+      "DELETE FROM rosql.main.t",
+      "CREATE TABLE rosql.main.x (v INTEGER)",
+      "DROP TABLE rosql.main.t"
+    ).foreach(sql =>
+      withClue(s"admin: $sql -> ")(refusedAsReadOnly(asAdmin("rofed", sql), "rosql"))
+    )
+    admin("rofed", "SELECT count(*), min(v) FROM rosql.main.t") shouldBe List("1,1")
+  }
+
+  it should "be read by a superuser and by a user granted it" in {
+    ready()
+    admin("rofed", "SELECT v FROM rosql.main.t") shouldBe List("1")
+    allowed("alice", "rofed", "SELECT v FROM rosql.main.t", Some(List("1")))
+  }
+
+  it should "refuse a user's write, whatever her grant" in {
+    ready()
+    doors.foreach { d =>
+      withClue(s"[$d] alice -> ")(
+        refusedAsReadOnly(as(d, "alice", "rofed", "INSERT INTO rosql.main.t VALUES (2)"), "rosql")
+      )
+    }
+    admin("rofed", "SELECT count(*) FROM rosql.main.t") shouldBe List("1")
+  }
+
+  "a read-only typed source" should "refuse a superuser's write" in {
+    ready()
+    val before = admin("rofed", "SELECT count(*) FROM pgro.e2e.orders")
+    refusedAsReadOnly(asAdmin("rofed", "INSERT INTO pgro.e2e.orders VALUES (9, 'z')"), "pgro")
+    admin("rofed", "SELECT count(*) FROM pgro.e2e.orders") shouldBe before
+  }
+
+  "a writable sql source on the same pool" should "take a superuser's and a user's writes" in {
+    ready()
+    admin("rofed", "INSERT INTO rwsql.main.t VALUES (2)")
+    // Reading the read-only catalog to write the writable one: the nearest write that must pass.
+    admin("rofed", "INSERT INTO rwsql.main.t SELECT v FROM rosql.main.t")
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        as(d, "alice", "rofed", "INSERT INTO rwsql.main.t VALUES (3)") shouldBe a[Right[?, ?]]
+      }
+    }
+    admin("rofed", "SELECT count(*) FROM rwsql.main.t") shouldBe List((3 + doors.size).toString)
   }
 
   // ---------- catalogs: memory, a custom alias, federated, lake ----------
