@@ -103,6 +103,20 @@ class ComputedLocationsSpec extends AnyFlatSpec with Matchers:
       s"COPY t FROM ($Dated)"
     ).foreach(sql => withClue(sql)(expressions(sql) shouldBe List(Dated)))
 
+  // Each of these runs once too (owner ruling on Phase D T11-m1), one case per word.
+  List(
+    "SUMMARIZE" -> s"SUMMARIZE read_csv($Dated)",
+    "PIVOT"     -> s"PIVOT read_csv($Dated) ON a USING sum(b)",
+    "UNPIVOT"   -> s"UNPIVOT read_csv($Dated) ON a, b INTO NAME k VALUE v",
+    "UPDATE"    -> s"UPDATE t SET a = s.a FROM read_csv($Dated) AS s WHERE t.id = s.id",
+    "DELETE"    -> s"delete from t using read_csv($Dated) as s where t.id = s.id",
+    "MERGE" -> s"MERGE INTO t USING read_csv($Dated) AS s ON t.id = s.id WHEN MATCHED THEN DELETE"
+  ).foreach { (word, sql) =>
+    it should s"have its location computed when it is a $word" in {
+      expressions(sql) shouldBe List(Dated)
+    }
+  }
+
   "a COPY's parenthesized location" should "be found with its parentheses, in both directions" in {
     val to = s"COPY t TO ($Dated) (FORMAT csv)"
     ComputedLocations.find(to).map(l => (l.expression, l.list)) shouldBe List((Dated, false))

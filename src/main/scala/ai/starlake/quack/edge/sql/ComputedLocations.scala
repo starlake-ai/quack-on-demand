@@ -22,12 +22,13 @@ import java.util.Locale
   * statement that runs names a literal location that every gateway screen and the node's full
   * screen judge exactly as if the client had typed it. Nothing else in the statement is touched.
   *
-  * Recognized only when the statement is one statement that runs once (a query, a COPY, an INSERT:
-  * [[RunOnceWords]]; a stored definition would keep the value of its creation forever) and the
-  * expression holds no subquery and no parameter (a statement evaluated alone could not read one);
-  * anything else, and any failure (the evaluation refused or failing, a NULL, a value that is not
-  * one non-empty VARCHAR, or a LIST of them for a reader, more than [[MaxBytes]]), leaves the
-  * statement as the client wrote it, so the node refuses it as before.
+  * Recognized only when the statement is one statement that runs once (a query, a SUMMARIZE, a
+  * PIVOT or UNPIVOT, a COPY, an INSERT, UPDATE, DELETE or MERGE: [[RunOnceWords]]; a stored
+  * definition would keep the value of its creation forever) and the expression holds no subquery
+  * and no parameter (a statement evaluated alone could not read one); anything else, and any
+  * failure (the evaluation refused or failing, a NULL, a value that is not one non-empty VARCHAR,
+  * or a LIST of them for a reader, more than [[MaxBytes]]), leaves the statement as the client
+  * wrote it, so the node refuses it as before.
   */
 private[quack] object ComputedLocations:
 
@@ -64,14 +65,29 @@ private[quack] object ComputedLocations:
     )
 
   /** The words a statement that runs once begins with, past any opening parentheses: a query (its
-    * FROM-first and CTE forms included), a COPY in either direction, an INSERT. A statement that
-    * stores its text to run later (CREATE VIEW, CREATE TABLE AS, CREATE MACRO, PREPARE) or does not
-    * run it at all (EXPLAIN) is not one: its location would be computed once, at submission.
+    * FROM-first and CTE forms included), a SUMMARIZE, a PIVOT or UNPIVOT, a COPY in either
+    * direction, an INSERT, UPDATE, DELETE or MERGE. A statement that stores its text to run later
+    * (anything beginning with CREATE: CREATE VIEW, CREATE TABLE AS, CREATE MACRO; PREPARE) or does
+    * not run it at all (EXPLAIN) is not one: its location would be computed once, at submission.
     */
-  private val RunOnceWords = Set("select", "with", "from", "copy", "insert")
+  private val RunOnceWords =
+    Set(
+      "select",
+      "with",
+      "from",
+      "summarize",
+      "pivot",
+      "unpivot",
+      "copy",
+      "insert",
+      "update",
+      "delete",
+      "merge"
+    )
 
-  /** The computed locations of `sql`, in text order, or Nil when it holds none this reader takes,
-    * or more than [[MaxLocations]].
+  /** The computed locations of `sql`, in text order, or Nil when it is not one statement beginning
+    * with a word of [[RunOnceWords]] (a query, SUMMARIZE, PIVOT, UNPIVOT, COPY, INSERT, UPDATE,
+    * DELETE, MERGE), holds none this reader takes, or holds more than [[MaxLocations]].
     */
   def find(sql: String): List[Location] =
     val view = SqlLexer.engineView(Option(sql).getOrElse(""))
