@@ -207,15 +207,21 @@ final class ManagerServer(
     * left partly unread as keep-alive and then closes the connection, so a client that reuses it
     * for its next request finds it closed (the JDK client does not retry a POST: "header parser
     * received no bytes"). Only a body announced at most [[RefusalDrainBytes]] long, with no
-    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read; any
-    * other still closes the connection.
+    * `Expect: 100-continue` (whose client waits for a go-ahead before sending it), is read. Any
+    * other body (chunked, longer, awaiting a go-ahead) is left unread, and the answer then says
+    * `Connection: close`, so a pooling client opens a new connection instead of reusing the one
+    * Ember closes (Phase C ledger T5-R4). A request with no body (no length, not chunked) needs
+    * neither.
     */
   private def refuse(req: Request[IO], resp: Response[IO]): OptionT[IO, Response[IO]] =
     val drain =
       req.contentLength
         .exists(_ <= RefusalDrainBytes) && req.headers.get(CIString("Expect")).isEmpty
+    val bodyless = req.contentLength.isEmpty && !req.isChunked
     OptionT.liftF(
-      (if drain then req.body.compile.drain.attempt.void else IO.unit).as(resp)
+      if drain then req.body.compile.drain.attempt.void.as(resp)
+      else if bodyless then IO.pure(resp)
+      else IO.pure(resp.putHeaders(org.http4s.headers.Connection.close))
     )
 
   private def apiKeyGuard(routes: HttpRoutes[IO]): HttpRoutes[IO] =

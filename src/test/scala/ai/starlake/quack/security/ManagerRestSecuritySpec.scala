@@ -22,7 +22,10 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
   /** Reads one HTTP/1.1 response from `in` (its headers, then a Content-Length or chunked body) and
     * answers its status; -1 when the server closed the connection first.
     */
-  private def rawStatus(in: java.io.InputStream): Int =
+  private def rawStatus(in: java.io.InputStream): Int = rawResponse(in)._1
+
+  /** [[rawStatus]], with the response's headers (names lowercased). */
+  private def rawResponse(in: java.io.InputStream): (Int, Map[String, String]) =
     def line(): Option[String] =
       val sb = new StringBuilder
       var c  = in.read()
@@ -31,7 +34,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         c = in.read()
       if c == -1 && sb.isEmpty then None else Some(sb.toString)
     line() match
-      case None         => -1
+      case None         => (-1, Map.empty)
       case Some(status) =>
         val headers = Iterator
           .continually(line().getOrElse(""))
@@ -53,7 +56,7 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
                   size > 0
                 }
                 .foreach(_ => ())
-        status.split(' ')(1).toInt
+        (status.split(' ')(1).toInt, headers)
 
   // ------------------------------------------------------------------
   // A. apiKeyGuard: sessions and PATs only
@@ -312,6 +315,40 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
         out.flush()
         rawStatus(in) shouldBe 200
       finally sock.close()
+    finally h.shutdown()
+  }
+
+  it should "say Connection: close when it refuses a request whose body it left unread" in {
+    // A chunked body is refused unread, and Ember then closes the connection: the answer must not
+    // invite a pooling client to reuse it (Phase C ledger T5-R4). An announced small body is read
+    // first, and a GET has none: both keep the connection.
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      val uri  = java.net.URI.create(h.baseUrl)
+      val json = s"""{"tenant":"${SecurityFixtures.TenantId}"}"""
+      def answer(request: String): (Int, Map[String, String]) =
+        val sock = new java.net.Socket(uri.getHost, uri.getPort)
+        try
+          sock.setSoTimeout(10000)
+          sock.getOutputStream.write(request.getBytes(UTF_8))
+          sock.getOutputStream.flush()
+          rawResponse(new java.io.BufferedInputStream(sock.getInputStream))
+        finally sock.close()
+      val post = "POST /api/tenant/location/list HTTP/1.1\r\nHost: localhost\r\n" +
+        "Content-Type: application/json\r\n"
+      val chunked = answer(
+        post + "Transfer-Encoding: chunked\r\n\r\n" +
+          s"${Integer.toHexString(json.length)}\r\n$json\r\n0\r\n\r\n"
+      )
+      chunked._1 shouldBe 401
+      chunked._2.get("connection").map(_.toLowerCase) shouldBe Some("close")
+      val announced = answer(post + s"Content-Length: ${json.length}\r\n\r\n$json")
+      announced._1 shouldBe 401
+      announced._2.get("connection").map(_.toLowerCase) should not be Some("close")
+      val get = answer("GET /api/tenant/list HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      get._1 shouldBe 401
+      get._2.get("connection").map(_.toLowerCase) should not be Some("close")
     finally h.shutdown()
   }
 
