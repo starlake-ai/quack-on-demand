@@ -103,7 +103,8 @@ int main() {
 	ExpectRefused(allowed + std::string("\0x", 2), "NUL", "a NUL character");
 
 #ifndef _WIN32
-	// ---- symbolic links: followed before the check, so none leads out of a folder unseen
+	// ---- symbolic links on the path's deepest existing ancestor: followed before the check. A link below
+	// a glob segment, or inside a COPY PARTITION_BY / OVERWRITE target, is not judged (CONTRACT item 33).
 	fs::create_directory_symlink(base / "outside", base / "allowed" / "escape");
 	ExpectResolved(allowed + "/escape/x.csv", Real(base / "outside") + "/x.csv", "a linked folder resolves to its target");
 	fs::create_symlink(base / "outside" / "secret.csv", base / "allowed" / "link.csv");

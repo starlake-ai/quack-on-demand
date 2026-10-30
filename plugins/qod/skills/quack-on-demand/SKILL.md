@@ -651,12 +651,17 @@ S3 then lets them do what their keys allow, no more. Always refused to tenant us
 - an `s3://` URL none of their keys covers (`QoD: <url> is outside the tenant's authorized locations
   (no S3 credential of yours covers it)`), a local path outside the tenant's folders, any scheme but
   `s3://` (`http(s)`, `gs`, `az`, `r2`), relative paths, `.` / `..` / empty segments, a
-  percent-escape, a location computed from columns, a subquery or a parameter, a symlink that leads
-  out of an authorized folder;
+  percent-escape, a location computed from columns, a subquery or a parameter;
 - a file in a table position: `FROM 'x.parquet'` and `FROM "s3://b/x"` are "table not found" for a
   tenant user; use the reader function;
 - `CREATE` / `DROP SECRET`, `SET` of the `s3_*`, proxy, certificate and cache settings, `ATTACH`,
   `IMPORT` / `EXPORT DATABASE`, `LOAD` / `INSTALL` from a path.
+
+Keep tenant folders free of symbolic links: the node resolves a path's deepest existing folder,
+but a link below it can still lead out of the authorized folder through a glob (`*/x.csv`) or a
+`COPY ... (PARTITION_BY ...)`, `PER_THREAD_OUTPUT` or `OVERWRITE`. Users cannot create links with
+SQL; uploads that preserve links (`rsync -a`, some SFTP clients) can, so copy files in without them
+(`rsync -rt`, or `-L` to copy what a link points to) and check with `find <folder> -type l`.
 
 The raw files of an attached Iceberg catalog's warehouse are not data folders QoD knows: keys for a
 warehouse bucket let their holder read its files directly. A catalog that neither vends credentials

@@ -257,7 +257,13 @@ manifest `tenants[].locations`): an absolute POSIX folder under `<root>/<tenant>
 a Windows path cannot be stored, so Windows nodes admit no local folder). No path may lie under any
 database's data path (every tenant's, branch siblings, managed prefixes within retention), compared
 on whole segments; relative paths, empty, `.` and `..` segments, percent-escapes and globs in a stored
-folder are refused; the node resolves symlinks before the check. A data path the checker cannot place
+folder are refused; the node resolves the deepest existing ancestor of a path (symlinks included)
+before the check, but does not judge links below it (CONTRACT item 33): through a glob segment
+(DuckDB expands one with `stat()`, following links) or a COPY with `PARTITION_BY`,
+`PER_THREAD_OUTPUT` or `OVERWRITE` (its directory walk follows linked directories), a symbolic link
+inside an authorized folder can lead out of it. Keeping tenant folders free of symbolic links is an
+operator duty, uploads that preserve links (`rsync -a`, some SFTP clients) included; users cannot
+create links with SQL. A data path the checker cannot place
 on the node (a relative one off the local runtime, or `DataFolders.Unplaced`: a DuckLake or
 duckdb-file row with no data path while the default metastore has none) denies every local location
 to every tenant. Every other scheme (`http(s)`, `gs`, `az`, `r2`) is refused to non-superusers. Not

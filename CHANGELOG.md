@@ -460,7 +460,11 @@
     manifest `tenants[].locations`; superusers and the tenant's admins; the folder is absolute and
     under `<QOD_TENANT_FILES_ROOT>/<tenant id>/` (`quack-on-demand.tenantFiles.root`; unset, the
     default, authorizes no local folder). New table `qodstate_tenant_location` (Liquibase `0051`).
-    Windows nodes admit no local folder.
+    Windows nodes admit no local folder. The node resolves a path's deepest existing folder,
+    symbolic links included, but does not judge links below it: through a glob segment or a COPY
+    with `PARTITION_BY`, `PER_THREAD_OUTPUT` or `OVERWRITE`, a link inside an authorized folder can
+    lead out of it. Operator action: keep tenant folders free of symbolic links, uploads that
+    preserve links (`rsync -a`, some SFTP clients) included; users cannot create links with SQL.
   A database's data folder, any tenant's, is never reachable (a scope at or under one is refused
   when added, `400 scope_in_data_folder`). Any other scheme (`http(s)`, `gs`, `az`, `r2`) is
   refused. Before, file access was superuser-only while the ACL validated and open to everyone with

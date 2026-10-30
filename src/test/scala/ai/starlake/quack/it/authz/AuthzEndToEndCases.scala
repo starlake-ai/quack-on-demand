@@ -654,9 +654,11 @@ abstract class AuthzEndToEndCases(
     Files.exists(Paths.get("/tmp/qod-authz-escape.csv")) shouldBe false
   }
 
-  "a symlink inside an authorized folder" should "not lead out of it" in {
+  "a symlink the path names inside an authorized folder" should "not lead out of it" in {
     ready()
-    // The node resolves the link before judging; on the local runtime the gateway does too.
+    // The node resolves the link before judging; on the local runtime the gateway does too. Only a
+    // link the path names: one below a glob segment or a COPY PARTITION_BY / OVERWRITE target is not
+    // judged (CONTRACT item 33), and keeping tenant folders free of links is the operator's.
     refused(
       "alice",
       "lake",
