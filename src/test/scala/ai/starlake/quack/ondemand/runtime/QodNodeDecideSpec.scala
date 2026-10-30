@@ -129,7 +129,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         s"http://127.0.0.1:${server.getAddress.getPort}",
         minted = Some(minted),
         paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
-        readOnlyCatalogs = ReadOnlyCatalogs.none
+        readOnlyCatalogs = ReadOnlyCatalogs.none,
+        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
       )
       val app = new DecideRoute(
         keys,

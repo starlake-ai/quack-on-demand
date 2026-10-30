@@ -46,7 +46,7 @@ class FlightProducerImplTypeInfoSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
       new SessionRegistry,

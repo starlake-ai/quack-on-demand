@@ -14,7 +14,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23000,
       max = 23010,
-      commandFor = (_, _, _) => sleepCmd(30)
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
     val node = backend.start(spec).unsafeRunSync()
@@ -26,7 +27,12 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     finally backend.stop(PoolKey("t", "t_default", "p"), "node-1").unsafeRunSync()
 
   it should "release the port on stop" in:
-    val backend = new LocalQuackBackend(23020, 23021, commandFor = (_, _, _) => sleepCmd(30))
+    val backend = new LocalQuackBackend(
+      23020,
+      23021,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
     backend.start(spec).unsafeRunSync()
     backend.stop(PoolKey("t", "t_default", "p"), "node-2").unsafeRunSync()
@@ -37,10 +43,15 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   // (holding its port) and its port lease leaked.
   it should "stop the process it still holds under a node id before starting another one" in:
     assume(!isWindows)
-    val backend = new LocalQuackBackend(23130, 23131, commandFor = (_, _, _) => sleepCmd(30))
-    val key     = PoolKey("t", "t_default", "p")
-    val spec    = NodeSpec(key, "node-again", Role.Dual, Map.empty, Map.empty)
-    val first   = backend.start(spec).unsafeRunSync()
+    val backend = new LocalQuackBackend(
+      23130,
+      23131,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val key   = PoolKey("t", "t_default", "p")
+    val spec  = NodeSpec(key, "node-again", Role.Dual, Map.empty, Map.empty)
+    val first = backend.start(spec).unsafeRunSync()
     try
       val second = backend.start(spec).unsafeRunSync()
       val handle = java.lang.ProcessHandle.of(first.pid.value)
@@ -57,9 +68,14 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   it should "never signal an adopted pid whose process did not start when the node did" in:
     assume(!isWindows)
     val unrelated = new java.lang.ProcessBuilder(sleepCmd(30)*).start()
-    val backend   = new LocalQuackBackend(23135, 23136, commandFor = (_, _, _) => sleepCmd(30))
-    val key       = PoolKey("t", "t_default", "p")
-    val row       = ai.starlake.quack.model.RunningNode(
+    val backend   = new LocalQuackBackend(
+      23135,
+      23136,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val key = PoolKey("t", "t_default", "p")
+    val row = ai.starlake.quack.model.RunningNode(
       nodeId = "adopted-mismatch",
       poolKey = key,
       role = Role.Dual,
@@ -84,8 +100,13 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       ()
 
   it should "carry NodeSpec.maxConcurrent through to RunningNode" in:
-    val backend = new LocalQuackBackend(23030, 23031, commandFor = (_, _, _) => sleepCmd(30))
-    val spec    = NodeSpec(
+    val backend = new LocalQuackBackend(
+      23030,
+      23031,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
       "node-3",
       Role.Dual,
@@ -103,7 +124,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23040,
       max = 23041,
-      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
@@ -134,7 +156,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       min = 23042,
       max = 23043,
-      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     // Mirrors what effectiveMetastoreFor produces for a pathless duckdb-file
     // tenant-db: dataPath removed entirely, not merely blank.
@@ -163,6 +186,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       commandFor = (spec, port, token) =>
         argv.set(LocalQuackBackend.defaultCommand("spawn.sh")(spec, port, token))
         envDumpCmd(capture.getAbsolutePath, 5)
+      ,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val storeSql = "CREATE OR REPLACE SECRET qod_db_store (TYPE s3, SECRET 'store-secret');"
     val spec     = NodeSpec(
@@ -301,7 +326,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23098,
       max = 23099,
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowUnsigned = true),
-      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5)
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val key  = PoolKey("t", "t_default", "p")
     val spec = NodeSpec(
@@ -345,7 +371,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23096,
       max = 23097,
       nodeBin = Some(managerBin),
-      commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5)
+      commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val allowed = Map(
       "pgHost"       -> "sec1-pg-host",
@@ -454,7 +481,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       // immediately), so the cleanup wait should never need the
       // 5 s SIGKILL fallback. (Windows console apps ignore the graceful
       // taskkill, so the timing assertion below is Unix-only.)
-      commandFor = (_, _, _) => sleepCmd(30)
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val a = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-a", Role.Dual, Map.empty, Map.empty)
     val b = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-b", Role.Dual, Map.empty, Map.empty)
@@ -488,7 +516,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
     val backend = new LocalQuackBackend(
       23070,
       23073,
-      commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait")
+      commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait"),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val spec =
       NodeSpec(PoolKey("t", "t_default", "p"), "node-tree", Role.Dual, Map.empty, Map.empty)
@@ -517,7 +546,12 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
   it should "cleanup(): terminate adopt-only nodes tracked by pid" in:
     assume(!isWindows)
     val orphan  = new java.lang.ProcessBuilder("sh", "-c", "sleep 30").start()
-    val backend = new LocalQuackBackend(23080, 23081, commandFor = (_, _, _) => sleepCmd(30))
+    val backend = new LocalQuackBackend(
+      23080,
+      23081,
+      commandFor = (_, _, _) => sleepCmd(30),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
     backend
       .adopt(
         ai.starlake.quack.model.RunningNode(

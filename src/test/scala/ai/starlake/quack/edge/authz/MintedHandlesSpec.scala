@@ -44,7 +44,8 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
       "k" * 32,
       "http://127.0.0.1:20900",
       minted = Some(m),
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val node =
       RunningNode(
@@ -101,7 +102,8 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
       "s" * 40,
       "http://127.0.0.1:20900",
       minted = Some(m),
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val node = RunningNode(
       "quack-acme-lake-bi-1",

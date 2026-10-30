@@ -66,9 +66,8 @@ final class KubernetesQuackBackend(
     // poll for a Terminating twin to clear before retrying a 409'd create).
     stopTimeoutSec: Int = 60,
     // The keys every pod's QOD_NODE_AUTHZ_KEY file derives from (Main passes the manager's, so its
-    // session handles verify).
-    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
-      ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    // session handles verify). Required: keys of another secret would have pods refuse every handle.
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     // The extension policy every pod's qod-node fixes before its database opens (spec decision 17).
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig()

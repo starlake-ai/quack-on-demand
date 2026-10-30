@@ -40,7 +40,8 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       "http://10.0.0.1:20900",
       () => Now,
       creds = digests,
-      readOnlyCatalogs = _ => Set("erp_pg", "crm")
+      readOnlyCatalogs = _ => Set("erp_pg", "crm"),
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     ).handle(Node, p)
 
   /** A payload this spec writes itself, MACed with the node key: shapes the minting code never

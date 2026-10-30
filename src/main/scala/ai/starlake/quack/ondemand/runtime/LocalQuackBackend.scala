@@ -22,7 +22,7 @@ import scala.jdk.CollectionConverters.*
   *   tests whose `commandFor` runs no script at all.
   * @param nodeKeys
   *   the keys every spawn's `QOD_NODE_AUTHZ_KEY` derives from; Main passes the manager's, so its
-  *   handles verify
+  *   handles verify. Required: keys of another secret would have the node refuse every handle
   * @param nodeExtensions
   *   the extension policy every spawn hands qod-node (spec decision 17); Main passes the manager's
   */
@@ -32,8 +32,7 @@ final class LocalQuackBackend(
     commandFor: (NodeSpec, Int, String) => List[String] =
       LocalQuackBackend.defaultCommand(LocalQuackBackend.DefaultSpawnScript),
     nodeBin: Option[Path] = None,
-    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
-      ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig()
 ) extends QuackBackend

@@ -134,7 +134,8 @@ class RefusedFormsLiveSpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         minted = Some(minted),
         paths = key =>
           Option(sup).flatMap(_.get(key)).flatMap(FlightSqlRouter.usePath).getOrElse(""),
-        readOnlyCatalogs = ReadOnlyCatalogs.none
+        readOnlyCatalogs = ReadOnlyCatalogs.none,
+        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
       )
       val init =
         s"""ATTACH '$dir/acme.duckdb' AS acme_db;

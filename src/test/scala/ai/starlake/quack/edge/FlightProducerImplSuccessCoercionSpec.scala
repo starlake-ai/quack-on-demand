@@ -85,8 +85,9 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         queryResponse(sql)
-    val adapter = new QuackHttpAdapter(client, tracker)
-    val router  = new FlightSqlRouter(
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,

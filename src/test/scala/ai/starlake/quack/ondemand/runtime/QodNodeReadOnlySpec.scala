@@ -31,11 +31,21 @@ class QodNodeReadOnlySpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
 
   // One node key, the views of two pools: one where the `rosql` source is read-only, one where
   // nothing is. The node holds no set of its own, only the one each handle carries.
-  private val secret      = NodeKeys.randomSecret()
-  private val decide      = StubDecideServer.start(secret)
-  private val readOnly    = new NodeKeys(secret, decide.url, readOnlyCatalogs = _ => Set("rosql"))
+  private val secret   = NodeKeys.randomSecret()
+  private val decide   = StubDecideServer.start(secret)
+  private val readOnly = new NodeKeys(
+    secret,
+    decide.url,
+    readOnlyCatalogs = _ => Set("rosql"),
+    versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+  )
   private val allWritable =
-    new NodeKeys(secret, decide.url, readOnlyCatalogs = ReadOnlyCatalogs.none)
+    new NodeKeys(
+      secret,
+      decide.url,
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+    )
 
   private val ReadOnly = "QoD: catalog rosql is read-only"
 

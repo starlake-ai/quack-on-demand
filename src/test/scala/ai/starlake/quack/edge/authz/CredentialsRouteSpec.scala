@@ -102,7 +102,8 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
       () => clock.get(),
       creds = served,
       issued = Some(issued),
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val route = new CredentialsRoute(keys, issued, served, () => clock.get())
 
@@ -193,7 +194,8 @@ class CredentialsRouteSpec extends AnyFlatSpec with Matchers:
         Secret,
         "http://10.0.0.9:20900",
         () => f.clock.get(),
-        readOnlyCatalogs = ReadOnlyCatalogs.none
+        readOnlyCatalogs = ReadOnlyCatalogs.none,
+        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
       ).handle(Node, Alice)
     f.call(body(foreign)) shouldBe
       (Status.ServiceUnavailable, CredentialsRoute.ContextExpired, Some(MediaType.text.plain))

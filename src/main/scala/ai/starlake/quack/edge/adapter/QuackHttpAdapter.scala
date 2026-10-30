@@ -5,10 +5,13 @@ import ai.starlake.quack.model.RunningNode
 import cats.effect.{IO, Outcome}
 import com.typesafe.scalalogging.LazyLogging
 
+/** `keys` mints every session handle: the manager's (Main), required, since keys of another secret
+  * would have every node refuse every handle (Phase B T6-M6).
+  */
 final class QuackHttpAdapter(
     client: QuackHttpClient,
     tracker: NodeLoadTracker,
-    keys: NodeKeys = NodeKeys.ephemeral()
+    keys: NodeKeys
 ) extends LazyLogging:
 
   /** Send `sql` to `node` for `principal`: every PREPARE of the call follows a fresh session handle

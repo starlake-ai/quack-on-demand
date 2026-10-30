@@ -55,8 +55,9 @@ class StreamArrowCancelSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
-    val router  = new FlightSqlRouter(
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,

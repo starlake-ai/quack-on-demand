@@ -8,24 +8,26 @@ import java.util.Base64
 /** The manager's node-key secret and what derives from it: every node's key, delivered to the node
   * as its `QOD_NODE_AUTHZ_KEY` file, and the session handles the manager mints for statements on
   * that node. `replica` is the URL nodes call back for verdicts and credentials
-  * (`QOD_INTERNAL_URL`); `versions` the tenants' policy versions; `creds` each user's S3
-  * credentials, digested into every handle; `issued` the registry of minted nonces the credentials
-  * endpoint answers (None: nothing is recorded, so every credentials fetch is refused as expired);
-  * `minted`, the registry of the contexts handles were minted with (None: nothing is registered, so
-  * every decide call for a user statement is refused as expired); `paths`, each pool's session
-  * default path (`FlightSqlRouter.usePath`, empty when the router sends no USE prelude), carried in
-  * every handle so the node judges secure views against it. The default, empty for every pool,
-  * makes the node hold every connection to the session default, so a secure view read after a USE
-  * prelude is refused, never admitted. `readOnlyCatalogs`, each pool's read-only federated catalogs
-  * (decision 24), carried in every handle but the system principal's: the node refuses any
-  * principal's write into them. It has no default, since none is safe: an empty set would let every
-  * principal, superusers included, write into a read-only catalog.
+  * (`QOD_INTERNAL_URL`); `versions` the tenants' policy versions, required: a default would mint
+  * one version forever, and no change but the session context's would flush a node's cached
+  * verdicts (Phase C review C-m1); `creds` each user's S3 credentials, digested into every handle
+  * (this and the next three default to what fails closed); `issued` the registry of minted nonces
+  * the credentials endpoint answers (None: nothing is recorded, so every credentials fetch is
+  * refused as expired); `minted`, the registry of the contexts handles were minted with (None:
+  * nothing is registered, so every decide call for a user statement is refused as expired);
+  * `paths`, each pool's session default path (`FlightSqlRouter.usePath`, empty when the router
+  * sends no USE prelude), carried in every handle so the node judges secure views against it. The
+  * default, empty for every pool, makes the node hold every connection to the session default, so a
+  * secure view read after a USE prelude is refused, never admitted. `readOnlyCatalogs`, each pool's
+  * read-only federated catalogs (decision 24), carried in every handle but the system principal's:
+  * the node refuses any principal's write into them. It has no default, since none is safe: an
+  * empty set would let every principal, superusers included, write into a read-only catalog.
   */
 final class NodeKeys(
     secret: String,
     val replica: String,
     clock: () => Long = () => System.currentTimeMillis(),
-    versions: PolicyVersions = PolicyVersions.zero,
+    versions: PolicyVersions,
     creds: UserS3Credentials = UserS3Credentials.none,
     issued: Option[IssuedHandles] = None,
     minted: Option[MintedHandles] = None,
@@ -89,8 +91,14 @@ object NodeKeys:
     new SecureRandom().nextBytes(bytes)
     Base64.getUrlEncoder.withoutPadding.encodeToString(bytes)
 
-  /** Keys from a random secret, for components a test builds without a control plane. A node
-    * started with other keys refuses every handle they mint.
+  /** Keys from a random secret, for components a test builds without a control plane; never in
+    * production (NodeKeysRequiredSpec): a node started with other keys refuses every handle they
+    * mint.
     */
   def ephemeral(): NodeKeys =
-    new NodeKeys(randomSecret(), "http://127.0.0.1:0", readOnlyCatalogs = ReadOnlyCatalogs.none)
+    new NodeKeys(
+      randomSecret(),
+      "http://127.0.0.1:0",
+      versions = PolicyVersions.zero,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )

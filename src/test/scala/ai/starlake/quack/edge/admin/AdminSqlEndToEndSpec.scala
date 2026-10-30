@@ -50,7 +50,8 @@ class AdminSqlEndToEndSpec extends AnyFlatSpec with Matchers:
       ) =
         IO.pure(TestArrow.okResponse())
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     val router = new FlightSqlRouter(
       sup,

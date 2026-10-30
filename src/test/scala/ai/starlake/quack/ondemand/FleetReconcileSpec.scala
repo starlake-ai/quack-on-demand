@@ -366,7 +366,12 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     fx.run {
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
       fx.holder(id(1)) shouldBe List("a")
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
@@ -382,7 +387,12 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     fx.join("a")
     fx.run {
       fx.sup.createPool(fx.key, RoleDistribution(0, 0, 1)).unsafeRunSync()
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()
@@ -598,7 +608,12 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.holder(id(1)) shouldBe List("a")
       fx.agents("a").paused = true
       fx.inner.backdate("a", 40) // unreachable (> 30s), inside the 60s grace
-      val h = new FleetHandlers(fx.store, cfg, backend = Some(fx.backend))
+      val h = new FleetHandlers(
+        fx.store,
+        cfg,
+        backend = Some(fx.backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      )
       h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
       fx.sup.reconcile().unsafeRunSync()

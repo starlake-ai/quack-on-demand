@@ -60,7 +60,12 @@ class ReadOnlyCatalogsSpec extends AnyFlatSpec with Matchers:
   "FederatedReadOnlyCatalogs" should "mint no user handle before its sources are wired" in {
     val catalogs = new FederatedReadOnlyCatalogs()
     intercept[IllegalStateException](catalogs.of(Pool)).getMessage should include("not loaded yet")
-    val keys = new NodeKeys("s" * 32, "r", readOnlyCatalogs = catalogs)
+    val keys = new NodeKeys(
+      "s" * 32,
+      "r",
+      readOnlyCatalogs = catalogs,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+    )
     intercept[IllegalStateException](keys.handle(Node, Alice))
     intercept[IllegalStateException](keys.handle(Node, Root))
     // The manager's own statements (health probes, maintenance) carry none, so they need no set.
@@ -142,7 +147,8 @@ class ReadOnlyCatalogsSpec extends AnyFlatSpec with Matchers:
     val keys = new NodeKeys(
       "s" * 32,
       "r",
-      readOnlyCatalogs = k => if k == Pool then Set("erp_pg", "crm") else Set.empty
+      readOnlyCatalogs = k => if k == Pool then Set("erp_pg", "crm") else Set.empty,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     readOnlyOf(keys, Node, Alice) shouldBe Right(List("crm", "erp_pg"))
     readOnlyOf(keys, Node, Root) shouldBe Right(List("crm", "erp_pg"))
@@ -150,7 +156,12 @@ class ReadOnlyCatalogsSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "carry none in the system principal's handle" in {
-    val keys = new NodeKeys("s" * 32, "r", readOnlyCatalogs = _ => Set("crm"))
+    val keys = new NodeKeys(
+      "s" * 32,
+      "r",
+      readOnlyCatalogs = _ => Set("crm"),
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+    )
     readOnlyOf(keys, Node, NodePrincipal.System) shouldBe Right(Nil)
   }
 
@@ -158,6 +169,15 @@ class ReadOnlyCatalogsSpec extends AnyFlatSpec with Matchers:
     withTurkishLocale {
       val catalogs = new FederatedReadOnlyCatalogs()
       catalogs.wire(_ => List(source("ERP_I", readOnly = true)))
-      readOnlyOf(new NodeKeys("s" * 32, "r", readOnlyCatalogs = catalogs), Node, Alice) shouldBe
+      readOnlyOf(
+        new NodeKeys(
+          "s" * 32,
+          "r",
+          readOnlyCatalogs = catalogs,
+          versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+        ),
+        Node,
+        Alice
+      ) shouldBe
         Right(List("erp_i"))
     }

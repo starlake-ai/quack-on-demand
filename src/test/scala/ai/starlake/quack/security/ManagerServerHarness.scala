@@ -737,7 +737,8 @@ object ManagerServerHarness:
         new ai.starlake.quack.ondemand.api.FleetHandlers(
           new ai.starlake.quack.ondemand.state.InMemoryFleetServerStore(),
           mgrCfg.fleet,
-          backend = None
+          backend = None,
+          nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
         )
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),

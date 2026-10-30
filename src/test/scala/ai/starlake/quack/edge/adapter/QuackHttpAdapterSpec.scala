@@ -46,7 +46,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
   "QuackHttpAdapter" should "delegate to client, track load on success" in:
     val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L))))
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     val out =
       adapter.send(node("n1"), "SELECT 1", NodePrincipal.System, session = None).unsafeRunSync()
@@ -65,7 +66,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.send(node("n2"), "SELECT 1", NodePrincipal.System, None).unsafeRunSync()
     tracker.snapshot("n2").healthy shouldBe false
 
@@ -77,14 +79,16 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.send(node("n3"), "BAD", NodePrincipal.System, None).unsafeRunSync()
     tracker.snapshot("n3").healthy shouldBe true
 
   "probe" should "be Ok without touching tracker counters" in:
     val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L))))
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.probe(node("p1")).unsafeRunSync() shouldBe ProbeVerdict.Ok
     val snap = tracker.snapshot("p1")
     snap.inFlight shouldBe 0
@@ -99,7 +103,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     // A transport failure, even of the probe's handle, is not the node refusing it.
     adapter.probe(node("p2")).unsafeRunSync() shouldBe
       ProbeVerdict.Failed(QuackError.Transient("connection refused").toString)
@@ -113,7 +118,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.probe(node("p3")).unsafeRunSync() shouldBe
       ProbeVerdict.Failed(QuackError.Permanent("400").toString)
     tracker.snapshot("p3").totalServed shouldBe 0L
@@ -138,8 +144,9 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
             sql: String
         ) =
           IO { recorded += s"stamped:$prelude|$sql"; TestArrow.okResponse() }
-    val tracker  = new NodeLoadTracker
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val tracker = new NodeLoadTracker
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val testNode = RunningNode(
       "n1",
       PoolKey("t", "t_db", "p"),
@@ -183,7 +190,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(42L)))
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     adapter
       .send(node("prep1"), "SELECT 1", NodePrincipal.System, session = None)
@@ -221,7 +229,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter
       .send(node("prep2"), "SELECT 1", NodePrincipal.System, None, recordLoad = false)
       .unsafeRunSync()
@@ -237,8 +246,9 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       }))
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
-    val stats   = adapter.engineStats(node("es1")).unsafeRunSync()
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val stats = adapter.engineStats(node("es1")).unsafeRunSync()
     stats should not be empty
     stats.get.memoryUsedBytes should be >= 0L
     val snap = tracker.snapshot("es1")
@@ -253,7 +263,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.engineStats(node("es2")).unsafeRunSync() shouldBe None
     tracker.snapshot("es2").healthy shouldBe true
 
@@ -269,7 +280,8 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.authzStats(node("as1")).unsafeRunSync() shouldBe
       Some(NodeAuthzStats(1L, 2L, 3L, 4L, 5L, 6L, 7L))
     val payload = ai.starlake.quack.edge.authz.HandleInspector.payload(client.preludes.head)
@@ -290,7 +302,9 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       )
     )
     val tracker = new NodeLoadTracker
-    new QuackHttpAdapter(refusing, tracker).authzStats(node("as2")).unsafeRunSync() shouldBe None
+    new QuackHttpAdapter(refusing, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      .authzStats(node("as2"))
+      .unsafeRunSync() shouldBe None
     tracker.snapshot("as2").healthy shouldBe true
     val raising =
       new QuackHttpClient(TestArrow.sharedAllocator):
@@ -302,14 +316,22 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
             authorize: () => String
         ): IO[QuackResponse] =
           IO.raiseError(new RuntimeException("socket reset"))
-    new QuackHttpAdapter(raising, new NodeLoadTracker)
+    new QuackHttpAdapter(
+      raising,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
       .authzStats(node("as3"))
       .unsafeRunSync() shouldBe None
 
   "tracked" should "release inFlight when the call is cancelled" in:
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)
-    val n       = node("n-cancel")
+    val adapter = new QuackHttpAdapter(
+      new FakeClient(Map.empty),
+      tracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val n = node("n-cancel")
     cats.effect
       .Deferred[IO, Unit]
       .flatMap { started =>
@@ -324,9 +346,13 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
   it should "release inFlight when the call raises" in:
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(new FakeClient(Map.empty), tracker)
-    val n       = node("n-raise")
-    val boom    = new RuntimeException("boom")
+    val adapter = new QuackHttpAdapter(
+      new FakeClient(Map.empty),
+      tracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val n    = node("n-raise")
+    val boom = new RuntimeException("boom")
     adapter
       .tracked[Unit](n, recordLoad = true)(IO.raiseError(boom))
       .attempt
@@ -347,8 +373,9 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
         ): IO[QuackResponse] =
           IO.raiseError(boom)
     val tracker = new NodeLoadTracker
-    val adapter = new QuackHttpAdapter(client, tracker)
-    val n       = node("n-send-raise")
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val n = node("n-send-raise")
     adapter.send(n, "SELECT 1", NodePrincipal.System, None).attempt.unsafeRunSync() shouldBe Left(
       boom
     )
@@ -356,8 +383,12 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
   "send" should "mint a session handle for the principal on the node it calls" in:
     val client  = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))))
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
-    val alice   = NodePrincipal("u-1", "alice", Some("acme"), superuser = false, system = false)
+    val adapter = new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val alice = NodePrincipal("u-1", "alice", Some("acme"), superuser = false, system = false)
     adapter.send(node("n-h"), "SELECT 1", alice, None).unsafeRunSync() match
       case QuackResponse.Ok(_, _, close) => close()
       case other                         => fail(s"expected Ok, got $other")
@@ -370,12 +401,20 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))),
       canary = () => TestArrow.okResponse(1L)
     )
-    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-open")).unsafeRunSync() shouldBe
+    new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    ).probe(node("p-open")).unsafeRunSync() shouldBe
       ProbeVerdict.Unenforced
 
   it should "pass a node that refuses it, as the system principal" in:
     val client = new FakeClient(Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))))
-    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-ok")).unsafeRunSync() shouldBe
+    new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    ).probe(node("p-ok")).unsafeRunSync() shouldBe
       ProbeVerdict.Ok
     client.canaries shouldBe 1
     ai.starlake.quack.edge.authz.HandleInspector
@@ -389,7 +428,11 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
       Map("quack:127.0.0.1:0" -> (() => TestArrow.okResponse(1L))),
       canary = () => QuackResponse.Failed(QuackError.Transient("HTTP 503 from Quack node"), 1)
     )
-    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-503")).unsafeRunSync() shouldBe
+    new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    ).probe(node("p-503")).unsafeRunSync() shouldBe
       ProbeVerdict.Ok
     client.canaries shouldBe 1
 
@@ -403,7 +446,11 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
         )
       )
     )
-    new QuackHttpAdapter(client, new NodeLoadTracker).probe(node("p-key")).unsafeRunSync() shouldBe
+    new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    ).probe(node("p-key")).unsafeRunSync() shouldBe
       ProbeVerdict.HandleRefused(answer)
     // The probe statement never ran, so there was nothing for the canary to tell.
     client.canaries shouldBe 0

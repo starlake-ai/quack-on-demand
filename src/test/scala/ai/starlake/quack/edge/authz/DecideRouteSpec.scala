@@ -124,7 +124,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
         "http://127.0.0.1:20900",
         () => clock.get(),
         minted = Some(minted),
-        readOnlyCatalogs = ReadOnlyCatalogs.none
+        readOnlyCatalogs = ReadOnlyCatalogs.none,
+        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
       )
     val decider = new AuthzDecider(
       tenantOf = t =>

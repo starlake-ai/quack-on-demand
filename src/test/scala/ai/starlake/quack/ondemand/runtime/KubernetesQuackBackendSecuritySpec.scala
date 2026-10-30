@@ -41,7 +41,8 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       // Deterministic: the test JVM's own QOD_S3_* must not leak into the node-env Secret.
       readEnv = _ => None,
-      podTemplateEnabled = podTemplateEnabled
+      podTemplateEnabled = podTemplateEnabled,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
 
   private val baseSpec = NodeSpec(
@@ -79,7 +80,8 @@ class KubernetesQuackBackendSecuritySpec
       podLabel = "managed-by=quack-on-demand",
       startupTimeoutSec = 5,
       readPodReady = _ => true,
-      runAsUser = 5000L
+      runAsUser = 5000L,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     backend.start(baseSpec.copy(nodeId = "quack-sec-runasuser")).unsafeRunSync()
     val pod = server.getClient.pods.inNamespace(ns).withName("quack-sec-runasuser").get()
@@ -484,7 +486,8 @@ class KubernetesQuackBackendSecuritySpec
       startupTimeoutSec = 5,
       readPodReady = _ => true,
       readEnv = _ => None,
-      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true)
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
     // pod, so the pod has each name once, from the config.

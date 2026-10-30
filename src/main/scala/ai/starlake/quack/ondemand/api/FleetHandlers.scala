@@ -38,8 +38,8 @@ final class FleetHandlers(
     backend: Option[FleetQuackBackend] = None,
     publish: StateChangePublisher = StateChangePublisher.noop,
     audit: AuditRecorder = AuditRecorder.noop,
-    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys =
-      ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+    // Required: the keys each assignment's node key derives from (the manager's).
+    nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig()
 ) extends LazyLogging:

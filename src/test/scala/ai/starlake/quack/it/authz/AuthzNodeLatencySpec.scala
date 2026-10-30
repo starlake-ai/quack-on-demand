@@ -70,7 +70,12 @@ class AuthzNodeLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAfter
         // httpfs as the spawn scripts install it (quack_serve's crypto needs it; autoloaded).
         "INSTALL httpfs;\n" + objects(""),
         nodeId = "quack-latency-plain",
-        keys = new NodeKeys(secret, stub.url, readOnlyCatalogs = ReadOnlyCatalogs.none),
+        keys = new NodeKeys(
+          secret,
+          stub.url,
+          readOnlyCatalogs = ReadOnlyCatalogs.none,
+          versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+        ),
         home = Some(home)
       )
       if TestPostgres.reachable then
@@ -100,7 +105,8 @@ class AuthzNodeLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAfter
             secret,
             stub.url,
             paths = _ => "lake.main",
-            readOnlyCatalogs = ReadOnlyCatalogs.none
+            readOnlyCatalogs = ReadOnlyCatalogs.none,
+            versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
           ),
           home = Some(home)
         )
@@ -149,7 +155,8 @@ class AuthzNodeLatencySpec extends AnyFlatSpec with Matchers with BeforeAndAfter
       secret,
       stub.url.replace("127.0.0.1", "localhost"),
       paths = _ => if use.isEmpty then "" else "lake.main",
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val protocol = new QuackProtocol(
       new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient()),

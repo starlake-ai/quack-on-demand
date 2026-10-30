@@ -90,7 +90,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(stub())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
     val sessions = new SessionRegistry
     val router   =
@@ -580,7 +580,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker),
+      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
       metadataFilterRewriter = mountedFilter
     )
 
@@ -688,7 +688,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -892,7 +892,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       ) =
         capturedSql = sql
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker)
+    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup2,
       new SessionRegistry,
@@ -1019,7 +1019,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturedSql = sql
         IO.pure(stub())
 
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -1747,7 +1747,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             authorize: () => String
         ) =
           IO.pure(stub())
-    val adapter2  = new QuackHttpAdapter(client2, tkr)
+    val adapter2  = new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
     val router2   = new FlightSqlRouter(
@@ -1827,7 +1827,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         sup2,
         new SessionRegistry,
         tkr,
-        new QuackHttpAdapter(client2, tkr),
+        new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
         metadataFilterRewriter = mountedFilter
       )
     router2.execute("retry-authz", "alice", pk2, "SELECT 1").unsafeRunSync() match
@@ -1912,7 +1912,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             sql: String
         ) =
           IO { calls += ((Some(prelude), sql)); TestArrow.okResponse() }
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2085,7 +2085,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             else TestArrow.okResponse()
           }
 
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2214,7 +2214,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val router  = new FlightSqlRouter(
       sup,
       new SessionRegistry,
@@ -2341,7 +2341,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker)
+    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val reg     = new SimpleMeterRegistry
     val ri      = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
     val dir     = new ai.starlake.quack.route.PlacementDirectory()

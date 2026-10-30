@@ -150,7 +150,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "s" * 32,
       "r",
       paths = k => if k == pool then "acme_db.tpch1" else "",
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val other = node.copy(poolKey = PoolKey("acme", "other_db", "bi"))
     HandleInspector.payload(keys.handle(node, Alice)).hcursor.get[String]("path") shouldBe
@@ -376,7 +377,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "k" * 32,
       "http://127.0.0.1:20900",
       () => 5000L,
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val p = HandleInspector.payload(keys.prelude(Node2, Alice))
     p.hcursor.get[String]("node") shouldBe Right("quack-acme-db-bi-2")
@@ -416,7 +418,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       "k" * 32,
       "http://127.0.0.1:20900",
       () => 5000L,
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     HandleInspector.payload(keys.handle(Node2, Alice)).hcursor.get[Long]("policyVersion") shouldBe
       Right(0L)
@@ -433,7 +436,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       () => 5000L,
       creds = digests,
       issued = Some(issued),
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     val p = HandleInspector.payload(keys.handle(Node2, Alice))
     p.hcursor.get[String]("creds") shouldBe Right("d" * 64)

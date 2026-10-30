@@ -140,7 +140,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       onStore,
       hbCfg,
       backend = Some(new FleetQuackBackend(onStore, hbCfg, clock = () => t0)),
-      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true)
+      nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
   }
@@ -215,7 +216,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val h = new FleetHandlers(
       failing,
       hbCfg,
-      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0))
+      backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0)),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
@@ -227,7 +229,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
 
   it should "400 fleet_disabled and write no server row when the manager is not in fleet mode" in {
     val store = new InMemoryFleetServerStore(clock = () => t0)
-    val h     = new FleetHandlers(store, hbCfg, backend = None)
+    val h     = new FleetHandlers(
+      store,
+      hbCfg,
+      backend = None,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
     h.heartbeat(req(), Some("secret"), loopback, None)
       .unsafeRunSync()
       .left
@@ -249,7 +256,15 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     )
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val backend = new FleetQuackBackend(store, cfg, clock = () => t0)
-    (store, new FleetHandlers(store, cfg, backend = Some(backend)))
+    (
+      store,
+      new FleetHandlers(
+        store,
+        cfg,
+        backend = Some(backend),
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      )
+    )
 
   "heartbeat approval" should "leave a server joined from outside the list pending" in {
     val (store, h) = approvalFixture("10.0.0.0/8")
@@ -304,7 +319,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val widened = new FleetHandlers(
       store,
       FleetConfig(joinToken = "secret", heartbeatSec = 7),
-      backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0))
+      backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0)),
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     widened
       .heartbeat(req(), Some("secret"), addr("192.168.1.5"), None)
@@ -445,7 +461,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       cfg,
       backend = Some(backend),
       publish = StateChangePublisher.noop,
-      audit = rootAudit
+      audit = rootAudit,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
@@ -605,7 +622,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       new InMemoryFleetServerStore(),
       FleetConfig(joinToken = "s"),
       backend = None,
-      publish = StateChangePublisher.noop
+      publish = StateChangePublisher.noop,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
@@ -756,7 +774,13 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     val cfg     = FleetConfig(joinToken = "secret", reassignAfterSec = 60)
     val backend = new FleetQuackBackend(probe, cfg, clock = () => t0)
     val pub     = new CountingPublisher
-    val h       = new FleetHandlers(probe, cfg, backend = Some(backend), publish = pub)
+    val h       = new FleetHandlers(
+      probe,
+      cfg,
+      backend = Some(backend),
+      publish = pub,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
     (inner, probe, pub, h)
 
   "heartbeat" should "not reply with an assignment bound to another source, whatever the store said" in {

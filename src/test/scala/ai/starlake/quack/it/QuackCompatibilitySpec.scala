@@ -90,7 +90,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private val keys   = new ai.starlake.quack.edge.authz.NodeKeys(
     secret,
     decide.url,
-    readOnlyCatalogs = ai.starlake.quack.edge.authz.ReadOnlyCatalogs.none
+    readOnlyCatalogs = ai.starlake.quack.edge.authz.ReadOnlyCatalogs.none,
+    versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
   )
 
   private var dir: Path                    = null

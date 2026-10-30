@@ -85,7 +85,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(stub())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -206,7 +207,8 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(defaultStub())
-    val adapter  = new QuackHttpAdapter(client, tracker)
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     // No journal param -> defaults to EventJournal.noop
     val router = new FlightSqlRouter(

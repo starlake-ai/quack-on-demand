@@ -90,7 +90,7 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(client, tracker),
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
       journal = journal,
       columnPolicyRewriter = columns,
       attachedCatalogsOf = _ => attached,

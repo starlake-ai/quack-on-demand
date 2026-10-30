@@ -30,7 +30,12 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   // stand-in signing with the keys the node was given.
   private val secret = NodeKeys.randomSecret()
   private val decide = StubDecideServer.start(secret)
-  private val keys   = new NodeKeys(secret, decide.url, readOnlyCatalogs = ReadOnlyCatalogs.none)
+  private val keys   = new NodeKeys(
+    secret,
+    decide.url,
+    readOnlyCatalogs = ReadOnlyCatalogs.none,
+    versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+  )
 
   override def beforeAll(): Unit =
     if QodNodeTestBinary.path.nonEmpty then
@@ -319,7 +324,8 @@ class QodNodeAuthzSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       secret,
       decide.url,
       paths = _ => "lake.main",
-      readOnlyCatalogs = ReadOnlyCatalogs.none
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     withConnection { conn =>
       def as(sql: String): Either[String, String] =
