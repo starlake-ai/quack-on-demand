@@ -109,7 +109,8 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       throwTenants: Boolean = false,
       opaTenant: Boolean = false,
       opaReply: Either[String, (Int, String)] = Left("no OPA in this spec"),
-      opaCacheTtlSec: Int = 0
+      opaCacheTtlSec: Int = 0,
+      usePath: String = UsePath
   ):
     val clock    = new AtomicLong(1_761_200_000_000L)
     val minted   = new MintedHandles(clock = () => clock.get())
@@ -157,7 +158,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
       functionClass = (_, _, name, _) => Option.when(name == "read_parquet")(FunctionClass.File),
       settingClass = _ => None
     )
-    val route = new DecideRoute(keys, minted, decider, dryRuns, _ => UsePath, () => clock.get())
+    val route = new DecideRoute(keys, minted, decider, dryRuns, _ => usePath, () => clock.get())
 
     def handle(p: NodePrincipal = AliceP): String = keys.handle(Node, p)
 
@@ -194,8 +195,15 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
         parse(new String(bytes, UTF_8)).toOption.get.hcursor
       case other => fail(s"not a verdict: $other")
 
-  /** The router's USE prelude as the describer sends it, to `path`, with `objects` beside it. */
-  private def use(path: String, objects: List[Json] = Nil): Array[Byte] =
+  /** The router's USE prelude as the describer sends it, to `path` at `scope`, with `objects` and
+    * the `settings` after it beside it.
+    */
+  private def use(
+      path: String,
+      objects: List[Json] = Nil,
+      scope: String = "session",
+      settings: List[Json] = Nil
+  ): Array[Byte] =
     CanonicalJson
       .render(
         Json.obj(
@@ -203,7 +211,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
           "functions" -> Json.arr(),
           "objects"   -> Json.arr(objects*),
           "settings"  -> Json.arr(
-            Json.obj("name" -> s("schema"), "scope" -> s("session"), "value" -> s(path))
+            (Json.obj("name" -> s("schema"), "scope" -> s(scope), "value" -> s(path)) :: settings)*
           ),
           "statement" -> s("SET"),
           "v"         -> Json.fromInt(1)
@@ -423,6 +431,18 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     decision(use("other.main")) shouldBe Right("refuse")
     decision(use(UsePath, List(read("orders")))) shouldBe Right("refuse")
     decision(use(UsePath.toUpperCase)) shouldBe Right("refuse")
+    // A second setting beside it, or the schema set at another scope: not the prelude.
+    val threads = Json.obj("name" -> s("threads"), "scope" -> s("session"), "value" -> s("4"))
+    decision(use(UsePath, settings = List(threads))) shouldBe Right("refuse")
+    decision(use(UsePath, scope = "local")) shouldBe Right("refuse")
+  }
+
+  it should "refuse the USE prelude of a pool with no session path" in {
+    val f = new Fixture(usePath = "")
+    verdict(f.call(request(f.handle(AliceDry), "plan", use("")))._2)
+      .get[String]("decision") shouldBe Right("refuse")
+    verdict(f.call(request(f.handle(AliceDry), "plan", use(UsePath)))._2)
+      .get[String]("decision") shouldBe Right("refuse")
   }
 
   it should "judge a screen description as any screen" in {
@@ -431,6 +451,19 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     v.get[String]("decision") shouldBe Right("allow")
     v.get[Boolean]("retryable") shouldBe Right(false)
     v.get[Long]("expiresAt") shouldBe Right(f.clock.get())
+  }
+
+  "isUsePrelude" should "hold for exactly one session schema setting to the pool's path" in {
+    val prelude                           = DescribedSetting("schema", "session", Some(UsePath))
+    def desc(settings: DescribedSetting*) = Description("SET", Nil, Nil, settings.toList, Nil)
+    DecideRoute.isUsePrelude(desc(prelude), UsePath) shouldBe true
+    DecideRoute.isUsePrelude(
+      desc(prelude, DescribedSetting("threads", "session", Some("4"))),
+      UsePath
+    ) shouldBe false
+    DecideRoute.isUsePrelude(desc(prelude.copy(scope = "local")), UsePath) shouldBe false
+    DecideRoute.isUsePrelude(desc(prelude.copy(value = Some(""))), "") shouldBe false
+    DecideRoute.isUsePrelude(desc(prelude), "") shouldBe false
   }
 
   "a malformed request" should "be answered 400 or 413" in {

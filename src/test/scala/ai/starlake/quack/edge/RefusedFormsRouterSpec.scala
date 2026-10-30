@@ -201,7 +201,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
         "SUMMARIZE t",
         Some(tenantUser),
         (node, wrappedSql, _, _, principal) =>
-          router.adapter.send(node, wrappedSql, principal, None).map(NodeOutcome.fromQuackResponse)
+          router.adapter.send(node, wrappedSql, principal, None).map(NodeOutcome.fromQuackResponse),
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     out.foreach(_.close())
@@ -290,7 +291,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
               Some(tenantUser),
               relay,
               evaluate = Some(evaluate),
-              failInTransaction = Some(answer => IO(fenced += answer).void)
+              failInTransaction = Some(answer => IO(fenced += answer).void),
+              purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
             )
             .unsafeRunSync()
         statement("BEGIN").foreach(_.close())

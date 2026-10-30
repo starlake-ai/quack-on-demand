@@ -93,7 +93,15 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         NodeOutcome.Ok("payload", 7L, () => ())
       }
     val out = fx.router
-      .executeWith("c-1", "alice", poolKey, "SELECT 1", None, send)
+      .executeWith(
+        "c-1",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync()
     out.map(r => (r.value, r.nodeId, r.durationMs)) shouldBe Right(
       ("payload", fx.nodes.head.nodeId, 7L)
@@ -114,7 +122,17 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         during = fx.router.registry.list().size
         NodeOutcome.Ok("payload", 1L, () => ())
       }
-    val out = fx.router.executeWith("c-2", "alice", poolKey, "SELECT 1", None, send).unsafeRunSync()
+    val out = fx.router
+      .executeWith(
+        "c-2",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
     during shouldBe 1
     fx.router.registry.list() should have size 1
     out.toOption.get.close()
@@ -129,7 +147,17 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         if calls.size == 1 then NodeOutcome.Transient("connection refused", 2L)
         else NodeOutcome.Ok("second", 3L, () => ())
       }
-    val out = fx.router.executeWith("c-3", "alice", poolKey, "SELECT 1", None, send).unsafeRunSync()
+    val out = fx.router
+      .executeWith(
+        "c-3",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
     out.map(_.value) shouldBe Right("second")
     calls.distinct should have size 2
 
@@ -137,7 +165,17 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
     val fx                                     = setup()
     val send: FlightSqlRouter.NodeSend[String] =
       (_, _, _, _, _) => IO.pure(NodeOutcome.Transient("connection refused", 2L))
-    val out = fx.router.executeWith("c-4", "alice", poolKey, "SELECT 1", None, send).unsafeRunSync()
+    val out = fx.router
+      .executeWith(
+        "c-4",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
     out match
       case Left(RouterFailure.Unavailable(_)) => succeed
       case other                              => fail(s"expected Unavailable, got $other")
@@ -150,7 +188,17 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         calls += 1
         NodeOutcome.Permanent("Catalog Error: Table with name t does not exist", 2L)
       }
-    val out = fx.router.executeWith("c-5", "alice", poolKey, "SELECT 1", None, send).unsafeRunSync()
+    val out = fx.router
+      .executeWith(
+        "c-5",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
     calls shouldBe 1
     out match
       case Left(RouterFailure.NotFound(m)) => m should include("does not exist")
@@ -171,7 +219,8 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         "INSERT INTO t VALUES (1)",
         None,
         send,
-        source = "quack"
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     calls shouldBe 0
@@ -195,7 +244,8 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         "INSERT INTO t VALUES (1)",
         None,
         send,
-        source = "quack"
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     fx.journal.drainNow()
@@ -214,7 +264,17 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       }
     val user = ai.starlake.quack.ondemand.state.RbacUser("u-7", Some("acme"), "alice", "user")
     val eff  = ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)
-    fx.router.executeWith("c-8", "alice", poolKey, "SELECT 1", Some(eff), send).unsafeRunSync()
+    fx.router
+      .executeWith(
+        "c-8",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        Some(eff),
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
+      .unsafeRunSync()
     // The retry on the second node runs for the same principal.
     seen shouldBe List.fill(2)(
       ai.starlake.quack.edge.authz.NodePrincipal(
@@ -251,7 +311,15 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       }
     // Live: the validator refuses before any node call.
     fx.router
-      .executeWith("dr-1", "alice", poolKey, "SELECT 1", Some(aliceEff), send)
+      .executeWith(
+        "dr-1",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        Some(aliceEff),
+        send,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync()
       .left
       .map(_.reason) shouldBe Left("access denied: denied by the validator")
@@ -301,6 +369,57 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       .map(_.reason) shouldBe Left(FlightSqlRouter.PoolNotWoken)
     calls shouldBe 0
     fx.router.supervisor.get(poolKey).get.suspended shouldBe true
+
+  it should "be refused for a superuser and for the system, before any pool lookup or node call" in:
+    val fx                                     = setup()
+    var calls                                  = 0
+    val send: FlightSqlRouter.NodeSend[String] = (_, _, _, _, _) =>
+      IO {
+        calls += 1
+        NodeOutcome.Ok("ran", 1L, () => ())
+      }
+    // A node admits both without asking the decision endpoint: the statement would run.
+    val superuser = aliceEff.copy(user = aliceEff.user.copy(tenant = None))
+    val system    = aliceEff.copy(system = true)
+    def dry(eff: Option[ai.starlake.quack.ondemand.rbac.EffectiveSet], key: PoolKey) =
+      fx.router
+        .executeWith(
+          "dr-4",
+          "alice",
+          key,
+          "INSERT INTO t VALUES (1)",
+          eff,
+          send,
+          recordExecution = false,
+          purpose = ai.starlake.quack.edge.authz.DecidePurpose.DryRun
+        )
+        .unsafeRunSync()
+    val unknown = PoolKey("acme", "acme_default", "nope")
+    List(Some(superuser), Some(system), None).foreach { eff =>
+      dry(eff, poolKey) shouldBe Left(
+        RouterFailure.AccessDenied(FlightSqlRouter.DryRunPrincipalRequired)
+      )
+      // Before the pool is looked up: an unknown pool is refused the same way, not 404.
+      dry(eff, unknown) shouldBe Left(
+        RouterFailure.AccessDenied(FlightSqlRouter.DryRunPrincipalRequired)
+      )
+    }
+    calls shouldBe 0
+    // The nearest allowed: a tenant user's dry run reaches the node call.
+    dry(Some(aliceEff), poolKey).isRight shouldBe true
+    calls shouldBe 1
+    // Through dryRun too: refused with no handle minted, for either principal.
+    List(superuser, system).foreach { eff =>
+      fx.router.dryRun("alice", poolKey, "INSERT INTO t VALUES (1)", eff).unsafeRunSync() shouldBe
+        ((Some(RouterFailure.AccessDenied(FlightSqlRouter.DryRunPrincipalRequired)), Nil))
+    }
+    // A tenant user's dryRun gets past the check to the node (none listens here).
+    fx.router
+      .dryRun("alice", poolKey, "SELECT 1", aliceEff)
+      .unsafeRunSync()
+      ._1
+      .map(_.reason) should not be Some(FlightSqlRouter.DryRunPrincipalRequired)
+    fx.router.history.snapshot(10) shouldBe empty
 
   "the adapter's authorizer" should "tell onMint each handle it mints, as the prelude carries it" in:
     val keys    = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()

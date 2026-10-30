@@ -257,7 +257,8 @@ final class QuackFrontDoor(
         evaluate = Some(evaluateSend(s, cq)),
         // A computed file location inside a client transaction is computed on the transaction's
         // link and fails hard (CONTRACT Addendum 4 items 25-25b).
-        failInTransaction = Some(answer => fenceTx(s, answer))
+        failInTransaction = Some(answer => fenceTx(s, answer)),
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .flatMap {
         case Left(fail) =>

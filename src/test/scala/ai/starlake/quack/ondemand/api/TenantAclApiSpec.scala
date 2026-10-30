@@ -319,7 +319,14 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
         "QoD: ATTACH is reserved to superusers"
     )
     val byGateway = RouterFailure.AccessDenied("access denied: trigger: trigger DDL is reserved")
-    List(byNode -> "ATTACH is reserved to superusers", byGateway -> "trigger DDL is reserved")
+    // The router's own refusal of a dry run for a superuser or the system (resolve already answers
+    // a superuser row not_found; this is the router's backstop).
+    val byPrincipal = RouterFailure.AccessDenied(FlightSqlRouter.DryRunPrincipalRequired)
+    List(
+      byNode      -> "ATTACH is reserved to superusers",
+      byGateway   -> "trigger DDL is reserved",
+      byPrincipal -> "a dry run runs only for a tenant user"
+    )
       .foreach { (failure, text) =>
         withHarness(nodeRun = Some(new FakeNodeRun(answer = (Some(failure), None)))) { h =>
           opaMode(h)

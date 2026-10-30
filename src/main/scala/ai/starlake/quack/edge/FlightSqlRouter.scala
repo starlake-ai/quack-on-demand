@@ -419,7 +419,8 @@ final class FlightSqlRouter(
           recordExecution = recordExecution,
           prepareDurationMs = prepareDurationMs,
           patId = patId,
-          evaluate = Some(adapterEvaluate)
+          evaluate = Some(adapterEvaluate),
+          purpose = DecidePurpose.Live
         ).map(_.map(r => QueryResult(r.value, r.close, r.nodeId, r.durationMs)))
 
   /** The Arrow transport as a [[FlightSqlRouter.NodeSend]]: what [[execute]] runs the pipeline
@@ -464,12 +465,27 @@ final class FlightSqlRouter(
     * principal on a node of `poolKey`, as a live statement runs (the USE prelude, the policy
     * rewriters, the node's parse screen and describer), under a decide context marked
     * [[DecidePurpose.DryRun]]: the decision endpoint never answers its plans an allow (but for the
-    * session's own USE prelude), so it runs nothing. No history row, no load booked, no computed
-    * location evaluated, no pool woken. Answers the router's failure (None only when the node ran
-    * the statement, which a dry run allows for a USE of the session's own path alone) and the nonce
-    * of every handle minted for it, in mint order.
+    * session's own USE prelude), so it runs nothing. That holds only for a tenant user: a node
+    * admits a superuser's or the system's statements without asking the decision endpoint, so the
+    * context would not stop them, and a dry run for either is refused here
+    * ([[FlightSqlRouter.DryRunPrincipalRequired]]) before any snapshot, handle or node call, as
+    * [[executeWith]] refuses it too. No history row, no load booked, no computed location
+    * evaluated, no pool woken. Answers the router's failure (None only when the node ran the
+    * statement, which a dry run allows for a USE of the session's own path alone) and the nonce of
+    * every handle minted for it, in mint order.
     */
   def dryRun(
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: EffectiveSet
+  ): IO[(Option[RouterFailure], List[String])] =
+    if !FlightSqlRouter.dryRunnable(Some(effectiveSet)) then
+      IO.pure((Some(FlightSqlRouter.dryRunRefused), Nil))
+    else dryRunAsTenantUser(user, poolKey, sql, effectiveSet)
+
+  /** [[dryRun]] for a tenant user, the one principal the decide context binds. */
+  private def dryRunAsTenantUser(
       user: String,
       poolKey: PoolKey,
       sql: String,
@@ -568,9 +584,55 @@ final class FlightSqlRouter(
       failInTransaction: Option[FlightSqlRouter.TransactionFence] = None,
       /** Why the statement's decisions are taken (decision 25): `DryRun` for the OPA dry run
         * ([[dryRun]]), whose plan verdicts are never an allow, so it runs nothing, and which never
-        * wakes a suspended pool. Live everywhere else.
+        * wakes a suspended pool; `Live` everywhere else. Required: no caller gets either by
+        * default. A dry run for anyone but a tenant user is refused before anything else
+        * ([[FlightSqlRouter.DryRunPrincipalRequired]]): a node admits a superuser's or the system's
+        * statements without asking the decision endpoint, so it would run.
         */
-      purpose: DecidePurpose = DecidePurpose.Live
+      purpose: DecidePurpose
+  ): IO[Either[RouterFailure, Routed[A]]] =
+    if purpose == DecidePurpose.DryRun && !FlightSqlRouter.dryRunnable(effectiveSet) then
+      IO.pure(Left(FlightSqlRouter.dryRunRefused))
+    else
+      executeFor(
+        connectionId,
+        user,
+        poolKey,
+        sql,
+        effectiveSet,
+        send,
+        source,
+        preferredNode,
+        recordExecution,
+        prepareDurationMs,
+        patId,
+        edge,
+        clientDataScans,
+        softPinOverCapacity,
+        evaluate,
+        failInTransaction,
+        purpose
+      )
+
+  /** [[executeWith]] past its dry-run principal check. */
+  private def executeFor[A](
+      connectionId: String,
+      user: String,
+      poolKey: PoolKey,
+      sql: String,
+      effectiveSet: Option[EffectiveSet],
+      send: FlightSqlRouter.NodeSend[A],
+      source: String,
+      preferredNode: Option[String],
+      recordExecution: Boolean,
+      prepareDurationMs: Option[Long],
+      patId: Option[String],
+      edge: String,
+      clientDataScans: Boolean,
+      softPinOverCapacity: Boolean,
+      evaluate: Option[FlightSqlRouter.NodeSend[NodeRows]],
+      failInTransaction: Option[FlightSqlRouter.TransactionFence],
+      purpose: DecidePurpose
   ): IO[Either[RouterFailure, Routed[A]]] =
     def run(
         statement: String,
@@ -1779,6 +1841,24 @@ object FlightSqlRouter:
     * pool is suspended.
     */
   val PoolNotWoken: String = "pool is suspended; a dry run never wakes it"
+
+  /** Why a dry run for a superuser, the system or no principal was refused: a node admits the first
+    * two without asking the decision endpoint, so the statement would run.
+    */
+  val DryRunPrincipalRequired: String =
+    "access denied: a dry run runs only for a tenant user"
+
+  /** The refusal of a dry run whose principal is not a tenant user (an access denial: the statement
+    * form of the dry run answers it `refused_before_opa`).
+    */
+  private[edge] def dryRunRefused: RouterFailure =
+    RouterFailure.AccessDenied(DryRunPrincipalRequired)
+
+  /** Whether a dry run may run for `effectiveSet`: a tenant user, never a superuser (no tenant),
+    * the system caller or no principal, whose statements no decide context binds.
+    */
+  def dryRunnable(effectiveSet: Option[EffectiveSet]): Boolean =
+    effectiveSet.exists(e => e.user.tenant.nonEmpty && !e.system)
 
   /** Why a computed file location got no literal: its evaluation failed (`Evaluation`, the
     * gateway's or the node's answer), or the value it yielded is no location (`Rejected`).

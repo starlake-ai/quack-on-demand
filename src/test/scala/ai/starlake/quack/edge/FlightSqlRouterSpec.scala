@@ -3103,7 +3103,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             Some(eff),
             okSend,
             source = "quack",
-            clientDataScans = true
+            clientDataScans = true,
+            purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
           )
           .unsafeRunSync() shouldBe a[Left[?, ?]]
         captured() shouldBe ""
@@ -3995,7 +3996,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         ClientFedInsert,
         Some(ordersWriter),
         okSend,
-        source = "quack"
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync() shouldBe a[Left[?, ?]]
 
@@ -4011,7 +4013,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(ordersWriter),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
       .map(_.value) shouldBe Right("count")
@@ -4022,7 +4025,16 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.execute("cds-4", "alice", poolKey, "SELECT 1").unsafeRunSync()
     capturer.lastCtx.clientDataScans shouldBe false
     router
-      .executeWith("cds-5", "alice", poolKey, "SELECT 1", None, okSend, source = "quack")
+      .executeWith(
+        "cds-5",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        okSend,
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync()
     capturer.lastCtx.clientDataScans shouldBe false
     router
@@ -4034,7 +4046,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         None,
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     capturer.lastCtx.clientDataScans shouldBe true
@@ -4055,7 +4068,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     val (router, _, _) = setupWithRewriter(protectedWriteGuard = guard)
     router
-      .executeWith("cds-7", "alice", poolKey, ClientFedInsert, Some(withRowPolicy), okSend)
+      .executeWith(
+        "cds-7",
+        "alice",
+        poolKey,
+        ClientFedInsert,
+        Some(withRowPolicy),
+        okSend,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync() shouldBe a[Left[?, ?]]
     router
       .executeWith(
@@ -4066,7 +4087,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(withRowPolicy),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
       .map(_.value) shouldBe Right("count")
@@ -4107,7 +4129,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
               Some(wildcardAllSet),
               okSend,
               source = "quack",
-              clientDataScans = true
+              clientDataScans = true,
+              purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
             )
             .unsafeRunSync()
             .left
@@ -4142,7 +4165,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             Some(wildcardAllSet),
             okSend,
             source = "quack",
-            clientDataScans = true
+            clientDataScans = true,
+            purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
           )
           .unsafeRunSync()
           .map(_.value) shouldBe Right("count")
@@ -4194,7 +4218,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             sql,
             Some(wildcardAllSet),
             okSend,
-            source = "quack"
+            source = "quack",
+            purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
           )
           .unsafeRunSync() shouldBe a[Left[?, ?]]
         captured() shouldBe ""
@@ -4262,7 +4287,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         Some(wildcardAllSet),
         okSend,
         source = "quack",
-        clientDataScans = true
+        clientDataScans = true,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync() shouldBe a[Left[?, ?]]
     aclCaptured() shouldBe ""

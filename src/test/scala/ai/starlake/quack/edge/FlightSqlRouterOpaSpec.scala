@@ -112,7 +112,8 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
         "INSERT INTO t VALUES (1)",
         None,
         okSend,
-        source = "quack"
+        source = "quack",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     seen.flatMap(_.poolKey) shouldBe Some(poolKey)
@@ -122,7 +123,17 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
   it should "map ValidatorUnavailable to RouterFailure.Unavailable and record transient" in:
     val fx  = routerWith((_: ValidationContext) => ValidatorUnavailable("opa down"))
     val out =
-      fx.router.executeWith("c-2", "alice", poolKey, "SELECT 1", None, okSend).unsafeRunSync()
+      fx.router
+        .executeWith(
+          "c-2",
+          "alice",
+          poolKey,
+          "SELECT 1",
+          None,
+          okSend,
+          purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+        )
+        .unsafeRunSync()
     out match
       case Left(RouterFailure.Unavailable(r)) =>
         r should include("authorization service unavailable")
@@ -134,7 +145,15 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
       Denied("no grant", Set.empty, Map("authz_source" -> "opa"))
     )
     fx.router
-      .executeWith("c-3", "alice", poolKey, "SELECT 1", None, okSend)
+      .executeWith(
+        "c-3",
+        "alice",
+        poolKey,
+        "SELECT 1",
+        None,
+        okSend,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync()
     fx.journal.drainNow()
     fx.store.events should have size 1
@@ -155,7 +174,15 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
       )
     )
     fx.router
-      .executeWith("c-4", "alice", poolKey, "SELECT 42", None, okSend)
+      .executeWith(
+        "c-4",
+        "alice",
+        poolKey,
+        "SELECT 42",
+        None,
+        okSend,
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
+      )
       .unsafeRunSync()
     fx.journal.drainNow()
     fx.store.events should have size 1
@@ -183,7 +210,8 @@ class FlightSqlRouterOpaSpec extends AnyFlatSpec with Matchers:
         None,
         okSend,
         source = "flightsql",
-        edge = "mcp"
+        edge = "mcp",
+        purpose = ai.starlake.quack.edge.authz.DecidePurpose.Live
       )
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
