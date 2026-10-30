@@ -211,6 +211,38 @@ class FlightSqlRouterAuditSpec extends AnyFlatSpec with Matchers:
     store.events.head.patId shouldBe Some("pat-8")
   }
 
+  it should "emit data-denial/sql.denied/denied for a node's authorization refusal" in {
+    val refusal = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Permission Error: QoD: user:alice lacks grants on cat.sch.tbl:insert"
+        ),
+        1L
+      )
+    val (router, journal, store) = setupWithJournal(stub = refusal)
+    router
+      .execute(
+        "aud-5",
+        "alice",
+        poolKey,
+        "INSERT INTO cat.sch.tbl VALUES (1)",
+        patId = Some("pat-9")
+      )
+      .unsafeRunSync()
+    journal.drainNow()
+    store.events should have size 1
+    val e = store.events.head
+    e.family shouldBe "data-denial"
+    e.action shouldBe "sql.denied"
+    e.outcome shouldBe "denied"
+    e.actor shouldBe "alice"
+    e.tenant shouldBe Some("acme")
+    e.origin shouldBe "flightsql"
+    e.patId shouldBe Some("pat-9")
+    e.detail("sql") shouldBe "INSERT INTO cat.sch.tbl VALUES (1)"
+    e.detail("reason") should include("QoD: user:alice lacks grants on cat.sch.tbl:insert")
+  }
+
   it should "not throw and not record when using the default noop journal (EventJournal.noop)" in {
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker

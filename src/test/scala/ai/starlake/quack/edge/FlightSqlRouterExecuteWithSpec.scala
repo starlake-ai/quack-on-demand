@@ -338,7 +338,7 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
       .left
-      .map(_.reason) shouldBe Left("permanent failure: Permission Error: QoD: dry run")
+      .map(_.reason) shouldBe Left("access denied: Permission Error: QoD: dry run")
     seen.map(_.context.map(_.purpose)) shouldBe
       List(Some(ai.starlake.quack.edge.authz.DecidePurpose.DryRun))
     // Only the live denial is in the history: a dry run records nothing.

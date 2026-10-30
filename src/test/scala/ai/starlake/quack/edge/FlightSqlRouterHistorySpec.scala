@@ -150,6 +150,23 @@ class FlightSqlRouterHistorySpec extends AnyFlatSpec with Matchers {
     e.error shouldBe Some("disk full")
   }
 
+  it should "persist a node's authorization refusal with status denied and the node's id" in {
+    val refusal: () => QuackResponse = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent("Permission Error: QoD: user:alice lacks grants"),
+        4L
+      )
+    val (router, journal, store) = setupWithJournal(stub = refusal)
+    router.execute("hist-5", "alice", poolKey, "SELECT secret FROM forbidden").unsafeRunSync()
+    journal.drainNow()
+    val rows = store.searchStatements(StatementQuery())
+    rows should have size 1
+    val e = rows.head.event
+    e.status shouldBe "denied"
+    e.nodeId should not be "-"
+    e.error shouldBe Some("Permission Error: QoD: user:alice lacks grants")
+  }
+
   it should "record nothing and throw nothing with the default noop journal" in {
     val sup     = buildSupervisor()
     val tracker = new NodeLoadTracker

@@ -186,8 +186,9 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       case Left(f) => f.reason should include("lacks grants on memory.main.t:read")
       case other   => fail(s"expected the listing's refusal, got $other")
     sent().size shouldBe 1
+    // The node's refusal is a denial (FlightSqlRouter.isNodeRefusal).
     router.history.snapshot(5).map(r => (r.sql, r.status)) shouldBe List(
-      ("SUMMARIZE t", "permanent")
+      ("SUMMARIZE t", "denied")
     )
   }
 

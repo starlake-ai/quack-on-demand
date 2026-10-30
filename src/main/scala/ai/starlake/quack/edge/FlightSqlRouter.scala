@@ -1580,7 +1580,10 @@ final class FlightSqlRouter(
 
                           case NodeOutcome.Permanent(m, latency) =>
                             stmtId.foreach(registry.deregister)
-                            maybeRecord(nodeId, latency, "permanent", Some(m))
+                            // The node's own refusal is a denial, journaled like the gateway's.
+                            val status =
+                              if FlightSqlRouter.isNodeRefusal(m) then "denied" else "permanent"
+                            maybeRecord(nodeId, latency, status, Some(m))
                             IO.pure(Left(classifyPermanent(m)))
                         }
           }
@@ -1755,10 +1758,11 @@ final class FlightSqlRouter(
 
   /** Map a permanent DuckDB error to a typed failure: the node's refusal for a decision it could
     * not get (FlightSqlRouter.NodeAuthzUnavailable: the replica is down or slow) becomes
-    * Unavailable, which the client may retry; missing-object errors become NotFound; the rest
-    * BadRequest. The "permanent failure:" prefix is preserved for operators. `context` (the retry's
-    * "retry failed: ") goes into the reason after it, never into the node's message the checks
-    * read: the unavailable check matches that message's start.
+    * Unavailable, which the client may retry; any other refusal of the node's
+    * ([[FlightSqlRouter.isNodeRefusal]]) becomes AccessDenied; missing-object errors become
+    * NotFound; the rest BadRequest. The "permanent failure:" prefix is preserved for operators on
+    * the last two. `context` (the retry's "retry failed: ") goes into the reason after the prefix,
+    * never into the node's message the checks read: they match that message's start.
     */
   private def classifyPermanent(message: String, context: String = ""): RouterFailure =
     val lower    = message.toLowerCase(Locale.ROOT)
@@ -1766,6 +1770,8 @@ final class FlightSqlRouter(
       (lower.contains("catalog error") && lower.contains("does not"))
     val full = s"permanent failure: $context$message"
     if FlightSqlRouter.isNodeAuthzUnavailable(message) then RouterFailure.Unavailable(full)
+    else if FlightSqlRouter.isNodeRefusal(message) then
+      RouterFailure.AccessDenied(s"access denied: $context$message")
     else if notFound then RouterFailure.NotFound(full)
     else RouterFailure.BadRequest(full)
 
@@ -1787,6 +1793,20 @@ object FlightSqlRouter:
   private val NodeAuthzUnavailablePrefixes: List[String] = List(
     s"Permission Error: $NodeAuthzUnavailable",
     s"Invalid Input Error: Authorization callback failed: Permission Error: $NodeAuthzUnavailable"
+  )
+
+  /** Whether a node's error `message` is its authorization refusal, other than
+    * [[NodeAuthzUnavailable]]: `QoD: ` right after DuckDB's Permission Error, in a statement's or
+    * the parse screen's shape. The node decided the principal may not run the statement, so the
+    * router books it as a denial, like the gateway's own refusals. A user's text quoting the marker
+    * (error('QoD: ...'), an identifier echoed in a catalog error) stays a permanent failure.
+    */
+  def isNodeRefusal(message: String): Boolean =
+    !isNodeAuthzUnavailable(message) && NodeRefusalPrefixes.exists(message.startsWith)
+
+  private val NodeRefusalPrefixes: List[String] = List(
+    "Permission Error: QoD: ",
+    "Invalid Input Error: Authorization callback failed: Permission Error: QoD: "
   )
 
   /** The target of the USE prelude [[wrapWithDefaultSchema]] sends before a pool's statements,

@@ -69,7 +69,7 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
 
   /** The node's refusal of a dry run's plan the rules allowed, as the router reports it. */
   private val DryRunRefusal =
-    RouterFailure.BadRequest("permanent failure: Permission Error: QoD: dry run")
+    RouterFailure.AccessDenied("access denied: Permission Error: QoD: dry run")
 
   private def opaMode(h: ManagerServerHarness.Harness): Unit =
     cursor(
@@ -314,8 +314,8 @@ class TenantAclApiSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     }
 
   it should "400 refused_before_opa with the node's or the gateway's refusal" in {
-    val byNode = RouterFailure.BadRequest(
-      "permanent failure: Invalid Input Error: Authorization callback failed: Permission Error: " +
+    val byNode = RouterFailure.AccessDenied(
+      "access denied: Invalid Input Error: Authorization callback failed: Permission Error: " +
         "QoD: ATTACH is reserved to superusers"
     )
     val byGateway = RouterFailure.AccessDenied("access denied: trigger: trigger DDL is reserved")

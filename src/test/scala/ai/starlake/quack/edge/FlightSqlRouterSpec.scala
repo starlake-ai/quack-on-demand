@@ -492,7 +492,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val (router, _, _) = setup(stub = perm)
     val out            = router.execute("c-unavail", "alice", poolKey, "SELECT 1").unsafeRunSync()
     out.swap.toOption.get shouldBe a[RouterFailure.Unavailable]
-    // Any other node refusal stays a bad request.
+    // Any other node refusal is a denial (the next case).
     val refusal        = QuackError.Permanent("Permission Error: QoD: user:alice lacks")
     val (denied, _, _) = setup(stub = () => QuackResponse.Failed(refusal, 1L))
     denied
@@ -500,7 +500,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .swap
       .toOption
-      .get shouldBe a[RouterFailure.BadRequest]
+      .get shouldBe a[RouterFailure.AccessDenied]
     // The parse screen's form of the same refusal is retryable too; a user's own text quoting the
     // marker is not.
     FlightSqlRouter.isNodeAuthzUnavailable(
@@ -521,6 +521,47 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .swap
       .toOption
       .get shouldBe a[RouterFailure.BadRequest]
+
+  it should "book a node's authorization refusal as a denial, in either shape the node raises it" in:
+    List(
+      "Permission Error: QoD: user:alice lacks grants on memory.main.t:read",
+      "Invalid Input Error: Authorization callback failed: Permission Error: QoD: function " +
+        "getenv is superuser-only"
+    ).foreach { m =>
+      withClue(m) {
+        val (router, _, node) =
+          setup(stub = () => QuackResponse.Failed(QuackError.Permanent(m), 1L))
+        router.execute("c-node-denied", "alice", poolKey, "SELECT * FROM t").unsafeRunSync() match
+          case Left(RouterFailure.AccessDenied(reason)) => reason shouldBe s"access denied: $m"
+          case o                                        => fail(s"expected AccessDenied, got $o")
+        val latest = router.history.snapshot(1).head
+        latest.status shouldBe "denied"
+        latest.nodeId shouldBe node.nodeId
+        latest.error shouldBe Some(m)
+      }
+    }
+    // A user's text quoting the marker, and every other node error, stay permanent failures.
+    List(
+      "Invalid Input Error: QoD: user:alice lacks",
+      "Binder Error: Permission Error: QoD: user:alice lacks",
+      "Parser Error: syntax error at or near \"QoD\""
+    ).foreach { m =>
+      withClue(m) {
+        FlightSqlRouter.isNodeRefusal(m) shouldBe false
+        val (router, _, _) =
+          setup(stub = () => QuackResponse.Failed(QuackError.Permanent(m), 1L))
+        router
+          .execute("c-node-error", "alice", poolKey, "SELECT 1")
+          .unsafeRunSync()
+          .swap
+          .toOption
+          .get shouldBe a[RouterFailure.BadRequest]
+        router.history.snapshot(1).head.status shouldBe "permanent"
+      }
+    }
+    FlightSqlRouter.isNodeRefusal(
+      s"Permission Error: ${FlightSqlRouter.NodeAuthzUnavailable}: timed out"
+    ) shouldBe false
 
   it should "invalidate pin and return error when in-transaction node dies (transient)" in:
     val (router, sessions, _) = setup(stub = () => TestArrow.okResponse(1L))
