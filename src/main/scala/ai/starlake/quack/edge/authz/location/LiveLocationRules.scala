@@ -31,6 +31,9 @@ trait LocationRulesSource:
   * after the scope was added). `sameHost` (the local runtime): local paths are also taken through
   * `realPath`, as the node resolves them; the root's real path and each tenant's folders are
   * resolved with the deny set and kept as long ([[LiveLocationRules.EntryTtlMs]] at most).
+  *
+  * A deny-set source the checker cannot place ([[LocationChecker.unplaceable]]) is named once in a
+  * WARN while it stays listed, through `owners` (the tenant-dbs whose data path it is).
   */
 final class LiveLocationRules(
     dataPaths: () => List[String],
@@ -40,7 +43,8 @@ final class LiveLocationRules(
     filesRoot: Option[String],
     sameHost: Boolean,
     clock: () => Long = () => System.currentTimeMillis(),
-    realPath: String => String = LocalRealPath.of
+    realPath: String => String = LocalRealPath.of,
+    owners: String => List[String] = _ => Nil
 ) extends LocationRulesSource,
       LazyLogging:
   import LiveLocationRules.*
@@ -67,6 +71,9 @@ final class LiveLocationRules(
     * rebuild of the deny set, so a real path is resolved again at least every EntryTtlMs.
     */
   private val folderCache = TrieMap.empty[String, (List[TenantLocation], List[String])]
+
+  /** The deny-set sources already named as unplaceable: once per source while it stays listed. */
+  private val unplaceableWarned = TrieMap.empty[String, Unit]
 
   /** Every database data folder of the deployment, as the deny set holds it now: the same list
     * instance while nothing it is built from changes (LocationChecker parses each list once).
@@ -97,6 +104,7 @@ final class LiveLocationRules(
     val sources = (seen.keys.toList ++ prefixes).distinct
     val live    = sources.toSet
     entries.filterInPlace((path, _) => live.contains(path))
+    unplaceableWarned.filterInPlace((path, _) => live.contains(path))
     val folders = sources.flatMap(entriesOf(_, now)).distinct
     // Rebuilt no later than the first remembered path's expiry and the entries' TTL.
     val livePaths  = paths.toSet
@@ -173,6 +181,21 @@ final class LiveLocationRules(
       case _                                           =>
         val fresh = DataFolders.of(path, sameHost, realPath)
         entries.put(path, (now, fresh))
+        if fresh.exists(LocationChecker.unplaceable) &&
+          unplaceableWarned.putIfAbsent(path, ()).isEmpty
+        then
+          // A failing lookup costs the names, never the deny set being built.
+          val named =
+            try owners(path)
+            catch case scala.util.control.NonFatal(_) => Nil
+          val whose = named match
+            case Nil   => "a data path of this deployment"
+            case named => named.mkString(", ")
+          logger.warn(
+            s"location rules: $whose: its data path cannot be placed on the nodes (a relative " +
+              "path off the local runtime, or one this host cannot parse); every tenant's local " +
+              "file locations are refused until it is fixed"
+          )
         fresh
 
   private def storePrefixes(): Either[String, List[String]] =

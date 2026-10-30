@@ -148,6 +148,12 @@ object LocationChecker:
           )
         case None => Entry.UnknownLocal
 
+  /** Whether deny-set entry `s` is one the checker cannot place (a relative data path off the local
+    * runtime, a path this host cannot parse): while it is listed, every local location is refused.
+    * [[DataFolders.Unplaced]] is not one (its supervisor WARN names it).
+    */
+  def unplaceable(s: String): Boolean = entry(s) == Entry.UnknownLocal
+
   /** The deny set as parsed entries, kept for the last list judged: the live rules hand every
     * statement the same list until a data path changes, so each data folder is parsed and folded
     * once, not once per statement.

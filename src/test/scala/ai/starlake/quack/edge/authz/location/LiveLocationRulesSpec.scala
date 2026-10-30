@@ -257,3 +257,37 @@ class LiveLocationRulesSpec extends AnyFlatSpec with Matchers:
     r.rulesFor("acme", "u-1").toOption.get.tenantFolders shouldBe first.tenantFolders
     calls.get() should be > once
   }
+
+  "a data path the checker cannot place" should "be named once in a WARN, with its tenant-db" in {
+    // Off the local runtime a relative data path may lie anywhere on a node, so every tenant's
+    // local locations are refused while it is listed (fail closed): the operator must learn which
+    // database causes it (Phase C ledger T5C-2). An absolute path or a bucket is placed: no WARN.
+    val paths = new AtomicReference(List("s3://lake/acme_tpch/", "/srv/lake/acme_x/", "./lake/t"))
+    val rules = new LiveLocationRules(
+      dataPaths = () => paths.get(),
+      unpurgedPrefixes = () => Nil,
+      tenantLocations = _ => Nil,
+      userScopes = _ => Right(Nil),
+      filesRoot = Some("/srv/qod-files"),
+      sameHost = false,
+      owners = p => if p == "./lake/t" then List("tenant-db acme/t (td-1)") else Nil
+    )
+    val (_, events) = ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+      .logged(classOf[LiveLocationRules].getName) {
+        (1 to 3).foreach(_ => rules.rulesFor("acme", "u-1"))
+        paths.set(paths.get() :+ "s3://lake/other/")
+        rules.rulesFor("acme", "u-1")
+      }
+    val warned = events
+      .filter(_.getLevel == ch.qos.logback.classic.Level.WARN)
+      .map(_.getFormattedMessage)
+    warned shouldBe List(
+      "location rules: tenant-db acme/t (td-1): its data path cannot be placed on the nodes " +
+        "(a relative path off the local runtime, or one this host cannot parse); every " +
+        "tenant's local file locations are refused until it is fixed"
+    )
+    LocationChecker.unplaceable("./lake/t") shouldBe true
+    LocationChecker.unplaceable("/srv/lake/acme_x/") shouldBe false
+    LocationChecker.unplaceable("s3://lake/acme_tpch/") shouldBe false
+    LocationChecker.unplaceable(DataFolders.Unplaced) shouldBe false
+  }

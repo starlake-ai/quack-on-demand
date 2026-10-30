@@ -1742,7 +1742,8 @@ final class PoolSupervisor(
     * its nodes get ([[effectiveMetastoreFor]], the spawn's own derivation, so a DuckLake row with
     * no path of its own counts at `parent(default)/<name>`), plus its stored `dataPath` and
     * metastore `dataPath` as written. A DuckLake or duckdb-file row whose nodes get none (the spawn
-    * script then picks a folder of its own), or one the derivation fails on, counts as
+    * scripts refuse to start such a node; an earlier one picked a folder of its own, where data may
+    * still lie), or one the derivation fails on, counts as
     * [[ai.starlake.quack.edge.authz.location.DataFolders.Unplaced]], and is named once in a WARN. A
     * duckdb-file row's path also comes with
     * [[ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker]], which denies every
@@ -1783,7 +1784,8 @@ final class PoolSupervisor(
             case None                                     =>
               Left(
                 "its nodes get no data path (no dataPath of its own and none in the default " +
-                  "metastore), so they pick a folder of their own"
+                  "metastore), so they cannot start (an earlier spawn script gave such a node " +
+                  "a folder of its own, which may still hold data)"
               )
         catch
           case scala.util.control.NonFatal(e) =>
@@ -1805,6 +1807,22 @@ final class PoolSupervisor(
       effective.getOrElse(List(unplaced)) ++ (td.dataPath :: td.metastore.get("dataPath").toList)
     }
     (paths ++ defaultMetastore.get("dataPath")).map(_.trim).filter(_.nonEmpty).distinct
+
+  /** The databases whose data path is `path` as [[dataPaths]] lists it (a duckdb-file path's
+    * name-prefix entry included), and the default metastore when it is its path: what a log line
+    * about that path names.
+    */
+  def dataPathOwners(path: String): List[String] =
+    val p =
+      path.trim.stripSuffix(ai.starlake.quack.edge.authz.location.DataFolders.NamePrefixMarker)
+    val rows = tenantDbs.values.toList.filter { td =>
+      val effective =
+        try effectiveMetastoreFor(td).get("dataPath").toList
+        catch case scala.util.control.NonFatal(_) => Nil
+      (effective ++ (td.dataPath :: td.metastore.get("dataPath").toList)).map(_.trim).contains(p)
+    }
+    rows.map(td => s"tenant-db ${td.tenantId}/${td.name} (${td.id})") ++
+      Option.when(defaultMetastore.get("dataPath").map(_.trim).contains(p))("the default metastore")
 
   def findTenantDb(tenantName: String, tenantDbName: String): Option[TenantDb] =
     getTenant(tenantName).flatMap { t =>

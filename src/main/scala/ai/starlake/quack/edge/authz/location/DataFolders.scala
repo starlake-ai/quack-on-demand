@@ -22,9 +22,10 @@ object DataFolders:
   private val FileDriveRe = "^/[A-Za-z]:[/\\\\].*$".r
 
   /** The data path of a database whose node gets none from the manager (a DuckLake or duckdb-file
-    * row with no data path of its own while the default metastore has none either): the spawn
-    * script then picks a folder of its own. Kept as written by [[of]], which the checker reads as
-    * "may be anywhere on the node": every local location is refused.
+    * row with no data path of its own while the default metastore has none either). The spawn
+    * scripts refuse to start such a node, but an earlier one picked a folder of its own, where data
+    * may still lie. Kept as written by [[of]], which the checker reads as "may be anywhere on the
+    * node": every local location is refused.
     */
   val Unplaced: String = "(a data path the manager cannot place)"
 

@@ -254,6 +254,20 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     warned.map(_.getFormattedMessage).exists(_.contains("acme/a (td-a)")) shouldBe true
     warned.map(_.getFormattedMessage).exists(_.contains("acme/f (td-f)")) shouldBe true
 
+  it should "name the owners of a data path as the deny set lists it" in:
+    // Phase C ledger T5C-2: the location rules' WARN for a path they cannot place names these.
+    val sup = supWithRows(
+      Map("dataPath" -> "./lake/qod/default"),
+      List(
+        pathless("a"),
+        pathless("f", TenantDbKind.DuckDbFile).copy(dataPath = "./files/f.duckdb")
+      )
+    )
+    sup.dataPathOwners("./lake/qod/a") shouldBe List("tenant-db acme/a (td-a)")
+    sup.dataPathOwners(" ./files/f.duckdb*") shouldBe List("tenant-db acme/f (td-f)")
+    sup.dataPathOwners("./lake/qod/default") shouldBe List("the default metastore")
+    sup.dataPathOwners("./elsewhere") shouldBe Nil
+
   it should "derive the data paths once, and again only after a tenant-db change" in:
     val sup   = supWithRows(Map("dataPath" -> "s3://lake/qod/tpch"), List(pathless("a")))
     val first = sup.dataPaths()

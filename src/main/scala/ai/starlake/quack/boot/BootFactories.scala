@@ -186,7 +186,8 @@ object BootFactories extends LazyLogging:
       tenantLocations = sup.tenantLocations,
       userScopes = userId => sup.userS3.current(userId).map(_.map(_.scope)),
       filesRoot = mgrCfg.tenantFiles.rootOpt,
-      sameHost = RuntimeType.isLocal(mgrCfg.runtimeType)
+      sameHost = RuntimeType.isLocal(mgrCfg.runtimeType),
+      owners = sup.dataPathOwners
     )
 
   /** qodstate_tenant.id -> the tenant_db names the tenant owns: the catalogs a wildcard catalog
