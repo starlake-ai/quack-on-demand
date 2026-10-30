@@ -1528,6 +1528,104 @@ abstract class AuthzEndToEndCases(
     allowed("alice", "lake", s"SELECT count(*) FROM $lake.main.orders", Some(List("10")))
   }
 
+  it should "reach a connection held open across it on its next statement, and a re-grant too" in {
+    ready()
+    // The handshake resolved the session's grants; only their following the tenant's policy
+    // version (the revoke moves it) keeps the session from being judged on them after the revoke.
+    val sql                  = s"SELECT x FROM $lake.main.v_secret"
+    var secretGrant          = grant(lake, "main", "secret", "RO")
+    def revokeSecret(): Unit =
+      stack.post("/api/role/permission/revoke", obj("id" -> s(secretGrant))); ()
+    def regrantSecret(): Unit = secretGrant = grant(lake, "main", "secret", "RO")
+    try
+      val held = stack.heldFlight("alice", AlicePw, Acme, "lake")
+      try
+        withClue("[Flight] one connection, before the revoke: ") {
+          held.run(sql) shouldBe Right(List("42"))
+        }
+        revokeSecret()
+        withClue("[Flight] the same connection, after the revoke: ") {
+          held.run(sql) match
+            case Left(err) => err should include("QoD: ")
+            case Right(r)  => fail(s"expected a refusal, got rows $r")
+        }
+        regrantSecret()
+        withClue("[Flight] the same connection, after the re-grant: ") {
+          held.run(sql) shouldBe Right(List("42"))
+        }
+      finally held.close()
+      if AuthzStack.cliPresent then
+        val out = stack.heldDoor("alice", AlicePw, Acme, "lake", List(sql, sql, sql)) {
+          case 0 => revokeSecret()
+          case 1 => regrantSecret()
+          case _ => ()
+        }
+        withClue("[Native] one session, before the revoke, after it, after the re-grant: ") {
+          out(0) shouldBe Right(List("42"))
+          out(1) match
+            case Left(err) => err should include("QoD: ")
+            case Right(r)  => fail(s"expected a refusal, got rows $r")
+          out(2) shouldBe Right(List("42"))
+        }
+    finally stack.postStatus("/api/role/permission/revoke", obj("id" -> s(secretGrant)))
+  }
+
+  "a pool permission revoke" should "refuse the next statement of a connection held open across it" in {
+    ready()
+    // frank holds lake only through a pool grant of his own: qod_no_pools opens nothing.
+    val frankPw = "frank-e2e-pw-1"
+    val frankId = stack
+      .post(
+        "/api/user/create",
+        obj(
+          "tenant"   -> s(Acme),
+          "username" -> s("frank"),
+          "password" -> s(frankPw),
+          "kind"     -> s("user"),
+          "roles"    -> Json.arr(s("e2e_reader")),
+          "groups"   -> Json.arr(s("qod_no_pools"))
+        )
+      )
+      .hcursor
+      .get[String]("id")
+      .fold(e => throw e, identity)
+    def poolGrant(): String =
+      stack
+        .post("/api/pool/permission/grant", obj("tenant" -> s(Acme), "userId" -> s(frankId)))
+        .hcursor
+        .get[String]("id")
+        .fold(e => throw e, identity)
+    def revoke(id: String): Unit =
+      stack.post("/api/pool/permission/revoke", obj("id" -> s(id))); ()
+    val sql   = s"SELECT count(*) FROM $lake.main.orders"
+    val lost  = "has no access to pool"
+    val first = poolGrant()
+    val held  = stack.heldFlight("frank", frankPw, Acme, "lake")
+    try
+      withClue("[Flight] one connection, before the revoke: ") {
+        held.run(sql) shouldBe Right(List("10"))
+      }
+      revoke(first)
+      withClue("[Flight] the same connection, after the revoke: ") {
+        held.run(sql) match
+          case Left(err) => err should include(lost)
+          case Right(r)  => fail(s"expected a refusal, got rows $r")
+      }
+    finally held.close()
+    if AuthzStack.cliPresent then
+      val second = poolGrant()
+      val out    = stack.heldDoor("frank", frankPw, Acme, "lake", List(sql, sql)) {
+        case 0 => revoke(second)
+        case _ => ()
+      }
+      withClue("[Native] one session, before the revoke and after it: ") {
+        out(0) shouldBe Right(List("10"))
+        out(1) match
+          case Left(err) => err should include(lost)
+          case Right(r)  => fail(s"expected a refusal, got rows $r")
+      }
+  }
+
   "a dead decision replica" should "give a retryable error, and the retry pass" in {
     ready()
     // A plan the node has never decided (no other case calls these functions on orders), so no

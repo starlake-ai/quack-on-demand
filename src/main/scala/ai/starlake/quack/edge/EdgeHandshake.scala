@@ -7,12 +7,7 @@ import ai.starlake.quack.edge.auth.{
   IdentityNaming
 }
 import ai.starlake.quack.model.{PoolKey, Tenant}
-import ai.starlake.quack.ondemand.rbac.{
-  AuthorizedHandshake,
-  AuthzRequest,
-  EffectiveSet,
-  HandshakeDenial
-}
+import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, AuthzRequest, HandshakeDenial}
 import com.typesafe.scalalogging.LazyLogging
 
 /** Why a handshake was refused. `Unauthenticated` covers a bad or missing credential and an
@@ -26,14 +21,15 @@ enum HandshakeFailure(val message: String):
   case Unauthorized(msg: String)    extends HandshakeFailure(msg)
   case Unavailable(msg: String)     extends HandshakeFailure(msg)
 
-/** A validated, authorized principal bound to one (tenant, tenantDb, pool). `effectiveSet` is
-  * computed once here and cached on the session so the per-statement ACL gate never re-queries
-  * Postgres; `profile` is the auth chain's view of the principal.
+/** A validated, authorized principal bound to one (tenant, tenantDb, pool). `grants` holds the
+  * effective set resolved here and resolves it again once the tenant's policy version moves
+  * ([[SessionGrants]]), so a statement never runs under grants a revoke took away; `profile` is the
+  * auth chain's view of the principal.
   */
 final case class HandshakeBound(
     poolKey: PoolKey,
     user: String,
-    effectiveSet: EffectiveSet,
+    grants: SessionGrants,
     profile: Option[AuthenticatedProfile]
 )
 
@@ -50,7 +46,8 @@ final case class HandshakeBound(
   *      verified ([[ai.starlake.quack.edge.auth.IdentityNaming]], the rule the management login
   *      applies too);
   *   3. re-resolve the target with the validated username;
-  *   4. run the user-scope and pool-access gates and compute the EffectiveSet.
+  *   4. run the user-scope and pool-access gates and compute the EffectiveSet, the tenant's policy
+  *      version read first ([[SessionGrants.authorize]]).
   *
   * @param lookupPool
   *   `(tenant, pool) -> tenantDb`, enforcing the tenant and pool kill switches.
@@ -61,6 +58,10 @@ final case class HandshakeBound(
   *   `superuserAdmissible` is false when the credential was validated by a TENANT realm, so such a
   *   principal can never bind to a tenant-IS-NULL superuser row. A `HandshakeDenial.Unavailable`
   *   (OPA unreachable) becomes `HandshakeFailure.Unavailable`.
+  * @param versions
+  *   each tenant's policy version: a bound session's grants are resolved again through `authorize`
+  *   once its tenant's version moves ([[SessionGrants]]). Required: a source that never moves would
+  *   keep every session on its handshake's grants.
   * @param edge
   *   the front door's name (`flightsql`, `quack`), carried into the OPA input's `client.edge`.
   */
@@ -69,6 +70,7 @@ final class EdgeHandshake(
     lookupPool: (String, String) => Either[String, String],
     resolveTenant: String => Option[Tenant],
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
+    versions: ai.starlake.quack.edge.authz.PolicyVersions,
     edge: String = "flightsql"
 ) extends LazyLogging:
 
@@ -166,7 +168,7 @@ final class EdgeHandshake(
             val jwtRoles  = profileOpt.map(_.role).filter(_.nonEmpty).toSet
             val jwtGroups = profileOpt.map(_.groups).getOrElse(Set.empty)
             val jwtClaims = profileOpt.map(_.claims).getOrElse(Map.empty)
-            authorize(
+            SessionGrants.authorize(
               AuthzRequest(
                 resolved.poolKey.tenant,
                 resolved.poolKey.pool,
@@ -176,16 +178,16 @@ final class EdgeHandshake(
                 jwtClaims,
                 superuserAdmissible = superuserAdmissible,
                 edge = edge
-              )
+              ),
+              authorize,
+              versions
             ) match
               case Left(HandshakeDenial.Denied(err)) =>
                 Left(HandshakeFailure.Unauthorized(s"permission denied: $err"))
               case Left(HandshakeDenial.Unavailable(err)) =>
                 Left(HandshakeFailure.Unavailable(s"authorization service unavailable: $err"))
-              case Right(auth) =>
-                Right(
-                  HandshakeBound(resolved.poolKey, resolved.user, auth.effectiveSet, profileOpt)
-                )
+              case Right((_, grants)) =>
+                Right(HandshakeBound(resolved.poolKey, resolved.user, grants, profileOpt))
           case Left(err) => Left(HandshakeFailure.Unauthenticated(err))
 
 object EdgeHandshake:

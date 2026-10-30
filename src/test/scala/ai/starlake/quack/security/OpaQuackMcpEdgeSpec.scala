@@ -104,6 +104,7 @@ class OpaQuackMcpEdgeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterA
         sup.findPoolKeyByTenantAndPoolName(tn, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
       authorize = req => sup.authorizeHandshakeDetailed(req),
+      versions = sup.policyVersions,
       edge = "quack"
     )
     new QuackFrontDoor(

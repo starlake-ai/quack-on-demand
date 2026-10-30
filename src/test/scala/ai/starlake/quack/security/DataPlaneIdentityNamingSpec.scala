@@ -204,6 +204,7 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
         asked.add(r)
         sup.authorizeHandshakeDetailed(r)
       },
+      versions = sup.policyVersions,
       edge = edge
     )
 
@@ -281,8 +282,9 @@ class DataPlaneIdentityNamingSpec extends AnyFlatSpec with Matchers:
     out match
       case Right(b) =>
         b.user shouldBe user
-        b.effectiveSet.user.username shouldBe user
-        b.effectiveSet.user.tenant shouldBe tenant
+        val set = b.grants.current().fold(f => fail(s"no grants: $f"), identity)
+        set.user.username shouldBe user
+        set.user.tenant shouldBe tenant
       case Left(other) => fail(s"expected a bound handshake, got $other")
 
   // ---------------------------------------------------------------------------------------------

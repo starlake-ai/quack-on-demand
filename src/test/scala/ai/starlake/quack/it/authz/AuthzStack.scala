@@ -320,6 +320,95 @@ final class AuthzStack(
       raw.close()
       allocator.close()
 
+  /** One FlightSQL connection of `user` on `pool`, held open: [[HeldFlight.run]]'s first statement
+    * makes the handshake (Basic), every later one replays the session's bearer, so they all run on
+    * the one session the handshake bound.
+    */
+  def heldFlight(user: String, password: String, tenant: String, pool: String): HeldFlight =
+    new HeldFlight(flightPort, user, password, tenant, pool)
+
+  /** `statements` through the native Quack front door on ONE session: one DuckDB 2.0 CLI process
+    * ATTACHes the front door as `q` once and runs each statement through
+    * `quack_query_by_name('q', ...)`, on the attached database's session. After statement `i` the
+    * CLI waits for this JVM, which runs `between(i)` (a revoke, a grant) first. Each statement's
+    * outcome: its rows as CSV lines (Right), or what the CLI printed on stderr for it (Left).
+    * Callers check [[AuthzStack.cliPresent]].
+    */
+  def heldDoor(
+      user: String,
+      password: String,
+      tenant: String,
+      pool: String,
+      statements: List[String]
+  )(between: Int => Unit): List[Either[String, List[String]]] =
+    val dir   = java.nio.file.Files.createTempDirectory("qod-held-door").toRealPath()
+    val token = doorToken(user, password, tenant, pool)
+    def at(name: String): Path = dir.resolve(name)
+    def marker(i: Int): String = s"qod-held-step-$i-end"
+    // Run by the CLI after each statement (`.shell` quotes every argument, so the shell logic lives
+    // in a file): the step's marker on the CLI's stderr, which is unbuffered and so follows the
+    // statement's error, if any; then a bounded wait for this JVM, so a spec failing between two
+    // steps never leaves the CLI behind.
+    java.nio.file.Files.writeString(
+      at("step.sh"),
+      """echo "qod-held-step-$2-end" 1>&2
+        |touch "$1/done-$2"
+        |i=0
+        |while [ ! -f "$1/go-$2" ] && [ "$i" -lt 1200 ]; do sleep 0.05; i=$((i+1)); done
+        |""".stripMargin
+    )
+    val script = new StringBuilder
+    script.append(
+      s"ATTACH 'quack:127.0.0.1:$quackPort' AS q (TYPE quack, TOKEN ${AuthzStack.lit(token)});\n"
+    )
+    statements.zipWithIndex.foreach { (sql, i) =>
+      // Each statement's rows in a file of its own: `.output` closes (flushes) the previous one.
+      script.append(s".output ${at(s"out-$i")}\n")
+      script.append(s"SELECT * FROM quack_query_by_name('q', ${AuthzStack.lit(sql)});\n")
+      script.append(".output\n")
+      script.append(s".shell /bin/sh ${at("step.sh")} $dir $i\n")
+    }
+    val err  = new StringBuffer
+    val proc = (Process(Seq("duckdb", "-no-agent", "-csv", "-noheader")) #<
+      new ByteArrayInputStream(script.toString.getBytes(StandardCharsets.UTF_8)))
+      .run(ProcessLogger(_ => (), l => err.append(l).append('\n')))
+    try
+      statements.indices.foreach { i =>
+        await(s"step $i of the held front door session", 60.seconds) {
+          Option.when(
+            java.nio.file.Files.exists(at(s"done-$i")) && err.toString.contains(marker(i))
+          )(())
+        }
+        between(i)
+        java.nio.file.Files.createFile(at(s"go-$i"))
+      }
+      proc.exitValue()
+      val errText = err.toString
+      statements.indices.toList.map { i =>
+        val from    = if i == 0 then 0 else errText.indexOf(marker(i - 1)) + marker(i - 1).length
+        val stepErr = errText.substring(from, errText.indexOf(marker(i))).trim
+        if stepErr.nonEmpty then Left(stepErr)
+        else
+          Right(
+            java.nio.file.Files
+              .readAllLines(at(s"out-$i"))
+              .asScala
+              .map(_.trim)
+              .filter(_.nonEmpty)
+              .toList
+          )
+      }
+    finally
+      proc.destroy()
+      Try {
+        val tree = java.nio.file.Files.walk(dir)
+        try
+          tree
+            .sorted(java.util.Comparator.reverseOrder())
+            .forEach(p => java.nio.file.Files.deleteIfExists(p))
+        finally tree.close()
+      }
+
   /** The front door token of `user` on `pool`. */
   private def doorToken(user: String, password: String, tenant: String, pool: String): String =
     s"tenant=$tenant&pool=$pool&user=$user&password=$password"
@@ -402,6 +491,55 @@ final class AuthzStack(
       .getOrElse(r.body())
     if result.flatMap(_.get[Boolean]("isError").toOption).contains(false) then Right(text)
     else Left(text)
+
+/** See [[AuthzStack.heldFlight]]. */
+final class HeldFlight(port: Int, user: String, password: String, tenant: String, pool: String):
+
+  private val allocator = new RootAllocator()
+  private val bearer    =
+    new org.apache.arrow.flight.auth2.ClientIncomingAuthHeaderMiddleware.Factory(
+      new org.apache.arrow.flight.auth2.ClientBearerHeaderHandler()
+    )
+  private val raw =
+    FlightClient
+      .builder(allocator, Location.forGrpcInsecure("127.0.0.1", port))
+      .intercept(bearer)
+      .build()
+  private val fsql                                                = new FlightSqlClient(raw)
+  private var session: Option[org.apache.arrow.flight.CallOption] = None
+
+  private def basic: HeaderCallOption =
+    val hdrs = new FlightCallHeaders()
+    hdrs.insert("tenant", tenant)
+    hdrs.insert("pool", pool)
+    hdrs.insert(
+      "authorization",
+      "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
+    )
+    new HeaderCallOption(hdrs)
+
+  /** `sql` on this connection: every row as `a,b` (Right), or the error the client got (Left). */
+  def run(sql: String): Either[String, List[String]] =
+    val opt = session.getOrElse(basic)
+    try
+      val info   = fsql.execute(sql, opt)
+      val stream = fsql.getStream(info.getEndpoints.get(0).getTicket, opt)
+      try
+        val out = ListBuffer.empty[String]
+        while stream.next() do
+          val root = stream.getRoot
+          for i <- 0 until root.getRowCount do
+            out += root.getFieldVectors.asScala
+              .map((v: FieldVector) => String.valueOf(v.getObject(i)))
+              .mkString(",")
+        Right(out.toList)
+      finally stream.close()
+    catch case e: FlightRuntimeException => Left(e.getMessage)
+    finally if session.isEmpty then session = Option(bearer.getCredentialCallOption)
+
+  def close(): Unit =
+    try raw.close()
+    finally allocator.close()
 
 object AuthzStack:
 

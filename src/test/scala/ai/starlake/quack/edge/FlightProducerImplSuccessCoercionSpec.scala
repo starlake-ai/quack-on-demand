@@ -97,7 +97,13 @@ class FlightProducerImplSuccessCoercionSpec extends AnyFlatSpec with Matchers:
     val producer = new FlightProducerImpl(router)
 
     val peer = s"peer-${java.util.UUID.randomUUID()}"
-    ConnectionContext.bind(peer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "alice")
+    ConnectionContext.bind(
+      peer,
+      poolKey,
+      s"conn-${java.util.UUID.randomUUID()}",
+      "alice",
+      grants = None
+    )
     (producer, peer)
 
   private val emptyHeaders = new org.apache.arrow.flight.CallHeaders:

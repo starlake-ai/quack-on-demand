@@ -97,7 +97,7 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       poolKey,
       s"conn-${java.util.UUID.randomUUID()}",
       "alice",
-      effectiveSet = superuserEff
+      grants = superuserEff.map(SessionGrants.fixed)
     )
     (producer, sent, router, peer)
 
@@ -614,7 +614,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       val command                = prepareQueryHandle(producer, peer, "SELECT a FROM t")
       // A second, unrelated session presents the same handle.
       val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
-      ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+      ConnectionContext.bind(
+        otherPeer,
+        poolKey,
+        s"conn-${java.util.UUID.randomUUID()}",
+        "mallory",
+        grants = None
+      )
       val listener = new RecordingStreamListener
       producer.getStreamPreparedStatement(command, fakeCallContext(otherPeer), listener)
       listener.awaitTerminal()
@@ -645,7 +651,13 @@ class FlightProducerImplPrepareSpec extends AnyFlatSpec with Matchers:
       .setPreparedStatementHandle(handle)
       .build()
     val otherPeer = s"peer-${java.util.UUID.randomUUID()}"
-    ConnectionContext.bind(otherPeer, poolKey, s"conn-${java.util.UUID.randomUUID()}", "mallory")
+    ConnectionContext.bind(
+        otherPeer,
+        poolKey,
+        s"conn-${java.util.UUID.randomUUID()}",
+        "mallory",
+        grants = None
+      )
     val ack = new RecordingPutListener
     producer.acceptPutPreparedStatementUpdate(cmd, fakeCallContext(otherPeer), null, ack).run()
     ack.completed shouldBe false

@@ -27,15 +27,21 @@ final class FlightEdgeServer(
     // display-name space) AND to recover the id for the Basic auth chain
     // (which queries `qodstate_user.tenant`, which stores the id).
     resolveTenant: String => Option[Tenant],
-    // Post-authentication authorize callback. Runs once per handshake
-    // after the auth chain validated the credentials. It performs the
-    // user-scope and pool-access gates, computes the EffectiveSet
+    // Post-authentication authorize callback. Runs at the handshake, after
+    // the auth chain validated the credentials, and again on a session's
+    // first statement after its tenant's policy version moved. It performs
+    // the user-scope and pool-access gates, computes the EffectiveSet
     // (union-merging any JWT-claimed role / group names), and returns
-    // an AuthorizedHandshake. The result is pinned onto
-    // ConnectionContext so the per-statement ACL gate can read it
-    // without further joins. See EdgeHandshake for the argument contract;
-    // HandshakeDenial.Unavailable (OPA unreachable) surfaces as UNAVAILABLE.
+    // an AuthorizedHandshake. The session's grants are pinned onto
+    // ConnectionContext so the per-statement ACL gate reads them without
+    // further joins until a grant changes. See EdgeHandshake for the
+    // argument contract; HandshakeDenial.Unavailable (OPA unreachable)
+    // surfaces as UNAVAILABLE.
     authorize: AuthzRequest => Either[HandshakeDenial, AuthorizedHandshake],
+    // Each tenant's policy version: a bound session's grants are resolved again through
+    // `authorize` once its tenant's version moves (SessionGrants), so a revoke reaches an open
+    // connection on its next statement. Required: see EdgeHandshake.
+    versions: ai.starlake.quack.edge.authz.PolicyVersions,
     // Branch targeting (Epic 1): (tenant, parent tenantDb, branch name) -> the branch's pool
     // key. Consulted AFTER `authorize` succeeded against the parent pool named by the client, so
     // a branch session carries exactly the parent pool's authorization and EffectiveSet. Left =
@@ -49,7 +55,14 @@ final class FlightEdgeServer(
 
   /** The transport-agnostic handshake shared with the Quack front door. */
   private val handshake =
-    new EdgeHandshake(authService, lookupPool, resolveTenant, authorize, edge = "flightsql")
+    new EdgeHandshake(
+      authService,
+      lookupPool,
+      resolveTenant,
+      authorize,
+      versions,
+      edge = "flightsql"
+    )
 
   /** Sweeps expired [[ConnectionContext]] entries so a departed client's session state (the context
     * entry and the router's session row) does not linger until the peer id happens to be presented
@@ -234,7 +247,7 @@ final class FlightEdgeServer(
                     key = targetKey,
                     connectionId = connId,
                     user = bound.user,
-                    effectiveSet = Some(bound.effectiveSet),
+                    grants = Some(bound.grants),
                     ttlSec = cfg.sessionTtlSec
                   )
                   authResult(peerId)

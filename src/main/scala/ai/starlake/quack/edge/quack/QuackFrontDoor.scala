@@ -240,13 +240,29 @@ final class QuackFrontDoor(
     // listing, between the two listings, that listing runs elsewhere and the client's catalog
     // comes up without tables until its next refresh (a new ATTACH, or the refresh after a DDL).
     val catalogRead = QuackFrontDoor.readsCatalog(prep.sql)
+    // The session's grants as of now: resolved again first when its tenant's policy version moved
+    // (SessionGrants), so a revoke reaches this open session on this statement.
+    s.bound.grants.currentIO.flatMap {
+      case Left(fail) => IO.pure(encodeError(fail.reason))
+      case Right(eff) => relayGranted(s, f, prep, reopenTx, cq, catalogRead, eff)
+    }
+
+  private def relayGranted(
+      s: QuackSession,
+      f: Frame,
+      prep: PrepareRequest,
+      reopenTx: Boolean,
+      cq: Long,
+      catalogRead: Boolean,
+      eff: ai.starlake.quack.ondemand.rbac.EffectiveSet
+  ): IO[Array[Byte]] =
     router
       .executeWith[PrepareOutcome](
         s.connectionId,
         s.bound.user,
         s.bound.poolKey,
         prep.sql,
-        Some(s.bound.effectiveSet),
+        Some(eff),
         relaySend(s, cq, prep, reopenTx),
         source = "quack",
         preferredNode = if catalogRead then s.catalogNode.get() else None,
@@ -415,12 +431,13 @@ final class QuackFrontDoor(
       router.adapter.tracked(node, recordLoad) {
         IO.monotonic.flatMap { t0 =>
           val elapsed: () => IO[Long] = () => IO.monotonic.map(t1 => (t1 - t0).toMillis)
-          // A reused transaction link was opened by this same session, so it mints for this
-          // principal already.
+          // A reused transaction link was opened by this same session for an earlier statement,
+          // whose grants this one's may no longer be (SessionGrants): it mints for this
+          // statement's principal from now on.
           val authorize = router.adapter.authorizer(node, principal)
           val reuse     = s.txLink.get().filter(_._1 == node.nodeId).map(_._2)
           val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] = reuse match
-            case Some(l) => IO.pure(Right((l, true)))
+            case Some(l) => IO { l.mintWith(authorize); Right((l, true)) }
             case None    =>
               QuackNodeLink
                 .open(transport, node, s.hello, cq, authorize)
@@ -510,8 +527,9 @@ final class QuackFrontDoor(
           val authorize               = router.adapter.authorizer(node, principal)
           val openIO: IO[Either[LinkFailure, (QuackNodeLink, Boolean)]] =
             s.txLink.get() match
-              case Some((id, l)) if id == node.nodeId => IO.pure(Right((l, true)))
-              case Some((id, _))                      =>
+              case Some((id, l)) if id == node.nodeId =>
+                IO { l.mintWith(authorize); Right((l, true)) }
+              case Some((id, _)) =>
                 IO.pure(
                   Left(
                     LinkFailure.Permanent(
@@ -589,8 +607,12 @@ final class QuackFrontDoor(
 
   private def admin(s: QuackSession, f: Frame, prep: PrepareRequest): IO[Array[Byte]] =
     val cq = f.header.clientQueryId
-    router
-      .execute(s.connectionId, s.bound.user, s.bound.poolKey, prep.sql, Some(s.bound.effectiveSet))
+    s.bound.grants.currentIO
+      .flatMap {
+        case Left(fail) => IO.pure(Left(fail))
+        case Right(eff) =>
+          router.execute(s.connectionId, s.bound.user, s.bound.poolKey, prep.sql, Some(eff))
+      }
       .flatMap {
         case Left(fail) => IO.pure(encodeError(fail.reason))
         case Right(qr)  =>

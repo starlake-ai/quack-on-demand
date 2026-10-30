@@ -284,18 +284,32 @@ final class PoolSupervisor(
   private val EffectiveCacheTtl: scala.concurrent.duration.FiniteDuration =
     scala.concurrent.duration.DurationInt(60).seconds
 
+  /** A cached set and the [[effectiveGeneration]] read before it was computed. */
+  private final case class CachedEffective(
+      generation: Long,
+      set: ai.starlake.quack.ondemand.rbac.EffectiveSet
+  )
+
   /** Caffeine-backed: `expireAfterWrite` handles the TTL, `maximumSize` bounds memory so
     * accumulated (userId, jwtRolesHash, jwtGroupsHash) keys can't leak.
     */
   private val effectiveCache: com.github.benmanes.caffeine.cache.Cache[
     EffectiveCacheKey,
-    ai.starlake.quack.ondemand.rbac.EffectiveSet
+    CachedEffective
   ] =
     com.github.benmanes.caffeine.cache.Caffeine
       .newBuilder()
       .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
       .maximumSize(10_000L)
-      .build[EffectiveCacheKey, ai.starlake.quack.ondemand.rbac.EffectiveSet]()
+      .build[EffectiveCacheKey, CachedEffective]()
+
+  /** Moved by every invalidation before it drops the cache and publishes the policy versions. A set
+    * is served from the cache only under the generation it was computed in: one computed from
+    * grants read before an RBAC mutation, and written after that mutation's invalidation, is never
+    * served (a session resolving again under the mutation's new version would keep it until the
+    * next change; [[ai.starlake.quack.edge.SessionGrants]]).
+    */
+  private val effectiveGeneration = new java.util.concurrent.atomic.AtomicLong(0L)
 
   /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
     * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
@@ -313,6 +327,7 @@ final class PoolSupervisor(
       versions: Option[Map[String, Long]],
       credentials: ai.starlake.quack.edge.authz.UserS3CredentialCache.Loaded
   ): Unit =
+    effectiveGeneration.incrementAndGet()
     effectiveCache.invalidateAll()
     policyVersions.publish(versions)
     userS3.publish(credentials)
@@ -4392,12 +4407,13 @@ final class PoolSupervisor(
       jwtRoles: Set[String] = Set.empty,
       jwtGroups: Set[String] = Set.empty
   ): Option[ai.starlake.quack.ondemand.rbac.EffectiveSet] =
-    val key    = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
-    val cached = effectiveCache.getIfPresent(key)
-    if cached != null then Some(cached)
+    val key        = EffectiveCacheKey(userId, jwtRoles, jwtGroups)
+    val generation = effectiveGeneration.get()
+    val cached     = effectiveCache.getIfPresent(key)
+    if cached != null && cached.generation == generation then Some(cached.set)
     else
       computeEffectiveSetForUser(userId, jwtRoles, jwtGroups).map { computed =>
-        effectiveCache.put(key, computed)
+        effectiveCache.put(key, CachedEffective(generation, computed))
         computed
       }
 

@@ -50,7 +50,8 @@ object LinkFailure:
   *
   * Every PREPARE it sends follows a fresh session handle from `authorize` (`CALL
   * system.main.qod_session(...)`, its own PREPARE): [[prepare]] for a relayed client statement,
-  * [[runDiscard]] for the manager's own.
+  * [[runDiscard]] for the manager's own. A link a client transaction keeps across statements is
+  * handed each statement's own `authorize` ([[mintWith]]).
   */
 final class QuackNodeLink(
     transport: QuackTransport,
@@ -58,6 +59,14 @@ final class QuackNodeLink(
     val nodeConnectionId: String,
     authorize: () => String
 ) extends LazyLogging:
+
+  private val minter = new java.util.concurrent.atomic.AtomicReference(authorize)
+
+  /** Mints every later session handle with `next`: a client transaction's link carries statements
+    * of one session whose grants can change between them (they follow the tenant's policy version,
+    * [[ai.starlake.quack.edge.SessionGrants]]), and each is judged under the grants of its own.
+    */
+  def mintWith(next: () => String): Unit = minter.set(next)
 
   /** POST already-framed bytes and return the node's response bytes. Private on purpose: it is the
     * one way to put a PREPARE on the link with no session handle in front of it, so the only ways
@@ -187,7 +196,7 @@ final class QuackNodeLink(
     * `Permanent`: nothing could be minted, and no other node would do better.
     */
   private def authorized(clientQueryId: Long): IO[Either[LinkFailure, Unit]] =
-    IO(authorize()).attempt.flatMap {
+    IO(minter.get()()).attempt.flatMap {
       case Left(e) =>
         IO.pure(Left(LinkFailure.Permanent(Option(e.getMessage).getOrElse(e.toString))))
       case Right(prelude) =>

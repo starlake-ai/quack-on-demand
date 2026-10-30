@@ -10,11 +10,12 @@ import scala.collection.concurrent.TrieMap
 /** Thread-safe map of `peerIdentity → Entry`, populated by the auth handler during Handshake and
   * read by the producer during `getStream`.
   *
-  * Every authenticated entry carries an [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] computed
-  * once at handshake time. The per-statement ACL gate reads this cached snapshot via
-  * `effectiveSetFor(peer)` -- no per-RPC join against qodstate_role_permission /
-  * qodstate_user_role. Superusers carry an empty effective set; the validator bypasses them
-  * outright based on `effectiveSet.user.tenant.isEmpty`.
+  * Every authenticated entry carries the session's [[SessionGrants]]: the
+  * [[ai.starlake.quack.ondemand.rbac.EffectiveSet]] the handshake resolved, resolved again on the
+  * first statement after the tenant's policy version moved, so a statement reads no join against
+  * qodstate_role_permission / qodstate_user_role until a grant changed. Superusers carry an empty
+  * effective set, never resolved again; the validator bypasses them outright based on
+  * `effectiveSet.user.tenant.isEmpty`.
   *
   * Sessions carry an `expiresAt`. Once past, every accessor pretends the entry doesn't exist and
   * the auth handler falls through to a full handshake -- which re-validates the original
@@ -30,10 +31,19 @@ object ConnectionContext:
       poolKey: PoolKey,
       connectionId: String,
       user: String,
-      effectiveSet: Option[EffectiveSet],
+      grants: Option[SessionGrants],
       expiresAt: Instant
   ):
     def expired(now: Instant = Instant.now()): Boolean = !now.isBefore(expiresAt)
+
+    /** The effective set the session's next statement runs under ([[SessionGrants.current]]); None
+      * when no handshake state is attached. Left: the session's grants now refuse it, or could not
+      * be resolved again. May block on the control plane.
+      */
+    def effectiveSet(): Either[RouterFailure, Option[EffectiveSet]] =
+      grants match
+        case None    => Right(None)
+        case Some(g) => g.current().map(Some(_))
 
   private val byPeer = TrieMap.empty[String, Entry]
 
@@ -53,16 +63,20 @@ object ConnectionContext:
     */
   private val DefaultTtlSec: Long = 3600
 
+  /** `grants` is required: the FlightSQL handshake binds the [[SessionGrants]] it resolved, which
+    * follow the tenant's policy version; None binds a session without handshake state, whose
+    * statements the validator denies.
+    */
   def bind(
       peer: String,
       key: PoolKey,
       connectionId: String,
       user: String,
-      effectiveSet: Option[EffectiveSet] = None,
+      grants: Option[SessionGrants],
       ttlSec: Long = DefaultTtlSec
   ): Unit =
     val exp = Instant.now().plusSeconds(ttlSec)
-    byPeer.put(peer, Entry(key, connectionId, user, effectiveSet, exp)); ()
+    byPeer.put(peer, Entry(key, connectionId, user, grants, exp)); ()
 
   /** Return the entry if present AND not expired. Expired entries are evicted lazily on access so a
     * long-idle peerId doesn't accumulate.
@@ -82,10 +96,9 @@ object ConnectionContext:
     gone.foreach(drop)
     gone.size
 
-  def poolFor(peer: String): Option[PoolKey]              = entry(peer).map(_.poolKey)
-  def connectionIdFor(peer: String): Option[String]       = entry(peer).map(_.connectionId)
-  def userFor(peer: String): Option[String]               = entry(peer).map(_.user)
-  def effectiveSetFor(peer: String): Option[EffectiveSet] = entry(peer).flatMap(_.effectiveSet)
+  def poolFor(peer: String): Option[PoolKey]        = entry(peer).map(_.poolKey)
+  def connectionIdFor(peer: String): Option[String] = entry(peer).map(_.connectionId)
+  def userFor(peer: String): Option[String]         = entry(peer).map(_.user)
 
   def unbind(peer: String): Unit = drop(peer)
 

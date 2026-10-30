@@ -279,7 +279,8 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       lookupPool = (t, p) =>
         sup.findPoolKeyByTenantAndPoolName(t, p).map(_.tenantDb).toRight(s"pool '$p' not found"),
       resolveTenant = raw => sup.getTenant(raw),
-      authorize = _ => Right(AuthorizedHandshake(poolKey, "t-1", "p-1", user, eff))
+      authorize = _ => Right(AuthorizedHandshake(poolKey, "t-1", "p-1", user, eff)),
+      versions = sup.policyVersions
     )
     val transport = new ScriptedTransport
     val sessions  = new QuackSessionRegistry(sessionTtlSec = ttlSec, maxHeartbeatSec = 3600)

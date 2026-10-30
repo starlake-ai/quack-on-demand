@@ -51,13 +51,14 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         if t == "acme" && p == "bi" then Right("acme_db") else Left(s"pool '$p' not found"),
       resolveTenant = raw =>
         if raw == "acme" then Some(Tenant("acme", "Acme Corporation")) else None,
-      authorize = _ => authorizeResult.left.map(HandshakeDenial.Denied(_))
+      authorize = _ => authorizeResult.left.map(HandshakeDenial.Denied(_)),
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
 
   "authenticate" should "bind a validated basic credential to its pool" in:
     val out = handshake().authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false)
-    out shouldBe Right(
-      HandshakeBound(PoolKey("acme", "acme_db", "bi"), "alice", eff, Some(profile("alice", "acme")))
+    out.map(b => (b.poolKey, b.user, b.grants.current(), b.profile)) shouldBe Right(
+      (PoolKey("acme", "acme_db", "bi"), "alice", Right(eff), Some(profile("alice", "acme")))
     )
 
   it should "route by the tenant id, never the display name" in:
@@ -106,6 +107,7 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
         seen = Some(r)
         Left(HandshakeDenial.Unavailable("connection refused"))
       },
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
       edge = "quack"
     )
     hs.authenticate(None, Some(("alice", "pw")), Some("bi"), Some("acme"), false) shouldBe
@@ -133,7 +135,8 @@ class EdgeHandshakeSpec extends AnyFlatSpec with Matchers:
       lookupPool = (_, _) => Right("acme_db"),
       resolveTenant = _ => Some(Tenant("acme")),
       authorize = _ =>
-        Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff))
+        Right(AuthorizedHandshake(PoolKey("acme", "acme_db", "bi"), "t-1", "p-1", eff.user, eff)),
+      versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
     )
     for (bearer, basic, superuser) <- List(
         (None, Some(("alice", "pw")), false),

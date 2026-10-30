@@ -225,7 +225,8 @@ object FlightEdgeHarness:
       authSvc,
       lookupPool,
       resolveTenant,
-      authorize
+      authorize,
+      sup.policyVersions
     )
     srv.start()
 
