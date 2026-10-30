@@ -100,6 +100,28 @@ class UserS3CredentialsSpec extends AnyFlatSpec with Matchers:
     loads.get() shouldBe 2L
   }
 
+  it should "vouch for nobody while its first load has not succeeded" in {
+    // Before any load succeeded, the empty sets say nothing of anyone: a user whose credentials are
+    // in the store must get the retryable answer, not a refusal that reads as permanent.
+    val fails = new AtomicBoolean(true)
+    val clock = new AtomicLong(1_000_000L)
+    val c     = new UserS3CredentialCache(
+      () => if fails.get() then throw new RuntimeException("pg down") else List(A),
+      () => clock.get()
+    )
+    c.refresh()
+    c.current("u-1") shouldBe Left(UserS3CredentialCache.StaleReason)
+    c.current("u-9") shouldBe Left(UserS3CredentialCache.StaleReason)
+    fails.set(false)
+    clock.addAndGet(UserS3CredentialCache.RetryMs)
+    c.current("u-1") shouldBe Right(List(A))
+    // Once loaded, an outage refuses only the users the last sets hold credentials of.
+    fails.set(true)
+    c.refresh()
+    c.current("u-1") shouldBe Left(UserS3CredentialCache.StaleReason)
+    c.current("u-9") shouldBe Right(Nil)
+  }
+
   "the served view" should "withhold a credential whose scope now lies at or under a data folder" in {
     val folders = new AtomicReference[Either[String, List[String]]](Right(Nil))
     val etl     = cred("a" * 32, "u-1", "s3://acme-etl/x/", 10L)

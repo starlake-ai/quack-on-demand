@@ -57,10 +57,12 @@ object UserS3Credentials:
   * versions (after every local RBAC mutation, credential writes included, and on every restore,
   * which HA peers run on the rbac NOTIFY). A failed refresh marks the cache stale: [[current]]
   * answers Left until a refresh succeeds for a user the last sets hold credentials of, so a
-  * credential removed meanwhile is never served or admitted from them. A user they hold none of is
-  * still answered with none: a credential added meanwhile is missing, which only grants less, and a
-  * store outage does not refuse the statements of every user. While stale, every read retries the
-  * load, at most once per [[UserS3CredentialCache.RetryMs]]. Never logs a credential.
+  * credential removed meanwhile is never served or admitted from them. Once a load has succeeded, a
+  * user they hold none of is still answered with none: a credential added meanwhile is missing,
+  * which only grants less, and a store outage does not refuse the statements of every user. Before
+  * any load has succeeded the sets say nothing of anyone, so every user is answered Left. While
+  * stale, every read retries the load, at most once per [[UserS3CredentialCache.RetryMs]]. Never
+  * logs a credential.
   */
 final class UserS3CredentialCache(
     load: () => List[UserS3Credential],
@@ -70,9 +72,14 @@ final class UserS3CredentialCache(
 
   @volatile private var byUser: Map[String, (List[UserS3Credential], String)] = Map.empty
   @volatile private var stale: Boolean                                        = false
+  @volatile private var loadedOnce: Boolean                                   = false
   @volatile private var lastAttempt: Long                                     = 0L
-  // Reads are numbered as they start; a read publishes only when no later-started one has, since
-  // a read that started later saw every commit an earlier one saw.
+  // Reads are numbered as they start, and a read publishes only when no later-started one has.
+  // Every commit is followed by a read that starts after it (the writer's own refresh, or a peer's
+  // NOTIFY-driven restore), and no read that started before that one can publish over it: a
+  // commit's own read always wins over every read that started before it. Two reads may still load
+  // out of start order; the published set then lags until the next read, never past a commit whose
+  // own read has published.
   private val reads               = new java.util.concurrent.atomic.AtomicLong(0L)
   @volatile private var published = 0L
 
@@ -84,7 +91,8 @@ final class UserS3CredentialCache(
 
   override def current(userId: String): Either[String, List[UserS3Credential]] =
     retryIfStale()
-    if stale && byUser.contains(userId) then Left(UserS3CredentialCache.StaleReason)
+    if stale && (!loadedOnce || byUser.contains(userId)) then
+      Left(UserS3CredentialCache.StaleReason)
     else Right(of(userId))
 
   /** Reloads every user's credentials: [[read]] then [[publish]]. */
@@ -102,7 +110,8 @@ final class UserS3CredentialCache(
     UserS3CredentialCache.Loaded(seq, at, sets)
 
   /** Publishes what [[read]] returned, unless a read that started after it has published already
-    * (it saw every commit this one saw). A failed read marks the cache stale.
+    * (see `reads`: a commit's own read is never overwritten by one that started before it). A
+    * failed read marks the cache stale.
     */
   def publish(loaded: UserS3CredentialCache.Loaded): Unit = synchronized {
     if loaded.seq > published then
@@ -115,6 +124,7 @@ final class UserS3CredentialCache(
           }
           if stale then logger.info("user S3 credentials: reloaded after a failed refresh")
           stale = false
+          loadedOnce = true
         case Left(cause) =>
           stale = true
           logger.warn(
