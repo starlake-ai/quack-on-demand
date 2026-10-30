@@ -51,7 +51,7 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     List(RolePermission("p-1", "r-1", "acme_lake", "main", "orders", "RO")),
     Nil
   )
-  private val AliceP = NodePrincipal.of(Some(Alice), Pool)
+  private val AliceP = NodePrincipal.of(Some(Alice), Pool, DecidePurpose.Live)
   private val Root   = NodePrincipal("root", "root", None, superuser = true, system = false)
 
   private def s(x: String): Json = Json.fromString(x)
@@ -293,7 +293,12 @@ class DecideRouteSpec extends AnyFlatSpec with Matchers:
     val nonce   = NodeHandles.verify(text, Key, Node.nodeId, f.clock.get()).toOption.get.nonce
     val mallory = Alice.copy(user = Alice.user.copy(id = "u-2", username = "mallory"))
     val h       = NodeHandles.verify(text, Key, Node.nodeId, f.clock.get()).toOption.get
-    f.minted.put(nonce, DecideContext(mallory, Pool, None), h.ctx, f.clock.get() + 60_000L)
+    f.minted.put(
+      nonce,
+      DecideContext(mallory, Pool, None, DecidePurpose.Live),
+      h.ctx,
+      f.clock.get() + 60_000L
+    )
     f.call(request(text, "plan", plan(List(read("orders"))))) shouldBe
       (Status.Unauthorized, "handle does not match its minted context", Some(MediaType.text.plain))
     // The same user and pool under another digest: the context is not the one minted.

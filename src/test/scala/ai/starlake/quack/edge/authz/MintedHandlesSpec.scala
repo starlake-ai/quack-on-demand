@@ -15,7 +15,8 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
   private val Ctx  = DecideContext(
     EffectiveSet(RbacUser("u-1", Some("acme"), "alice", "user"), Nil, Nil, Nil, Nil),
     Pool,
-    None
+    None,
+    DecidePurpose.Live
   )
 
   "MintedHandles" should "keep a context until DecideGraceMs past its handle's expiry" in {
@@ -57,7 +58,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
         None,
         Instant.EPOCH
       )
-    val text = keys.handle(node, NodePrincipal.of(Some(Ctx.effective), Pool))
+    val text = keys.handle(node, NodePrincipal.of(Some(Ctx.effective), Pool, DecidePurpose.Live))
     val h = NodeHandles.verify(text, keys.key(node.nodeId), node.nodeId, System.currentTimeMillis())
     // With the digest the handle carries, computed once at mint.
     m.get(h.toOption.get.nonce) shouldBe Some(MintedHandles.Minted(Ctx, h.toOption.get.ctx))
@@ -72,10 +73,12 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
     ) shouldBe None
     // A superuser needs no context: none is registered, though the handle digests it.
     val root = Ctx.effective.copy(user = Ctx.effective.user.copy(tenant = None))
-    val su   = keys.handle(node, NodePrincipal.of(Some(root), Pool))
+    val su   = keys.handle(node, NodePrincipal.of(Some(root), Pool, DecidePurpose.Live))
     val suh = NodeHandles.verify(su, keys.key(node.nodeId), node.nodeId, System.currentTimeMillis())
     suh.toOption.get.principal.superuser shouldBe true
-    suh.toOption.get.ctx shouldBe NodeHandles.contextDigest(Some(DecideContext(root, Pool, None)))
+    suh.toOption.get.ctx shouldBe NodeHandles.contextDigest(
+      Some(DecideContext(root, Pool, None, DecidePurpose.Live))
+    )
     m.get(suh.toOption.get.nonce) shouldBe None
     m.size shouldBe 1L
   }
@@ -83,7 +86,11 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
   "NodePrincipal.of with a pool" should "carry the session context, with the set's token restriction" in {
     val r   = ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted.copy(branchOnly = true)
     val eff = Ctx.effective.copy(restriction = Some(r))
-    NodePrincipal.of(Some(eff), Pool).context shouldBe Some(DecideContext(eff, Pool, Some(r)))
-    NodePrincipal.of(Some(eff.copy(system = true)), Pool) shouldBe NodePrincipal.System
-    NodePrincipal.of(None, Pool) shouldBe NodePrincipal.Unbound
+    NodePrincipal.of(Some(eff), Pool, DecidePurpose.Live).context shouldBe
+      Some(DecideContext(eff, Pool, Some(r), DecidePurpose.Live))
+    NodePrincipal.of(Some(eff), Pool, DecidePurpose.DryRun).context.map(_.purpose) shouldBe
+      Some(DecidePurpose.DryRun)
+    NodePrincipal.of(Some(eff.copy(system = true)), Pool, DecidePurpose.DryRun) shouldBe
+      NodePrincipal.System
+    NodePrincipal.of(None, Pool, DecidePurpose.Live) shouldBe NodePrincipal.Unbound
   }

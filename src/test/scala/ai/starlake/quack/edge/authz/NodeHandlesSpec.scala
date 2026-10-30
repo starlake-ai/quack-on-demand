@@ -42,7 +42,8 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
       Nil
     ),
     PoolKey("acme", "acme_db", "bi"),
-    restriction = None
+    restriction = None,
+    purpose = DecidePurpose.Live
   )
 
   "mint" should "produce exactly the golden handle qod-node's handle_test verifies" in {
@@ -342,6 +343,20 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
           )
         )
       )
+  }
+
+  "a dry run's session context" should "write purpose dryRun, and a live one no purpose at all" in {
+    val live = CanonicalJson.render(DecideContext.json(GoldenContext))
+    // The golden line is the live context's: unchanged by the purpose field.
+    live shouldBe golden("context")
+    live should not include "purpose"
+    val dry = GoldenContext.copy(purpose = DecidePurpose.DryRun)
+    CanonicalJson.render(DecideContext.json(dry)) shouldBe
+      live.replace(""","restriction":""", ""","purpose":"dryRun","restriction":""")
+    // So a dry run never shares a cached verdict with a live session.
+    NodeHandles.contextDigest(Some(dry)) should not be NodeHandles.contextDigest(
+      Some(GoldenContext)
+    )
   }
 
   private val Node2 = RunningNode(

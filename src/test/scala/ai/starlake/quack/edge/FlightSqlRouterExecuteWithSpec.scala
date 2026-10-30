@@ -223,6 +223,9 @@ class FlightSqlRouterExecuteWithSpec extends AnyFlatSpec with Matchers:
         Some("acme"),
         superuser = false,
         system = false,
-        context = Some(ai.starlake.quack.edge.authz.DecideContext(eff, poolKey, None))
+        context = Some(
+          ai.starlake.quack.edge.authz
+            .DecideContext(eff, poolKey, None, ai.starlake.quack.edge.authz.DecidePurpose.Live)
+        )
       )
     )

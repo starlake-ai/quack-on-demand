@@ -49,10 +49,15 @@ object NodePrincipal:
   /** [[of]] with the session's authorization context on `poolKey`, what the router mints with: the
     * handle's `ctx` digests it, and the decision endpoint judges the statement with it
     * ([[MintedHandles]]). The token restriction is the one the set was narrowed by
-    * (`EffectiveSet.restriction`). The system principal and an unbound statement carry none.
+    * (`EffectiveSet.restriction`); `purpose` is why its statements are decided (a dry run's are
+    * never run). The system principal and an unbound statement carry none.
     */
-  def of(effectiveSet: Option[EffectiveSet], poolKey: PoolKey): NodePrincipal =
+  def of(
+      effectiveSet: Option[EffectiveSet],
+      poolKey: PoolKey,
+      purpose: DecidePurpose
+  ): NodePrincipal =
     effectiveSet.filterNot(_.system) match
       case Some(e) =>
-        of(effectiveSet).copy(context = Some(DecideContext(e, poolKey, e.restriction)))
+        of(effectiveSet).copy(context = Some(DecideContext(e, poolKey, e.restriction, purpose)))
       case None => of(effectiveSet)

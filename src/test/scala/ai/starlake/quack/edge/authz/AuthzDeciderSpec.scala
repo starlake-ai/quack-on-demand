@@ -50,7 +50,7 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
       restriction: Option[TokenRestriction] = None
   ) = DecidePrincipal(
     NodePrincipal(e.user.id, e.user.username, e.user.tenant, superuser = false, system = false),
-    Some(DecideContext(e, pool, restriction))
+    Some(DecideContext(e, pool, restriction, DecidePurpose.Live))
   )
 
   private val Rules = LocationRules(

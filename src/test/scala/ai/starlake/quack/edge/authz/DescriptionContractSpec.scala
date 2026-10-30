@@ -240,7 +240,7 @@ class DescriptionContractSpec extends AnyFlatSpec with Matchers:
     )
     DecidePrincipal(
       NodePrincipal("u-alice", "alice", Some("acme"), superuser = false, system = false),
-      Some(DecideContext(effective, pool, None))
+      Some(DecideContext(effective, pool, None, DecidePurpose.Live))
     )
 
   private val root: DecidePrincipal =

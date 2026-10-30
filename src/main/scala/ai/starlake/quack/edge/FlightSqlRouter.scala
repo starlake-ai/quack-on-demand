@@ -860,7 +860,8 @@ final class FlightSqlRouter(
     val kind = classifier.classify(sql)
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
-    val principal = ai.starlake.quack.edge.authz.NodePrincipal.of(effectiveSet, poolKey)
+    val principal = ai.starlake.quack.edge.authz.NodePrincipal
+      .of(effectiveSet, poolKey, ai.starlake.quack.edge.authz.DecidePurpose.Live)
     // Per-pool dbName/schemaName overrides feed the SQL parser so unqualified
     // table refs resolve to what the node actually sees at execution time.
     val maybeState               = supervisor.get(poolKey)

@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.runtime
 import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.authz.{
   AuthzDecider,
+  DecidePurpose,
   DecideRoute,
   MintedHandles,
   NodeKeys,
@@ -180,7 +181,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
     * sends it: its USE prelude, then the statement.
     */
   private def as(who: EffectiveSet, pool: PoolKey, sql: String): Either[String, List[String]] =
-    val principal = NodePrincipal.of(Some(who), pool)
+    val principal = NodePrincipal.of(Some(who), pool, DecidePurpose.Live)
     val onPool    = node.node.copy(poolKey = pool)
     LiveQodNode.lines(
       client
