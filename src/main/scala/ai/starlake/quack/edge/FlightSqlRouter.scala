@@ -596,7 +596,7 @@ final class FlightSqlRouter(
                   run(
                     ComputedLocations.substitute(sql, locations.zip(values)),
                     preferredNode,
-                    Map("locations" -> values.mkString(", "))
+                    Map("locations" -> values.mkString(", ").take(500))
                   )
                 case Left(failure) =>
                   (fence, failure) match

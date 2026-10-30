@@ -414,6 +414,22 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "cut the locations it names to 500 characters, like the sql" in {
+    // The values are the user's to choose: up to 16 locations of 4 KiB each.
+    val store       = new ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+    val journal     = new ai.starlake.quack.ondemand.telemetry.EventJournal(store)
+    val long        = "s3://acme-etl/out/" + "x" * 2000 + ".csv"
+    val (router, _) = setup(evaluatesTo(s"'$long'"), journal = journal)
+    run(
+      router,
+      "COPY (SELECT 1 AS a) TO ('s3://acme-etl/out/' || 'x.csv')",
+      tenantUser
+    ).isRight shouldBe true
+    journal.drainNow()
+    val write = store.events.find(_.family == "data-write").getOrElse(fail("no data-write event"))
+    write.detail.get("locations").map(_.length) shouldBe Some(500)
+  }
+
   "SHOW TABLES" should "reach the node as written when the metadata filter does not narrow it" in {
     val (router, sent) = setup(filter = false)
     run(router, "SHOW TABLES", tenantUser).isRight shouldBe true
