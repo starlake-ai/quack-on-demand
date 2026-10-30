@@ -1,4 +1,6 @@
-package ai.starlake.quack.edge.sql
+package ai.starlake.quack.edge.policy
+
+import ai.starlake.quack.edge.sql.{AccessGate, GateOutcome, LockdownScreen}
 
 import ai.starlake.acl.model.Config
 import org.scalatest.flatspec.AnyFlatSpec

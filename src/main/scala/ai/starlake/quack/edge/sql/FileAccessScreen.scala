@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.parser.ExtractionResult
+import ai.starlake.quack.edge.policy.CatalogReachingCalls
 import ai.starlake.sql.SqlLexer
 
 /** Direct file access, refused to every tenant-scoped principal whenever the ACL validates (QoD

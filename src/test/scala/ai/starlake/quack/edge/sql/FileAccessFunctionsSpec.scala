@@ -1,5 +1,6 @@
 package ai.starlake.quack.edge.sql
 
+import ai.starlake.quack.edge.policy.CatalogReachingCalls
 import ai.starlake.quack.ondemand.InProcessDuckDb
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers

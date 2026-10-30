@@ -1,4 +1,6 @@
-package ai.starlake.quack.edge.sql
+package ai.starlake.quack.edge.policy
+
+import ai.starlake.quack.edge.sql.{FunctionCalls, StatementHead}
 
 /** Calls the ACL cannot authorize table by table, denied to a tenant-scoped principal whenever the
   * ACL validates (QoD-grant mode and OPA mode alike). Two families:
@@ -21,23 +23,25 @@ package ai.starlake.quack.edge.sql
   * Owner ruling (2026-10-11): these are NOT refused for every caller. A superuser keeps the raw
   * passthrough (the standard way to send native SQL to a federated source), and with the ACL off
   * and lockdown off nothing is blocked. This gate is the "ACL validates" half; lockdown denies the
-  * same family to every non-superuser through [[LockdownScreen]]. Three consumers call it:
+  * same family to every non-superuser through [[ai.starlake.quack.edge.sql.LockdownScreen]]. Three
+  * consumers call it:
   *
-  *   - [[PostgresAclValidator]], when a tenant-scoped principal is screened: the `*.*.* ALL`
-  *     wildcard covers "unsupported constructs", and admitting these under it would let a tenant
-  *     admin reach a sibling tenant's catalog, another database, or the node's secrets.
-  *   - the OPA path through [[AccessGate]], same population.
-  *   - [[ai.starlake.quack.edge.policy.ProtectedWriteGuard]], for a principal with column or row
-  *     policies, on every statement kind (a plain SELECT included): the read would return
-  *     unfiltered, unmasked rows.
+  *   - [[ai.starlake.quack.edge.sql.PostgresAclValidator]], when a tenant-scoped principal is
+  *     screened: the `*.*.* ALL` wildcard covers "unsupported constructs", and admitting these
+  *     under it would let a tenant admin reach a sibling tenant's catalog, another database, or the
+  *     node's secrets.
+  *   - the OPA path through [[ai.starlake.quack.edge.sql.AccessGate]], same population.
+  *   - [[ProtectedWriteGuard]], for a principal with column or row policies, on every statement
+  *     kind (a plain SELECT included): the read would return unfiltered, unmasked rows.
   *
   * Lexical on purpose, not an AST walk: an unparseable statement reaches the wildcard-coverable
   * parse-error arm with no AST at all. Calls are read from DuckDB 2.0's own tokens by
-  * [[FunctionCalls]]: a listed name, bare, double-quoted or backtick-quoted (DuckDB 2.0 runs
-  * `` `query_table`('orders') ``), qualified or not, followed past any trivia by an opening
-  * parenthesis, compared case-insensitively after unquoting. A name in a comment, or a quoted
-  * identifier with no parenthesis after it (a column named `query`), is not a call. String literal
-  * bodies are scanned too, so a literal like `'query('` over-denies: the safe direction.
+  * [[ai.starlake.quack.edge.sql.FunctionCalls]]: a listed name, bare, double-quoted or
+  * backtick-quoted (DuckDB 2.0 runs `` `query_table`('orders') ``), qualified or not, followed past
+  * any trivia by an opening parenthesis, compared case-insensitively after unquoting. A name in a
+  * comment, or a quoted identifier with no parenthesis after it (a column named `query`), is not a
+  * call. String literal bodies are scanned too, so a literal like `'query('` over-denies: the safe
+  * direction.
   */
 object CatalogReachingCalls:
 
@@ -72,7 +76,7 @@ object CatalogReachingCalls:
     * names escaped the `ducklake_` prefix: a `*.*.* ALL` grant admitted the maintenance and the
     * option writes the explicit calls are refused for. (`merge_adjacent_files` and `set_option`,
     * with the explicit maintenance calls, are also reserved to superusers in every ACL mode by
-    * [[CheckpointScreen.MaintenanceCalls]].)
+    * [[ai.starlake.quack.edge.sql.CheckpointScreen.MaintenanceCalls]].)
     *
     * `PRAGMA table_info('t')` is DuckDB's own pragma (it resolves the core pragma, not the macro,
     * on 2.0) and stays admitted: [[isReaching]] skips a `table_info` call right after `PRAGMA`.
@@ -147,27 +151,34 @@ object CatalogReachingCalls:
 
   /** The first SQL-valued setting a statement of `sql` sets, resets or pragmas, or None. */
   def sqlValuedSetting(sql: String): Option[String] =
-    NodeSettingScreen.targetedSettings(sql).find(SqlValuedSettings)
+    StatementHead
+      .split(sql)
+      .iterator
+      .flatMap(s => StatementHead.settingAt(StatementHead.of(s)).map(_._1))
+      .find(SqlValuedSettings)
 
   def settingDenyReason(name: String): String =
     s"setting $name runs SQL the gateway cannot authorize; " +
       "not available to tenant-scoped principals (deny, fail-closed)"
 
-  /** The names refused for every caller under lockdown too; [[LockdownScreen]] reads this so the
-    * lockdown and ACL-validates paths can never drift apart. The run-time-target trio is in it:
-    * with lockdown on and the ACL off, `query(<computed text>)` ran any reader the lockdown denies
-    * by name (a concatenation spells the name), and `query_table('<path>')` read a local file.
+  /** The names refused for every caller under lockdown too;
+    * [[ai.starlake.quack.edge.sql.LockdownScreen]] reads this so the lockdown and ACL-validates
+    * paths can never drift apart. The run-time-target trio is in it: with lockdown on and the ACL
+    * off, `query(<computed text>)` ran any reader the lockdown denies by name (a concatenation
+    * spells the name), and `query_table('<path>')` read a local file.
     */
   val LockdownNames: Set[String] = NodeEscaping ++ Fixed
 
   /** Sentinel returned when a statement nests string literals too deeply to screen
-    * ([[FunctionCalls.MaxDepth]]); not a real function name, so it never collides with one.
+    * ([[ai.starlake.quack.edge.sql.FunctionCalls.MaxDepth]]); not a real function name, so it never
+    * collides with one.
     */
   private val NestingTooDeep = "\u0000nesting-too-deep"
 
   /** The first catalog-reaching or node-escaping function called by `sql`, lowercased, or the
-    * nesting sentinel when a literal nested past [[FunctionCalls.MaxDepth]] left part of the
-    * statement unscanned (fail closed, as [[LockdownScreen]] does), or None.
+    * nesting sentinel when a literal nested past
+    * [[ai.starlake.quack.edge.sql.FunctionCalls.MaxDepth]] left part of the statement unscanned
+    * (fail closed, as [[ai.starlake.quack.edge.sql.LockdownScreen]] does), or None.
     */
   def find(sql: String): Option[String] =
     val scan = FunctionCalls.scan(sql)

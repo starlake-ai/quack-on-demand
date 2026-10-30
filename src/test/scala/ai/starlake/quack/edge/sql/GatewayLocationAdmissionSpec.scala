@@ -4,7 +4,7 @@ import ai.starlake.acl.model.Config
 import ai.starlake.quack.edge.FlightSqlRouter
 import ai.starlake.quack.edge.authz.location.LocationRules
 import ai.starlake.quack.edge.cls.{ColumnCatalog, SchemaContext}
-import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard}
+import ai.starlake.quack.edge.policy.{DottedIdentifierScreen, GuardOutcome, ProtectedWriteGuard}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RolePermission, RoleRowPolicy}

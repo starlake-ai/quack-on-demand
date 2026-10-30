@@ -1,4 +1,4 @@
-package ai.starlake.quack.edge.sql
+package ai.starlake.quack.edge.policy
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers

@@ -1,4 +1,4 @@
-package ai.starlake.quack.edge.sql
+package ai.starlake.quack.edge.policy
 
 import ai.starlake.sql.SqlLexer
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
@@ -36,16 +36,17 @@ import java.util.Locale
   * AS "a.b"`), the shape BI tools generate for column labels; in DuckDB's grammar `AS` is never
   * followed by a table reference, so an alias names no table the check could misread. A name that
   * starts with a URL scheme (`FROM "s3://b/x.parquet"`, the scheme holding no dot) is a remote
-  * replacement scan reading the object, judged as a path by [[LockdownScreen]]; split on its dots
-  * its first part holds the `://`, so it is the file reference it is
-  * (`DuckDBDialectMapper.isFileReference`), which [[FileAccessScreen]] refuses to every
-  * tenant-scoped principal, `*.*.* ALL` included, like `FROM 's3://b/x.parquet'`. A `://` anywhere
-  * else is no exception (`"other.x://"` would be checked as schema `other`).
+  * replacement scan reading the object, judged as a path by
+  * [[ai.starlake.quack.edge.sql.LockdownScreen]]; split on its dots its first part holds the `://`,
+  * so it is the file reference it is (`DuckDBDialectMapper.isFileReference`), which
+  * [[ai.starlake.quack.edge.sql.FileAccessScreen]] refuses to every tenant-scoped principal,
+  * `*.*.* ALL` included, like `FROM 's3://b/x.parquet'`. A `://` anywhere else is no exception
+  * (`"other.x://"` would be checked as schema `other`).
   *
-  * Runs for callers the ACL checks (QoD grants and OPA, through [[AccessGate]]), for principals
-  * with column or row policies (the protected-write guard), and on lockdown pools (every caller).
-  * Off lockdown, a table whose name holds one of these stays reachable to superusers and to callers
-  * the ACL does not check.
+  * Runs for callers the ACL checks (QoD grants and OPA, through
+  * [[ai.starlake.quack.edge.sql.AccessGate]]), for principals with column or row policies (the
+  * protected-write guard), and on lockdown pools (every caller). Off lockdown, a table whose name
+  * holds one of these stays reachable to superusers and to callers the ACL does not check.
   */
 object DottedIdentifierScreen:
 

@@ -10,6 +10,11 @@ import ai.starlake.acl.parser.{
   TableExtractor,
   Verb
 }
+import ai.starlake.quack.edge.policy.{
+  CatalogReachingCalls,
+  DottedIdentifierScreen,
+  SessionScopeScreen
+}
 
 /** What a statement needs authorized, independent of WHO decides (QoD grants or OPA).
   *   - `Refuse`: the statement cannot be authorized table by table. `wildcardCoverable` says
@@ -29,11 +34,10 @@ enum GateOutcome:
 object AccessGate:
 
   /** The refusal of a two-part name headed by an attached catalog, worded once for every step that
-    * refuses it (this gate, [[CatalogWriteScreen]], the protected-write guard).
+    * refuses it ([[ai.starlake.quack.edge.policy.ProtectedWriteGuard.ambiguousNameReason]]).
     */
   def ambiguousNameReason(a: DenyReason.AmbiguousCatalogRef): String =
-    s"ambiguous two-part name '${a.tableName}': '${a.catalog}' is an attached catalog; " +
-      s"qualify fully as '${a.catalog}.<schema>.<table>'"
+    ai.starlake.quack.edge.policy.ProtectedWriteGuard.ambiguousNameReason(a)
 
   /** The SQL parser configuration for a session: the pool's metastore catalog / schema fill in
     * unqualified references, falling back to the validator's defaults.

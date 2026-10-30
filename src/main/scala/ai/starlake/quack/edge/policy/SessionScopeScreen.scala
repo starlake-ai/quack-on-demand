@@ -1,5 +1,6 @@
-package ai.starlake.quack.edge.sql
+package ai.starlake.quack.edge.policy
 
+import ai.starlake.quack.edge.sql.StatementHead
 import ai.starlake.sql.{SqlCommentStripper, SqlLexer, SqlTrivia}
 
 /** Refuses a multi-statement submission that changes the session's schema or search path.
@@ -15,13 +16,14 @@ import ai.starlake.sql.{SqlCommentStripper, SqlLexer, SqlTrivia}
   * submission with anything else; sent on its own it is unchanged (control flow, and the next
   * statement gets the prelude again).
   *
-  * Pure and token-based on purpose: it is split by [[LockdownScreen.splitStatements]] and each
-  * statement is read from DuckDB 2.0's own tokens ([[StatementHead]], the setting name through
-  * [[NodeSettingScreen.settingAt]], the one setting reader every screen shares), so neither a
-  * comment, a string, a quoted identifier (double quotes or backticks, glued to the keyword or not)
-  * nor a dollar-quoted body can hide a separator or a verb, the statement an `EXPLAIN ANALYZE`
-  * carries is judged, and it never depends on whether JSqlParser can parse the statement (it cannot
-  * parse `SET x TO`, `PRAGMA`, or a two-part `USE`).
+  * Pure and token-based on purpose: it is split by
+  * [[ai.starlake.quack.edge.sql.StatementHead.split]] and each statement is read from DuckDB 2.0's
+  * own tokens ([[StatementHead]], the setting name through
+  * [[ai.starlake.quack.edge.sql.StatementHead.settingAt]], the one setting reader every screen
+  * shares), so neither a comment, a string, a quoted identifier (double quotes or backticks, glued
+  * to the keyword or not) nor a dollar-quoted body can hide a separator or a verb, the statement an
+  * `EXPLAIN ANALYZE` carries is judged, and it never depends on whether JSqlParser can parse the
+  * statement (it cannot parse `SET x TO`, `PRAGMA`, or a two-part `USE`).
   *
   * Recognized, fail closed: `USE ...` (any form); `SET` / `RESET`, optionally `SESSION` / `GLOBAL`
   * / `LOCAL`, of `search_path`, `schema` or `ALL`, in any quoting and case, and a `SET` / `RESET`
@@ -38,7 +40,7 @@ object SessionScopeScreen:
   def find(sql: String): Option[String] =
     // A fragment holding only comments runs nothing on DuckDB: `USE x; -- done` is one statement.
     val statements =
-      LockdownScreen.splitStatements(sql).filter(s => SqlLexer.tokens(s).exists(!_.isTrivia))
+      StatementHead.split(sql).filter(s => SqlLexer.tokens(s).exists(!_.isTrivia))
     if statements.lengthCompare(2) < 0 then None
     else statements.find(changesScope).map(reason)
 
@@ -49,17 +51,17 @@ object SessionScopeScreen:
       "other statements: table names after them are authorized against the pool's default " +
       s"schema, not the one they select ($brief)"
 
-  /** True when `statement` (one top-level statement, as [[LockdownScreen.splitStatements]] cuts it)
-    * moves name resolution.
+  /** True when `statement` (one top-level statement, as
+    * [[ai.starlake.quack.edge.sql.StatementHead.split]] cuts it) moves name resolution.
     */
-  private[sql] def changesScope(statement: String): Boolean =
+  private[policy] def changesScope(statement: String): Boolean =
     val h = StatementHead.of(statement)
     h.word(h.start) match
       case Some("use")           => true
       case Some("set" | "reset") =>
-        NodeSettingScreen.settingAt(h) match
+        StatementHead.settingAt(h) match
           case None            => true
           case Some((name, _)) => name == "all" || ScopeSettings.contains(name)
       case Some("pragma") =>
-        NodeSettingScreen.settingAt(h).exists((name, _) => ScopeSettings.contains(name))
+        StatementHead.settingAt(h).exists((name, _) => ScopeSettings.contains(name))
       case _ => false

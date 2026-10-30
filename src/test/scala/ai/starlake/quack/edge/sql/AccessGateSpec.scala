@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.model.Config
 import ai.starlake.acl.parser.Verb
+import ai.starlake.quack.edge.policy.CatalogReachingCalls
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 

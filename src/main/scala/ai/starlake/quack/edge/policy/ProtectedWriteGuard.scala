@@ -2,14 +2,7 @@ package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, Verb}
-import ai.starlake.quack.edge.sql.{
-  AccessGate,
-  BacktickScreen,
-  CatalogReachingCalls,
-  DottedIdentifierScreen,
-  FileAccessScreen,
-  FileAdmission
-}
+import ai.starlake.quack.edge.sql.{BacktickScreen, FileAccessScreen, FileAdmission}
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
   ColumnPolicyRewriter,
@@ -116,7 +109,9 @@ final class ProtectedWriteGuard(
     results.iterator
       .collect { case e: StatementResult.Extracted => e.qualificationErrors }
       .flatten
-      .collectFirst { case a: DenyReason.AmbiguousCatalogRef => AccessGate.ambiguousNameReason(a) }
+      .collectFirst { case a: DenyReason.AmbiguousCatalogRef =>
+        ProtectedWriteGuard.ambiguousNameReason(a)
+      }
 
   /** More than one statement, as the lexer separates them (a `;` inside a literal, a quoted name or
     * a comment does not count, nor does a trailing one). `kind` describes only a batch's first
@@ -290,3 +285,11 @@ object ProtectedWriteGuard:
       clsEnabled = false,
       rlsEnabled = false
     )
+
+  /** The refusal of a two-part name headed by an attached catalog, worded once for every step that
+    * refuses it (this guard, [[RewriteScope]], and until the gateway screens go, the ACL gate and
+    * the read-only catalog screen).
+    */
+  def ambiguousNameReason(a: DenyReason.AmbiguousCatalogRef): String =
+    s"ambiguous two-part name '${a.tableName}': '${a.catalog}' is an attached catalog; " +
+      s"qualify fully as '${a.catalog}.<schema>.<table>'"

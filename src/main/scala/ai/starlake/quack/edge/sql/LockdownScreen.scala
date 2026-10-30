@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.sql
 
 import ai.starlake.quack.model.BucketKeys
+import ai.starlake.quack.edge.policy.{CatalogReachingCalls, DottedIdentifierScreen}
 import ai.starlake.sql.{ParserInput, SqlCommentStripper, SqlLexer, SqlTrivia}
 
 import java.util.Locale
