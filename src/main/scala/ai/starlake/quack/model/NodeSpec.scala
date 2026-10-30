@@ -13,14 +13,16 @@ final case class NodeSpec(
     // merge node's branch attach). Trusted; never a tenant's initSql.
     extraSetupSql: String = "",
     // The tenant-db's initSql. Runs after the proxy and resource settings and before the catalog
-    // ATTACH, so engine-level defaults are in effect before quack starts. Delivered as the secret
-    // file `tenantDbInitSql`; `tenantDbInitTrusted` (env QOD_INIT_TRUSTED_DB) says whether the
-    // spawn script hands it to qod-node as written (a superuser's or the manager's) or inside a
-    // marked untrusted section that qod-node runs under its tenant initSql allowlist.
+    // ATTACH, so engine-level defaults are in effect before quack starts. Delivered as a secret
+    // file whose name is its trust: `tenantDbInitSqlTrusted` when `tenantDbInitTrusted` (a
+    // superuser's or the manager's text, which the spawn script hands to qod-node as written),
+    // else `tenantDbInitSql`, which it puts inside a marked untrusted section that qod-node runs
+    // under its tenant initSql allowlist.
     tenantDbInitSql: String = "",
     tenantDbInitTrusted: Boolean = false,
     // The pool's initSql. Runs after the catalog ATTACH, before the federation blob. Delivered as
-    // the secret file `tenantPoolInitSql`, its trust as env QOD_INIT_TRUSTED_POOL, like the above.
+    // the secret file `tenantPoolInitSqlTrusted` or `tenantPoolInitSql` by its trust, like the
+    // above.
     tenantPoolInitSql: String = "",
     tenantPoolInitTrusted: Boolean = false,
     // Per-database object-store CREATE SECRET (ObjectStoreSecret.sql), scoped to the db's
