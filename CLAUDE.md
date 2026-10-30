@@ -343,8 +343,12 @@ table macro, or a `query()` that is not a literal query, or views nested past 16
 table unreadable or unwritable; secure views follow the definition and session rules above; DESCRIBE
 `key` / table_info `pk` are NULL; an OPA tenant's DESCRIBE and SHOW TABLES are empty and SUMMARIZE is
 refused; `*.*.*` never covers a federated catalog, nor (at the gateway with the ACL on) a `memory`
-catalog or a custom `catalogAlias`; with the ACL on and filtered metadata off, SHOW TABLES is refused
-at the gateway.
+catalog or a custom `catalogAlias` (CONTRACT item 34, until Phase D deletes the gateway screens). That
+includes `qod serve`: a `.duckdb` file is attached under its stem (`sales`), not the tenant-db name
+(`smoke_sales`), and loose files are views in `memory`, so with the ACL on a user holding only the
+default `qod_all_tables` is refused at the gateway (`lacks grants on sales.main.<table>:Read`) until
+granted `sales.*.*` (or `memory.*.*`) explicitly. With the ACL
+on and filtered metadata off, SHOW TABLES is refused at the gateway.
 
 **Residuals** (known, not holes to report): foldable constant arguments are evaluated during bind
 before a refusal (no value reaches the client); `pg_sleep` / `sleep_ms` are allowed, in bind-time
