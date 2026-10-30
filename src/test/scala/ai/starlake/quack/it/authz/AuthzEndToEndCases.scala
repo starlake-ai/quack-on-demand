@@ -34,6 +34,7 @@ import scala.util.Try
   *     `v_secret`, RO the secure views, RW the federated tables (the read-only `rosql.main.t`
   *     included), RO the aliased and s3lake tables), group `qod_all_pools`;
   *   - bob, carol, dave (acme): the defaults, `qod_all_tables` (`*.*.* ALL`) and `qod_all_pools`;
+  *   - erin (acme): a tenant admin (kind `admin`) with the default memberships;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -63,8 +64,9 @@ abstract class AuthzEndToEndCases(
   private val BobPw     = "bob-e2e-pw-1"
   private val CarolPw   = "carol-e2e-pw-1"
   private val DavePw    = "dave-e2e-pw-1"
+  private val ErinPw    = "erin-e2e-pw-1"
   private val Passwords =
-    Map("alice" -> AlicePw, "bob" -> BobPw, "carol" -> CarolPw, "dave" -> DavePw)
+    Map("alice" -> AlicePw, "bob" -> BobPw, "carol" -> CarolPw, "dave" -> DavePw, "erin" -> ErinPw)
 
   private val Rustfs = "http://localhost:9000"
 
@@ -320,6 +322,16 @@ abstract class AuthzEndToEndCases(
         "password" -> s(CarolPw),
         "kind"     -> s("user"),
         "roles"    -> Json.arr(s("qod_all_tables"), s("e2e_pg_owner"))
+      )
+    )
+    // A tenant admin, with the default memberships: no superuser on the node (decision 29).
+    stack.post(
+      "/api/user/create",
+      obj(
+        "tenant"   -> s(Acme),
+        "username" -> s("erin"),
+        "password" -> s(ErinPw),
+        "kind"     -> s("admin")
       )
     )
 
@@ -595,6 +607,18 @@ abstract class AuthzEndToEndCases(
               err should include("QoD: ")
               err should include(node)
           case Right(r) => fail(s"expected a refusal, got rows $r")
+      }
+    }
+
+  /** `sql` as `user` on `pool` fails through every door: DuckDB's own "does not exist" (replacement
+    * scans are off for users, so a path in a table position binds to no table) or a node refusal.
+    */
+  private def missingOrRefused(user: String, pool: String, sql: String): Unit =
+    doors.foreach { d =>
+      withClue(s"[$d] $user: $sql -> ") {
+        as(d, user, pool, sql) match
+          case Left(err) => err should (include("does not exist") or include("QoD: "))
+          case Right(r)  => fail(s"expected a refusal, got rows $r")
       }
     }
 
@@ -1584,4 +1608,687 @@ abstract class AuthzEndToEndCases(
       "lake",
       superuser = true
     ) shouldBe Right(List("0"))
+  }
+
+  // ---------- Phase D acceptance (Task 7): the deleted gateway screens' cases, on the node ----------
+
+  "a superuser-only function" should "be refused to users, however it is reached" in {
+    ready()
+    List(
+      "SELECT * FROM quack_active_connections()",
+      "SELECT count(*) FROM \"quack_active_connections\"()",
+      "FROM quack_active_connections()",
+      "SELECT * FROM quack_server_list()",
+      "SELECT * FROM truncate_duckdb_logs()",
+      "SELECT * FROM enable_logging()",
+      "CALL enable_logging(storage = 'file', storage_path = '/tmp/qod-authz-logs')",
+      "SELECT * FROM query('SELECT * FROM quack_active_connections()')",
+      "SELECT 1; SELECT * FROM quack_server_list()",
+      "CALL dbgen(sf = 0)",
+      "SELECT * FROM shell_history()"
+    ).foreach(sql => refused("bob", "lake", sql))
+  }
+
+  "the node's state" should "be hidden from users: settings, secrets, databases, sessions" in {
+    ready()
+    List(
+      "SELECT * FROM duckdb_settings()",
+      "SELECT name, value FROM duckdb_settings() WHERE name LIKE 's3%'",
+      "SELECT * FROM system.main.duckdb_secrets()",
+      "SELECT * FROM `duckdb_secrets`()",
+      "SELECT * FROM which_secret('s3://x/y', 's3')",
+      "SELECT * FROM duckdb_databases()",
+      "SELECT * FROM duckdb_memory()",
+      "SELECT * FROM duckdb_extensions()",
+      "SELECT current_setting('s3_secret_access_key')",
+      "SELECT current_setting('s3_' || 'secret_access_key')",
+      "SELECT current_setting('TimeZone')",
+      "SELECT * FROM whoami()",
+      "PRAGMA database_list",
+      s"PRAGMA storage_info('$lake.main.orders')",
+      "SELECT * FROM query('SELECT * FROM duckdb_secrets()')",
+      "SELECT 1; SELECT * FROM duckdb_settings()"
+    ).foreach(sql => refused("bob", "lake", sql))
+    // The bare view spelling: DuckDB's own "does not exist" or a node refusal.
+    missingOrRefused("bob", "lake", "SELECT name, value FROM duckdb_settings WHERE name LIKE 's3%'")
+    // A tenant admin is no superuser on the node.
+    refused("erin", "lake", "SELECT * FROM duckdb_settings()", node = "duckdb_settings")
+    refused("erin", "lake", "SET threads = 2", node = "threads")
+  }
+
+  "the DuckLake metadata catalog" should "be refused to users, even under *.*.* ALL" in {
+    ready()
+    // DuckLake keeps its metadata catalog out of duckdb_databases() and duckdb_tables(); on
+    // Postgres (no METADATA_SCHEMA in the node's ATTACH) its tables live in schema public. The
+    // superuser's read proves the name, so every refusal below is the node's, not a missing table.
+    val meta     = s"__ducklake_metadata_$lake"
+    val schema   = "public"
+    val dataFile = s"$meta.$schema.ducklake_data_file"
+    admin("lake", s"SELECT count(*) >= 0 FROM $dataFile") shouldBe List("true")
+    val upper = meta.toUpperCase(java.util.Locale.ROOT)
+    refused("bob", "lake", s"SELECT count(*) FROM $dataFile", node = "DuckLake catalog metadata")
+    List(
+      s"SELECT count(*) FROM \"$upper\".$schema.ducklake_data_file",
+      s"SELECT count(*) FROM $meta . $schema . ducklake_data_file",
+      s"USE $meta.$schema; SELECT count(*) FROM ducklake_data_file",
+      s"SET search_path = '$meta.$schema'; SELECT count(*) FROM ducklake_data_file",
+      s"SELECT * FROM query_table('$dataFile')",
+      s"SELECT * FROM query('SELECT count(*) FROM $dataFile')",
+      s"SELECT * FROM query_table('__duck' || 'lake_metadata_$lake.$schema.ducklake_data_file')",
+      s"PREPARE meta_p AS SELECT count(*) FROM $dataFile; EXECUTE meta_p",
+      s"EXPLAIN ANALYZE SELECT count(*) FROM $dataFile",
+      s"SELECT 1; SELECT count(*) FROM $dataFile",
+      s"SELECT * FROM ducklake_list_files('$lake', 'orders')",
+      "SELECT * FROM json_execute_serialized_sql('{}')",
+      s"DETACH $meta"
+    ).foreach(sql => refused("bob", "lake", sql))
+    // A plain view's body is judged where it is read, from the expanded plan (spec Section 6): bob
+    // may create one over the metadata catalog in a schema he holds (the gateway refused that), and
+    // every read through it is refused.
+    val view = s"$lake.main.qod_e2e_meta"
+    allowed("bob", "lake", s"CREATE OR REPLACE VIEW $view AS SELECT * FROM $dataFile")
+    try
+      refused("bob", "lake", s"SELECT count(*) FROM $view", node = "DuckLake catalog metadata")
+      refused(
+        "bob",
+        "lake",
+        s"SELECT * FROM query_table('$view')",
+        node = "DuckLake catalog metadata"
+      )
+    finally admin("lake", s"DROP VIEW IF EXISTS $view")
+    // The data tables stay readable with an ordinary grant.
+    allowed("alice", "lake", s"SELECT count(*) FROM $lake.main.orders", Some(List("10")))
+  }
+
+  "DuckLake maintenance, CHECKPOINT and option setting" should "be the superusers'" in {
+    ready()
+    List(
+      "CHECKPOINT",
+      s"CHECKPOINT $lake",
+      "FORCE CHECKPOINT",
+      "/* c */ CHECKPOINT",
+      s"CALL checkpoint('$lake')",
+      s"SELECT * FROM checkpoint('$lake')",
+      s"CALL force_checkpoint('$lake')",
+      s"CALL ducklake_merge_adjacent_files('$lake')",
+      s"CALL ducklake_cleanup_old_files('$lake', dry_run => true)",
+      s"CALL ducklake_expire_snapshots('$lake', dry_run => true, versions => [1])",
+      s"CALL ducklake_flush_inlined_data('$lake')",
+      s"SELECT * FROM ducklake_set_option('$lake', 'parquet_compression', 'zstd')",
+      s"SELECT * FROM ducklake_snapshots('$lake')",
+      "FROM merge_adjacent_files()",
+      s"FROM $lake.set_option('expire_older_than', '1 second')",
+      s"SELECT * FROM query('CALL ducklake_flush_inlined_data(''$lake'')')"
+    ).foreach(sql => refused("bob", "lake", sql))
+    // The nearest admitted: a superuser's maintenance read (a CHECKPOINT of the DuckLake catalog
+    // would run its maintenance and could expire what later cases read).
+    admin("lake", s"SELECT count(*) >= 1 FROM ducklake_snapshots('$lake')") shouldBe List("true")
+  }
+
+  "a node-wide, resource or path setting" should "be refused to users in every form" in {
+    ready()
+    List(
+      "SET threads = 2",
+      "SET worker_threads = 2",
+      "SET memory_limit = '100GB'",
+      "PRAGMA memory_limit = '100GB'",
+      "RESET memory_limit",
+      "SET max_temp_directory_size = '1TB'",
+      "SET temp_directory = '/tmp/qod-authz-temp'",
+      "SET enable_profiling = 'json'",
+      "SET profiling_output = '/tmp/qod-authz-profile'",
+      "SET checkpoint_threshold = '1GB'",
+      "SET file_search_path = '/etc'",
+      "SET home_directory = '/etc'",
+      "SET allow_asterisks_in_http_paths = true",
+      "SET enable_logging = true",
+      "SET logging_level = 'DEBUG'",
+      "SET force_mbedtls_unsafe = true",
+      "SET allowed_directories = ['/']",
+      "SET enable_external_access = true",
+      "SET disabled_filesystems = ''",
+      "SET lock_configuration = false",
+      "SET allow_extension_repositories = 'allowed'",
+      "SET pg_pool_max_connections = 1",
+      "SET ducklake_retry_wait_ms = 86400000",
+      "SET \"threads\" = 2",
+      "SET`threads`=2",
+      "SET/* c */threads = 2",
+      " SET threads = 2",
+      "EXPLAIN ANALYZE SET threads = 2",
+      "SELECT 1; SET threads = 2",
+      "RESET GLOBAL search_path",
+      "SET qod_no_such_setting = 1"
+    ).foreach(sql => refused("bob", "lake", sql))
+  }
+
+  "a session setting whose default scope is global" should "be refused unscoped and admitted SET SESSION" in {
+    ready()
+    // DuckDB 2.0 resolves an unscoped SET of a GLOBAL-default setting to the node's shared config;
+    // the describer reports the scope DuckDB resolves (describer.cpp AddSetting).
+    List(
+      "SET default_collation = 'nocase'",
+      "SET default_collation TO 'nocase'",
+      "RESET default_collation",
+      "PRAGMA default_collation = 'nocase'",
+      "SET GLOBAL default_collation = 'nocase'"
+    ).foreach(sql => refused("alice", "lake", sql, node = "at global scope"))
+    allowed("alice", "lake", "SET SESSION default_collation = 'nocase'")
+    allowed("alice", "lake", "RESET SESSION default_collation")
+    allowed("alice", "lake", "SET SESSION integer_division = true")
+  }
+
+  "a parser or credential setting" should "be refused to users, and changeable by superusers" in {
+    ready()
+    List(
+      "SET dialect_compatibility_mode = 'spark'",
+      "RESET dialect_compatibility_mode",
+      "RESET preserve_identifier_case",
+      "RESET SESSION table_function_identifier_conversion",
+      "RESET show_behavior",
+      "SET redact_http_logs = false",
+      "RESET allow_unredacted_secrets",
+      "SET \"redact_http_logs\" = false",
+      "EXPLAIN ANALYZE RESET preserve_identifier_case",
+      "SELECT 1; RESET dialect_compatibility_mode",
+      "PRAGMA import_database('/tmp/qod-authz-import')",
+      "IMPORT DATABASE '/tmp/qod-authz-import'",
+      "SELECT * FROM query('PRAGMA import_database(''/tmp/qod-authz-import'')')"
+    ).foreach(sql => refused("bob", "lake", sql))
+    // Intentional change (decision 29): NodeSettingScreen refused these to superusers too; the node
+    // leaves a superuser's statement to the superuser. Session-scoped settings, harmless here.
+    admin("lake", "RESET preserve_identifier_case")
+    admin("lake", "RESET SESSION dialect_compatibility_mode")
+    admin("lake", "RESET redact_http_logs")
+    // An empty export (no schema, no data): what IMPORT DATABASE replays is the superuser's own.
+    val dump = outDir.resolve(s"empty-export-$run")
+    Files.createDirectories(dump)
+    Files.writeString(dump.resolve("schema.sql"), "")
+    Files.writeString(dump.resolve("load.sql"), "")
+    // An empty import returns no result set: the trailing SELECT gives the call one to answer.
+    admin("lake", s"IMPORT DATABASE '$dump'; SELECT 'imported'") shouldBe List("imported")
+    // qod-node is not the DuckDB CLI: shell_history() does not exist there, so a superuser gets
+    // DuckDB's catalog error, never a QoD refusal.
+    stack.flight(
+      "SELECT * FROM shell_history()",
+      "admin",
+      "admin",
+      Acme,
+      "lake",
+      superuser = true
+    ) match
+      case Left(err) => err should not include "QoD: "
+      case Right(r)  => fail(s"shell_history() answered on a node: $r")
+  }
+
+  "a SQL-valued setting" should "be refused to a user without policies, in every form" in {
+    ready()
+    // The guard screens these only for principals with policies (Task 4): bob and erin hold none,
+    // so only the node stands between them and SQL (or a callback) the node runs later, outside
+    // every policy: the postgres extension's staleness and health-check queries, quack's
+    // authentication and authorization callbacks.
+    List("pg_staleness_query", "pg_pool_health_check_query").foreach { name =>
+      List(
+        s"SET $name = 'SELECT 1'",
+        s"SET SESSION $name = 'SELECT 1'",
+        s"SET GLOBAL $name = 'SELECT 1'",
+        s"RESET $name",
+        s"PRAGMA $name = 'SELECT 1'",
+        s"EXPLAIN ANALYZE SET $name = 'SELECT 1'",
+        s"SELECT 1; SET $name = 'SELECT 1'"
+      ).foreach(sql => refused("bob", "lake", sql, node = name))
+      refused("erin", "lake", s"SET $name = 'SELECT 1'", node = name)
+    }
+    List("quack_authentication_function", "quack_authorization_function").foreach { name =>
+      List(
+        s"SET $name = 'qod_e2e_cb'",
+        s"SET GLOBAL $name = 'qod_e2e_cb'",
+        s"RESET $name",
+        s"RESET GLOBAL $name",
+        s"PRAGMA $name = 'qod_e2e_cb'",
+        s"EXPLAIN ANALYZE SET GLOBAL $name = 'qod_e2e_cb'",
+        s"SELECT 1; RESET $name"
+      ).foreach(sql => refused("bob", "lake", sql, node = name))
+      refused("erin", "lake", s"SET GLOBAL $name = 'qod_e2e_cb'", node = name)
+    }
+  }
+
+  "a file reached by another route than a reader" should "be refused outside the authorized folders" in {
+    ready()
+    List(
+      "SELECT * FROM glob('/etc/*')",
+      "SELECT count(*) FROM read_blob('/etc/hosts')",
+      s"SELECT * FROM parquet_metadata('$lakeData/probe.parquet')",
+      "SELECT * FROM sql_auto_complete('SELECT * FROM ''/etc/ho')",
+      "PREPARE 'prep_s' AS COPY (SELECT 1) TO '/tmp/qod-authz-prep.csv'",
+      "PREPARE $$prep_d$$ AS COPY (SELECT 1) TO '/tmp/qod-authz-prep.csv'",
+      "SET file_search_path = '/etc'; SELECT count(*) FROM \"hosts\"",
+      s"EXPORT DATABASE '$outDir/exp-$run'",
+      s"IMPORT DATABASE '$inDir'",
+      s"ATTACH '$outDir/att-$run.duckdb' AS qod_e2e_att",
+      "LOAD '/tmp/qod-authz-evil.duckdb_extension'",
+      "INSTALL '/tmp/qod-authz-evil.duckdb_extension'",
+      "FORCE INSTALL httpfs FROM 'http://127.0.0.1:1'",
+      s"COPY FROM DATABASE $lake TO memory",
+      "SELECT 1; SELECT * FROM read_text('/etc/hosts')"
+    ).foreach(sql => refused("bob", "lake", sql))
+    // A table macro whose body reads query_table(source): the path binds to no table.
+    List(
+      "SELECT * FROM histogram('/etc/hosts', a)",
+      "SELECT * FROM histogram_values('/etc/hosts', a)",
+      s"SELECT * FROM histogram('$lakeData/probe.parquet', id)"
+    ).foreach(sql => missingOrRefused("bob", "lake", sql))
+    List("/tmp/qod-authz-prep.csv", s"$outDir/exp-$run", s"$outDir/att-$run.duckdb").foreach { p =>
+      withClue(p)(Files.exists(Paths.get(p)) shouldBe false)
+    }
+    // The nearest admitted: the histogram aggregate over a granted table.
+    allowed(
+      "bob",
+      "lake",
+      s"SELECT count(*) FROM (SELECT histogram(id) FROM $lake.main.orders)",
+      Some(List("1"))
+    )
+  }
+
+  "ATTACH, DETACH, INSTALL, LOAD, CONNECT and extension repositories" should "be the superusers'" in {
+    ready()
+    List(
+      "ATTACH ':memory:' AS qod_e2e_mem",
+      "DETACH IF EXISTS qod_e2e_absent",
+      "INSTALL fts",
+      "FORCE INSTALL fts",
+      "LOAD httpfs",
+      "UPDATE EXTENSIONS",
+      "EXPLAIN ANALYZE INSTALL fts",
+      "SELECT 1; LOAD httpfs",
+      "CONNECT 'quack:127.0.0.1:1'",
+      "DISCONNECT",
+      "CREATE EXTENSION REPOSITORY qod_e2e_repo WITH PREFIX 'https://127.0.0.1:1/'"
+    ).foreach(sql => refused("bob", "lake", sql))
+  }
+
+  "a call that leaves the node's catalogs" should "be the superusers'" in {
+    ready()
+    List(
+      "SELECT * FROM postgres_scan('host=127.0.0.1 port=1 dbname=x', 'public', 't')",
+      "SELECT * FROM postgres_scan_pushdown('host=127.0.0.1 port=1 dbname=x', 'public', 't')",
+      "CALL postgres_execute('pgfed', 'SELECT 1')",
+      "SELECT * FROM postgres_query('pgfed', 'SELECT 1')",
+      "SELECT * FROM postgres_attach('host=127.0.0.1 port=1 dbname=x')",
+      "CALL postgres_configure_pool(health_check_query := 'SELECT 1')",
+      "SELECT * FROM quack_query('quack:127.0.0.1:1', 'SELECT 1')",
+      "SELECT * FROM destroy_external_resource('read' || '_text', '/etc/hosts')",
+      "SELECT * FROM create_external_resource('t', {}, 'r')",
+      "SELECT * FROM query('CALL postgres_execute(''pgfed'', ''SELECT 1'')')",
+      "FROM query('FROM postgres_' || 'execute(''pgfed'', ''SELECT 1'')')"
+    ).foreach(sql => refused("bob", "fed", sql))
+  }
+
+  "trigger DDL" should "be the superusers', tenant admins included (decision 29)" in {
+    ready()
+    admin("files", s"CREATE OR REPLACE TABLE $files.main.trg_src (a INTEGER)")
+    admin("files", s"CREATE OR REPLACE TABLE $files.main.trg_log (a INTEGER)")
+    admin(
+      "files",
+      s"CREATE TRIGGER trg_admin AFTER INSERT ON $files.main.trg_src FOR EACH STATEMENT " +
+        s"INSERT INTO $files.main.trg_log VALUES (1)"
+    )
+    val create =
+      s"CREATE TRIGGER trg_user AFTER INSERT ON $files.main.trg_src FOR EACH STATEMENT " +
+        s"INSERT INTO $files.main.trg_log VALUES (2)"
+    List("bob", "erin").foreach { user =>
+      List(
+        create,
+        s"CREATE OR REPLACE TRIGGER trg_admin AFTER INSERT ON $files.main.trg_src " +
+          s"FOR EACH STATEMENT INSERT INTO $files.main.trg_log VALUES (3)",
+        s"DROP TRIGGER trg_admin ON $files.main.trg_src",
+        s"EXPLAIN ANALYZE $create",
+        s"SELECT 1; $create"
+      ).foreach(sql => refused(user, "files", sql, node = "trigger"))
+    }
+    // The superuser's trigger still fires for a user who may write the table and its log.
+    allowed("bob", "files", s"INSERT INTO $files.main.trg_src VALUES (1)")
+    admin("files", s"SELECT count(*) FROM $files.main.trg_log") shouldBe List(doors.size.toString)
+  }
+
+  "a macro or a secure view" should "be created by superusers only" in {
+    ready()
+    List(
+      "CREATE MACRO qod_e2e_m(x) AS x * 2",
+      "CREATE TEMP MACRO qod_e2e_tm(x) AS x * 2",
+      "CREATE MACRO qod_e2e_tbl() AS TABLE SELECT 1 AS a",
+      s"CREATE SECURE VIEW $files.main.qod_e2e_sv AS SELECT 1 AS a"
+    ).foreach(sql => refused("bob", "files", sql))
+  }
+
+  "a grant" should "cover exactly its verb, on the table DuckDB binds" in {
+    ready()
+    // alice: RW on events, RO on orders, nothing on secret.
+    allowed("alice", "lake", s"UPDATE $lake.main.events SET v = 'u' WHERE id = 1")
+    allowed("alice", "lake", s"DELETE FROM $lake.main.events WHERE id = 100")
+    allowed("alice", "lake", s"SELECT count(*) >= 0 FROM $lake.main.events", Some(List("true")))
+    List(
+      s"UPDATE $lake.main.orders SET v = 'x'",
+      s"DELETE FROM $lake.main.orders",
+      s"TRUNCATE $lake.main.orders",
+      s"MERGE INTO $lake.main.orders o USING (SELECT 1 AS id) s ON o.id = s.id " +
+        "WHEN MATCHED THEN DELETE",
+      s"ALTER TABLE $lake.main.events ADD COLUMN w INTEGER",
+      s"DROP TABLE $lake.main.orders",
+      s"CREATE TABLE $lake.main.qod_e2e_new (a INTEGER)",
+      s"CREATE TABLE $lake.main.qod_e2e_ctas AS SELECT * FROM $lake.main.orders",
+      s"CREATE VIEW $lake.main.qod_e2e_v AS SELECT * FROM $lake.main.orders",
+      s"INSERT INTO $lake.main.events SELECT x, 'leak' FROM $lake.main.secret",
+      s"UPDATE $lake.main.events SET v = (SELECT max(x)::VARCHAR FROM $lake.main.secret)",
+      s"MERGE INTO $lake.main.events e USING (SELECT x AS id FROM $lake.main.secret) s " +
+        "ON e.id = s.id WHEN MATCHED THEN DELETE",
+      s"WITH s AS (SELECT x FROM $lake.main.secret) INSERT INTO $lake.main.events " +
+        "SELECT x, 'cte' FROM s",
+      s"EXPLAIN ANALYZE DELETE FROM $lake.main.orders",
+      s"SELECT 1; INSERT INTO $lake.main.orders VALUES (99, 'batch')",
+      s"/* c */ INSERT INTO $lake.main.orders VALUES (97, 'comment')",
+      s" INSERT INTO $lake.main.orders VALUES (96, 'nbsp')",
+      s"COPY $lake.main.secret TO '$outDir/leak-$run.csv' (HEADER)",
+      s"COPY $lake.main.orders FROM '$inDir/x.csv' (HEADER)"
+    ).foreach(sql => refused("alice", "lake", sql, node = "lacks grants"))
+    Files.exists(outDir.resolve(s"leak-$run.csv")) shouldBe false
+    admin("lake", s"SELECT count(*) FROM $lake.main.orders") shouldBe List("10")
+  }
+
+  "a table read in any position" should "need its grant" in {
+    ready()
+    val secret = s"$lake.main.secret"
+    val orders = s"$lake.main.orders"
+    List(
+      s"SELECT (SELECT max(x) FROM $secret)",
+      s"SELECT count(*) FROM $orders WHERE EXISTS (SELECT 1 FROM $secret)",
+      s"SELECT count(*) FROM $orders WHERE id IN (SELECT x FROM $secret)",
+      s"SELECT * FROM $orders o, LATERAL (SELECT x FROM $secret) s",
+      s"SELECT * FROM ($orders JOIN $secret ON true)",
+      s"SELECT id FROM $orders UNION ALL SELECT x FROM $secret",
+      s"WITH secret AS (SELECT 1 AS x) SELECT * FROM $secret",
+      s"SELECT MAP {'k': (SELECT max(x) FROM $secret)}",
+      s"SELECT json_object('k', (SELECT max(x) FROM $secret))",
+      s"SELECT ARRAY(SELECT x FROM $secret)",
+      s"SELECT 42 = ANY (SELECT x FROM $secret)",
+      s"SELECT ARRAY(TABLE $secret)",
+      s"SELECT 1 WHERE 42 = ANY (TABLE $secret)",
+      s"SELECT id FROM $orders ORDER BY (SELECT max(x) FROM $secret)",
+      s"FROM $secret",
+      s"PIVOT $secret ON x IN (42) USING count(*)",
+      s"SET VARIABLE leak = (SELECT max(x) FROM $secret); SELECT getvariable('leak')",
+      s"PREPARE leak_p AS SELECT x FROM $secret; EXECUTE leak_p",
+      s"SELECT * FROM query('SELECT x FROM $secret')",
+      s"SELECT * FROM query_table('$secret')",
+      s"SELECT 1 AS x$$$$; SELECT x FROM $secret; -- $$$$"
+    ).foreach(sql => refused("alice", "lake", sql, node = "lacks grants"))
+    // The nearest admitted: the same shapes over the granted table, and a CTE named like the secret.
+    List(
+      s"SELECT (SELECT max(id) FROM $orders)"                       -> "9",
+      "WITH secret AS (SELECT 1 AS x) SELECT x FROM secret"         -> "1",
+      s"PREPARE ok_p AS SELECT count(*) FROM $orders; EXECUTE ok_p" -> "10",
+      s"SELECT * FROM query('SELECT count(*) FROM $orders')"        -> "10",
+      s"SELECT count(*) FROM query_table('$orders')"                -> "10",
+      s"SELECT len(ARRAY(TABLE $orders))"                           -> "10"
+    ).foreach((sql, row) => allowed("alice", "lake", sql, Some(List(row))))
+  }
+
+  "a batch that moves the schema or search path" should "be judged on the table DuckDB resolves" in {
+    ready()
+    admin("lake", s"CREATE SCHEMA IF NOT EXISTS $lake.other")
+    admin("lake", s"CREATE OR REPLACE TABLE $lake.other.orders AS SELECT 'other' AS v")
+    List(
+      s"SET search_path = '$lake.other'; SELECT count(*) FROM orders",
+      s"SET SESSION search_path TO '$lake.other,$lake.main'; SELECT count(*) FROM orders",
+      "SET schema = 'other'; SELECT count(*) FROM orders",
+      s"USE $lake.other; SELECT count(*) FROM orders",
+      "USE other; SELECT count(*) FROM orders",
+      s"PRAGMA search_path = '$lake.other'; SELECT count(*) FROM orders",
+      s"SET \"search_path\" = '$lake.other'; SELECT count(*) FROM orders",
+      s"/* c */ SET search_path = '$lake.other'; SELECT count(*) FROM orders",
+      s"EXPLAIN ANALYZE SET search_path = '$lake.other'; SELECT count(*) FROM orders",
+      s"SELECT 1 AS x$$$$; SET search_path = '$lake.other'; SELECT count(*) FROM orders; -- $$$$"
+    ).foreach(sql => refused("alice", "lake", sql, node = s"$lake.other.orders"))
+    // A batch that resolves to the granted table: admitted (the gateway refused every such batch).
+    allowed("alice", "lake", s"USE $lake.main; SELECT count(*) FROM orders", Some(List("10")))
+    allowed("alice", "lake", "SET schema = 'main'; SELECT count(*) FROM orders", Some(List("10")))
+  }
+
+  "a quoted name" should "be judged as the one table DuckDB reads" in {
+    ready()
+    // alice holds RO on pub only; each quoted spelling below is another table to DuckDB, which the
+    // gateway's parser read as pub (or main.pub).
+    admin("files", s"CREATE OR REPLACE TABLE $files.main.pub AS SELECT 'pub' AS v")
+    List("\"main.pub\"", "\"[pub]\"", "\"pub@x\"", "\"pub\"\"x\"").foreach { q =>
+      admin("files", s"CREATE OR REPLACE TABLE $files.main.$q AS SELECT 'leak' AS v")
+    }
+    grant(files, "main", "pub", "RO")
+    List(
+      "SELECT v FROM \"main.pub\"",
+      s"SELECT v FROM $files.main.\"main.pub\"",
+      "SELECT v FROM `main.pub`",
+      "SELECT v FROM \"[pub]\"",
+      "SELECT v FROM `[pub]`",
+      "SELECT v FROM \"pub@x\"",
+      "SELECT v FROM \"pub\"\"x\"",
+      "SELECT 1; SELECT v FROM \"main.pub\"",
+      "EXPLAIN ANALYZE SELECT v FROM \"main.pub\""
+    ).foreach(sql => refused("alice", "files", sql, node = "lacks grants"))
+    List(
+      "SELECT v FROM pub",
+      "SELECT v FROM \"main\".\"pub\"",
+      "SELECT v FROM `pub`",
+      s"SELECT v FROM $files.main.pub"
+    ).foreach(sql => allowed("alice", "files", sql, Some(List("pub"))))
+  }
+
+  "a two-part name" should "be judged as DuckDB resolves it" in {
+    ready()
+    allowed("alice", "lake", s"SELECT count(*) FROM $lake.orders", Some(List("10")))
+    allowed("alice", "lake", "SELECT count(*) FROM main.orders", Some(List("10")))
+    refused("alice", "lake", s"SELECT * FROM $lake.secret", node = "lacks grants")
+    refused("alice", "lake", s"INSERT INTO $lake.orders VALUES (98, 'two')", node = "lacks grants")
+    refused("alice", "lake", s"DROP TABLE $lake.events", node = "lacks grants")
+    refused("alice", "aliased", s"SELECT v FROM $Alias.aliased_u", node = "lacks grants")
+    allowed("alice", "aliased", s"SELECT v FROM $Alias.aliased_t", Some(List("5")))
+  }
+
+  "a federated table" should "be judged beside the pool's own catalog, by its own grant" in {
+    ready()
+    // The PostgresAclValidator cases of PostgresFederationE2ESpec, on the node: alice holds RW on
+    // pgfed.e2e.orders only; the fed pool's own catalog is DuckDB's memory.
+    admin("fed", "CREATE OR REPLACE TABLE memory.main.fed_local AS SELECT 1 AS id")
+    val join = "SELECT count(*) FROM memory.main.fed_local l JOIN pgfed.e2e.orders o ON l.id = o.id"
+    // Only the federated side granted: refused on the local side.
+    refused("alice", "fed", join, node = "memory.main.fed_local")
+    val local = grant("memory", "main", "fed_local", "RO")
+    try
+      allowed("alice", "fed", join, Some(List("1")))
+      // Only the local side granted: refused on the federated side.
+      refused(
+        "alice",
+        "fed",
+        "SELECT count(*) FROM memory.main.fed_local l JOIN pgfed.e2e.other o ON true",
+        node = "pgfed.e2e.other"
+      )
+      // A federated grant takes effect on the next statement, and so does its revoke.
+      val other = grant("pgfed", "e2e", "other", "RO")
+      allowed("alice", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
+      stack.post("/api/role/permission/revoke", obj("id" -> s(other)))
+      refused("alice", "fed", "SELECT count(*) FROM pgfed.e2e.other", node = "pgfed.e2e.other")
+    finally stack.post("/api/role/permission/revoke", obj("id" -> s(local)))
+    // A catalog-wide federated grant (carol's pgfed.e2e.* ALL) covers the source; *.*.* does not.
+    allowed("carol", "fed", "SELECT count(*) FROM pgfed.e2e.other", Some(List("0")))
+    refused("bob", "fed", "SELECT count(*) FROM pgfed.e2e.other", node = "pgfed.e2e.other")
+  }
+
+  "a catalog listing" should "show a user only the tables they hold a grant on" in {
+    ready()
+    val sql = s"SELECT table_name FROM duckdb_tables() WHERE database_name = '$lake' " +
+      "AND schema_name = 'main' ORDER BY 1"
+    doors.foreach { d =>
+      withClue(s"[$d] ") {
+        val mine = as(d, "alice", "lake", sql)
+        mine shouldBe a[Right[?, ?]]
+        mine.toOption.get should contain allOf ("events", "orders")
+        mine.toOption.get should not contain "secret"
+        val all = as(d, "bob", "lake", sql)
+        all shouldBe a[Right[?, ?]]
+        all.toOption.get should contain("secret")
+      }
+    }
+  }
+
+  "a view's definition" should "not be readable through pg_get_viewdef without being a superuser" in {
+    ready()
+    val marker = s"qod-def-$run"
+    admin("files", s"CREATE OR REPLACE VIEW $files.main.v_def AS SELECT '$marker' AS m")
+    // A duckdb-file catalog keeps its entries' oids for the node's life: the superuser's probe
+    // finds the definition, so the probe is sound and only a refusal is a safe answer.
+    val oid = admin(
+      "files",
+      s"SELECT view_oid FROM duckdb_views() WHERE database_name = '$files' AND view_name = 'v_def'"
+    ) match
+      case List(one) => one.toLong
+      case other     => fail(s"v_def has no single oid: $other")
+    val probe = s"SELECT count(*) FROM range(${oid - 100000}, ${oid + 100000}) r(o) " +
+      s"WHERE pg_get_viewdef(o) LIKE '%$marker%'"
+    admin("files", probe) shouldBe List("1")
+    refused("alice", "files", probe, node = "pg_get_viewdef")
+    refused("bob", "files", probe, node = "pg_get_viewdef")
+    refused("alice", "files", "SELECT pg_catalog.pg_get_viewdef(1)", node = "pg_get_viewdef")
+    refused("alice", "files", "SELECT \"pg_get_viewdef\"(1)", node = "pg_get_viewdef")
+    refused("alice", "files", "SELECT pg_get_constraintdef(1)", node = "pg_get_constraintdef")
+    // The nearest admitted: a pg_catalog macro classed allowed.
+    allowed("alice", "files", "SELECT pg_typeof(1) IS NOT NULL", Some(List("true")))
+  }
+
+  "a client data scan on the FlightSQL path" should "be refused at once, never wait for rows no client sends" in {
+    ready()
+    val sql = s"INSERT INTO $lake.main.events SELECT * FROM scan_data_from_quack_client(" +
+      "'0f8e2c3a-1b2c-4d5e-8f90-0123456789ab', NULL::STRUCT(id INTEGER, v VARCHAR), " +
+      "ordered := true)"
+    val pending = scala.concurrent.Future(stack.flight(sql, "alice", AlicePw, Acme, "lake"))(using
+      scala.concurrent.ExecutionContext.global
+    )
+    // Task 4's gateway refusal, before any node connection: never a wait for rows no client sends.
+    scala.concurrent.Await.result(pending, 60.seconds) match
+      case Left(err) => err should include("scan_data_from_quack_client")
+      case Right(r)  => fail(s"a client data scan ran on the FlightSQL path: $r")
+  }
+
+  "a client-fed INSERT through an ATTACHed front door" should "be judged on its target" in {
+    ready()
+    assume(AuthzStack.cliPresent, "no DuckDB 2.0 CLI on PATH")
+    stack.attached(
+      "INSERT INTO q.main.events VALUES (300, 'door');",
+      "alice",
+      AlicePw,
+      Acme,
+      "lake"
+    ) shouldBe a[Right[?, ?]]
+    stack.attached(
+      "INSERT INTO q.main.orders VALUES (301, 'door');",
+      "alice",
+      AlicePw,
+      Acme,
+      "lake"
+    ) match
+      case Left(err) => err should include("QoD: ")
+      case Right(r)  => fail(s"alice wrote orders through the front door: $r")
+    admin("lake", s"SELECT count(*) FROM $lake.main.events WHERE id = 300") shouldBe List("1")
+    admin("lake", s"SELECT count(*) FROM $lake.main.orders WHERE id = 301") shouldBe List("0")
+  }
+
+  "a read-only federated catalog" should "refuse every write, in every spelling, to everyone" in {
+    ready()
+    // Task 2's fixture: pool rofed; rosql (sql source over a file attached READ_WRITE, read-only in
+    // QoD, table main.t holding one row, alice RW on it), pgro (typed Postgres, read-only, no user
+    // grant). Task 2 pins the plain INSERT / UPDATE / DELETE / CREATE TABLE / DROP TABLE; these are
+    // the CatalogWriteScreenSpec forms only the gateway's text screen refused before Task 4.
+    Files.writeString(inDir.resolve("ro.csv"), "v\n9\n")
+    val ro = "catalog rosql is read-only"
+    List(
+      "ALTER TABLE rosql.main.t ADD COLUMN y INTEGER",
+      "CREATE SCHEMA rosql.qod_e2e_s",
+      "CREATE TABLE rosql.main.qod_e2e_ctas AS SELECT v FROM rwsql.main.t",
+      "CREATE VIEW rosql.main.qod_e2e_v AS SELECT 1 AS a",
+      s"COPY rosql.main.t FROM '${inDir.resolve("ro.csv")}' (HEADER)",
+      "INSERT INTO rosql.main.t SELECT v FROM rwsql.main.t",
+      "MERGE INTO rosql.main.t d USING (SELECT 1 AS v) s ON d.v = s.v WHEN MATCHED THEN DELETE",
+      "SELECT 1; INSERT INTO rosql.main.t VALUES (2)",
+      "INSERT INTO rosql.main.t VALUES (3); SELECT 1",
+      "SELECT 1; INSERT INTO rosql.main.t VALUES (4); SELECT 2",
+      "PREPARE ro_w AS INSERT INTO rosql.main.t VALUES (5); EXECUTE ro_w",
+      "USE rosql.main; INSERT INTO t VALUES (6)",
+      "/* c */ INSERT INTO rosql.main.t VALUES (7)",
+      "\u00a0INSERT INTO rosql.main.t VALUES (8)",
+      "INSERT INTO rosql.main.t VALUES (9) /* \u00a0 */",
+      "EXPLAIN ANALYZE INSERT INTO rosql.main.t VALUES (10)",
+      "BEGIN; INSERT INTO rosql.main.t VALUES (11); COMMIT"
+    ).foreach { sql =>
+      refused("alice", "rofed", sql, node = ro)
+      withClue(s"admin: $sql -> ") {
+        stack.flight(sql, "admin", "admin", Acme, "rofed", superuser = true) match
+          case Left(err) => err should include(ro)
+          case Right(r)  => fail(s"a superuser wrote a read-only catalog: $r")
+      }
+    }
+    // The alias folded as DuckDB folds it: a quoted upper-case spelling is the same catalog.
+    refused("alice", "rofed", "INSERT INTO \"ROSQL\".main.t VALUES (12)", node = "is read-only")
+    // Attach and detach naming a read-only catalog, and the typed source: superusers too.
+    List(
+      "DETACH rosql",
+      "INSERT INTO pgro.e2e.orders SELECT * FROM pgro.e2e.orders WHERE false",
+      "UPDATE pgro.e2e.orders SET v = v WHERE false",
+      "DELETE FROM pgro.e2e.orders WHERE false",
+      "USE pgro.e2e; DELETE FROM orders WHERE false"
+    ).foreach { sql =>
+      withClue(s"admin: $sql -> ") {
+        stack.flight(sql, "admin", "admin", Acme, "rofed", superuser = true) match
+          case Left(err) => err should include("is read-only")
+          case Right(r)  => fail(s"a superuser wrote or detached a read-only catalog: $r")
+      }
+    }
+    // Reads stay admitted, and nothing was written.
+    allowed("alice", "rofed", "SELECT count(*), min(v) FROM rosql.main.t", Some(List("1,1")))
+    admin("rofed", "SELECT count(*), min(v) FROM rosql.main.t") shouldBe List("1,1")
+  }
+
+  "an OPA tenant's statements" should "be decided by its policy on the node, fail closed" in {
+    ready()
+    val opa = new FakeOpa(denyTable = "secret")
+    opa.start()
+    def setAcl(fields: (String, Json)*): Unit =
+      stack.post("/api/tenant/setAcl", obj((("name" -> s(Acme)) +: fields)*))
+    setAcl("mode" -> s("opa"), "opaUrl" -> s(opa.url))
+    try
+      // The policy decides, whatever the QoD grants say: alice holds no grant on aliased_u.
+      allowed("alice", "aliased", s"SELECT max(v) + 1 FROM $Alias.main.aliased_u", Some(List("7")))
+      refused(
+        "alice",
+        "lake",
+        s"SELECT min(x) FROM $lake.main.secret",
+        node = "denied by policy"
+      )
+      // A local rule refuses before OPA is asked.
+      val asked = opa.statementCalls
+      refused("alice", "lake", "SELECT current_setting('TimeZone')", node = "current_setting")
+      refused("alice", "lake", "SELECT * FROM duckdb_secrets()", node = "duckdb_secrets")
+      opa.statementCalls shouldBe asked
+      // An outage is retryable, never an allow: a plan no case decided before.
+      opa.failStatements.set(true)
+      refused(
+        "alice",
+        "lake",
+        s"SELECT max(length(v)) FROM $lake.main.orders",
+        node = "authorization unavailable, retry"
+      )
+      opa.failStatements.set(false)
+      // Superusers never reach OPA.
+      admin("lake", s"SELECT min(x) FROM $lake.main.secret") shouldBe List("42")
+    finally
+      try setAcl("mode" -> s("qod"))
+      finally opa.stop()
+    allowed("alice", "lake", s"SELECT count(*) FROM $lake.main.orders", Some(List("10")))
   }
