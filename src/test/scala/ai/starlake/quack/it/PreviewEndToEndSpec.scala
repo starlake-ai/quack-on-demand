@@ -88,10 +88,15 @@ class PreviewEndToEndSpec
   private def withRouter[A](dbName: String, dataPath: java.nio.file.Path)(
       test: (FlightSqlRouter, PoolKey) => A
   ): A =
-    val store    = new InMemoryControlPlaneStore()
-    val tracker  = new NodeLoadTracker
-    val keys     = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
-    val backend  = new LocalQuackBackend(min = 24900, max = 24999, nodeKeys = keys)
+    val store   = new InMemoryControlPlaneStore()
+    val tracker = new NodeLoadTracker
+    val keys    = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val backend = new LocalQuackBackend(
+      min = 24900,
+      max = 24999,
+      nodeKeys = keys,
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
     val sup      = new PoolSupervisor(backend, tracker, store)
     val tenant   = "pvtenant"
     val tenantDb = "pv_e2e"

@@ -42,7 +42,8 @@ class KubernetesQuackBackendSecuritySpec
       // Deterministic: the test JVM's own QOD_S3_* must not leak into the node-env Secret.
       readEnv = _ => None,
       podTemplateEnabled = podTemplateEnabled,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
 
   private val baseSpec = NodeSpec(
@@ -81,7 +82,8 @@ class KubernetesQuackBackendSecuritySpec
       startupTimeoutSec = 5,
       readPodReady = _ => true,
       runAsUser = 5000L,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     backend.start(baseSpec.copy(nodeId = "quack-sec-runasuser")).unsafeRunSync()
     val pod = server.getClient.pods.inNamespace(ns).withName("quack-sec-runasuser").get()
@@ -440,7 +442,8 @@ class KubernetesQuackBackendSecuritySpec
       startupTimeoutSec = 5,
       readPodReady = _ => true,
       readEnv = _ => None,
-      nodeKeys = keys
+      nodeKeys = keys,
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     // A metastore entry named like the id env var must not give the pod a second one: kubelet
     // lets the last duplicate win, and a reader taking the first would see the spoofed value.
@@ -488,7 +491,8 @@ class KubernetesQuackBackendSecuritySpec
       readPodReady = _ => true,
       readEnv = _ => None,
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(autoinstallKnown = true),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     // A metastore entry spelled like one of them is not a TenantDb.NodeEnvKeys key: it reaches no
     // pod, so the pod has each name once, from the config.

@@ -189,8 +189,8 @@ final class LiveLocationRules(
             try owners(path)
             catch case scala.util.control.NonFatal(_) => Nil
           val whose = named match
-            case Nil   => "a data path of this deployment"
-            case named => named.mkString(", ")
+            case Nil  => "a data path of this deployment"
+            case list => list.mkString(", ")
           logger.warn(
             s"location rules: $whose: its data path cannot be placed on the nodes (a relative " +
               "path off the local runtime, or one this host cannot parse); every tenant's local " +

@@ -370,7 +370,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         fx.store,
         cfg,
         backend = Some(fx.backend),
-        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
@@ -391,7 +392,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         fx.store,
         cfg,
         backend = Some(fx.backend),
-        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
@@ -612,7 +614,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         fx.store,
         cfg,
         backend = Some(fx.backend),
-        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
       )
       h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())

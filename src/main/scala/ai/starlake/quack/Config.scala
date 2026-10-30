@@ -782,8 +782,8 @@ final case class NodeAuthzLimitsConfig(
       envVar = "QOD_AUTHZ_DECIDE_TIMEOUT_MS",
       description =
         "How long a node waits for one verdict from the manager, connect to last byte, in ms " +
-          "(1 to 60000). A slower answer refuses the statement as retryable. Applies at each " +
-          "node's next start."
+          "(1 to 60000). A slower answer refuses the statement, as retryable when it is a " +
+          "single statement. Applies at each node's next start."
     )
     decideTimeoutMs: Int = 2000,
     @field @ConfigField(

@@ -398,18 +398,15 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
   it should "stop the statement when it is killed while its retry runs" in {
     // The first node fails the evaluation in transport; the router retries it on the other one,
     // and the PAT is revoked while that retry runs. The retry must be in the registry to be seen.
-    var router: FlightSqlRouter = null
-    val evaluations             = new java.util.concurrent.atomic.AtomicInteger(0)
-    val (r, sent)               = setup(
-      sql =>
-        if sql.endsWith(" AS location") && evaluations.incrementAndGet() == 1 then
-          QuackResponse.Failed(QuackError.Transient("node went away"))
-        else
-          if sql.endsWith(" AS location") then router.registry.killByPats(Set("pat-1"))
-          evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
-      ,
-      nodes = 2
-    )
+    var router: FlightSqlRouter       = null
+    val evaluations                   = new java.util.concurrent.atomic.AtomicInteger(0)
+    val node: String => QuackResponse = sql =>
+      if sql.endsWith(" AS location") && evaluations.incrementAndGet() == 1 then
+        QuackResponse.Failed(QuackError.Transient("node went away"))
+      else
+        if sql.endsWith(" AS location") then router.registry.killByPats(Set("pat-1"))
+        evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+    val (r, sent) = setup(node, nodes = 2)
     router = r
     router
       .execute("c-kill2", "alice", poolKey, Computed, Some(tenantUser), patId = Some("pat-1"))
@@ -425,19 +422,16 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     // The substituted statement fails in transport on its first node and is retried: the registry
     // shows what the client sent (never the rewrite, which may carry a row policy's predicates)
     // from the retry's first wire byte.
-    var router: FlightSqlRouter = null
-    var seen                    = List.empty[String]
-    val statements              = new java.util.concurrent.atomic.AtomicInteger(0)
-    val (r, _)                  = setup(
-      sql =>
-        if !sql.endsWith(" AS location") && statements.incrementAndGet() == 1 then
-          QuackResponse.Failed(QuackError.Transient("node went away"))
-        else
-          if !sql.endsWith(" AS location") then seen = router.registry.list().map(_.sql)
-          evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
-      ,
-      nodes = 2
-    )
+    var router: FlightSqlRouter       = null
+    var seen                          = List.empty[String]
+    val statements                    = new java.util.concurrent.atomic.AtomicInteger(0)
+    val node: String => QuackResponse = sql =>
+      if !sql.endsWith(" AS location") && statements.incrementAndGet() == 1 then
+        QuackResponse.Failed(QuackError.Transient("node went away"))
+      else
+        if !sql.endsWith(" AS location") then seen = router.registry.list().map(_.sql)
+        evaluatesTo("'s3://acme-etl/in/x.csv'")(sql)
+    val (r, _) = setup(node, nodes = 2)
     router = r
     run(router, Computed, tenantUser).isRight shouldBe true
     seen shouldBe List(Computed)

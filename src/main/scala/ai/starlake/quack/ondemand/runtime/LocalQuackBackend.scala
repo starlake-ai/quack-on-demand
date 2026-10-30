@@ -37,8 +37,8 @@ final class LocalQuackBackend(
     nodeKeys: ai.starlake.quack.edge.authz.NodeKeys,
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig(),
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig =
-      ai.starlake.quack.NodeAuthzLimitsConfig()
+    // Required (Main passes the manager's): a default would silently run qod-node's own limits.
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends QuackBackend
     with LazyLogging:
 

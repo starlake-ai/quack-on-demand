@@ -15,7 +15,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23000,
       max = 23010,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-1", Role.Dual, Map.empty, Map.empty)
     val node = backend.start(spec).unsafeRunSync()
@@ -31,7 +32,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23020,
       23021,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(PoolKey("t", "t_default", "p"), "node-2", Role.Dual, Map.empty, Map.empty)
     backend.start(spec).unsafeRunSync()
@@ -47,7 +49,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23130,
       23131,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key   = PoolKey("t", "t_default", "p")
     val spec  = NodeSpec(key, "node-again", Role.Dual, Map.empty, Map.empty)
@@ -72,7 +75,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23135,
       23136,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key = PoolKey("t", "t_default", "p")
     val row = ai.starlake.quack.model.RunningNode(
@@ -104,7 +108,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23030,
       23031,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
@@ -125,7 +130,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23040,
       max = 23041,
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec = NodeSpec(
       PoolKey("t", "t_default", "p"),
@@ -157,7 +163,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23042,
       max = 23043,
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     // Mirrors what effectiveMetastoreFor produces for a pathless duckdb-file
     // tenant-db: dataPath removed entirely, not merely blank.
@@ -187,7 +194,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
         argv.set(LocalQuackBackend.defaultCommand("spawn.sh")(spec, port, token))
         envDumpCmd(capture.getAbsolutePath, 5)
       ,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val storeSql = "CREATE OR REPLACE SECRET qod_db_store (TYPE s3, SECRET 'store-secret');"
     val spec     = NodeSpec(
@@ -259,6 +267,7 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       min = 23092,
       max = 23093,
       nodeKeys = keys,
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
       commandFor = (spec, port, token) =>
         argv.set(production(spec, port, token))
         envDumpCmd(capture.getAbsolutePath, 5)
@@ -327,7 +336,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       max = 23099,
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowUnsigned = true),
       commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val key  = PoolKey("t", "t_default", "p")
     val spec = NodeSpec(
@@ -406,7 +416,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       max = 23097,
       nodeBin = Some(managerBin),
       commandFor = (spec, _, _) => envDumpCmd(capture(spec.nodeId).getAbsolutePath, 5),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val allowed = Map(
       "pgHost"       -> "sec1-pg-host",
@@ -516,7 +527,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       // 5 s SIGKILL fallback. (Windows console apps ignore the graceful
       // taskkill, so the timing assertion below is Unix-only.)
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val a = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-a", Role.Dual, Map.empty, Map.empty)
     val b = NodeSpec(PoolKey("t", "t_default", "p"), "node-cu-b", Role.Dual, Map.empty, Map.empty)
@@ -551,7 +563,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23070,
       23073,
       commandFor = (_, _, _) => List("bash", "-c", "trap '' TERM; sleep 30 & wait"),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val spec =
       NodeSpec(PoolKey("t", "t_default", "p"), "node-tree", Role.Dual, Map.empty, Map.empty)
@@ -584,7 +597,8 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       23080,
       23081,
       commandFor = (_, _, _) => sleepCmd(30),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     backend
       .adopt(

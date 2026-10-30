@@ -51,7 +51,8 @@ class ReconcileStartupWindowSpec extends AnyFlatSpec with Matchers:
       min,
       max,
       commandFor = (_, _, _) => cmd,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val started                                = new ConcurrentLinkedQueue[Started]()
     def start(spec: NodeSpec): IO[RunningNode] =

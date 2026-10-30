@@ -71,9 +71,9 @@ final class KubernetesQuackBackend(
     // The extension policy every pod's qod-node fixes before its database opens (spec decision 17).
     nodeExtensions: ai.starlake.quack.NodeExtensionsConfig =
       ai.starlake.quack.NodeExtensionsConfig(),
-    // The decide limits every pod's qod-node reads at start.
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig =
-      ai.starlake.quack.NodeAuthzLimitsConfig()
+    // The decide limits every pod's qod-node reads at start. Required (Main passes the manager's): a
+    // default would silently run qod-node's own limits.
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
 ) extends QuackBackend,
       LazyLogging:
 

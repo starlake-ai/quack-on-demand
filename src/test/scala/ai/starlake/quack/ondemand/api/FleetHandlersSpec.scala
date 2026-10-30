@@ -36,7 +36,16 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
   private def fixture(nodeKeys: NodeKeys = NodeKeys.ephemeral()) =
     val store   = new InMemoryFleetServerStore(clock = () => t0)
     val backend = new FleetQuackBackend(store, hbCfg, clock = () => t0)
-    (store, new FleetHandlers(store, hbCfg, backend = Some(backend), nodeKeys = nodeKeys))
+    (
+      store,
+      new FleetHandlers(
+        store,
+        hbCfg,
+        backend = Some(backend),
+        nodeKeys = nodeKeys,
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+      )
+    )
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
     FleetHeartbeatRequest(
       name,
@@ -141,7 +150,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       hbCfg,
       backend = Some(new FleetQuackBackend(onStore, hbCfg, clock = () => t0)),
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
   }
@@ -253,7 +263,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       failing,
       hbCfg,
       backend = Some(new FleetQuackBackend(failing, hbCfg, clock = () => t0)),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
@@ -269,7 +280,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       store,
       hbCfg,
       backend = None,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     h.heartbeat(req(), Some("secret"), loopback, None)
       .unsafeRunSync()
@@ -298,7 +310,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         store,
         cfg,
         backend = Some(backend),
-        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+        nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
       )
     )
 
@@ -356,7 +369,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       store,
       FleetConfig(joinToken = "secret", heartbeatSec = 7),
       backend = Some(new FleetQuackBackend(store, hbCfg, clock = () => t0)),
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     widened
       .heartbeat(req(), Some("secret"), addr("192.168.1.5"), None)
@@ -498,7 +512,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       backend = Some(backend),
       publish = StateChangePublisher.noop,
       audit = rootAudit,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
@@ -659,7 +674,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       FleetConfig(joinToken = "s"),
       backend = None,
       publish = StateChangePublisher.noop,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
@@ -815,7 +831,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       cfg,
       backend = Some(backend),
       publish = pub,
-      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
     )
     (inner, probe, pub, h)
 
