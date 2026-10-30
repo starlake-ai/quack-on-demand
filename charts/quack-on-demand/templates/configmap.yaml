@@ -20,7 +20,6 @@ data:
   # (values.yaml, security.nodeLockdown). dig keeps the defaults when an
   # upgrade with --reuse-values carries a release made before these values.
   QOD_NODE_LOCKDOWN:       {{ dig "nodeLockdown" true (.Values.security | default dict) | quote }}
-  QOD_ACL_ENABLED:         {{ dig "aclEnabled" false (.Values.security | default dict) | quote }}
 
   # ---- K8s backend ----------------------------------------------------------
   # QOD_K8S_NAMESPACE is injected via fieldRef in the Deployment so it

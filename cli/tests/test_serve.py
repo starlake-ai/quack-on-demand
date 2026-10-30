@@ -118,13 +118,16 @@ def test_serve_hands_the_jvm_a_preloadable_libduckdb(runner, wired, tmp_path, mo
     assert target.is_file() and target.parent == lib_dir
 
 
-def test_serve_turns_acl_on_explicitly(runner, wired, tmp_path):
-    # quack-on-demand.acl.enabled defaults to FALSE in application.conf, so a
-    # persistent install has to ask for it.
+def test_serve_sets_no_removed_enforcement_switch(runner, wired, tmp_path, monkeypatch):
+    # The manager refuses to boot with QOD_ACL_ENABLED set to any value (every node enforces):
+    # serve must not export it.
+    monkeypatch.delenv("QOD_ACL_ENABLED", raising=False)
     f = tmp_path / "sales.duckdb"
     f.write_bytes(b"")
     _invoke(runner, wired, str(f))
-    assert wired["env"]["QOD_ACL_ENABLED"] == "true"
+    # A bare bool, so a failure never prints the launch environment.
+    exported = "QOD_ACL_ENABLED" in wired["env"]
+    assert not exported, "qod serve exported QOD_ACL_ENABLED"
 
 
 def test_serve_first_boot_refuses_without_terminal_or_env(runner, wired, tmp_path):
@@ -381,9 +384,11 @@ def test_serve_falls_back_to_the_default_pg_data_dir_on_an_empty_env_value(
     assert wired["env"]["QOD_PG_EMBEDDED_DATA_DIR"] == str(tmp_path / "state" / "pg")
 
 
-def test_serve_warns_loudly_when_acl_is_overridden_off(runner, wired, tmp_path):
-    # I-1: a QOD_ACL_ENABLED=false persisted by `qod setup` outranks serve's
-    # setdefault silently today; it must at least warn.
+def test_serve_passes_a_persisted_acl_switch_through_for_the_manager_to_refuse(
+    runner, wired, tmp_path
+):
+    # A QOD_ACL_ENABLED persisted by an older `qod setup --set` reaches the manager untouched: its
+    # boot refusal names the variable. serve neither rewrites nor warns about it.
     from qod_cli.config import save_start_env
 
     save_start_env({"QOD_ACL_ENABLED": "false"})
@@ -391,8 +396,7 @@ def test_serve_warns_loudly_when_acl_is_overridden_off(runner, wired, tmp_path):
     f.write_bytes(b"")
     result = _invoke(runner, wired, str(f))
     assert wired["env"]["QOD_ACL_ENABLED"] == "false"
-    assert "WARN" in result.output
-    assert "QOD_ACL_ENABLED=false" in result.output
+    assert "ACL is disabled" not in result.output
 
 
 def test_serve_rejects_size_greater_than_1_for_a_duckdb_file(runner, wired, tmp_path):

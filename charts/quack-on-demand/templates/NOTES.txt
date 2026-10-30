@@ -28,15 +28,6 @@ Quack on Demand has been installed.
   connectors) uses a personal access token, minted once from a session:
 
     qod auth pat create --name ci
-{{- $security := .Values.security | default dict }}
-{{- if and (not (dig "nodeLockdown" true $security)) (not (dig "aclEnabled" false $security)) }}
-
-  WARNING: security.nodeLockdown and security.aclEnabled are both off. Any
-  tenant user can read the node's mounted secrets, including the Postgres
-  password of postgres.user ({{ .Values.postgres.user }}), and with it the
-  control-plane database and every tenant's catalog. See "Tenant isolation"
-  in the chart README.
-{{- end }}
 
 # Port-forward FlightSQL (gRPC)
 

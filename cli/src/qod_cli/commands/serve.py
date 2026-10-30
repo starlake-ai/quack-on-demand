@@ -9,7 +9,8 @@ Without `--demo` this is not the demo: `qod serve --demo` (and its deprecated al
 `qod start --demo`) is ephemeral, seeded with TPC-H, and deliberately insecure (its
 posture comes from DemoConfig.overlay and lives only on that code path); the default
 `qod serve` path is persistent and keeps the normal secure posture: TLS on, DB auth
-on, ACL on, an admin password chosen at first boot instead of 'admin'.
+on, an admin password chosen at first boot instead of 'admin' (every node enforces
+the grants; there is no ACL switch).
 
 The booting manager provisions itself: this command writes the three create
 bodies to a spec file named by QOD_SERVE_PROVISION, and the manager's add-only
@@ -913,16 +914,6 @@ def serve(
     try:
         outcome_path(spec_path).unlink(missing_ok=True)
         env["QOD_SERVE_PROVISION"] = str(spec_path)
-        # quack-on-demand.acl.enabled defaults to FALSE, so a persistent install has to
-        # ask for it. TLS and DB auth are already on by default. A real env var or a
-        # persisted `qod setup` value wins over this default.
-        env.setdefault("QOD_ACL_ENABLED", "true")
-        if env.get("QOD_ACL_ENABLED", "true").lower() != "true":
-            typer.echo(
-                f"WARN: ACL is disabled by QOD_ACL_ENABLED={env['QOD_ACL_ENABLED']} (from the "
-                "environment or qod setup); this gateway will not enforce table permissions.",
-                err=True,
-            )
 
         # chdir is process-global; do it before spawning the provisioning thread so
         # that thread never observes a cwd flip mid-run.

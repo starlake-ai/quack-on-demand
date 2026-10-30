@@ -200,17 +200,12 @@ postgres:
 # --- Tenant SQL screening -----------------------------------------------------
 # Node lockdown (QOD_NODE_LOCKDOWN) is ON in this chart, unlike the manager's
 # own first-run default. It stops non-superusers from running ATTACH, INSTALL
-# and LOAD, changing protected settings and reading local files. Without it (and with
-# the SQL ACL off) any tenant user can read the node's mounted secrets
-# (/var/run/qod-secrets: the catalog Postgres password, object-store keys,
-# federation SQL) with read_text(). Pools can still opt out one by one
-# (POST /api/pool/setLockdown). Turning it off chart-wide is only safe when
-# every tenant user is trusted with the postgres.user credential.
+# and LOAD and changing protected settings. Every node refuses a tenant user's
+# read of a local path outside the tenant's authorized folders whatever this
+# says, the mounted secrets (/var/run/qod-secrets) included. Pools can still
+# opt out one by one (POST /api/pool/setLockdown).
 security:
   nodeLockdown: true
-  # SQL ACL (QOD_ACL_ENABLED): enforce role grants per table. Off by default;
-  # turning it on also refuses file-reading functions to non-superusers.
-  aclEnabled: false
 
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB

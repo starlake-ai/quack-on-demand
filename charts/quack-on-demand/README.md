@@ -101,7 +101,6 @@ See [`values.yaml`](values.yaml) for the full list. The most-used:
 | `postgres.host` | `""` (REQUIRED) | Set to the cluster-reachable Postgres host. |
 | `postgres.user` | `""` (REQUIRED) | A dedicated non-superuser role with `CREATEDB` that owns the control-plane database. See [Tenant isolation](#tenant-isolation). |
 | `security.nodeLockdown` | `true` | `QOD_NODE_LOCKDOWN`. Keeps tenant users away from the node's mounted secrets. See [Tenant isolation](#tenant-isolation). |
-| `security.aclEnabled` | `false` | `QOD_ACL_ENABLED`: enforce per-table role grants. |
 | `postgres.existingSecret` | `""` | Recommended for prod. Inline `postgres.password` is dev-only. |
 | `admin.password` / `admin.existingSecret` | `""` | REQUIRED, one of the two: seeds the superuser(s) on first boot, and nobody can log in without it. Inline `admin.password` is dev-only; in production reference a Secret holding the key `adminPassword`. |
 | `flightsql.tls.enabled` | `true` | Manager auto-generates a self-signed cert at boot when no Secret is mounted. |
@@ -194,7 +193,7 @@ Each node pod mounts its secrets read-only at `/var/run/qod-secrets` for its who
 
 Two chart defaults bound that exposure:
 
-- **`security.nodeLockdown: true`.** Non-superuser SQL cannot read local files (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, so a tenant user cannot read the mounted files. The manager's own default is off; the chart turns it on. A pool can opt out with `POST /api/pool/setLockdown`; its tenant users can then read the files, unless the SQL ACL (`security.aclEnabled: true`) is on, which also refuses file reads to non-superusers. With both off, every tenant user can read the credential.
+- **`security.nodeLockdown: true`.** Non-superuser SQL cannot read local files (`read_text`, `read_csv`, `glob`...), ATTACH, INSTALL, LOAD or change protected settings, so a tenant user cannot read the mounted files. The manager's own default is off; the chart turns it on. A pool can opt out with `POST /api/pool/setLockdown`; every node still refuses a tenant user's read of a local path outside the tenant's authorized folders, the mounted files included.
 - **`postgres.user` has no default.** Use a dedicated role that is not a Postgres superuser, for example `CREATE ROLE qod LOGIN CREATEDB PASSWORD '...'; CREATE DATABASE qod OWNER qod;`.
 
 QoD superusers are never screened and can always read the files. Isolating each node to its own catalog needs one Postgres role per catalog database, which is not implemented yet.
